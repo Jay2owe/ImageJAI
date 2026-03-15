@@ -49,11 +49,26 @@ public final class PromptTemplates {
             + "6. When you see the [STATE] context, use it to understand what images are open and their properties.\n"
             + "7. If no image is open and the user wants to process something, ask them to open an image first.\n";
 
+    private static final String VISION_ADDENDUM =
+            "\n\nWhen an image is provided, you can see its contents. Describe what you observe:\n"
+            + "- Image modality (fluorescence, brightfield, confocal, etc.)\n"
+            + "- Visible structures (cells, nuclei, tissue, etc.)\n"
+            + "- Image quality (noise, saturation, artifacts)\n"
+            + "- Suggest appropriate analysis steps based on what you see.\n";
+
     /**
      * Returns the core system prompt for the ImageJ AI assistant.
      */
     public static String getSystemPrompt() {
         return SYSTEM_PROMPT;
+    }
+
+    /**
+     * Returns the system prompt with vision addendum appended.
+     * Use this when an image is being sent alongside the message.
+     */
+    public static String getSystemPromptWithVision() {
+        return SYSTEM_PROMPT + VISION_ADDENDUM;
     }
 
     /**

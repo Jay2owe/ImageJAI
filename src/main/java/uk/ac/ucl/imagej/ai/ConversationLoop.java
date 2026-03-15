@@ -4,6 +4,7 @@ import uk.ac.ucl.imagej.ai.config.Constants;
 import uk.ac.ucl.imagej.ai.config.Settings;
 import uk.ac.ucl.imagej.ai.engine.CommandEngine;
 import uk.ac.ucl.imagej.ai.engine.ExecutionResult;
+import uk.ac.ucl.imagej.ai.engine.ImageCapture;
 import uk.ac.ucl.imagej.ai.engine.StateInspector;
 import uk.ac.ucl.imagej.ai.knowledge.PromptTemplates;
 import uk.ac.ucl.imagej.ai.llm.BackendFactory;
@@ -15,6 +16,8 @@ import uk.ac.ucl.imagej.ai.ui.ChatPanel;
 import javax.swing.SwingUtilities;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
+import java.util.regex.Pattern;
 
 /**
  * Main orchestrator: wires ChatPanel, LLM backend, and CommandEngine together.
@@ -26,6 +29,15 @@ import java.util.List;
  * All LLM calls run on background threads. All GUI updates run on the EDT.
  */
 public class ConversationLoop implements ChatPanel.ChatListener {
+
+    /**
+     * Pattern matching vision-related keywords in user messages.
+     * Case-insensitive word-boundary matching for common vision trigger words.
+     */
+    private static final Pattern VISION_KEYWORDS = Pattern.compile(
+            "\\b(look|see|check|show|image|picture|screenshot|describe|what do you see"
+            + "|does this look|what type|examine|inspect|view|visible|appear|observe)\\b",
+            Pattern.CASE_INSENSITIVE);
 
     private final ChatPanel chatPanel;
     private final Settings settings;
@@ -104,19 +116,48 @@ public class ConversationLoop implements ChatPanel.ChatListener {
             return;
         }
 
-        // Add user message to history
-        history.add(Message.user(userText));
+        // Determine whether to use vision for this message
+        boolean useVision = shouldUseVision(userText);
+        byte[] imageBytes = null;
+
+        if (useVision) {
+            imageBytes = ImageCapture.captureActiveImage();
+            if (imageBytes == null) {
+                // No image open, fall back to text-only
+                useVision = false;
+            }
+        }
+
+        // Add user message to history (with or without image)
+        if (useVision && imageBytes != null) {
+            history.add(Message.userWithImage(userText, imageBytes));
+        } else {
+            history.add(Message.user(userText));
+        }
         trimHistory();
 
         // Build state context
         String stateContext = stateInspector.buildStateContext();
         String contextBlock = PromptTemplates.buildContextBlock(stateContext);
 
-        // Build system prompt with current state
-        String systemPrompt = PromptTemplates.getSystemPrompt() + "\n\n" + contextBlock;
+        // Build system prompt — use vision variant when sending an image
+        String basePrompt = useVision
+                ? PromptTemplates.getSystemPromptWithVision()
+                : PromptTemplates.getSystemPrompt();
+        String systemPrompt = basePrompt + "\n\n" + contextBlock;
 
-        // Call LLM
-        LLMResponse response = backend.chat(history, systemPrompt);
+        // Show image preview in chat when vision is active
+        if (useVision && imageBytes != null) {
+            showImagePreview(imageBytes, "Current image sent for analysis");
+        }
+
+        // Call LLM — use vision endpoint when we have an image
+        LLMResponse response;
+        if (useVision && imageBytes != null) {
+            response = backend.chatWithVision(history, systemPrompt, imageBytes);
+        } else {
+            response = backend.chat(history, systemPrompt);
+        }
 
         if (!response.isSuccess()) {
             showAssistantMessage("LLM error: " + response.getError());
@@ -189,6 +230,11 @@ public class ConversationLoop implements ChatPanel.ChatListener {
             }
 
             showStatus(summary.toString());
+
+            // Post-execution visual verification
+            if (settings.autoScreenshot && settings.visionEnabled && backend != null) {
+                performPostExecutionVerification(macroCode, systemPrompt);
+            }
             return;
         }
 
@@ -299,5 +345,100 @@ public class ConversationLoop implements ChatPanel.ChatListener {
      */
     public void clearHistory() {
         history.clear();
+    }
+
+    /**
+     * Determine whether the user message should trigger vision analysis.
+     * Returns true if vision is enabled in settings AND the message contains
+     * vision-related keywords.
+     *
+     * @param userMessage the user's message text
+     * @return true if vision should be used
+     */
+    boolean shouldUseVision(String userMessage) {
+        if (!settings.visionEnabled) {
+            return false;
+        }
+        if (userMessage == null || userMessage.isEmpty()) {
+            return false;
+        }
+        return VISION_KEYWORDS.matcher(userMessage).find();
+    }
+
+    /**
+     * Show a base64-encoded image thumbnail in the chat panel.
+     *
+     * @param pngBytes the PNG image bytes
+     * @param caption  a caption to display below the image
+     */
+    private void showImagePreview(byte[] pngBytes, String caption) {
+        if (pngBytes == null || pngBytes.length == 0) {
+            return;
+        }
+        String base64 = base64Encode(pngBytes);
+        String html = "<div style='margin:4px 0;'>"
+                + "<img src='data:image/png;base64," + base64 + "' "
+                + "style='max-width:380px; border:1px solid #444;' />"
+                + "<div style='color:#a0a0aa; font-size:11px; font-style:italic; margin-top:2px;'>"
+                + escapeHtml(caption)
+                + "</div></div>";
+        chatPanel.appendHtml(html);
+    }
+
+    /**
+     * Perform post-execution visual verification by capturing the current image
+     * and sending it to the LLM for assessment.
+     *
+     * @param macroCode    the macro that was just executed
+     * @param systemPrompt the current system prompt
+     */
+    private void performPostExecutionVerification(String macroCode, String systemPrompt) {
+        byte[] postImage = ImageCapture.captureActiveImage();
+        if (postImage == null) {
+            return;
+        }
+
+        showImagePreview(postImage, "Post-execution capture");
+
+        String verificationPrompt = "I just executed this ImageJ macro:\n```\n" + macroCode
+                + "\n```\nHere is the resulting image. Does it look correct? Any issues?";
+
+        history.add(Message.userWithImage(verificationPrompt, postImage));
+        trimHistory();
+
+        String visionPrompt = PromptTemplates.getSystemPromptWithVision() + "\n\n"
+                + PromptTemplates.buildContextBlock(stateInspector.buildStateContext());
+
+        LLMResponse verifyResponse = backend.chatWithVision(history, visionPrompt, postImage);
+
+        if (verifyResponse.isSuccess()) {
+            String assessment = verifyResponse.getContent();
+            history.add(Message.assistant(assessment));
+            trimHistory();
+            showAssistantMessage(assessment);
+        } else {
+            System.err.println("[ImageJAI] Post-execution verification failed: "
+                    + verifyResponse.getError());
+        }
+    }
+
+    /**
+     * Base64-encode a byte array. Uses javax.xml.bind on Java 8.
+     */
+    private static String base64Encode(byte[] data) {
+        return javax.xml.bind.DatatypeConverter.printBase64Binary(data);
+    }
+
+    /**
+     * Escape HTML special characters.
+     */
+    private static String escapeHtml(String s) {
+        if (s == null) {
+            return "";
+        }
+        return s.replace("&", "&amp;")
+                .replace("<", "&lt;")
+                .replace(">", "&gt;")
+                .replace("\"", "&quot;");
     }
 }
