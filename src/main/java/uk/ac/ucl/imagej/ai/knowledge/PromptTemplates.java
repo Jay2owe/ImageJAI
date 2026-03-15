@@ -19,6 +19,9 @@ public final class PromptTemplates {
     private static final Pattern MACRO_PATTERN =
             Pattern.compile("<macro>(.*?)</macro>", Pattern.DOTALL);
 
+    private static final Pattern PIPELINE_PATTERN =
+            Pattern.compile("<pipeline>(.*?)</pipeline>", Pattern.DOTALL);
+
     private static final String SYSTEM_PROMPT =
             "You are an AI assistant for ImageJ/Fiji, a scientific image analysis application.\n"
             + "You help users analyze microscopy images through natural language.\n"
@@ -50,7 +53,19 @@ public final class PromptTemplates {
             + "4. If the user asks a question (not an action), just respond conversationally.\n"
             + "5. If an error occurs, analyze it and suggest a fix.\n"
             + "6. When you see the [STATE] context, use it to understand what images are open and their properties.\n"
-            + "7. If no image is open and the user wants to process something, ask them to open an image first.\n";
+            + "7. If no image is open and the user wants to process something, ask them to open an image first.\n"
+            + "\n"
+            + "When the user asks for a multi-step analysis, respond with a <pipeline> block:\n"
+            + "<pipeline>\n"
+            + "  <step description=\"Step 1 description\">macro code here;</step>\n"
+            + "  <step description=\"Step 2 description\">macro code here;</step>\n"
+            + "</pipeline>\n"
+            + "\n"
+            + "Use <pipeline> blocks when:\n"
+            + "- The task requires 3 or more sequential operations\n"
+            + "- The user says \"pipeline\", \"workflow\", \"all steps\", \"full analysis\"\n"
+            + "- The task involves batch processing\n"
+            + "Do NOT mix <macro> and <pipeline> in the same response. Use one or the other.\n";
 
     private static final String VISION_ADDENDUM =
             "\n\nWhen an image is provided, you can see its contents. Describe what you observe:\n"
@@ -96,6 +111,36 @@ public final class PromptTemplates {
     }
 
     /**
+     * Check whether an LLM response contains a pipeline block.
+     *
+     * @param response the raw LLM response text
+     * @return true if a {@code <pipeline>} block is present
+     */
+    public static boolean hasPipeline(String response) {
+        if (response == null || response.isEmpty()) {
+            return false;
+        }
+        return PIPELINE_PATTERN.matcher(response).find();
+    }
+
+    /**
+     * Extract the raw pipeline block content from an LLM response.
+     *
+     * @param response the raw LLM response text
+     * @return the full {@code <pipeline>...</pipeline>} block, or empty string if not found
+     */
+    public static String extractPipelineBlock(String response) {
+        if (response == null || response.isEmpty()) {
+            return "";
+        }
+        Matcher matcher = PIPELINE_PATTERN.matcher(response);
+        if (matcher.find()) {
+            return "<pipeline>" + matcher.group(1) + "</pipeline>";
+        }
+        return "";
+    }
+
+    /**
      * Strip macro blocks from response to get only conversational text.
      *
      * @param response the raw LLM response text
@@ -106,6 +151,7 @@ public final class PromptTemplates {
             return "";
         }
         String cleaned = MACRO_PATTERN.matcher(response).replaceAll("");
+        cleaned = PIPELINE_PATTERN.matcher(cleaned).replaceAll("");
         // Collapse multiple blank lines into one
         cleaned = cleaned.replaceAll("\n{3,}", "\n\n");
         return cleaned.trim();
