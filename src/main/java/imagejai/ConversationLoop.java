@@ -5,6 +5,7 @@ import imagejai.config.Settings;
 import imagejai.engine.CommandEngine;
 import imagejai.engine.ExecutionResult;
 import imagejai.engine.ImageCapture;
+import imagejai.engine.PipelineBuilder;
 import imagejai.engine.StateInspector;
 import imagejai.knowledge.PromptTemplates;
 import imagejai.llm.BackendFactory;
@@ -43,15 +44,19 @@ public class ConversationLoop implements ChatPanel.ChatListener {
     private final Settings settings;
     private LLMBackend backend;
     private final CommandEngine commandEngine;
+    private final PipelineBuilder pipelineBuilder;
     private final StateInspector stateInspector;
     private final List<Message> history;
+    private PipelineBuilder.Pipeline lastPipeline;
 
     public ConversationLoop(ChatPanel chatPanel, Settings settings) {
         this.chatPanel = chatPanel;
         this.settings = settings;
         this.commandEngine = new CommandEngine();
+        this.pipelineBuilder = new PipelineBuilder(commandEngine);
         this.stateInspector = new StateInspector();
         this.history = new ArrayList<Message>();
+        this.lastPipeline = null;
         refreshBackend();
     }
 
@@ -166,11 +171,12 @@ public class ConversationLoop implements ChatPanel.ChatListener {
 
         String fullResponse = response.getContent();
 
-        // Extract macros from the response
+        // Check for pipeline block first, then macros
+        boolean hasPipeline = PromptTemplates.hasPipeline(fullResponse);
         List<String> macros = PromptTemplates.extractMacros(fullResponse);
 
-        if (macros.isEmpty()) {
-            // Pure conversational response, no macros
+        if (!hasPipeline && macros.isEmpty()) {
+            // Pure conversational response
             history.add(Message.assistant(fullResponse));
             trimHistory();
             showAssistantMessage(fullResponse);
@@ -183,14 +189,24 @@ public class ConversationLoop implements ChatPanel.ChatListener {
             showAssistantMessage(conversation);
         }
 
-        // Add full response (with macros) to history
+        // Add full response to history
         history.add(Message.assistant(fullResponse));
         trimHistory();
 
-        // Execute each macro block
-        for (int i = 0; i < macros.size(); i++) {
-            String macroCode = macros.get(i);
-            executeMacroWithRetry(macroCode, systemPrompt, 0);
+        if (hasPipeline) {
+            // Parse and execute the pipeline
+            PipelineBuilder.Pipeline pipeline = pipelineBuilder.parsePipeline(fullResponse);
+            if (pipeline != null) {
+                executePipelineWithProgress(pipeline);
+            } else {
+                showAssistantMessage("Failed to parse pipeline from response.");
+            }
+        } else {
+            // Execute each macro block
+            for (int i = 0; i < macros.size(); i++) {
+                String macroCode = macros.get(i);
+                executeMacroWithRetry(macroCode, systemPrompt, 0);
+            }
         }
     }
 
@@ -291,6 +307,148 @@ public class ConversationLoop implements ChatPanel.ChatListener {
 
         // Retry with the corrected macro
         executeMacroWithRetry(correctedMacros.get(0), updatedSystemPrompt, attempt + 1);
+    }
+
+    /**
+     * Execute a pipeline with visual progress updates in the chat panel.
+     * Shows numbered steps with status icons. On completion, offers save/batch options.
+     */
+    private void executePipelineWithProgress(final PipelineBuilder.Pipeline pipeline) {
+        // Show the pipeline plan before execution
+        showPipelinePlan(pipeline);
+
+        lastPipeline = pipeline;
+
+        pipelineBuilder.executePipeline(pipeline, new PipelineBuilder.PipelineCallback() {
+            @Override
+            public void onStepStarted(PipelineBuilder.PipelineStep step) {
+                showStatus("Pipeline step " + step.index + "/" + pipeline.steps.size()
+                        + ": " + step.description + "...");
+                showPipelineProgress(pipeline);
+            }
+
+            @Override
+            public void onStepCompleted(PipelineBuilder.PipelineStep step) {
+                showPipelineProgress(pipeline);
+            }
+
+            @Override
+            public void onStepFailed(PipelineBuilder.PipelineStep step, String error) {
+                showPipelineProgress(pipeline);
+                showAssistantMessage("Step " + step.index + " failed: " + error
+                        + "\nYou can ask me to fix this step and resume the pipeline.");
+            }
+
+            @Override
+            public void onPipelineCompleted(PipelineBuilder.Pipeline p) {
+                showPipelineProgress(p);
+                long totalTime = 0;
+                for (int i = 0; i < p.steps.size(); i++) {
+                    totalTime += p.steps.get(i).executionTimeMs;
+                }
+                showAssistantMessage("Pipeline completed successfully in " + totalTime + "ms.\n\n"
+                        + "You can:\n"
+                        + "- Say \"save pipeline\" to export as a .ijm macro file\n"
+                        + "- Say \"run on folder\" to create a batch processing macro");
+            }
+
+            @Override
+            public void onPipelineFailed(PipelineBuilder.Pipeline p, PipelineBuilder.PipelineStep failedStep) {
+                // Already handled in onStepFailed
+            }
+        });
+    }
+
+    /**
+     * Show the pipeline plan (before execution) with all steps listed.
+     */
+    private void showPipelinePlan(PipelineBuilder.Pipeline pipeline) {
+        StringBuilder html = new StringBuilder();
+        html.append("<div style='background:#2a2a32; border-left:3px solid #00c8ff; ");
+        html.append("padding:8px 12px; margin:4px 0;'>");
+        html.append("<div style='color:#00c8ff; font-weight:bold; font-size:13px; ");
+        html.append("margin-bottom:6px;'>Pipeline: ").append(escapeHtml(pipeline.name));
+        html.append("</div>");
+        for (int i = 0; i < pipeline.steps.size(); i++) {
+            PipelineBuilder.PipelineStep step = pipeline.steps.get(i);
+            html.append("<div style='color:#888890; font-size:12px; margin:2px 0; ");
+            html.append("font-family:monospace;'>");
+            html.append("&#9675; Step ").append(step.index).append(": ");
+            html.append(escapeHtml(step.description));
+            html.append("</div>");
+        }
+        html.append("</div>");
+        chatPanel.appendHtml(html.toString());
+    }
+
+    /**
+     * Show current pipeline progress with color-coded status icons.
+     * Replaces the previous progress display by appending a new one.
+     */
+    private void showPipelineProgress(PipelineBuilder.Pipeline pipeline) {
+        StringBuilder html = new StringBuilder();
+        html.append("<div style='background:#1e1e24; border-left:3px solid #666670; ");
+        html.append("padding:6px 10px; margin:2px 0;'>");
+        html.append("<div style='color:#a0a0aa; font-size:11px; font-weight:bold; ");
+        html.append("margin-bottom:4px;'>Pipeline Progress</div>");
+
+        for (int i = 0; i < pipeline.steps.size(); i++) {
+            PipelineBuilder.PipelineStep step = pipeline.steps.get(i);
+            String icon;
+            String color;
+            String statusText = "";
+
+            if ("success".equals(step.status)) {
+                icon = "&#10003;";  // checkmark
+                color = "#4ec94e";
+                statusText = " (" + step.executionTimeMs + "ms)";
+            } else if ("running".equals(step.status)) {
+                icon = "&#9654;";  // play arrow
+                color = "#00c8ff";
+                statusText = "...";
+            } else if ("failed".equals(step.status)) {
+                icon = "&#10007;";  // X mark
+                color = "#e05050";
+                if (step.result != null && step.result.getError() != null) {
+                    statusText = " - " + truncateError(step.result.getError());
+                }
+            } else if ("skipped".equals(step.status)) {
+                icon = "&#9675;";  // circle
+                color = "#555560";
+                statusText = " (skipped)";
+            } else {
+                icon = "&#9675;";  // circle
+                color = "#888890";
+            }
+
+            html.append("<div style='color:").append(color).append("; font-size:12px; ");
+            html.append("margin:1px 0; font-family:monospace;'>");
+            html.append(icon).append(" Step ").append(step.index).append(": ");
+            html.append(escapeHtml(step.description));
+            html.append("<span style='color:#666670;'>").append(escapeHtml(statusText));
+            html.append("</span></div>");
+        }
+
+        html.append("</div>");
+        chatPanel.appendHtml(html.toString());
+    }
+
+    /**
+     * Truncate an error message for display in the progress view.
+     */
+    private String truncateError(String error) {
+        if (error == null) {
+            return "";
+        }
+        // Take first line only
+        int newline = error.indexOf('\n');
+        if (newline > 0) {
+            error = error.substring(0, newline);
+        }
+        if (error.length() > 80) {
+            error = error.substring(0, 77) + "...";
+        }
+        return error;
     }
 
     /**
