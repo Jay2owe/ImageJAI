@@ -22,6 +22,7 @@ public class ImageJAIPlugin implements Command {
 
     private static JFrame chatFrame;
     private static ChatPanel chatPanel;
+    private static ConversationLoop conversationLoop;
 
     @Override
     public void run() {
@@ -52,8 +53,10 @@ public class ImageJAIPlugin implements Command {
             settings.save();
         }
 
-        // Create chat panel and window
+        // Create chat panel and wire conversation loop
         chatPanel = new ChatPanel(settings);
+        conversationLoop = new ConversationLoop(chatPanel, settings);
+        chatPanel.addChatListener(conversationLoop);
 
         chatFrame = new JFrame(Constants.PLUGIN_NAME + " v" + Constants.VERSION);
         chatFrame.setDefaultCloseOperation(JFrame.DISPOSE_ON_CLOSE);
@@ -68,6 +71,7 @@ public class ImageJAIPlugin implements Command {
                 // Null out static references so they can be GC'd
                 chatPanel = null;
                 chatFrame = null;
+                conversationLoop = null;
                 System.out.println("[ImageJAI] Window closed, resources released.");
             }
         });
