@@ -5,6 +5,9 @@ import java.util.List;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
+import uk.ac.ucl.imagej.ai.knowledge.MacroReference;
+import uk.ac.ucl.imagej.ai.knowledge.DocIndex;
+
 /**
  * System prompts and response parsing for the conversation loop.
  * Handles macro extraction from LLM responses and context formatting.
@@ -106,6 +109,35 @@ public final class PromptTemplates {
         // Collapse multiple blank lines into one
         cleaned = cleaned.replaceAll("\n{3,}", "\n\n");
         return cleaned.trim();
+    }
+
+    /**
+     * Search both MacroReference and DocIndex for knowledge relevant to the
+     * user's query, and return formatted context for prompt injection.
+     *
+     * @param userQuery  the user's natural language query
+     * @param macroRef   the macro reference index
+     * @param docIndex   the documentation index
+     * @return formatted context string (may be empty if no matches)
+     */
+    public static String getRelevantKnowledge(String userQuery,
+                                               MacroReference macroRef,
+                                               DocIndex docIndex) {
+        List<MacroReference.MacroEntry> macros = macroRef.search(userQuery, 5);
+        List<DocIndex.DocEntry> docs = docIndex.search(userQuery, 3);
+
+        StringBuilder sb = new StringBuilder();
+        if (!macros.isEmpty()) {
+            sb.append("[RELEVANT MACRO FUNCTIONS]\n");
+            sb.append(macroRef.formatForPrompt(macros));
+            sb.append("[/RELEVANT MACRO FUNCTIONS]\n\n");
+        }
+        if (!docs.isEmpty()) {
+            sb.append("[RELEVANT TIPS]\n");
+            sb.append(docIndex.formatForPrompt(docs));
+            sb.append("[/RELEVANT TIPS]\n\n");
+        }
+        return sb.toString();
     }
 
     /**
