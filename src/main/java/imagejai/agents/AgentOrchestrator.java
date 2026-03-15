@@ -68,6 +68,9 @@ public class AgentOrchestrator {
 
     // Specialist agents
     private SegmentationAgent segmentationAgent;
+    private MeasurementAgent measurementAgent;
+    private VisualizationAgent visualizationAgent;
+    private StatsAgent statsAgent;
 
     /**
      * Create a new AgentOrchestrator.
@@ -84,6 +87,9 @@ public class AgentOrchestrator {
         this.explorationEngine = explorationEngine;
         this.settings = settings;
         this.segmentationAgent = new SegmentationAgent(backend, commandEngine, explorationEngine);
+        this.measurementAgent = new MeasurementAgent(backend, commandEngine);
+        this.visualizationAgent = new VisualizationAgent(backend, commandEngine);
+        this.statsAgent = new StatsAgent(backend, commandEngine);
     }
 
     /**
@@ -136,14 +142,11 @@ public class AgentOrchestrator {
             case SEGMENTATION:
                 return segmentationAgent.process(userMessage, stateContext, history);
             case MEASUREMENT:
-                // Future: MeasurementAgent
-                return null;
+                return measurementAgent.process(userMessage, stateContext, history);
             case VISUALIZATION:
-                // Future: VisualizationAgent
-                return null;
+                return visualizationAgent.process(userMessage, stateContext, history);
             case STATISTICS:
-                // Future: StatisticsAgent
-                return null;
+                return statsAgent.process(userMessage, stateContext, history);
             default:
                 return null;
         }
@@ -179,6 +182,15 @@ public class AgentOrchestrator {
         this.backend = backend;
         if (segmentationAgent != null) {
             segmentationAgent.setBackend(backend);
+        }
+        if (measurementAgent != null) {
+            measurementAgent.setBackend(backend);
+        }
+        if (visualizationAgent != null) {
+            visualizationAgent.setBackend(backend);
+        }
+        if (statsAgent != null) {
+            statsAgent.setBackend(backend);
         }
     }
 }
