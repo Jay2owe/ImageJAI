@@ -1,9 +1,11 @@
 package uk.ac.ucl.imagej.ai;
 
+import uk.ac.ucl.imagej.ai.agents.AgentOrchestrator;
 import uk.ac.ucl.imagej.ai.config.Constants;
 import uk.ac.ucl.imagej.ai.config.Settings;
 import uk.ac.ucl.imagej.ai.engine.CommandEngine;
 import uk.ac.ucl.imagej.ai.engine.ExecutionResult;
+import uk.ac.ucl.imagej.ai.engine.ExplorationEngine;
 import uk.ac.ucl.imagej.ai.engine.ImageCapture;
 import uk.ac.ucl.imagej.ai.engine.PipelineBuilder;
 import uk.ac.ucl.imagej.ai.engine.StateInspector;
@@ -44,8 +46,10 @@ public class ConversationLoop implements ChatPanel.ChatListener {
     private final Settings settings;
     private LLMBackend backend;
     private final CommandEngine commandEngine;
+    private final ExplorationEngine explorationEngine;
     private final PipelineBuilder pipelineBuilder;
     private final StateInspector stateInspector;
+    private final AgentOrchestrator orchestrator;
     private final List<Message> history;
     private PipelineBuilder.Pipeline lastPipeline;
 
@@ -53,11 +57,14 @@ public class ConversationLoop implements ChatPanel.ChatListener {
         this.chatPanel = chatPanel;
         this.settings = settings;
         this.commandEngine = new CommandEngine();
+        this.explorationEngine = new ExplorationEngine(commandEngine);
         this.pipelineBuilder = new PipelineBuilder(commandEngine);
         this.stateInspector = new StateInspector();
         this.history = new ArrayList<Message>();
         this.lastPipeline = null;
         refreshBackend();
+        this.orchestrator = new AgentOrchestrator(backend, commandEngine,
+                explorationEngine, settings);
     }
 
     /**
@@ -72,6 +79,9 @@ public class ConversationLoop implements ChatPanel.ChatListener {
         } catch (Exception e) {
             System.err.println("[ImageJAI] Failed to create backend: " + e.getMessage());
             this.backend = null;
+        }
+        if (orchestrator != null) {
+            orchestrator.setBackend(backend);
         }
     }
 
@@ -145,6 +155,22 @@ public class ConversationLoop implements ChatPanel.ChatListener {
         String stateContext = stateInspector.buildStateContext();
         String contextBlock = PromptTemplates.buildContextBlock(stateContext);
 
+        // Check if a specialist agent should handle this request
+        AgentOrchestrator.AgentType agentType = orchestrator.classifyIntent(userText);
+        if (agentType != AgentOrchestrator.AgentType.GENERAL) {
+            String agentLabel = AgentOrchestrator.getAgentLabel(agentType);
+            if (agentLabel != null) {
+                showStatus(agentLabel + " processing...");
+            }
+            String specialistResponse = orchestrator.processWithSpecialist(
+                    agentType, userText, stateContext, history);
+            if (specialistResponse != null) {
+                handleSpecialistResponse(specialistResponse, agentLabel, stateContext);
+                return;
+            }
+            // If specialist returned null, fall through to general handling
+        }
+
         // Build system prompt — use vision variant when sending an image
         String basePrompt = useVision
                 ? PromptTemplates.getSystemPromptWithVision()
@@ -206,6 +232,63 @@ public class ConversationLoop implements ChatPanel.ChatListener {
             for (int i = 0; i < macros.size(); i++) {
                 String macroCode = macros.get(i);
                 executeMacroWithRetry(macroCode, systemPrompt, 0);
+            }
+        }
+    }
+
+    /**
+     * Handle a response from a specialist agent.
+     * Parses the response for macros/pipelines just like the general flow,
+     * but prefixes the conversational output with the agent label.
+     *
+     * @param response   the specialist's full response text
+     * @param agentLabel display label for the agent (e.g. "[Segmentation Agent]")
+     * @param stateContext the current ImageJ state context
+     */
+    private void handleSpecialistResponse(String response, String agentLabel,
+                                           String stateContext) {
+        // Add response to history
+        history.add(Message.assistant(response));
+        trimHistory();
+
+        // Check for pipeline or macros
+        boolean hasPipeline = PromptTemplates.hasPipeline(response);
+        List<String> macros = PromptTemplates.extractMacros(response);
+
+        // Extract conversational text
+        String conversation = PromptTemplates.extractConversation(response);
+
+        // Prefix with agent label
+        if (agentLabel != null && !conversation.isEmpty()) {
+            conversation = agentLabel + " " + conversation;
+        } else if (agentLabel != null && conversation.isEmpty() && !hasPipeline && macros.isEmpty()) {
+            conversation = agentLabel + " " + response;
+        }
+
+        if (!hasPipeline && macros.isEmpty()) {
+            // Pure conversational response
+            showAssistantMessage(conversation);
+            return;
+        }
+
+        // Show the conversational part first
+        if (!conversation.isEmpty()) {
+            showAssistantMessage(conversation);
+        }
+
+        if (hasPipeline) {
+            PipelineBuilder.Pipeline pipeline = pipelineBuilder.parsePipeline(response);
+            if (pipeline != null) {
+                executePipelineWithProgress(pipeline);
+            } else {
+                showAssistantMessage("Failed to parse pipeline from response.");
+            }
+        } else {
+            // Build system prompt for retry context
+            String systemPrompt = PromptTemplates.getSystemPrompt() + "\n\n"
+                    + PromptTemplates.buildContextBlock(stateContext);
+            for (int i = 0; i < macros.size(); i++) {
+                executeMacroWithRetry(macros.get(i), systemPrompt, 0);
             }
         }
     }
