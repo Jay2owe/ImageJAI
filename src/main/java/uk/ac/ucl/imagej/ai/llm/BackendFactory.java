@@ -17,17 +17,22 @@ public final class BackendFactory {
      * @throws IllegalArgumentException if the provider is unknown
      */
     public static LLMBackend create(Settings settings) {
-        String provider = settings.provider != null ? settings.provider.toLowerCase().trim() : "";
+        Settings.ModelConfig config = settings.getActiveConfig();
+        if (config == null) {
+            throw new IllegalArgumentException("No active model configuration");
+        }
+
+        String provider = config.provider != null ? config.provider.toLowerCase().trim() : "";
 
         switch (provider) {
             case "gemini":
-                return new GeminiBackend(settings.apiKey, settings.model);
+                return new GeminiBackend(config.apiKey, config.model);
             case "ollama":
-                return new OllamaBackend(settings.ollamaUrl, settings.model);
+                return new OllamaBackend(config.url, config.model);
             case "openai":
-                return new OpenAICompatibleBackend(settings.openaiUrl, settings.apiKey, settings.model);
+                return new OpenAICompatibleBackend(config.url, config.apiKey, config.model);
             case "custom":
-                return new OpenAICompatibleBackend(settings.customUrl, settings.customApiKey, settings.customModel);
+                return new OpenAICompatibleBackend(config.url, config.apiKey, config.model);
             default:
                 throw new IllegalArgumentException("Unknown LLM provider: " + provider +
                         ". Supported: gemini, ollama, openai, custom");

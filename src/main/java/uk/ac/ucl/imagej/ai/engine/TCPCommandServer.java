@@ -7,6 +7,7 @@ import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import com.google.gson.JsonPrimitive;
+import ij.IJ;
 import uk.ac.ucl.imagej.ai.config.Constants;
 
 import javax.swing.SwingUtilities;
@@ -303,38 +304,40 @@ public class TCPCommandServer {
         }
         final String code = codeElement.getAsString();
 
-        final Object[] holder = new Object[1];
-        final CountDownLatch latch = new CountDownLatch(1);
-
-        SwingUtilities.invokeLater(new Runnable() {
-            @Override
-            public void run() {
-                try {
-                    ExecutionResult result = commandEngine.executeMacroWithTimeout(code, MACRO_TIMEOUT_MS);
-                    holder[0] = result;
-                } catch (Exception e) {
-                    holder[0] = e;
-                } finally {
-                    latch.countDown();
-                }
-            }
-        });
-
+        // Call IJ.runMacro directly on this TCP handler thread.
+        // The ImageJ macro interpreter handles its own EDT dispatch internally.
+        // Using CommandEngine's executor/invokeAndWait causes deadlocks or hangs
+        // because the executor thread lacks ImageJ's expected thread context.
         try {
-            if (!latch.await(MACRO_TIMEOUT_MS + 5000, TimeUnit.MILLISECONDS)) {
-                return errorResponse("Macro execution timed out");
+            long startTime = System.currentTimeMillis();
+            String macroReturn = IJ.runMacro(code);
+            long elapsed = System.currentTimeMillis() - startTime;
+
+            JsonObject result = new JsonObject();
+            result.addProperty("success", true);
+            result.addProperty("output", macroReturn != null ? macroReturn : "");
+            result.addProperty("executionTimeMs", elapsed);
+
+            // Capture state after execution
+            try {
+                ImageInfo active = stateInspector.getActiveImageInfo();
+                if (active != null) {
+                    JsonArray newImages = new JsonArray();
+                    newImages.add(active.getTitle());
+                    result.add("newImages", newImages);
+                }
+                String csv = stateInspector.getResultsTableCSV();
+                if (csv != null && !csv.isEmpty()) {
+                    result.addProperty("resultsTable", csv);
+                }
+            } catch (Exception ignore) {
+                // State inspection is best-effort
             }
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            return errorResponse("Interrupted while waiting for macro execution");
-        }
 
-        if (holder[0] instanceof Exception) {
-            return errorResponse("Macro error: " + ((Exception) holder[0]).getMessage());
+            return successResponse(result);
+        } catch (Exception e) {
+            return errorResponse("Macro error: " + e.getMessage());
         }
-
-        ExecutionResult result = (ExecutionResult) holder[0];
-        return successResponse(executionResultToJson(result));
     }
 
     private JsonObject handleGetState() {
@@ -549,38 +552,15 @@ public class TCPCommandServer {
 
         PipelineBuilder.Pipeline pipeline = new PipelineBuilder.Pipeline("TCP Pipeline", steps);
 
-        final Object[] holder = new Object[1];
-        final CountDownLatch latch = new CountDownLatch(1);
-
-        SwingUtilities.invokeLater(new Runnable() {
-            @Override
-            public void run() {
-                try {
-                    pipelineBuilder.executePipeline(pipeline, null);
-                    holder[0] = pipeline;
-                } catch (Exception e) {
-                    holder[0] = e;
-                } finally {
-                    latch.countDown();
-                }
-            }
-        });
-
+        // executePipeline calls commandEngine.executeMacro() which handles EDT
+        // dispatch internally, so call directly from TCP handler thread.
         try {
-            long timeout = PIPELINE_TIMEOUT_MS + (steps.size() * MACRO_TIMEOUT_MS);
-            if (!latch.await(timeout, TimeUnit.MILLISECONDS)) {
-                return errorResponse("Pipeline execution timed out");
-            }
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            return errorResponse("Interrupted");
+            pipelineBuilder.executePipeline(pipeline, null);
+        } catch (Exception e) {
+            return errorResponse("Pipeline error: " + e.getMessage());
         }
 
-        if (holder[0] instanceof Exception) {
-            return errorResponse("Pipeline error: " + ((Exception) holder[0]).getMessage());
-        }
-
-        PipelineBuilder.Pipeline result = (PipelineBuilder.Pipeline) holder[0];
+        PipelineBuilder.Pipeline result = pipeline;
         JsonObject resultJson = new JsonObject();
         resultJson.addProperty("status", result.status);
         JsonArray stepsResult = new JsonArray();
@@ -612,38 +592,14 @@ public class TCPCommandServer {
             methods = null; // Will use defaults
         }
 
-        final Object[] holder = new Object[1];
-        final CountDownLatch latch = new CountDownLatch(1);
-
-        SwingUtilities.invokeLater(new Runnable() {
-            @Override
-            public void run() {
-                try {
-                    ExplorationEngine.ExplorationReport report = explorationEngine.exploreThresholds(methods);
-                    holder[0] = report;
-                } catch (Exception e) {
-                    holder[0] = e;
-                } finally {
-                    latch.countDown();
-                }
-            }
-        });
-
+        // exploreThresholds calls commandEngine.executeMacro() which handles EDT
+        // dispatch internally, so call directly from TCP handler thread.
+        ExplorationEngine.ExplorationReport report;
         try {
-            long timeout = PIPELINE_TIMEOUT_MS * 2;
-            if (!latch.await(timeout, TimeUnit.MILLISECONDS)) {
-                return errorResponse("Threshold exploration timed out");
-            }
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            return errorResponse("Interrupted");
+            report = explorationEngine.exploreThresholds(methods);
+        } catch (Exception e) {
+            return errorResponse("Exploration error: " + e.getMessage());
         }
-
-        if (holder[0] instanceof Exception) {
-            return errorResponse("Exploration error: " + ((Exception) holder[0]).getMessage());
-        }
-
-        ExplorationEngine.ExplorationReport report = (ExplorationEngine.ExplorationReport) holder[0];
         JsonObject resultJson = new JsonObject();
         if (report.recommended != null) {
             resultJson.addProperty("recommended", report.recommended.methodName);
