@@ -81,6 +81,17 @@
                     <target>1.8</target>
                 </configuration>
             </plugin>
+            <!-- Generate SciJava plugin annotation index -->
+            <plugin>
+                <artifactId>maven-jar-plugin</artifactId>
+                <configuration>
+                    <archive>
+                        <manifest>
+                            <packageName>imagejai</packageName>
+                        </manifest>
+                    </archive>
+                </configuration>
+            </plugin>
         </plugins>
     </build>
 </project>
