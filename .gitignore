@@ -10,3 +10,10 @@ target/
 .DS_Store
 agent/.tmp/
 __pycache__/
+
+# Auto-generated agent context files (from sync_context.py)
+agent/GEMINI.md
+agent/AGENTS.md
+agent/.clinerules
+agent/.cursorrules
+agent/.aider.conventions.md

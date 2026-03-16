@@ -23,12 +23,15 @@ public class AgentLauncher {
         public final String command;
         public final String description;
         public final String executablePath;
+        public final String contextFlags;
 
-        public AgentInfo(String name, String command, String description, String executablePath) {
+        public AgentInfo(String name, String command, String description,
+                         String executablePath, String contextFlags) {
             this.name = name;
             this.command = command;
             this.description = description;
             this.executablePath = executablePath;
+            this.contextFlags = contextFlags;
         }
 
         @Override
@@ -37,16 +40,17 @@ public class AgentLauncher {
         }
     }
 
-    // Known CLI agents to search for
+    // Known CLI agents: {display name, command, description, context flags}
+    // Context flags tell the agent where to find project context.
+    // Empty string means the agent auto-reads its own file (e.g., CLAUDE.md, GEMINI.md).
     private static final String[][] KNOWN_AGENTS = {
-        // {display name, command name, description, extra search paths...}
-        {"Claude Code", "claude", "Anthropic's Claude CLI agent"},
-        {"Aider", "aider", "AI pair programming in your terminal"},
-        {"GitHub Copilot CLI", "gh copilot", "GitHub Copilot in the terminal"},
-        {"Gemini CLI", "gemini", "Google's Gemini CLI agent"},
-        {"Open Interpreter", "interpreter", "Open-source code interpreter"},
-        {"Cline", "cline", "Autonomous coding agent"},
-        {"Codex CLI", "codex", "OpenAI Codex CLI"},
+        {"Claude Code", "claude", "Anthropic's Claude CLI agent", ""},
+        {"Aider", "aider", "AI pair programming in your terminal", "--read .aider.conventions.md"},
+        {"GitHub Copilot CLI", "gh copilot", "GitHub Copilot in the terminal", ""},
+        {"Gemini CLI", "gemini", "Google's Gemini CLI agent", ""},
+        {"Open Interpreter", "interpreter", "Open-source code interpreter", "--system_message \"$(cat CLAUDE.md)\""},
+        {"Cline", "cline", "Autonomous coding agent", ""},
+        {"Codex CLI", "codex", "OpenAI Codex CLI", ""},
     };
 
     private final String agentWorkspace;
@@ -74,10 +78,11 @@ public class AgentLauncher {
             String name = known[0];
             String command = known[1];
             String description = known[2];
+            String flags = known.length > 3 ? known[3] : "";
 
             String path = findExecutable(command);
             if (path != null) {
-                agents.add(new AgentInfo(name, command, description, path));
+                agents.add(new AgentInfo(name, command, description, path, flags));
             }
         }
 
@@ -101,6 +106,15 @@ public class AgentLauncher {
      */
     public boolean launchAgent(AgentInfo agent) {
         try {
+            // Sync context files for non-Claude agents before launching
+            syncContextFiles();
+
+            // Build the full command with context flags
+            String fullCommand = agent.command;
+            if (agent.contextFlags != null && !agent.contextFlags.isEmpty()) {
+                fullCommand = agent.command + " " + agent.contextFlags;
+            }
+
             String os = System.getProperty("os.name", "").toLowerCase();
             List<String> cmd = new ArrayList<String>();
 
@@ -112,11 +126,11 @@ public class AgentLauncher {
                 cmd.add("\"" + agent.name + "\"");  // window title
                 cmd.add("cmd.exe");
                 cmd.add("/k");
-                cmd.add(agent.command);
+                cmd.add(fullCommand);
             } else if (os.contains("mac")) {
                 // macOS: use osascript to open Terminal
                 String script = "tell application \"Terminal\" to do script "
-                        + "\"cd '" + agentWorkspace + "' && " + agent.command + "\"";
+                        + "\"cd '" + agentWorkspace + "' && " + fullCommand + "\"";
                 cmd.add("osascript");
                 cmd.add("-e");
                 cmd.add(script);
@@ -126,7 +140,7 @@ public class AgentLauncher {
                 if (terminal != null) {
                     cmd.add(terminal);
                     cmd.add("-e");
-                    cmd.add("bash -c 'cd \"" + agentWorkspace + "\" && " + agent.command + "; bash'");
+                    cmd.add("bash -c 'cd \"" + agentWorkspace + "\" && " + fullCommand + "; bash'");
                 } else {
                     IJ.log("[AgentLauncher] No terminal emulator found");
                     return false;
@@ -233,5 +247,31 @@ public class AgentLauncher {
             }
         }
         return null;
+    }
+
+    /**
+     * Run sync_context.py to generate context files for non-Claude agents.
+     * Reads CLAUDE.md and creates GEMINI.md, .clinerules, .cursorrules, etc.
+     */
+    private void syncContextFiles() {
+        File syncScript = new File(agentWorkspace, "sync_context.py");
+        if (!syncScript.exists()) {
+            return; // No sync script available
+        }
+
+        try {
+            ProcessBuilder pb = new ProcessBuilder("python", syncScript.getAbsolutePath());
+            pb.directory(new File(agentWorkspace));
+            pb.redirectErrorStream(true);
+            Process proc = pb.start();
+            boolean finished = proc.waitFor() == 0;
+            if (finished) {
+                IJ.log("[AgentLauncher] Context files synced for all agents");
+            } else {
+                IJ.log("[AgentLauncher] Warning: sync_context.py exited with errors");
+            }
+        } catch (Exception e) {
+            IJ.log("[AgentLauncher] Could not run sync_context.py: " + e.getMessage());
+        }
     }
 }
