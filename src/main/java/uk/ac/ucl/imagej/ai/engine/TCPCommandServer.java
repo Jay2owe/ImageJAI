@@ -1063,40 +1063,105 @@ public class TCPCommandServer {
     }
 
     /**
-     * Recursively extract text labels and button labels from a dialog's component tree.
+     * Recursively extract ALL readable content from a dialog's component tree.
+     * Reads labels, text fields, dropdowns, checkboxes, sliders, spinners,
+     * text areas, and buttons — everything needed to understand any dialog.
      */
     private void extractDialogContent(Container container, StringBuilder text, List<String> buttons) {
         for (Component comp : container.getComponents()) {
+            // --- Labels ---
             if (comp instanceof javax.swing.JLabel) {
-                String labelText = ((javax.swing.JLabel) comp).getText();
-                if (labelText != null && !labelText.trim().isEmpty()) {
-                    text.append(labelText.trim()).append("\n");
+                String s = ((javax.swing.JLabel) comp).getText();
+                if (s != null && !s.trim().isEmpty()) {
+                    text.append(s.trim()).append("\n");
                 }
             } else if (comp instanceof java.awt.Label) {
-                String labelText = ((java.awt.Label) comp).getText();
-                if (labelText != null && !labelText.trim().isEmpty()) {
-                    text.append(labelText.trim()).append("\n");
+                String s = ((java.awt.Label) comp).getText();
+                if (s != null && !s.trim().isEmpty()) {
+                    text.append(s.trim()).append("\n");
                 }
+
+            // --- Buttons ---
             } else if (comp instanceof javax.swing.JButton) {
-                String btnText = ((javax.swing.JButton) comp).getText();
-                if (btnText != null && !btnText.trim().isEmpty()) {
-                    buttons.add(btnText.trim());
+                String s = ((javax.swing.JButton) comp).getText();
+                if (s != null && !s.trim().isEmpty()) {
+                    buttons.add(s.trim());
                 }
             } else if (comp instanceof java.awt.Button) {
-                String btnText = ((java.awt.Button) comp).getLabel();
-                if (btnText != null && !btnText.trim().isEmpty()) {
-                    buttons.add(btnText.trim());
+                String s = ((java.awt.Button) comp).getLabel();
+                if (s != null && !s.trim().isEmpty()) {
+                    buttons.add(s.trim());
                 }
+
+            // --- Text input fields ---
+            } else if (comp instanceof javax.swing.JTextField) {
+                String s = ((javax.swing.JTextField) comp).getText();
+                if (s != null && !s.trim().isEmpty()) {
+                    text.append("[field: ").append(s.trim()).append("]\n");
+                }
+            } else if (comp instanceof java.awt.TextField) {
+                String s = ((java.awt.TextField) comp).getText();
+                if (s != null && !s.trim().isEmpty()) {
+                    text.append("[field: ").append(s.trim()).append("]\n");
+                }
+
+            // --- Text areas ---
             } else if (comp instanceof javax.swing.JTextArea) {
-                String areaText = ((javax.swing.JTextArea) comp).getText();
-                if (areaText != null && !areaText.trim().isEmpty()) {
-                    text.append(areaText.trim()).append("\n");
+                String s = ((javax.swing.JTextArea) comp).getText();
+                if (s != null && !s.trim().isEmpty()) {
+                    text.append(s.trim()).append("\n");
                 }
             } else if (comp instanceof java.awt.TextArea) {
-                String areaText = ((java.awt.TextArea) comp).getText();
-                if (areaText != null && !areaText.trim().isEmpty()) {
-                    text.append(areaText.trim()).append("\n");
+                String s = ((java.awt.TextArea) comp).getText();
+                if (s != null && !s.trim().isEmpty()) {
+                    text.append(s.trim()).append("\n");
                 }
+
+            // --- Dropdowns / Choice ---
+            } else if (comp instanceof javax.swing.JComboBox) {
+                javax.swing.JComboBox<?> combo = (javax.swing.JComboBox<?>) comp;
+                Object selected = combo.getSelectedItem();
+                if (selected != null) {
+                    text.append("[dropdown: ").append(selected.toString()).append("]\n");
+                }
+            } else if (comp instanceof java.awt.Choice) {
+                String s = ((java.awt.Choice) comp).getSelectedItem();
+                if (s != null) {
+                    text.append("[dropdown: ").append(s).append("]\n");
+                }
+
+            // --- Checkboxes ---
+            } else if (comp instanceof javax.swing.JCheckBox) {
+                javax.swing.JCheckBox cb = (javax.swing.JCheckBox) comp;
+                String label = cb.getText();
+                if (label != null && !label.trim().isEmpty()) {
+                    text.append("[checkbox: ").append(label.trim())
+                        .append(" = ").append(cb.isSelected() ? "ON" : "OFF").append("]\n");
+                }
+            } else if (comp instanceof java.awt.Checkbox) {
+                java.awt.Checkbox cb = (java.awt.Checkbox) comp;
+                String label = cb.getLabel();
+                if (label != null && !label.trim().isEmpty()) {
+                    text.append("[checkbox: ").append(label.trim())
+                        .append(" = ").append(cb.getState() ? "ON" : "OFF").append("]\n");
+                }
+
+            // --- Sliders ---
+            } else if (comp instanceof javax.swing.JSlider) {
+                javax.swing.JSlider slider = (javax.swing.JSlider) comp;
+                text.append("[slider: ").append(slider.getValue())
+                    .append(" (").append(slider.getMinimum())
+                    .append("-").append(slider.getMaximum()).append(")]\n");
+            } else if (comp instanceof java.awt.Scrollbar) {
+                java.awt.Scrollbar sb = (java.awt.Scrollbar) comp;
+                text.append("[scrollbar: ").append(sb.getValue())
+                    .append(" (").append(sb.getMinimum())
+                    .append("-").append(sb.getMaximum()).append(")]\n");
+
+            // --- Spinners ---
+            } else if (comp instanceof javax.swing.JSpinner) {
+                javax.swing.JSpinner spinner = (javax.swing.JSpinner) comp;
+                text.append("[spinner: ").append(spinner.getValue()).append("]\n");
             }
 
             // Recurse into child containers
