@@ -110,6 +110,17 @@ def get_metadata():
     return imagej_command({"command": "get_metadata"})
 
 
+def get_pixels(x=None, y=None, width=None, height=None, slice_num=None, all_slices=False):
+    cmd = {"command": "get_pixels"}
+    if x is not None: cmd["x"] = x
+    if y is not None: cmd["y"] = y
+    if width is not None: cmd["width"] = width
+    if height is not None: cmd["height"] = height
+    if slice_num is not None: cmd["slice"] = slice_num
+    if all_slices: cmd["allSlices"] = True
+    return imagej_command(cmd)
+
+
 def get_dialogs():
     return imagej_command({"command": "get_dialogs"})
 

@@ -304,6 +304,8 @@ public class TCPCommandServer {
             return handleGetMetadata();
         } else if ("batch".equals(command)) {
             return handleBatch(request);
+        } else if ("get_pixels".equals(command)) {
+            return handleGetPixels(request);
         } else if ("get_dialogs".equals(command)) {
             return handleGetDialogs();
         } else if ("close_dialogs".equals(command)) {
@@ -970,6 +972,134 @@ public class TCPCommandServer {
     private static String base64Encode(byte[] data) {
         // java.util.Base64 is available in Java 8
         return java.util.Base64.getEncoder().encodeToString(data);
+    }
+
+    /**
+     * Return raw pixel data for the active image (or a region of it).
+     * Supports optional parameters: x, y, width, height, slice.
+     * Returns base64-encoded raw pixel values as floats (4 bytes each),
+     * plus metadata for reconstruction.
+     *
+     * Request:
+     *   {"command": "get_pixels"}                              — full current slice
+     *   {"command": "get_pixels", "slice": 5}                  — full slice 5
+     *   {"command": "get_pixels", "x":10, "y":10, "width":100, "height":100}  — region
+     *   {"command": "get_pixels", "allSlices": true}           — entire stack
+     */
+    private JsonObject handleGetPixels(JsonObject request) {
+        // Parse optional parameters
+        final int reqX = request.has("x") ? request.get("x").getAsInt() : -1;
+        final int reqY = request.has("y") ? request.get("y").getAsInt() : -1;
+        final int reqW = request.has("width") ? request.get("width").getAsInt() : -1;
+        final int reqH = request.has("height") ? request.get("height").getAsInt() : -1;
+        final int reqSlice = request.has("slice") ? request.get("slice").getAsInt() : -1;
+        final boolean allSlices = request.has("allSlices") && request.get("allSlices").getAsBoolean();
+
+        final Object[] holder = new Object[1];
+        final CountDownLatch latch = new CountDownLatch(1);
+
+        SwingUtilities.invokeLater(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    ImagePlus imp = WindowManager.getCurrentImage();
+                    if (imp == null) {
+                        holder[0] = "NO_IMAGE";
+                        return;
+                    }
+
+                    int imgW = imp.getWidth();
+                    int imgH = imp.getHeight();
+                    int nSlices = imp.getStackSize();
+
+                    // Determine region
+                    int x = reqX >= 0 ? Math.min(reqX, imgW - 1) : 0;
+                    int y = reqY >= 0 ? Math.min(reqY, imgH - 1) : 0;
+                    int w = reqW > 0 ? Math.min(reqW, imgW - x) : imgW - x;
+                    int h = reqH > 0 ? Math.min(reqH, imgH - y) : imgH - y;
+
+                    // Determine slices to extract
+                    int startSlice, endSlice;
+                    if (allSlices) {
+                        startSlice = 1;
+                        endSlice = nSlices;
+                    } else if (reqSlice > 0) {
+                        startSlice = Math.min(reqSlice, nSlices);
+                        endSlice = startSlice;
+                    } else {
+                        startSlice = imp.getCurrentSlice();
+                        endSlice = startSlice;
+                    }
+                    int sliceCount = endSlice - startSlice + 1;
+
+                    // Safety: limit total pixels to avoid OOM
+                    long totalPixels = (long) w * h * sliceCount;
+                    if (totalPixels > 4000000) { // ~16MB as floats
+                        holder[0] = new Exception("Region too large: " + totalPixels
+                                + " pixels. Max 4M. Use x/y/width/height to crop.");
+                        return;
+                    }
+
+                    // Extract pixel values as floats
+                    float[] allPixels = new float[w * h * sliceCount];
+                    int offset = 0;
+                    for (int s = startSlice; s <= endSlice; s++) {
+                        imp.setSliceWithoutUpdate(s);
+                        ij.process.ImageProcessor ip = imp.getProcessor();
+                        for (int py = y; py < y + h; py++) {
+                            for (int px = x; px < x + w; px++) {
+                                allPixels[offset++] = ip.getPixelValue(px, py);
+                            }
+                        }
+                    }
+
+                    // Convert float array to bytes then base64
+                    byte[] rawBytes = new byte[allPixels.length * 4];
+                    java.nio.ByteBuffer buf = java.nio.ByteBuffer.wrap(rawBytes);
+                    buf.order(java.nio.ByteOrder.LITTLE_ENDIAN);
+                    for (float v : allPixels) {
+                        buf.putFloat(v);
+                    }
+                    String b64 = base64Encode(rawBytes);
+
+                    JsonObject result = new JsonObject();
+                    result.addProperty("x", x);
+                    result.addProperty("y", y);
+                    result.addProperty("width", w);
+                    result.addProperty("height", h);
+                    result.addProperty("sliceStart", startSlice);
+                    result.addProperty("sliceEnd", endSlice);
+                    result.addProperty("sliceCount", sliceCount);
+                    result.addProperty("nPixels", allPixels.length);
+                    result.addProperty("type", imp.getBitDepth() + "-bit");
+                    result.addProperty("encoding", "base64_float32_le");
+                    result.addProperty("data", b64);
+
+                    holder[0] = result;
+                } catch (Exception e) {
+                    holder[0] = e;
+                } finally {
+                    latch.countDown();
+                }
+            }
+        });
+
+        try {
+            if (!latch.await(30000, TimeUnit.MILLISECONDS)) {
+                return errorResponse("Timed out getting pixels");
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return errorResponse("Interrupted");
+        }
+
+        if (holder[0] instanceof Exception) {
+            return errorResponse("Error: " + ((Exception) holder[0]).getMessage());
+        }
+        if ("NO_IMAGE".equals(holder[0])) {
+            return errorResponse("No active image");
+        }
+        return successResponse((JsonObject) holder[0]);
     }
 
     private JsonObject handleGetDialogs() {
