@@ -141,7 +141,9 @@ public class CommandEngine {
     }
 
     /**
-     * Callable that runs the macro on the EDT via invokeAndWait.
+     * Callable that runs the macro. IJ.runMacro creates its own Interpreter
+     * which handles EDT dispatch internally, so we run it directly on the
+     * executor thread to avoid blocking the EDT event loop.
      */
     private static class MacroTask implements Callable<String> {
         private final String macroCode;
@@ -152,29 +154,7 @@ public class CommandEngine {
 
         @Override
         public String call() throws Exception {
-            final String[] result = new String[1];
-            final Exception[] thrown = new Exception[1];
-
-            if (SwingUtilities.isEventDispatchThread()) {
-                // Already on EDT
-                result[0] = IJ.runMacro(macroCode);
-            } else {
-                SwingUtilities.invokeAndWait(new Runnable() {
-                    @Override
-                    public void run() {
-                        try {
-                            result[0] = IJ.runMacro(macroCode);
-                        } catch (Exception e) {
-                            thrown[0] = e;
-                        }
-                    }
-                });
-            }
-
-            if (thrown[0] != null) {
-                throw thrown[0];
-            }
-            return result[0];
+            return IJ.runMacro(macroCode);
         }
     }
 }

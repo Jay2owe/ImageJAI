@@ -20,6 +20,7 @@ Can also be imported:
 import socket
 import json
 import sys
+import os
 import base64
 
 HOST = "localhost"
@@ -123,7 +124,11 @@ def main():
         elif cmd == "capture":
             resp = capture_image()
             if resp.get("ok") and resp.get("result", {}).get("base64"):
-                outfile = sys.argv[2] if len(sys.argv) > 2 else "capture.png"
+                # Default to .tmp/ dir so captures don't pollute the workspace
+                tmp_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".tmp")
+                os.makedirs(tmp_dir, exist_ok=True)
+                name = sys.argv[2] if len(sys.argv) > 2 else "capture"
+                outfile = os.path.join(tmp_dir, name + ".png")
                 img_data = base64.b64decode(resp["result"]["base64"])
                 with open(outfile, "wb") as f:
                     f.write(img_data)

@@ -1,0 +1,232 @@
+"""
+Scan the running Fiji instance for all available commands, installed plugins,
+and available update sites. Saves results to .tmp/.
+
+Run this once at the start of each session:
+    python scan_plugins.py
+"""
+
+import socket
+import json
+import os
+import re
+import gzip
+import xml.etree.ElementTree as ET
+
+HOST = "localhost"
+PORT = 7746
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+TMP_DIR = os.path.join(SCRIPT_DIR, ".tmp")
+FIJI_HOME = "C:/Users/jamie/OneDrive - Imperial College London/ImageJ/Fiji.app"
+FIJI_PLUGINS = FIJI_HOME + "/plugins"
+DB_XML_GZ = FIJI_HOME + "/db.xml.gz"
+
+
+def send(cmd):
+    """Send a JSON command to ImageJ TCP server."""
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.settimeout(45)
+    s.connect((HOST, PORT))
+    s.sendall((json.dumps(cmd) + "\n").encode("utf-8"))
+    data = b""
+    while True:
+        try:
+            chunk = s.recv(65536)
+            if not chunk:
+                break
+            data += chunk
+        except socket.timeout:
+            break
+    s.close()
+    return json.loads(data.decode("utf-8"))
+
+
+def scan_commands():
+    """Get all available menu commands from the running Fiji instance."""
+    os.makedirs(TMP_DIR, exist_ok=True)
+    tmpfile = os.path.join(TMP_DIR, "commands.txt").replace("\\", "/")
+    macro = (
+        'List.setCommands; cmds = List.getList; '
+        'f = File.open("' + tmpfile + '"); '
+        'print(f, cmds); File.close(f);'
+    )
+    r = send({"command": "execute_macro", "code": macro})
+    if r.get("ok") and r.get("result", {}).get("success"):
+        print("Saved all commands to .tmp/commands.txt")
+    else:
+        print("WARNING: Could not enumerate commands:",
+              r.get("result", {}).get("error", "unknown"))
+
+    commands = []
+    cmd_path = os.path.join(TMP_DIR, "commands.txt")
+    if os.path.exists(cmd_path):
+        with open(cmd_path, "r") as f:
+            commands = [line.strip() for line in f if line.strip() and "=null" not in line]
+    return commands
+
+
+def categorize_commands(commands):
+    """Categorize commands into notable plugin groups."""
+    notable = {
+        "Deep Learning Segmentation": [],
+        "Tracking": [],
+        "Registration & Stitching": [],
+        "3D Analysis": [],
+        "GPU Accelerated (CLIJ2)": [],
+        "Colocalization": [],
+        "Morphology & Skeleton": [],
+        "Bio-Formats (File Import)": [],
+        "Deconvolution": [],
+    }
+
+    patterns = {
+        "Deep Learning Segmentation": r"(?i)(stardist|cellpose|weka.*segm|labkit|deepcell|csbdeep|ilastik)",
+        "Tracking": r"(?i)(trackmate|mtrack|manual.track|track.*mate)",
+        "Registration & Stitching": r"(?i)(stitch|register|registration|descriptor.*reg|bUnwarp|elastix|bigwarp)",
+        "3D Analysis": r"(?i)^3D\s",
+        "GPU Accelerated (CLIJ2)": r"(?i)(clij|on GPU)",
+        "Colocalization": r"(?i)(coloc|colocali)",
+        "Morphology & Skeleton": r"(?i)(skeleton|morpho|sholl|neurite|SNT)",
+        "Bio-Formats (File Import)": r"(?i)(bio.format|bioformat)",
+        "Deconvolution": r"(?i)(deconvol)",
+    }
+
+    for cmd in commands:
+        name = cmd.split("=")[0].strip()
+        for category, pattern in patterns.items():
+            if re.search(pattern, cmd):
+                notable[category].append(name)
+                break
+
+    return notable
+
+
+def scan_update_sites():
+    """Parse Fiji's db.xml.gz to find enabled and available update sites."""
+    enabled = []
+    disabled = []
+
+    if not os.path.exists(DB_XML_GZ):
+        print("WARNING: db.xml.gz not found at", DB_XML_GZ)
+        return enabled, disabled
+
+    try:
+        with gzip.open(DB_XML_GZ, "rb") as f:
+            data = f.read().decode("utf-8")
+        root = ET.fromstring(data)
+
+        for site in root.findall("update-site"):
+            enabled.append({
+                "name": site.get("name", ""),
+                "url": site.get("url", ""),
+                "description": site.get("description", ""),
+            })
+
+        for site in root.findall("disabled-update-site"):
+            disabled.append({
+                "name": site.get("name", ""),
+                "url": site.get("url", ""),
+                "description": site.get("description", ""),
+            })
+    except Exception as e:
+        print("WARNING: Failed to parse db.xml.gz:", e)
+
+    return enabled, disabled
+
+
+def write_summary(commands, notable, enabled_sites, disabled_sites):
+    """Write the complete plugin summary."""
+    summary_path = os.path.join(TMP_DIR, "plugins_summary.txt")
+    with open(summary_path, "w") as f:
+        f.write("# Fiji Plugin & Update Site Summary\n")
+        f.write("# Total available commands: {}\n".format(len(commands)))
+        f.write("# Enabled update sites: {}\n".format(len(enabled_sites)))
+        f.write("# Available (disabled) update sites: {}\n\n".format(len(disabled_sites)))
+
+        # Notable command categories
+        f.write("=" * 60 + "\n")
+        f.write("INSTALLED PLUGIN CAPABILITIES\n")
+        f.write("=" * 60 + "\n\n")
+        for category, items in notable.items():
+            if items:
+                f.write("## {} ({} commands)\n".format(category, len(items)))
+                for item in sorted(set(items))[:20]:
+                    f.write("  - {}\n".format(item))
+                f.write("\n")
+
+        # Enabled update sites
+        f.write("=" * 60 + "\n")
+        f.write("ENABLED UPDATE SITES\n")
+        f.write("=" * 60 + "\n\n")
+        for site in enabled_sites:
+            f.write("  [ON]  {}\n".format(site["name"]))
+            if site["description"]:
+                f.write("        {}\n".format(site["description"][:120]))
+        f.write("\n")
+
+        # Disabled update sites (available to install)
+        f.write("=" * 60 + "\n")
+        f.write("AVAILABLE UPDATE SITES (not yet enabled)\n")
+        f.write("These can be enabled in Fiji > Help > Update... > Manage Update Sites\n")
+        f.write("=" * 60 + "\n\n")
+        for site in disabled_sites:
+            name = site["name"]
+            desc = site["description"]
+            # Skip mirrors and meta-sites
+            if "mirror" in name.lower() or "hotfix" in name.lower():
+                continue
+            f.write("  [OFF] {}\n".format(name))
+            if desc:
+                f.write("        {}\n".format(desc[:140]))
+
+    # Also write a compact "suggest install" lookup file
+    suggest_path = os.path.join(TMP_DIR, "update_sites.json")
+    all_sites = {}
+    for site in enabled_sites:
+        all_sites[site["name"]] = {
+            "enabled": True,
+            "url": site["url"],
+            "description": site["description"],
+        }
+    for site in disabled_sites:
+        all_sites[site["name"]] = {
+            "enabled": False,
+            "url": site["url"],
+            "description": site["description"],
+        }
+    with open(suggest_path, "w") as f:
+        json.dump(all_sites, f, indent=2)
+
+    print("Saved plugin summary to .tmp/plugins_summary.txt")
+    print("Saved update sites to .tmp/update_sites.json")
+
+
+def main():
+    os.makedirs(TMP_DIR, exist_ok=True)
+
+    # 1. Scan running Fiji for commands
+    commands = scan_commands()
+    print("Total commands available:", len(commands))
+
+    # 2. Categorize notable commands
+    notable = categorize_commands(commands)
+
+    # 3. Scan update sites
+    enabled_sites, disabled_sites = scan_update_sites()
+    print("Enabled update sites:", len(enabled_sites))
+    print("Available (disabled) update sites:", len(disabled_sites))
+
+    # 4. Write everything
+    write_summary(commands, notable, enabled_sites, disabled_sites)
+
+    # 5. Print key info
+    print("\nInstalled capabilities:")
+    for cat, items in notable.items():
+        if items and cat != "GPU Accelerated (CLIJ2)":
+            print("  {} ({})".format(cat, len(items)))
+
+    print("\nEnabled sites: {}".format(", ".join(s["name"] for s in enabled_sites)))
+
+
+if __name__ == "__main__":
+    main()

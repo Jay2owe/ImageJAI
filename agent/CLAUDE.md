@@ -10,29 +10,60 @@ You are the brain. The TCP server is your hands.
 
 ## Sending Commands
 
-Use this pattern for EVERY ImageJ operation:
+Use the `ij.py` helper in this directory for ALL ImageJ operations:
 
 ```bash
-echo '{"command": "COMMAND_NAME", ...params}' | nc localhost 7746
+python ij.py ping                                    # test connection
+python ij.py macro 'run("Blobs (25K)");'             # run macro code
+python ij.py state                                    # full ImageJ state
+python ij.py info                                     # active image details
+python ij.py results                                  # measurements as CSV
+python ij.py capture                                  # screenshot → .tmp/capture.png
+python ij.py capture my_name                          # screenshot → .tmp/my_name.png
+python ij.py explore Otsu Triangle Li                 # compare thresholds
+python ij.py raw '{"command": "ping"}'                # raw JSON command
 ```
 
-If `nc` (netcat) isn't available, use Python:
-```bash
-python -c "
-import socket, json, sys
-s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-s.connect(('localhost', 7746))
-cmd = json.dumps(COMMAND_DICT)
-s.sendall((cmd + '\n').encode('utf-8'))
-data = b''
-while True:
-    chunk = s.recv(65536)
-    if not chunk: break
-    data += chunk
-s.close()
-print(data.decode('utf-8'))
-"
+If `ij.py` is not available, use raw Python with sockets (see ij.py source for pattern).
+
+---
+
+## LOOKING AT IMAGES (CRITICAL — READ THIS)
+
+You CAN see images. This is how:
+
+1. Run `python ij.py capture` — saves PNG to `agent/.tmp/capture.png`
+2. Use the **Read tool** on the PNG file — you will see the image visually
+3. Use what you see to make decisions about the next step
+
+**Do this after EVERY macro that changes the image.** This is your eyes.
+
 ```
+# Example workflow — ALWAYS capture and look:
+python ij.py macro 'run("Blobs (25K)");'
+python ij.py capture after_open           # → .tmp/after_open.png
+# Then: Read tool on .tmp/after_open.png  ← YOU SEE THE IMAGE
+
+python ij.py macro 'run("Gaussian Blur...", "sigma=2");'
+python ij.py capture after_blur           # → .tmp/after_blur.png
+# Then: Read tool on .tmp/after_blur.png  ← YOU SEE THE RESULT
+```
+
+### Temp directory: `agent/.tmp/`
+- All captures go here automatically
+- Gitignored — nothing in `.tmp/` is tracked or committed
+- Safe to overwrite/delete at any time
+- Does NOT affect the user's images or data
+- Use descriptive names: `capture before_threshold`, `capture after_watershed`
+
+### When to capture:
+- **After opening** an image — confirm it loaded correctly
+- **After processing** (threshold, filter, etc.) — verify the result looks right
+- **Before measuring** — make sure the mask/segmentation makes sense
+- **When something looks wrong** — capture to diagnose the issue
+- **When the user asks "what does it look like"** — capture and show
+
+---
 
 ## Available Commands
 
@@ -45,7 +76,7 @@ print(data.decode('utf-8'))
 ### execute_macro — Run ImageJ macro code
 ```json
 {"command": "execute_macro", "code": "run(\"Blobs (25K)\");"}
-→ {"ok": true, "result": {"success": true, "output": "...", "resultsTable": "...", "newImages": ["Blobs"]}}
+→ {"ok": true, "result": {"success": true, "output": "...", "executionTimeMs": 123, "newImages": [...], "resultsTable": "..."}}
 ```
 
 This is your primary tool. ImageJ macro language can do almost anything:
@@ -81,12 +112,10 @@ Always check state before doing anything. Know what's open.
 
 ### capture_image — Screenshot as base64 PNG
 ```json
-{"command": "capture_image"}
+{"command": "capture_image", "maxSize": 1024}
 → {"ok": true, "result": {"base64": "iVBOR...", "width": 256, "height": 254}}
-
-// With size limit:
-{"command": "capture_image", "maxSize": 512}
 ```
+NOTE: Prefer `python ij.py capture` which saves to .tmp/ automatically.
 
 ### get_state_context — Formatted state for prompts
 ```json
@@ -103,7 +132,6 @@ Always check state before doing anything. Know what's open.
 ]}
 → {"ok": true, "result": {"status": "completed", "steps": [...]}}
 ```
-
 ### explore_thresholds — Compare threshold methods
 ```json
 {"command": "explore_thresholds", "methods": ["Otsu", "Triangle", "Li", "Huang", "MaxEntropy"]}
@@ -119,13 +147,17 @@ Always check state before doing anything. Know what's open.
 → {"ok": true, "result": [{...}, {...}]}
 ```
 
+---
+
 ## Your Workflow
 
-1. **Check state first**: `get_state` — know what's open before acting
-2. **Execute macros**: `execute_macro` — do the work
-3. **Verify results**: `get_state` or `get_results_table` — confirm it worked
-4. **Capture if needed**: `capture_image` — see what happened visually
-5. **Iterate**: if something failed, read the error, fix the macro, retry
+1. **Check state first**: `python ij.py state` — know what's open
+2. **Execute macros**: `python ij.py macro '...'` — do the work
+3. **Capture and LOOK**: `python ij.py capture step_name` then Read the PNG
+4. **Verify results**: `python ij.py results` — check measurements
+5. **Iterate**: if something looks wrong, fix the macro, retry
+
+---
 
 ## Error Handling
 
@@ -135,6 +167,97 @@ If a macro fails, the response will have `"success": false` and an `"error"` fie
 - "Selection required" → create an ROI first
 - Command not found → check the exact command name in ImageJ menus
 
+---
+
+## Macro Reference
+
+See **`macro-reference.md`** in this directory for the complete ImageJ macro
+command reference with syntax, examples, recipes, and best practices.
+
+---
+
+## Discovering Installed Plugins (DO THIS ON STARTUP)
+
+Run the plugin scanner at the start of every session:
+
+```bash
+python scan_plugins.py
+```
+
+This writes two files:
+- `.tmp/commands.txt` — all 1966 available menu commands (searchable)
+- `.tmp/plugins_summary.txt` — categorized summary of notable plugins
+
+Then read `.tmp/plugins_summary.txt` to know what's available.
+
+### Key plugins installed in this Fiji:
+- **StarDist 2D/3D** — deep learning nuclei segmentation
+- **Cellpose** — deep learning cell segmentation (also Cellpose SAM)
+- **TrackMate** — particle/cell tracking
+- **Advanced Weka Segmentation** — trainable pixel classification
+- **Labkit** — interactive segmentation with ML
+- **CLIJ2** — 504 GPU-accelerated image processing commands
+- **Bio-Formats** — reads .nd2 (Nikon), .lif (Leica), .czi (Zeiss), etc.
+- **Coloc 2** — colocalization analysis with proper statistics
+- **AnalyzeSkeleton** — neurite/branch analysis
+- **Stitching** — 2D and 3D image stitching
+- **ABBA** — brain atlas alignment
+- **Deconvolution** — Richardson-Lucy, iterative 3D
+
+### To search for a specific command:
+```bash
+grep -i "keyword" .tmp/commands.txt
+```
+
+### To use a discovered plugin via macro:
+```bash
+python ij.py macro 'run("StarDist 2D");'
+python ij.py macro 'run("Coloc 2");'
+python ij.py macro 'run("Bio-Formats Importer", "open=/path/to/file.nd2");'
+```
+
+### Suggesting plugins to install
+
+The scanner also saves `.tmp/update_sites.json` with all 330 update sites
+(22 enabled, 308 available). When a user asks for something that requires a
+plugin not currently installed:
+
+1. Search for it: `grep -i "keyword" .tmp/update_sites.json`
+2. Check `.tmp/commands.txt` to confirm it's not already available
+3. If not installed, tell the user:
+   - What update site to enable
+   - How to do it: **Help > Update... > Manage Update Sites > check the box > Apply > Restart Fiji**
+   - What the plugin does
+
+Example: if user asks for "ilastik" segmentation:
+```bash
+grep -i ilastik .tmp/update_sites.json
+# → shows ilastik site exists but is disabled
+```
+Then tell them: "ilastik is available but not installed. Enable it via
+Help > Update > Manage Update Sites > check 'ilastik' > Apply, then restart Fiji."
+
+**Never try to modify update sites programmatically.** Always instruct the
+user to do it through the Fiji updater GUI.
+
+---
+
+## Known Issues & Limitations
+
+### Fiji deployment path
+The user runs Fiji from: `C:\Users\jamie\OneDrive - Imperial College London\ImageJ\Fiji.app`
+NOT from the Dropbox Fiji.app. Always deploy JARs to the OneDrive path.
+
+### Build & deploy
+```bash
+cd "C:\Users\jamie\UK Dementia Research Institute Dropbox\Brancaccio Lab\Jamie\Experiments\ImageJAI"
+mvn clean package -q
+cp target/imagej-ai-0.1.0-SNAPSHOT.jar "C:\Users\jamie\OneDrive - Imperial College London\ImageJ\Fiji.app\plugins\"
+```
+User must restart Fiji after deploying. Fiji caches classes — hot-reload does NOT work.
+
+---
+
 ## Learning
 
 As you work, update `learnings.md` in this directory with:
@@ -143,10 +266,14 @@ As you work, update `learnings.md` in this directory with:
 - Workflows you've discovered
 - Tips about the user's specific images/data
 
+---
+
 ## Rules
 - Always check state before acting
 - Never assume an image is open — verify
+- **ALWAYS capture and visually inspect images after processing steps**
 - If a macro fails, try to fix it (up to 3 attempts)
 - Show the user what you're doing and why
 - For multi-step tasks, explain the plan before executing
 - No Co-Authored-By lines on git commits
+- If something doesn't work, fix the TCP server code — don't work around bugs silently
