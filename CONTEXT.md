@@ -22,6 +22,7 @@ mvn clean package -q && bash build.sh
 - `engine/ImageMonitor.java` — background polling (saturation, memory, calibration)
 - `engine/ScriptGenerator.java` — LLM generates Groovy/Jython scripts, installs to Fiji
 - `engine/CrossToolRunner.java` — run Python/R via ProcessBuilder
+- `engine/TCPCommandServer.java` — optional TCP on 7746, JSON commands, off by default
 - `knowledge/MacroReference.java` — ~90 entries, keyword search
 - `knowledge/DocIndex.java` — ~30 tips/recipes
 - `knowledge/PromptTemplates.java` — system prompts, extractMacros(), extractPipelineBlock()
@@ -32,4 +33,5 @@ mvn clean package -q && bash build.sh
 - EDT: all Swing + ImageJ ops. Background: all LLM calls.
 - Response format: `<macro>code</macro>` or `<pipeline><step desc="...">code</step></pipeline>`
 - Self-correction: feed error back to LLM, retry up to 3x
+- TCP server: port 7746, JSON protocol, off by default, shares engine with chat panel
 - No Co-Authored-By on commits

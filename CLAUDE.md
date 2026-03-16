@@ -62,6 +62,7 @@ src/main/java/imagejai/
     AnnotationHelper.java       Overlay annotations (text, arrows, scale bars, warnings)
     ScriptGenerator.java        Generate Groovy/Jython/macro scripts with GUI, install to Fiji
     CrossToolRunner.java        Run Python/R scripts externally
+    TCPCommandServer.java       Optional TCP server (port 7746) for Claude CLI / external agents
 
   agents/
     AgentOrchestrator.java      Keyword-based intent classification → route to specialist
@@ -104,6 +105,14 @@ User message → AgentOrchestrator.classifyIntent() → route to specialist or g
 - VISUALIZATION: "LUT", "projection", "montage", "figure", "scale bar"
 - STATISTICS: "t-test", "ANOVA", "p-value", "significant", "compare groups"
 - GENERAL: everything else
+
+### TCP Server (Optional, off by default)
+- Port 7746 (AgentConsole uses 7745)
+- JSON protocol: `{"command": "execute_macro", "code": "..."}` → `{"ok": true, "result": {...}}`
+- Commands: ping, execute_macro, get_state, get_image_info, get_results_table, capture_image, run_pipeline, explore_thresholds, get_state_context, batch
+- Enable in Settings > Advanced > "Enable TCP command server"
+- Shares CommandEngine/StateInspector with chat panel but has independent conversation (no shared LLM)
+- EDT dispatch via CountDownLatch pattern (same as AgentConsole's QTimer.singleShot + Event)
 
 ### Vision
 - Triggered by keywords: "see", "look", "check", "describe", "image"

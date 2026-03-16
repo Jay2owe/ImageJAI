@@ -15,6 +15,7 @@ A single Fiji plugin that adds a conversational AI assistant to ImageJ. Install 
 - **Live monitoring** — Warns about saturated pixels, uncalibrated images, memory pressure
 - **Hypothesis-driven analysis** — State a scientific hypothesis, AI designs the complete analysis plan
 - **Cross-tool integration** — Optional Python/R script execution for advanced statistics
+- **TCP command server** — Optional TCP server (port 7746) for external agent access (Claude CLI, AgentConsole, scripts). Off by default.
 
 ## Install
 
@@ -74,7 +75,8 @@ ImageJAIPlugin.java          Entry point (Plugins > AI Assistant)
 │   ├── ExplorationEngine    Parameter optimization (try N methods, compare)
 │   ├── ImageMonitor         Background monitoring for issues
 │   ├── ScriptGenerator      Generate installable Fiji scripts
-│   └── CrossToolRunner      Run Python/R externally
+│   ├── CrossToolRunner      Run Python/R externally
+│   └── TCPCommandServer     Optional TCP server for external agents (port 7746)
 ├── agents/                  Multi-agent specialist system
 │   ├── AgentOrchestrator    Intent classification + routing
 │   ├── SegmentationAgent    Thresholding, watershed, StarDist/Cellpose
@@ -99,6 +101,32 @@ ImageJAIPlugin.java          Entry point (Plugins > AI Assistant)
 6. Results (new images, measurements, errors) are captured and fed back
 7. If a macro fails, the AI self-corrects (up to 3 retries)
 8. The response and any results are displayed in the chat
+
+## TCP Command Server (Advanced)
+
+For power users who want to control ImageJ from Claude CLI, AgentConsole, or custom scripts:
+
+1. Open Settings > check "Enable TCP command server"
+2. Default port: 7746 (configurable)
+3. Send JSON commands over TCP:
+
+```bash
+# Test connection
+echo '{"command": "ping"}' | nc localhost 7746
+
+# Execute a macro
+echo '{"command": "execute_macro", "code": "run(\"Blobs (25K)\");"}' | nc localhost 7746
+
+# Get current state
+echo '{"command": "get_state"}' | nc localhost 7746
+
+# Capture image as base64 PNG
+echo '{"command": "capture_image"}' | nc localhost 7746
+```
+
+Available commands: `ping`, `execute_macro`, `get_state`, `get_image_info`, `get_results_table`, `capture_image`, `run_pipeline`, `explore_thresholds`, `get_state_context`, `batch`
+
+This is completely optional — the plugin works fully without it.
 
 ## License
 
