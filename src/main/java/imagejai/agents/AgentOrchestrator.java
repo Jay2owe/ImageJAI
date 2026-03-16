@@ -32,7 +32,9 @@ public class AgentOrchestrator {
         /** LUTs, projections, montages, figures, scale bars. */
         VISUALIZATION,
         /** Statistical tests, plots, data export. */
-        STATISTICS
+        STATISTICS,
+        /** Hypothesis-driven analysis design. */
+        HYPOTHESIS
     }
 
     // Keyword patterns for intent classification (case-insensitive)
@@ -61,6 +63,15 @@ public class AgentOrchestrator {
             + "|standard\\s+deviation|mean\\s+comparison|bar\\s+chart|scatter)\\b",
             Pattern.CASE_INSENSITIVE);
 
+    private static final Pattern HYPOTHESIS_PATTERN = Pattern.compile(
+            "\\b(hypothesi[sz]|test\\s+whether|is\\s+there\\s+a\\s+difference"
+            + "|is\\s+there\\s+an\\s+effect|does\\s+\\w+\\s+affect"
+            + "|relationship\\s+between)\\b"
+            + "|\\bcompare\\s+\\w+\\s+between\\b"
+            + "|\\bis\\s+\\w+\\s+increased\\b"
+            + "|\\bis\\s+\\w+\\s+decreased\\b",
+            Pattern.CASE_INSENSITIVE);
+
     private LLMBackend backend;
     private final CommandEngine commandEngine;
     private final ExplorationEngine explorationEngine;
@@ -71,6 +82,7 @@ public class AgentOrchestrator {
     private MeasurementAgent measurementAgent;
     private VisualizationAgent visualizationAgent;
     private StatsAgent statsAgent;
+    private HypothesisAgent hypothesisAgent;
 
     /**
      * Create a new AgentOrchestrator.
@@ -90,6 +102,7 @@ public class AgentOrchestrator {
         this.measurementAgent = new MeasurementAgent(backend, commandEngine);
         this.visualizationAgent = new VisualizationAgent(backend, commandEngine);
         this.statsAgent = new StatsAgent(backend, commandEngine);
+        this.hypothesisAgent = new HypothesisAgent(backend, commandEngine);
     }
 
     /**
@@ -107,7 +120,10 @@ public class AgentOrchestrator {
         String lower = userMessage.toLowerCase(Locale.ROOT);
 
         // Check each specialist pattern. Priority order matters for ambiguous messages:
-        // segmentation first (most specific domain), then measurement, visualization, statistics.
+        // hypothesis first (most holistic), then segmentation, measurement, visualization, statistics.
+        if (HYPOTHESIS_PATTERN.matcher(lower).find()) {
+            return AgentType.HYPOTHESIS;
+        }
         if (SEGMENTATION_PATTERN.matcher(lower).find()) {
             return AgentType.SEGMENTATION;
         }
@@ -147,6 +163,8 @@ public class AgentOrchestrator {
                 return visualizationAgent.process(userMessage, stateContext, history);
             case STATISTICS:
                 return statsAgent.process(userMessage, stateContext, history);
+            case HYPOTHESIS:
+                return hypothesisAgent.process(userMessage, stateContext, history);
             default:
                 return null;
         }
@@ -168,6 +186,8 @@ public class AgentOrchestrator {
                 return "[Visualization Agent]";
             case STATISTICS:
                 return "[Statistics Agent]";
+            case HYPOTHESIS:
+                return "[Hypothesis Agent]";
             default:
                 return null;
         }
@@ -191,6 +211,9 @@ public class AgentOrchestrator {
         }
         if (statsAgent != null) {
             statsAgent.setBackend(backend);
+        }
+        if (hypothesisAgent != null) {
+            hypothesisAgent.setBackend(backend);
         }
     }
 }
