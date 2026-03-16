@@ -21,6 +21,10 @@ python ij.py results                                  # measurements as CSV
 python ij.py capture                                  # screenshot → .tmp/capture.png
 python ij.py capture my_name                          # screenshot → .tmp/my_name.png
 python ij.py explore Otsu Triangle Li                 # compare thresholds
+python ij.py log                                      # ImageJ Log window contents
+python ij.py histogram                                # intensity stats + bin counts
+python ij.py windows                                  # all open window titles
+python ij.py metadata                                 # Bio-Formats info + calibration
 python ij.py raw '{"command": "ping"}'                # raw JSON command
 ```
 
@@ -147,15 +151,45 @@ NOTE: Prefer `python ij.py capture` which saves to .tmp/ automatically.
 → {"ok": true, "result": [{...}, {...}]}
 ```
 
+### get_log — ImageJ Log window contents
+```json
+{"command": "get_log"}
+→ {"ok": true, "result": "text from the Log window..."}
+```
+Many plugins write warnings here that you won't see otherwise.
+
+### get_histogram — Intensity distribution of active image
+```json
+{"command": "get_histogram"}
+→ {"ok": true, "result": {"min": 0, "max": 255, "mean": 128.5, "stdDev": 45.2, "nPixels": 65536, "bins": [0, 5, 12, ...]}}
+```
+Critical for choosing threshold methods and detecting saturation.
+
+### get_open_windows — All open windows by type
+```json
+{"command": "get_open_windows"}
+→ {"ok": true, "result": {"images": ["blobs.gif"], "nonImages": ["Results", "Log"]}}
+```
+
+### get_metadata — Bio-Formats metadata and calibration
+```json
+{"command": "get_metadata"}
+→ {"ok": true, "result": {"title": "...", "info": "Bio-Formats metadata...", "properties": {...}, "calibration": {"pixelWidth": 0.325, "unit": "um", ...}}}
+```
+Essential for knowing if measurements are calibrated and what channels represent.
+
 ---
 
 ## Your Workflow
 
 1. **Check state first**: `python ij.py state` — know what's open
-2. **Execute macros**: `python ij.py macro '...'` — do the work
-3. **Capture and LOOK**: `python ij.py capture step_name` then Read the PNG
-4. **Verify results**: `python ij.py results` — check measurements
-5. **Iterate**: if something looks wrong, fix the macro, retry
+2. **Check metadata**: `python ij.py metadata` — is the image calibrated?
+3. **Execute macros**: `python ij.py macro '...'` — do the work
+4. **Capture and LOOK**: `python ij.py capture step_name` then Read the PNG
+5. **Check histogram**: `python ij.py histogram` — verify intensity distribution
+6. **Verify results**: `python ij.py results` — check measurements
+7. **Check log**: `python ij.py log` — look for warnings from plugins
+8. **Iterate**: if something looks wrong, fix the macro, retry
 
 ---
 
@@ -255,6 +289,43 @@ mvn clean package -q
 cp target/imagej-ai-0.1.0-SNAPSHOT.jar "C:\Users\jamie\OneDrive - Imperial College London\ImageJ\Fiji.app\plugins\"
 ```
 User must restart Fiji after deploying. Fiji caches classes — hot-reload does NOT work.
+
+---
+
+## Agent-Side Python Tools
+
+These are in this directory and can be imported or run directly:
+
+- **`session_log.py`** — wraps ij.py to auto-log every command/response with timestamps.
+  Export session as replayable `.ijm` macro script. Usage:
+  ```python
+  from session_log import SessionLogger
+  log = SessionLogger()
+  log.send({"command": "execute_macro", "code": "run('Blobs');"})
+  log.export_macro(".tmp/replay.ijm")
+  ```
+
+- **`results_parser.py`** — parse Results table CSV into structured data with
+  summary stats and outlier detection. Usage:
+  ```python
+  from results_parser import parse_results, summarize
+  data = parse_results(csv_string)
+  print(summarize(data))
+  ```
+
+- **`image_diff.py`** — compare two captured PNGs (before/after). Returns pixel
+  diff percentage and correlation. Usage:
+  ```python
+  from image_diff import compare_images
+  result = compare_images(".tmp/before.png", ".tmp/after.png")
+  ```
+
+- **`macro_lint.py`** — validate macro code before sending (quotes, semicolons,
+  parens, known functions). Usage:
+  ```python
+  from macro_lint import lint_macro
+  warnings = lint_macro('run("Blobs (25K)")')
+  ```
 
 ---
 
