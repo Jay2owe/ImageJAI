@@ -7,9 +7,13 @@ Usage:
     python ij.py state
     python ij.py info
     python ij.py results
-    python ij.py capture [output.png]
+    python ij.py capture [name]
     python ij.py macro "run('Blobs (25K)');"
     python ij.py explore Otsu Triangle Li
+    python ij.py log
+    python ij.py histogram
+    python ij.py windows
+    python ij.py metadata
     python ij.py raw '{"command": "ping"}'
 
 Can also be imported:
@@ -90,6 +94,22 @@ def explore_thresholds(methods):
     return imagej_command({"command": "explore_thresholds", "methods": methods})
 
 
+def get_log():
+    return imagej_command({"command": "get_log"})
+
+
+def get_histogram():
+    return imagej_command({"command": "get_histogram"})
+
+
+def get_open_windows():
+    return imagej_command({"command": "get_open_windows"})
+
+
+def get_metadata():
+    return imagej_command({"command": "get_metadata"})
+
+
 def main():
     if len(sys.argv) < 2:
         print(__doc__)
@@ -146,6 +166,22 @@ def main():
         elif cmd == "explore":
             methods = sys.argv[2:] if len(sys.argv) > 2 else ["Otsu", "Triangle", "Li", "Huang", "MaxEntropy"]
             print(json.dumps(explore_thresholds(methods), indent=2))
+
+        elif cmd == "log":
+            resp = get_log()
+            if resp.get("ok"):
+                print(resp["result"])
+            else:
+                print(json.dumps(resp, indent=2))
+
+        elif cmd == "histogram":
+            print(json.dumps(get_histogram(), indent=2))
+
+        elif cmd == "windows":
+            print(json.dumps(get_open_windows(), indent=2))
+
+        elif cmd == "metadata":
+            print(json.dumps(get_metadata(), indent=2))
 
         elif cmd == "raw":
             if len(sys.argv) < 3:
