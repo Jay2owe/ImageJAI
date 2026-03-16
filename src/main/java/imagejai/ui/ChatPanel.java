@@ -1,6 +1,7 @@
 package imagejai.ui;
 
 import imagejai.config.Settings;
+import imagejai.engine.AgentLauncher;
 
 import javax.swing.*;
 import javax.swing.border.EmptyBorder;
@@ -35,6 +36,7 @@ public class ChatPanel extends JPanel {
 
     private final Settings settings;
     private final List<ChatListener> listeners = new ArrayList<ChatListener>();
+    private AgentLauncher agentLauncher;
 
     private JComboBox<Settings.ModelConfig> profileSwitcher;
     private JTextPane messageArea;
@@ -344,6 +346,16 @@ public class ChatPanel extends JPanel {
         JPanel headerButtons = new JPanel(new FlowLayout(FlowLayout.RIGHT, 2, 0));
         headerButtons.setOpaque(false);
 
+        // Launch Agent button
+        JButton agentBtn = createHeaderButton("\u25B6", "Launch AI Agent"); // Play triangle
+        agentBtn.addActionListener(new ActionListener() {
+            @Override
+            public void actionPerformed(ActionEvent e) {
+                showAgentLaunchMenu(agentBtn);
+            }
+        });
+        headerButtons.add(agentBtn);
+
         // Clear conversation button
         JButton clearBtn = createHeaderButton("\u2718", "Clear conversation"); // X mark
         clearBtn.addActionListener(new ActionListener() {
@@ -493,5 +505,112 @@ public class ChatPanel extends JPanel {
             settings.save();
             refreshProfileSwitcher();
         }
+    }
+
+    /**
+     * Set the agent launcher for the "Launch Agent" button.
+     */
+    public void setAgentLauncher(AgentLauncher launcher) {
+        this.agentLauncher = launcher;
+    }
+
+    /**
+     * Show a popup menu with detected agents to launch.
+     */
+    private void showAgentLaunchMenu(Component anchor) {
+        if (agentLauncher == null) {
+            JOptionPane.showMessageDialog(this,
+                    "Agent launcher not configured.\nEnable the TCP server in Settings first.",
+                    "Agent Launcher", JOptionPane.INFORMATION_MESSAGE);
+            return;
+        }
+
+        final List<AgentLauncher.AgentInfo> agents = agentLauncher.detectAgents();
+
+        JPopupMenu menu = new JPopupMenu();
+        menu.setBackground(new Color(40, 40, 48));
+
+        if (agents.isEmpty()) {
+            JMenuItem noAgents = new JMenuItem("No AI agents detected on PATH");
+            noAgents.setEnabled(false);
+            noAgents.setForeground(TEXT_MUTED);
+            menu.add(noAgents);
+
+            menu.addSeparator();
+
+            JMenuItem hint = new JMenuItem("Install: claude, aider, gemini...");
+            hint.setEnabled(false);
+            hint.setForeground(TEXT_MUTED);
+            hint.setFont(new Font(Font.SANS_SERIF, Font.ITALIC, 11));
+            menu.add(hint);
+        } else {
+            JMenuItem header = new JMenuItem("Launch AI Agent");
+            header.setEnabled(false);
+            header.setFont(new Font(Font.SANS_SERIF, Font.BOLD, 12));
+            header.setForeground(ACCENT);
+            menu.add(header);
+            menu.addSeparator();
+
+            for (final AgentLauncher.AgentInfo agent : agents) {
+                JMenuItem item = new JMenuItem(agent.name + "  —  " + agent.description);
+                item.setForeground(Color.WHITE);
+                item.setBackground(new Color(40, 40, 48));
+                item.addActionListener(new ActionListener() {
+                    @Override
+                    public void actionPerformed(ActionEvent e) {
+                        boolean ok = agentLauncher.launchAgent(agent);
+                        if (ok) {
+                            appendMessage("assistant", "Launched " + agent.name
+                                    + " in: " + agentLauncher.getAgentWorkspace());
+                        } else {
+                            appendMessage("assistant", "Failed to launch " + agent.name
+                                    + ". Check the ImageJ log for details.");
+                        }
+                    }
+                });
+                menu.add(item);
+            }
+        }
+
+        menu.addSeparator();
+
+        // Rescan option
+        JMenuItem rescan = new JMenuItem("Rescan for agents...");
+        rescan.setForeground(TEXT_MUTED);
+        rescan.addActionListener(new ActionListener() {
+            @Override
+            public void actionPerformed(ActionEvent e) {
+                List<AgentLauncher.AgentInfo> found = agentLauncher.rescanAgents();
+                if (found.isEmpty()) {
+                    appendMessage("assistant", "No AI agents found on PATH. "
+                            + "Install one of: claude, aider, gemini, interpreter");
+                } else {
+                    StringBuilder sb = new StringBuilder("Detected agents:\n");
+                    for (AgentLauncher.AgentInfo a : found) {
+                        sb.append("  \u2022 ").append(a.name)
+                          .append(" (").append(a.executablePath).append(")\n");
+                    }
+                    appendMessage("assistant", sb.toString());
+                }
+            }
+        });
+        menu.add(rescan);
+
+        // Open workspace folder
+        JMenuItem openFolder = new JMenuItem("Open agent workspace folder");
+        openFolder.setForeground(TEXT_MUTED);
+        openFolder.addActionListener(new ActionListener() {
+            @Override
+            public void actionPerformed(ActionEvent e) {
+                try {
+                    Desktop.getDesktop().open(new java.io.File(agentLauncher.getAgentWorkspace()));
+                } catch (Exception ex) {
+                    appendMessage("assistant", "Could not open folder: " + ex.getMessage());
+                }
+            }
+        });
+        menu.add(openFolder);
+
+        menu.show(anchor, 0, anchor.getHeight());
     }
 }
