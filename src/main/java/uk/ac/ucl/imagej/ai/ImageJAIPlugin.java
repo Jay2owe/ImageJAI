@@ -5,6 +5,7 @@ import org.scijava.command.Command;
 import org.scijava.plugin.Plugin;
 import uk.ac.ucl.imagej.ai.config.Constants;
 import uk.ac.ucl.imagej.ai.config.Settings;
+import uk.ac.ucl.imagej.ai.engine.AgentLauncher;
 import uk.ac.ucl.imagej.ai.engine.CommandEngine;
 import uk.ac.ucl.imagej.ai.engine.ExplorationEngine;
 import uk.ac.ucl.imagej.ai.engine.PipelineBuilder;
@@ -70,6 +71,12 @@ public class ImageJAIPlugin implements Command {
                     "To use chat features, please configure an API key in Settings.");
         }
 
+        // Set up agent launcher — find the agent workspace directory
+        String agentWorkspace = findAgentWorkspace();
+        if (agentWorkspace != null) {
+            chatPanel.setAgentLauncher(new AgentLauncher(agentWorkspace));
+        }
+
         // Start TCP command server if enabled
         if (settings.tcpServerEnabled) {
             startTcpServer(settings, chatPanel);
@@ -124,6 +131,39 @@ public class ImageJAIPlugin implements Command {
      */
     public static JFrame getChatFrame() {
         return chatFrame;
+    }
+
+    /**
+     * Find the agent workspace directory. Looks for the 'agent' subdirectory
+     * next to the plugin's source project, or falls back to a default location.
+     */
+    private static String findAgentWorkspace() {
+        // Try to find the agent/ directory relative to the plugin JAR location
+        // The JAR is in Fiji/plugins/, the source project has an agent/ subdirectory
+        try {
+            // Check well-known project locations
+            String[] candidates = {
+                System.getProperty("user.home") + "/UK Dementia Research Institute Dropbox/Brancaccio Lab/Jamie/Experiments/ImageJAI/agent",
+                System.getProperty("user.home") + "/ImageJAI/agent",
+                System.getProperty("user.dir") + "/agent",
+            };
+            for (String candidate : candidates) {
+                java.io.File dir = new java.io.File(candidate);
+                if (dir.isDirectory() && new java.io.File(dir, "CLAUDE.md").exists()) {
+                    return dir.getAbsolutePath();
+                }
+            }
+
+            // Fallback: create a default workspace in user home
+            java.io.File fallback = new java.io.File(System.getProperty("user.home"), ".imagej-ai/agent");
+            if (!fallback.exists()) {
+                fallback.mkdirs();
+            }
+            return fallback.getAbsolutePath();
+        } catch (Exception e) {
+            System.err.println("[ImageJAI] Could not determine agent workspace: " + e.getMessage());
+            return null;
+        }
     }
 
     /**
