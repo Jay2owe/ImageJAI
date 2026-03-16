@@ -44,6 +44,12 @@ public class SettingsDialog extends JDialog {
     private JPasswordField customKeyField;
     private JTextField customModelField;
 
+    // TCP server fields
+    private JCheckBox tcpEnabledCheckbox;
+    private JTextField tcpPortField;
+    private JLabel tcpPortLabel;
+    private JLabel tcpHelpLabel;
+
     private JPanel cardsPanel;
     private CardLayout cardsLayout;
 
@@ -87,7 +93,12 @@ public class SettingsDialog extends JDialog {
         cardsPanel.add(buildOllamaPanel(), "ollama");
         cardsPanel.add(buildOpenAIPanel(), "openai");
         cardsPanel.add(buildCustomPanel(), "custom");
-        content.add(cardsPanel, BorderLayout.CENTER);
+        // Wrap cards and advanced panel in a vertical box
+        JPanel centerPanel = new JPanel();
+        centerPanel.setLayout(new BoxLayout(centerPanel, BoxLayout.Y_AXIS));
+        centerPanel.add(cardsPanel);
+        centerPanel.add(buildAdvancedPanel());
+        content.add(centerPanel, BorderLayout.CENTER);
 
         // Buttons
         JPanel btnPanel = new JPanel(new FlowLayout(FlowLayout.RIGHT));
@@ -239,6 +250,56 @@ public class SettingsDialog extends JDialog {
         return p;
     }
 
+    private JPanel buildAdvancedPanel() {
+        JPanel wrapper = new JPanel(new BorderLayout());
+        wrapper.setBorder(BorderFactory.createCompoundBorder(
+                BorderFactory.createTitledBorder("Advanced"),
+                new EmptyBorder(4, 8, 4, 8)));
+
+        JPanel p = new JPanel(new GridBagLayout());
+        GridBagConstraints c = new GridBagConstraints();
+        c.insets = new Insets(2, 4, 2, 4);
+        c.anchor = GridBagConstraints.WEST;
+        c.fill = GridBagConstraints.HORIZONTAL;
+
+        // Checkbox
+        c.gridx = 0; c.gridy = 0; c.gridwidth = 2;
+        tcpEnabledCheckbox = new JCheckBox("Enable TCP command server");
+        tcpEnabledCheckbox.addActionListener(new ActionListener() {
+            @Override
+            public void actionPerformed(ActionEvent e) {
+                boolean enabled = tcpEnabledCheckbox.isSelected();
+                tcpPortField.setEnabled(enabled);
+                tcpPortLabel.setEnabled(enabled);
+                tcpHelpLabel.setEnabled(enabled);
+            }
+        });
+        p.add(tcpEnabledCheckbox, c);
+
+        // Port label + field
+        c.gridx = 0; c.gridy = 1; c.gridwidth = 1;
+        tcpPortLabel = new JLabel("  Port:");
+        p.add(tcpPortLabel, c);
+
+        c.gridx = 1;
+        tcpPortField = new JTextField(String.valueOf(Constants.DEFAULT_TCP_PORT), 6);
+        p.add(tcpPortField, c);
+
+        // Help text
+        c.gridx = 0; c.gridy = 2; c.gridwidth = 2;
+        tcpHelpLabel = new JLabel("<html><i>For Claude CLI / external tools</i></html>");
+        tcpHelpLabel.setFont(tcpHelpLabel.getFont().deriveFont(Font.ITALIC, 11f));
+        p.add(tcpHelpLabel, c);
+
+        // Start disabled
+        tcpPortField.setEnabled(false);
+        tcpPortLabel.setEnabled(false);
+        tcpHelpLabel.setEnabled(false);
+
+        wrapper.add(p, BorderLayout.WEST);
+        return wrapper;
+    }
+
     private GridBagConstraints gbc() {
         GridBagConstraints c = new GridBagConstraints();
         c.insets = new Insets(4, 4, 4, 4);
@@ -285,6 +346,14 @@ public class SettingsDialog extends JDialog {
         customUrlField.setText(settings.customUrl);
         customKeyField.setText(settings.customApiKey);
         customModelField.setText(settings.customModel);
+
+        // TCP settings
+        tcpEnabledCheckbox.setSelected(settings.tcpServerEnabled);
+        tcpPortField.setText(String.valueOf(settings.tcpPort));
+        boolean tcpOn = settings.tcpServerEnabled;
+        tcpPortField.setEnabled(tcpOn);
+        tcpPortLabel.setEnabled(tcpOn);
+        tcpHelpLabel.setEnabled(tcpOn);
 
         onProviderChanged();
     }
@@ -337,6 +406,21 @@ public class SettingsDialog extends JDialog {
             }
         }
 
+        // Validate TCP port if enabled
+        if (tcpEnabledCheckbox.isSelected()) {
+            String portStr = tcpPortField.getText().trim();
+            try {
+                int port = Integer.parseInt(portStr);
+                if (port < 1024 || port > 65535) {
+                    showError("TCP port must be between 1024 and 65535.");
+                    return false;
+                }
+            } catch (NumberFormatException ex) {
+                showError("TCP port must be a valid number.");
+                return false;
+            }
+        }
+
         return true;
     }
 
@@ -381,6 +465,16 @@ public class SettingsDialog extends JDialog {
             String model = customModelField.getText().trim();
             settings.customModel = model;
             settings.model = model;
+        }
+
+        // TCP settings
+        settings.tcpServerEnabled = tcpEnabledCheckbox.isSelected();
+        if (settings.tcpServerEnabled) {
+            try {
+                settings.tcpPort = Integer.parseInt(tcpPortField.getText().trim());
+            } catch (NumberFormatException ex) {
+                settings.tcpPort = Constants.DEFAULT_TCP_PORT;
+            }
         }
 
         confirmed = true;

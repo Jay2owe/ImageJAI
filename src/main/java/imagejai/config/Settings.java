@@ -27,6 +27,8 @@ public class Settings {
     public boolean visionEnabled = true;
     public boolean autoScreenshot = false;     // Auto-capture after each command
     public int maxHistory = Constants.MAX_CONVERSATION_HISTORY;
+    public boolean tcpServerEnabled = false;  // Off by default
+    public int tcpPort = Constants.DEFAULT_TCP_PORT;
 
     // Transient
     private transient Path configPath;

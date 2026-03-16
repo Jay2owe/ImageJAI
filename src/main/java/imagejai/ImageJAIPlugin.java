@@ -5,6 +5,11 @@ import org.scijava.command.Command;
 import org.scijava.plugin.Plugin;
 import imagejai.config.Constants;
 import imagejai.config.Settings;
+import imagejai.engine.CommandEngine;
+import imagejai.engine.ExplorationEngine;
+import imagejai.engine.PipelineBuilder;
+import imagejai.engine.StateInspector;
+import imagejai.engine.TCPCommandServer;
 import imagejai.ui.ChatPanel;
 import imagejai.ui.SettingsDialog;
 
@@ -23,6 +28,7 @@ public class ImageJAIPlugin implements Command {
     private static JFrame chatFrame;
     private static ChatPanel chatPanel;
     private static ConversationLoop conversationLoop;
+    private static TCPCommandServer tcpServer;
 
     @Override
     public void run() {
@@ -58,6 +64,11 @@ public class ImageJAIPlugin implements Command {
         conversationLoop = new ConversationLoop(chatPanel, settings);
         chatPanel.addChatListener(conversationLoop);
 
+        // Start TCP command server if enabled
+        if (settings.tcpServerEnabled) {
+            startTcpServer(settings, chatPanel);
+        }
+
         chatFrame = new JFrame(Constants.PLUGIN_NAME + " v" + Constants.VERSION);
         chatFrame.setDefaultCloseOperation(JFrame.DISPOSE_ON_CLOSE);
         chatFrame.getContentPane().add(chatPanel);
@@ -68,6 +79,11 @@ public class ImageJAIPlugin implements Command {
         chatFrame.addWindowListener(new WindowAdapter() {
             @Override
             public void windowClosed(WindowEvent e) {
+                // Stop TCP server if running
+                if (tcpServer != null) {
+                    tcpServer.stop();
+                    tcpServer = null;
+                }
                 // Null out static references so they can be GC'd
                 chatPanel = null;
                 chatFrame = null;
@@ -102,5 +118,47 @@ public class ImageJAIPlugin implements Command {
      */
     public static JFrame getChatFrame() {
         return chatFrame;
+    }
+
+    /**
+     * Create and start the TCP command server with a listener that
+     * reports status and activity to the chat panel.
+     */
+    private static void startTcpServer(Settings settings, final ChatPanel panel) {
+        CommandEngine engine = new CommandEngine();
+        StateInspector inspector = new StateInspector();
+        PipelineBuilder pipeline = new PipelineBuilder(engine);
+        ExplorationEngine exploration = new ExplorationEngine(engine);
+
+        tcpServer = new TCPCommandServer(settings.tcpPort, engine, inspector, pipeline, exploration);
+        tcpServer.start(new TCPCommandServer.ServerListener() {
+            @Override
+            public void onServerStarted(int port) {
+                panel.appendMessage("assistant",
+                        "[TCP] Server listening on port " + port);
+            }
+
+            @Override
+            public void onServerStopped() {
+                panel.appendMessage("assistant", "[TCP] Server stopped.");
+            }
+
+            @Override
+            public void onClientConnected(String clientInfo) {
+                System.err.println("[ImageJAI-TCP] Client connected: " + clientInfo);
+            }
+
+            @Override
+            public void onCommandReceived(String command) {
+                panel.appendMessage("assistant",
+                        "[External] " + command);
+            }
+
+            @Override
+            public void onError(String error) {
+                panel.appendMessage("assistant",
+                        "[TCP] Error: " + error);
+            }
+        });
     }
 }
