@@ -36,6 +36,7 @@ public class ChatPanel extends JPanel {
     private final Settings settings;
     private final List<ChatListener> listeners = new ArrayList<ChatListener>();
 
+    private JComboBox<Settings.ModelConfig> profileSwitcher;
     private JTextPane messageArea;
     private JScrollPane scrollPane;
     private JTextArea inputArea;
@@ -86,13 +87,17 @@ public class ChatPanel extends JPanel {
         southPanel.add(thinkingLabel, BorderLayout.NORTH);
 
         // Status bar
-        statusLabel = new JLabel(settings.provider + " / " + settings.model);
+        Settings.ModelConfig active = settings.getActiveConfig();
+        statusLabel = new JLabel((active != null ? active.provider + " / " + active.model : "No Profile"));
         statusLabel.setForeground(TEXT_MUTED);
         statusLabel.setFont(new Font(Font.SANS_SERIF, Font.PLAIN, 10));
         statusLabel.setBorder(new EmptyBorder(2, 2, 0, 0));
         southPanel.add(statusLabel, BorderLayout.SOUTH);
 
         add(southPanel, BorderLayout.SOUTH);
+
+        // Initial state of input (disabled if no API key)
+        updateInputState();
 
         // Thinking animation timer
         thinkingTimer = new Timer(400, new ActionListener() {
@@ -111,6 +116,45 @@ public class ChatPanel extends JPanel {
         appendMessage("assistant", "Hello! I'm your ImageJ AI Assistant. "
                 + "I can help you analyze images, run macros, and more.\n\n"
                 + "Try: \"Open the sample blobs image\" or \"What image do I have open?\"");
+    }
+
+    private void updateInputState() {
+        boolean hasKey = settings.hasApiKey();
+        inputArea.setEnabled(hasKey);
+        sendBtn.setEnabled(hasKey);
+        if (hasKey) {
+            if ("API key required for chat...".equals(inputArea.getText())) {
+                inputArea.setText("");
+            }
+        } else {
+            inputArea.setText("API key required for chat...");
+        }
+        Settings.ModelConfig active = settings.getActiveConfig();
+        if (active != null) {
+            statusLabel.setText(active.provider + " / " + active.model);
+        }
+    }
+
+    /**
+     * Refresh the profile switcher dropdown.
+     */
+    public void refreshProfileSwitcher() {
+        if (profileSwitcher == null) return;
+        
+        // Remove action listener to prevent loops
+        ActionListener[] al = profileSwitcher.getActionListeners();
+        for (ActionListener a : al) profileSwitcher.removeActionListener(a);
+        
+        profileSwitcher.removeAllItems();
+        for (Settings.ModelConfig c : settings.configs) {
+            profileSwitcher.addItem(c);
+        }
+        profileSwitcher.setSelectedItem(settings.getActiveConfig());
+        
+        // Restore action listener
+        for (ActionListener a : al) profileSwitcher.addActionListener(a);
+        
+        updateInputState();
     }
 
     /**
@@ -212,9 +256,9 @@ public class ChatPanel extends JPanel {
         SwingUtilities.invokeLater(new Runnable() {
             @Override
             public void run() {
-                inputArea.setEnabled(enabled);
-                sendBtn.setEnabled(enabled);
-                if (enabled) {
+                inputArea.setEnabled(enabled && settings.hasApiKey());
+                sendBtn.setEnabled(enabled && settings.hasApiKey());
+                if (enabled && settings.hasApiKey()) {
                     inputArea.requestFocusInWindow();
                 }
             }
@@ -263,13 +307,39 @@ public class ChatPanel extends JPanel {
     }
 
     private JPanel createHeader() {
-        JPanel header = new JPanel(new BorderLayout());
+        JPanel header = new JPanel(new BorderLayout(4, 0));
         header.setOpaque(false);
 
+        // Title + Profile Switcher
+        JPanel leftPanel = new JPanel(new FlowLayout(FlowLayout.LEFT, 4, 0));
+        leftPanel.setOpaque(false);
+        
         JLabel title = new JLabel("AI Assistant");
         title.setForeground(ACCENT);
         title.setFont(new Font(Font.SANS_SERIF, Font.BOLD, 14));
-        header.add(title, BorderLayout.WEST);
+        leftPanel.add(title);
+
+        profileSwitcher = new JComboBox<Settings.ModelConfig>();
+        profileSwitcher.setPreferredSize(new Dimension(150, 22));
+        profileSwitcher.setFont(new Font(Font.SANS_SERIF, Font.PLAIN, 11));
+        for (Settings.ModelConfig c : settings.configs) {
+            profileSwitcher.addItem(c);
+        }
+        profileSwitcher.setSelectedItem(settings.getActiveConfig());
+        profileSwitcher.addActionListener(new ActionListener() {
+            @Override
+            public void actionPerformed(ActionEvent e) {
+                Settings.ModelConfig selected = (Settings.ModelConfig) profileSwitcher.getSelectedItem();
+                if (selected != null) {
+                    settings.activeConfigId = selected.id;
+                    settings.save();
+                    updateInputState();
+                    appendMessage("assistant", "Switched to profile: " + selected.name);
+                }
+            }
+        });
+        leftPanel.add(profileSwitcher);
+        header.add(leftPanel, BorderLayout.WEST);
 
         JPanel headerButtons = new JPanel(new FlowLayout(FlowLayout.RIGHT, 2, 0));
         headerButtons.setOpaque(false);
@@ -378,6 +448,8 @@ public class ChatPanel extends JPanel {
     }
 
     private void sendMessage() {
+        if (!settings.hasApiKey()) return;
+        
         String text = inputArea.getText().trim();
         if (text.isEmpty()) return;
         inputArea.setText("");
@@ -419,7 +491,7 @@ public class ChatPanel extends JPanel {
         dialog.setVisible(true);
         if (dialog.wasConfirmed()) {
             settings.save();
-            statusLabel.setText(settings.provider + " / " + settings.model);
+            refreshProfileSwitcher();
         }
     }
 }

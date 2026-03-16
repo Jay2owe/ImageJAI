@@ -48,7 +48,7 @@ public class ImageJAIPlugin implements Command {
         // Load settings
         Settings settings = Settings.load();
 
-        // First-run: show settings dialog
+        // First-run: show settings dialog (if no key and not just TCP)
         if (settings.isFirstRun()) {
             Frame parent = IJ.getInstance();
             SettingsDialog dialog = new SettingsDialog(parent, settings);
@@ -61,8 +61,14 @@ public class ImageJAIPlugin implements Command {
 
         // Create chat panel and wire conversation loop
         chatPanel = new ChatPanel(settings);
-        conversationLoop = new ConversationLoop(chatPanel, settings);
-        chatPanel.addChatListener(conversationLoop);
+        
+        if (settings.hasApiKey()) {
+            conversationLoop = new ConversationLoop(chatPanel, settings);
+            chatPanel.addChatListener(conversationLoop);
+        } else {
+            chatPanel.appendMessage("assistant", "AI Assistant is running in TCP-only mode. " +
+                    "To use chat features, please configure an API key in Settings.");
+        }
 
         // Start TCP command server if enabled
         if (settings.tcpServerEnabled) {
