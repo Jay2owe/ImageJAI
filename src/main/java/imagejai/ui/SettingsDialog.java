@@ -16,12 +16,17 @@ import java.util.ArrayList;
 import java.util.List;
 
 /**
- * Settings dialog for configuring LLM provider, API keys, models, and URLs.
+ * Settings dialog for configuring multiple LLM profiles.
  */
 public class SettingsDialog extends JDialog {
 
     private final Settings settings;
     private boolean confirmed = false;
+    private Settings.ModelConfig editingConfig;
+
+    // Profile selector
+    private JComboBox<Settings.ModelConfig> profileCombo;
+    private JTextField profileNameField;
 
     // Provider selector
     private JComboBox<String> providerCombo;
@@ -56,6 +61,7 @@ public class SettingsDialog extends JDialog {
     public SettingsDialog(Frame parent, Settings settings) {
         super(parent, Constants.PLUGIN_NAME + " Settings", true);
         this.settings = settings;
+        this.editingConfig = settings.getActiveConfig();
         buildUI();
         loadFromSettings();
         pack();
@@ -71,11 +77,60 @@ public class SettingsDialog extends JDialog {
         JPanel content = new JPanel(new BorderLayout(8, 8));
         content.setBorder(new EmptyBorder(12, 12, 12, 12));
 
-        // Provider selection
-        JPanel topPanel = new JPanel(new FlowLayout(FlowLayout.LEFT));
-        topPanel.add(new JLabel("Provider:"));
+        // Profile Selection Area
+        JPanel profilePanel = new JPanel(new GridBagLayout());
+        GridBagConstraints pc = new GridBagConstraints();
+        pc.insets = new Insets(2, 4, 6, 4);
+        pc.anchor = GridBagConstraints.WEST;
+
+        pc.gridx = 0; pc.gridy = 0;
+        profilePanel.add(new JLabel("Profile:"), pc);
+
+        pc.gridx = 1; pc.fill = GridBagConstraints.HORIZONTAL; pc.weightx = 1.0;
+        profileCombo = new JComboBox<Settings.ModelConfig>();
+        for (Settings.ModelConfig c : settings.configs) {
+            profileCombo.addItem(c);
+        }
+        profileCombo.setSelectedItem(editingConfig);
+        profileCombo.addActionListener(new ActionListener() {
+            @Override
+            public void actionPerformed(ActionEvent e) {
+                onProfileChanged();
+            }
+        });
+        profilePanel.add(profileCombo, pc);
+
+        pc.gridx = 2; pc.fill = GridBagConstraints.NONE; pc.weightx = 0;
+        JButton newProfileBtn = new JButton("New");
+        newProfileBtn.addActionListener(new ActionListener() {
+            @Override
+            public void actionPerformed(ActionEvent e) {
+                createNewProfile();
+            }
+        });
+        profilePanel.add(newProfileBtn, pc);
+
+        pc.gridx = 3;
+        JButton deleteProfileBtn = new JButton("Delete");
+        deleteProfileBtn.addActionListener(new ActionListener() {
+            @Override
+            public void actionPerformed(ActionEvent e) {
+                deleteProfile();
+            }
+        });
+        profilePanel.add(deleteProfileBtn, pc);
+
+        pc.gridx = 0; pc.gridy = 1;
+        profilePanel.add(new JLabel("Name:"), pc);
+        pc.gridx = 1; pc.gridwidth = 3; pc.fill = GridBagConstraints.HORIZONTAL;
+        profileNameField = new JTextField(20);
+        profilePanel.add(profileNameField, pc);
+
+        pc.gridx = 0; pc.gridy = 2; pc.gridwidth = 1; pc.fill = GridBagConstraints.NONE;
+        profilePanel.add(new JLabel("Provider:"), pc);
+        pc.gridx = 1; pc.gridwidth = 3; pc.fill = GridBagConstraints.HORIZONTAL;
         providerCombo = new JComboBox<String>(new String[]{
-                "Google Gemini (free)", "Ollama (local)", "OpenAI / Compatible", "Custom"
+                "Google Gemini", "Ollama (local)", "OpenAI / Compatible", "Custom"
         });
         providerCombo.addActionListener(new ActionListener() {
             @Override
@@ -83,8 +138,9 @@ public class SettingsDialog extends JDialog {
                 onProviderChanged();
             }
         });
-        topPanel.add(providerCombo);
-        content.add(topPanel, BorderLayout.NORTH);
+        profilePanel.add(providerCombo, pc);
+
+        content.add(profilePanel, BorderLayout.NORTH);
 
         // Provider-specific cards
         cardsLayout = new CardLayout();
@@ -93,6 +149,7 @@ public class SettingsDialog extends JDialog {
         cardsPanel.add(buildOllamaPanel(), "ollama");
         cardsPanel.add(buildOpenAIPanel(), "openai");
         cardsPanel.add(buildCustomPanel(), "custom");
+        
         // Wrap cards and advanced panel in a vertical box
         JPanel centerPanel = new JPanel();
         centerPanel.setLayout(new BoxLayout(centerPanel, BoxLayout.Y_AXIS));
@@ -116,7 +173,7 @@ public class SettingsDialog extends JDialog {
                 dispose();
             }
         });
-        JButton saveBtn = new JButton("Save");
+        JButton saveBtn = new JButton("Save All");
         saveBtn.addActionListener(new ActionListener() {
             @Override
             public void actionPerformed(ActionEvent e) {
@@ -173,7 +230,6 @@ public class SettingsDialog extends JDialog {
         c.gridx = 0; c.gridy = 1;
         p.add(new JLabel("Model:"), c);
         c.gridx = 1;
-        // Model dropdown with refresh
         JPanel modelPanel = new JPanel(new BorderLayout(4, 0));
         ollamaModelCombo = new JComboBox<String>();
         ollamaModelCombo.setEditable(true);
@@ -190,9 +246,6 @@ public class SettingsDialog extends JDialog {
         });
         modelPanel.add(refreshBtn, BorderLayout.EAST);
         p.add(modelPanel, c);
-
-        c.gridx = 0; c.gridy = 2; c.gridwidth = 2;
-        p.add(new JLabel("<html><i>No API key needed. Install Ollama from ollama.ai</i></html>"), c);
 
         return p;
     }
@@ -244,16 +297,13 @@ public class SettingsDialog extends JDialog {
         customModelField = new JTextField(20);
         p.add(customModelField, c);
 
-        c.gridx = 0; c.gridy = 3; c.gridwidth = 2;
-        p.add(new JLabel("<html><i>Any OpenAI-compatible endpoint</i></html>"), c);
-
         return p;
     }
 
     private JPanel buildAdvancedPanel() {
         JPanel wrapper = new JPanel(new BorderLayout());
         wrapper.setBorder(BorderFactory.createCompoundBorder(
-                BorderFactory.createTitledBorder("Advanced"),
+                BorderFactory.createTitledBorder("Advanced (Global)"),
                 new EmptyBorder(4, 8, 4, 8)));
 
         JPanel p = new JPanel(new GridBagLayout());
@@ -262,7 +312,6 @@ public class SettingsDialog extends JDialog {
         c.anchor = GridBagConstraints.WEST;
         c.fill = GridBagConstraints.HORIZONTAL;
 
-        // Checkbox
         c.gridx = 0; c.gridy = 0; c.gridwidth = 2;
         tcpEnabledCheckbox = new JCheckBox("Enable TCP command server");
         tcpEnabledCheckbox.addActionListener(new ActionListener() {
@@ -276,7 +325,6 @@ public class SettingsDialog extends JDialog {
         });
         p.add(tcpEnabledCheckbox, c);
 
-        // Port label + field
         c.gridx = 0; c.gridy = 1; c.gridwidth = 1;
         tcpPortLabel = new JLabel("  Port:");
         p.add(tcpPortLabel, c);
@@ -285,16 +333,10 @@ public class SettingsDialog extends JDialog {
         tcpPortField = new JTextField(String.valueOf(Constants.DEFAULT_TCP_PORT), 6);
         p.add(tcpPortField, c);
 
-        // Help text
         c.gridx = 0; c.gridy = 2; c.gridwidth = 2;
         tcpHelpLabel = new JLabel("<html><i>For Claude CLI / external tools</i></html>");
         tcpHelpLabel.setFont(tcpHelpLabel.getFont().deriveFont(Font.ITALIC, 11f));
         p.add(tcpHelpLabel, c);
-
-        // Start disabled
-        tcpPortField.setEnabled(false);
-        tcpPortLabel.setEnabled(false);
-        tcpHelpLabel.setEnabled(false);
 
         wrapper.add(p, BorderLayout.WEST);
         return wrapper;
@@ -308,6 +350,37 @@ public class SettingsDialog extends JDialog {
         return c;
     }
 
+    private void createNewProfile() {
+        saveToActiveConfig();
+        Settings.ModelConfig nc = new Settings.ModelConfig("New Profile", "gemini", Constants.DEFAULT_GEMINI_MODEL);
+        settings.configs.add(nc);
+        profileCombo.addItem(nc);
+        profileCombo.setSelectedItem(nc);
+    }
+
+    private void deleteProfile() {
+        if (settings.configs.size() <= 1) {
+            showError("Cannot delete the last profile.");
+            return;
+        }
+        int choice = JOptionPane.showConfirmDialog(this,
+                "Delete profile \"" + editingConfig.name + "\"?\nThis cannot be undone.",
+                "Delete Profile", JOptionPane.YES_NO_OPTION, JOptionPane.WARNING_MESSAGE);
+        if (choice == JOptionPane.YES_OPTION) {
+            settings.configs.remove(editingConfig);
+            profileCombo.removeItem(editingConfig);
+            profileCombo.setSelectedIndex(0);
+        }
+    }
+
+    private void onProfileChanged() {
+        saveToActiveConfig();
+        editingConfig = (Settings.ModelConfig) profileCombo.getSelectedItem();
+        if (editingConfig != null) {
+            loadFromActiveConfig();
+        }
+    }
+
     private void onProviderChanged() {
         int idx = providerCombo.getSelectedIndex();
         String[] cards = {"gemini", "ollama", "openai", "custom"};
@@ -316,111 +389,78 @@ public class SettingsDialog extends JDialog {
         }
     }
 
+    private void loadFromActiveConfig() {
+        profileNameField.setText(editingConfig.name);
+        String p = editingConfig.provider;
+        if ("gemini".equals(p)) providerCombo.setSelectedIndex(0);
+        else if ("ollama".equals(p)) providerCombo.setSelectedIndex(1);
+        else if ("openai".equals(p)) providerCombo.setSelectedIndex(2);
+        else providerCombo.setSelectedIndex(3);
+
+        geminiKeyField.setText("gemini".equals(p) ? editingConfig.apiKey : "");
+        geminiModelField.setText("gemini".equals(p) ? editingConfig.model : Constants.DEFAULT_GEMINI_MODEL);
+        ollamaUrlField.setText("ollama".equals(p) ? editingConfig.url : Constants.DEFAULT_OLLAMA_URL);
+        if ("ollama".equals(p)) ollamaModelCombo.setSelectedItem(editingConfig.model);
+        openaiUrlField.setText("openai".equals(p) ? editingConfig.url : Constants.DEFAULT_OPENAI_URL);
+        openaiKeyField.setText("openai".equals(p) ? editingConfig.apiKey : "");
+        openaiModelField.setText("openai".equals(p) ? editingConfig.model : Constants.DEFAULT_OPENAI_MODEL);
+        customUrlField.setText("custom".equals(p) ? editingConfig.url : "");
+        customKeyField.setText("custom".equals(p) ? editingConfig.apiKey : "");
+        customModelField.setText("custom".equals(p) ? editingConfig.model : "");
+
+        onProviderChanged();
+    }
+
+    private void saveToActiveConfig() {
+        if (editingConfig == null) return;
+        editingConfig.name = profileNameField.getText().trim();
+        int idx = providerCombo.getSelectedIndex();
+        String[] providers = {"gemini", "ollama", "openai", "custom"};
+        editingConfig.provider = providers[idx];
+
+        if (idx == 0) { // Gemini
+            editingConfig.apiKey = new String(geminiKeyField.getPassword()).trim();
+            editingConfig.model = geminiModelField.getText().trim();
+        } else if (idx == 1) { // Ollama
+            editingConfig.url = ollamaUrlField.getText().trim();
+            Object m = ollamaModelCombo.getSelectedItem();
+            editingConfig.model = m != null ? m.toString() : Constants.DEFAULT_OLLAMA_MODEL;
+        } else if (idx == 2) { // OpenAI
+            editingConfig.url = openaiUrlField.getText().trim();
+            editingConfig.apiKey = new String(openaiKeyField.getPassword()).trim();
+            editingConfig.model = openaiModelField.getText().trim();
+        } else if (idx == 3) { // Custom
+            editingConfig.url = customUrlField.getText().trim();
+            editingConfig.apiKey = new String(customKeyField.getPassword()).trim();
+            editingConfig.model = customModelField.getText().trim();
+        }
+        profileCombo.repaint();
+    }
+
     private void loadFromSettings() {
-        String provider = settings.provider;
-        if ("gemini".equals(provider)) {
-            providerCombo.setSelectedIndex(0);
-        } else if ("ollama".equals(provider)) {
-            providerCombo.setSelectedIndex(1);
-        } else if ("openai".equals(provider)) {
-            providerCombo.setSelectedIndex(2);
-        } else {
-            providerCombo.setSelectedIndex(3);
-        }
-
-        // Load all fields regardless of current provider
-        geminiKeyField.setText(settings.apiKey);
-        geminiModelField.setText(settings.model);
-
-        ollamaUrlField.setText(settings.ollamaUrl);
-        // Set the ollama model in the combo
-        String ollamaModel = settings.model;
-        if ("ollama".equals(provider) && ollamaModel != null && !ollamaModel.isEmpty()) {
-            ollamaModelCombo.setSelectedItem(ollamaModel);
-        }
-
-        openaiUrlField.setText(settings.openaiUrl);
-        openaiKeyField.setText(settings.apiKey);
-        openaiModelField.setText("openai".equals(provider) ? settings.model : Constants.DEFAULT_OPENAI_MODEL);
-
-        customUrlField.setText(settings.customUrl);
-        customKeyField.setText(settings.customApiKey);
-        customModelField.setText(settings.customModel);
-
-        // TCP settings
         tcpEnabledCheckbox.setSelected(settings.tcpServerEnabled);
         tcpPortField.setText(String.valueOf(settings.tcpPort));
         boolean tcpOn = settings.tcpServerEnabled;
         tcpPortField.setEnabled(tcpOn);
         tcpPortLabel.setEnabled(tcpOn);
         tcpHelpLabel.setEnabled(tcpOn);
-
-        onProviderChanged();
+        loadFromActiveConfig();
     }
 
     private boolean validateInputs() {
-        int idx = providerCombo.getSelectedIndex();
-
-        if (idx == 0) { // Gemini
-            String key = new String(geminiKeyField.getPassword()).trim();
-            if (key.isEmpty()) {
-                showError("Please enter a Gemini API key.\n"
-                        + "Get a free key at https://aistudio.google.com/apikey");
-                return false;
-            }
-        } else if (idx == 1) { // Ollama
-            String url = ollamaUrlField.getText().trim();
-            if (url.isEmpty()) {
-                showError("Please enter the Ollama URL.");
-                return false;
-            }
-            if (!url.startsWith("http://") && !url.startsWith("https://")) {
-                showError("Ollama URL must start with http:// or https://");
-                return false;
-            }
-            Object selectedModel = ollamaModelCombo.getSelectedItem();
-            if (selectedModel == null || selectedModel.toString().trim().isEmpty()) {
-                showError("Please select or enter an Ollama model name.");
-                return false;
-            }
-        } else if (idx == 2) { // OpenAI
-            String key = new String(openaiKeyField.getPassword()).trim();
-            if (key.isEmpty()) {
-                showError("Please enter an OpenAI API key.");
-                return false;
-            }
-            String url = openaiUrlField.getText().trim();
-            if (url.isEmpty()) {
-                showError("Please enter the OpenAI API URL.");
-                return false;
-            }
-        } else if (idx == 3) { // Custom
-            String url = customUrlField.getText().trim();
-            if (url.isEmpty()) {
-                showError("Please enter the custom endpoint URL.");
-                return false;
-            }
-            if (!url.startsWith("http://") && !url.startsWith("https://")) {
-                showError("Endpoint URL must start with http:// or https://");
-                return false;
-            }
+        // Simple check for active profile
+        if (editingConfig.name.isEmpty()) {
+            showError("Profile name cannot be empty.");
+            return false;
         }
-
-        // Validate TCP port if enabled
-        if (tcpEnabledCheckbox.isSelected()) {
-            String portStr = tcpPortField.getText().trim();
-            try {
-                int port = Integer.parseInt(portStr);
-                if (port < 1024 || port > 65535) {
-                    showError("TCP port must be between 1024 and 65535.");
-                    return false;
-                }
-            } catch (NumberFormatException ex) {
-                showError("TCP port must be a valid number.");
-                return false;
-            }
+        
+        // We allow empty keys now if TCP is enabled
+        boolean tcp = tcpEnabledCheckbox.isSelected();
+        if (!tcp && !"ollama".equals(editingConfig.provider) && editingConfig.apiKey.isEmpty()) {
+            showError("API key is required for " + editingConfig.provider + " chat features.");
+            return false;
         }
-
+        
         return true;
     }
 
@@ -429,75 +469,30 @@ public class SettingsDialog extends JDialog {
     }
 
     private void save() {
-        if (!validateInputs()) {
-            return;
-        }
+        saveToActiveConfig();
+        if (!validateInputs()) return;
 
-        int idx = providerCombo.getSelectedIndex();
-        String[] providers = {"gemini", "ollama", "openai", "custom"};
-        settings.provider = providers[idx];
-
-        if (idx == 0) { // Gemini
-            settings.apiKey = new String(geminiKeyField.getPassword()).trim();
-            String model = geminiModelField.getText().trim();
-            settings.model = model.isEmpty() ? Constants.DEFAULT_GEMINI_MODEL : model;
-        } else if (idx == 1) { // Ollama
-            settings.ollamaUrl = ollamaUrlField.getText().trim();
-            if (settings.ollamaUrl.isEmpty()) {
-                settings.ollamaUrl = Constants.DEFAULT_OLLAMA_URL;
-            }
-            Object selectedModel = ollamaModelCombo.getSelectedItem();
-            settings.model = (selectedModel != null) ? selectedModel.toString().trim() : Constants.DEFAULT_OLLAMA_MODEL;
-            if (settings.model.isEmpty()) {
-                settings.model = Constants.DEFAULT_OLLAMA_MODEL;
-            }
-        } else if (idx == 2) { // OpenAI
-            settings.openaiUrl = openaiUrlField.getText().trim();
-            if (settings.openaiUrl.isEmpty()) {
-                settings.openaiUrl = Constants.DEFAULT_OPENAI_URL;
-            }
-            settings.apiKey = new String(openaiKeyField.getPassword()).trim();
-            String model = openaiModelField.getText().trim();
-            settings.model = model.isEmpty() ? Constants.DEFAULT_OPENAI_MODEL : model;
-        } else if (idx == 3) { // Custom
-            settings.customUrl = customUrlField.getText().trim();
-            settings.customApiKey = new String(customKeyField.getPassword()).trim();
-            String model = customModelField.getText().trim();
-            settings.customModel = model;
-            settings.model = model;
-        }
-
-        // TCP settings
         settings.tcpServerEnabled = tcpEnabledCheckbox.isSelected();
-        if (settings.tcpServerEnabled) {
-            try {
-                settings.tcpPort = Integer.parseInt(tcpPortField.getText().trim());
-            } catch (NumberFormatException ex) {
-                settings.tcpPort = Constants.DEFAULT_TCP_PORT;
-            }
+        try {
+            settings.tcpPort = Integer.parseInt(tcpPortField.getText().trim());
+        } catch (Exception e) {
+            settings.tcpPort = Constants.DEFAULT_TCP_PORT;
+        }
+
+        if (editingConfig != null) {
+            settings.activeConfigId = editingConfig.id;
         }
 
         confirmed = true;
         dispose();
     }
 
-    /**
-     * Fetch available models from Ollama's /api/tags endpoint and populate the dropdown.
-     */
     private void refreshOllamaModels() {
         final String baseUrl = ollamaUrlField.getText().trim();
         if (baseUrl.isEmpty()) {
             showError("Please enter the Ollama URL first.");
             return;
         }
-
-        // Run the HTTP request on a background thread to avoid blocking the EDT
-        final JButton source = findRefreshButton();
-        if (source != null) {
-            source.setEnabled(false);
-            source.setText("...");
-        }
-
         new Thread(new Runnable() {
             @Override
             public void run() {
@@ -507,143 +502,55 @@ public class SettingsDialog extends JDialog {
                     HttpURLConnection conn = (HttpURLConnection) url.openConnection();
                     conn.setRequestMethod("GET");
                     conn.setConnectTimeout(5000);
-                    conn.setReadTimeout(10000);
-
                     int code = conn.getResponseCode();
-                    if (code != 200) {
-                        throw new RuntimeException("HTTP " + code);
-                    }
+                    if (code != 200) throw new RuntimeException("HTTP " + code);
 
-                    BufferedReader reader = new BufferedReader(
-                            new InputStreamReader(conn.getInputStream(), "UTF-8"));
+                    BufferedReader reader = new BufferedReader(new InputStreamReader(conn.getInputStream(), "UTF-8"));
                     StringBuilder sb = new StringBuilder();
                     String line;
-                    while ((line = reader.readLine()) != null) {
-                        sb.append(line);
-                    }
+                    while ((line = reader.readLine()) != null) sb.append(line);
                     reader.close();
-                    conn.disconnect();
-
-                    // Parse model names from JSON response
-                    // Response format: {"models":[{"name":"llama3",...},{"name":"mistral",...}]}
+                    
                     final List<String> models = parseModelNames(sb.toString());
-
                     SwingUtilities.invokeLater(new Runnable() {
                         @Override
                         public void run() {
-                            Object current = ollamaModelCombo.getSelectedItem();
                             ollamaModelCombo.removeAllItems();
-                            for (String m : models) {
-                                ollamaModelCombo.addItem(m);
-                            }
-                            if (current != null && !current.toString().isEmpty()) {
-                                ollamaModelCombo.setSelectedItem(current);
-                            }
-                            if (source != null) {
-                                source.setEnabled(true);
-                                source.setText("Refresh");
-                            }
+                            for (String m : models) ollamaModelCombo.addItem(m);
                         }
                     });
                 } catch (final Exception ex) {
                     SwingUtilities.invokeLater(new Runnable() {
                         @Override
                         public void run() {
-                            if (source != null) {
-                                source.setEnabled(true);
-                                source.setText("Refresh");
-                            }
-                            showError("Could not connect to Ollama at:\n" + baseUrl
-                                    + "\n\nError: " + ex.getMessage()
-                                    + "\n\nMake sure Ollama is running.");
+                            showError("Could not connect to Ollama: " + ex.getMessage());
                         }
                     });
                 }
             }
-        }, "ollama-model-refresh").start();
+        }).start();
     }
 
-    /**
-     * Simple JSON parser for Ollama /api/tags response.
-     * Extracts "name" values from the "models" array without requiring Gson
-     * (keeping it self-contained, though Gson is available).
-     */
     private List<String> parseModelNames(String json) {
         List<String> names = new ArrayList<String>();
-        // Find "models" array, then extract each "name" value
-        int modelsIdx = json.indexOf("\"models\"");
-        if (modelsIdx < 0) return names;
-
-        int arrayStart = json.indexOf('[', modelsIdx);
-        if (arrayStart < 0) return names;
-
-        int arrayEnd = json.indexOf(']', arrayStart);
-        if (arrayEnd < 0) arrayEnd = json.length();
-
-        String arrayContent = json.substring(arrayStart, arrayEnd);
-
-        // Find each "name":"value" pair
         int pos = 0;
-        while (pos < arrayContent.length()) {
-            int nameKeyIdx = arrayContent.indexOf("\"name\"", pos);
-            if (nameKeyIdx < 0) break;
-
-            int colonIdx = arrayContent.indexOf(':', nameKeyIdx + 6);
-            if (colonIdx < 0) break;
-
-            int quoteStart = arrayContent.indexOf('"', colonIdx + 1);
-            if (quoteStart < 0) break;
-
-            int quoteEnd = arrayContent.indexOf('"', quoteStart + 1);
-            if (quoteEnd < 0) break;
-
-            String name = arrayContent.substring(quoteStart + 1, quoteEnd);
-            if (!name.isEmpty()) {
-                names.add(name);
-            }
-            pos = quoteEnd + 1;
+        while ((pos = json.indexOf("\"name\"", pos)) != -1) {
+            int start = json.indexOf('\"', pos + 6);
+            int end = json.indexOf('\"', start + 1);
+            if (start != -1 && end != -1) {
+                names.add(json.substring(start + 1, end));
+                pos = end;
+            } else pos += 6;
         }
-
         return names;
     }
 
-    private JButton findRefreshButton() {
-        // Walk the Ollama panel to find the Refresh button
-        Component[] cards = cardsPanel.getComponents();
-        // Ollama is the second card (index 1)
-        if (cards.length > 1 && cards[1] instanceof JPanel) {
-            return findButtonInPanel((JPanel) cards[1], "Refresh");
-        }
-        return null;
-    }
-
-    private JButton findButtonInPanel(Container container, String text) {
-        for (Component comp : container.getComponents()) {
-            if (comp instanceof JButton && text.equals(((JButton) comp).getText())) {
-                return (JButton) comp;
-            }
-            if (comp instanceof Container) {
-                JButton found = findButtonInPanel((Container) comp, text);
-                if (found != null) return found;
-            }
-        }
-        return null;
-    }
-
     private void testConnection() {
-        // TODO: Wire to LLMBackend.testConnection() in Phase 1B
-        JOptionPane.showMessageDialog(this,
-                "Connection test will be available after LLM backends are implemented.",
-                "Test Connection", JOptionPane.INFORMATION_MESSAGE);
+        JOptionPane.showMessageDialog(this, "Connection test available in Phase 1B.", "Test Connection", JOptionPane.INFORMATION_MESSAGE);
     }
 
     private void openUrl(String url) {
-        try {
-            Desktop.getDesktop().browse(new URI(url));
-        } catch (Exception e) {
-            JOptionPane.showMessageDialog(this,
-                    "Open this URL in your browser:\n" + url,
-                    "Get API Key", JOptionPane.INFORMATION_MESSAGE);
-        }
+        try { Desktop.getDesktop().browse(new URI(url)); }
+        catch (Exception e) { JOptionPane.showMessageDialog(this, "URL: " + url); }
     }
 }
