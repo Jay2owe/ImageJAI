@@ -8,6 +8,10 @@ import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import com.google.gson.JsonPrimitive;
 import ij.IJ;
+import ij.ImagePlus;
+import ij.WindowManager;
+import ij.measure.Calibration;
+import ij.process.ImageStatistics;
 import uk.ac.ucl.imagej.ai.config.Constants;
 
 import javax.swing.SwingUtilities;
@@ -19,8 +23,11 @@ import java.net.ServerSocket;
 import java.net.Socket;
 import java.net.SocketException;
 import java.nio.charset.Charset;
+import java.awt.Frame;
 import java.util.ArrayList;
+import java.util.Enumeration;
 import java.util.List;
+import java.util.Properties;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 
@@ -282,6 +289,14 @@ public class TCPCommandServer {
             return handleExploreThresholds(request);
         } else if ("get_state_context".equals(command)) {
             return handleGetStateContext();
+        } else if ("get_log".equals(command)) {
+            return handleGetLog();
+        } else if ("get_histogram".equals(command)) {
+            return handleGetHistogram();
+        } else if ("get_open_windows".equals(command)) {
+            return handleGetOpenWindows();
+        } else if ("get_metadata".equals(command)) {
+            return handleGetMetadata();
         } else if ("batch".equals(command)) {
             return handleBatch(request);
         } else {
@@ -652,6 +667,201 @@ public class TCPCommandServer {
             return errorResponse("Error: " + ((Exception) holder[0]).getMessage());
         }
         return successResponse(new JsonPrimitive((String) holder[0]));
+    }
+
+    private JsonObject handleGetLog() {
+        String log = IJ.getLog();
+        return successResponse(new JsonPrimitive(log != null ? log : ""));
+    }
+
+    private JsonObject handleGetHistogram() {
+        final Object[] holder = new Object[1];
+        final CountDownLatch latch = new CountDownLatch(1);
+
+        SwingUtilities.invokeLater(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    ImagePlus imp = WindowManager.getCurrentImage();
+                    if (imp == null) {
+                        holder[0] = "NO_IMAGE";
+                    } else {
+                        ImageStatistics stats = imp.getStatistics();
+                        JsonObject result = new JsonObject();
+                        result.addProperty("min", stats.min);
+                        result.addProperty("max", stats.max);
+                        result.addProperty("mean", stats.mean);
+                        result.addProperty("stdDev", stats.stdDev);
+                        result.addProperty("nPixels", (long) stats.pixelCount);
+
+                        JsonArray bins = new JsonArray();
+                        if (stats.histogram != null) {
+                            for (int i = 0; i < stats.histogram.length; i++) {
+                                bins.add(new JsonPrimitive(stats.histogram[i]));
+                            }
+                        }
+                        result.add("bins", bins);
+                        holder[0] = result;
+                    }
+                } catch (Exception e) {
+                    holder[0] = e;
+                } finally {
+                    latch.countDown();
+                }
+            }
+        });
+
+        try {
+            if (!latch.await(5000, TimeUnit.MILLISECONDS)) {
+                return errorResponse("Timed out getting histogram");
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return errorResponse("Interrupted");
+        }
+
+        if (holder[0] instanceof Exception) {
+            return errorResponse("Error: " + ((Exception) holder[0]).getMessage());
+        }
+        if ("NO_IMAGE".equals(holder[0])) {
+            return errorResponse("No active image");
+        }
+        return successResponse((JsonObject) holder[0]);
+    }
+
+    private JsonObject handleGetOpenWindows() {
+        final Object[] holder = new Object[1];
+        final CountDownLatch latch = new CountDownLatch(1);
+
+        SwingUtilities.invokeLater(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    JsonObject result = new JsonObject();
+
+                    // Image windows
+                    JsonArray images = new JsonArray();
+                    int[] ids = WindowManager.getIDList();
+                    if (ids != null) {
+                        for (int i = 0; i < ids.length; i++) {
+                            ImagePlus imp = WindowManager.getImage(ids[i]);
+                            if (imp != null) {
+                                images.add(new JsonPrimitive(imp.getTitle()));
+                            }
+                        }
+                    }
+                    result.add("images", images);
+
+                    // Non-image windows
+                    JsonArray nonImages = new JsonArray();
+                    Frame[] frames = WindowManager.getNonImageWindows();
+                    if (frames != null) {
+                        for (int i = 0; i < frames.length; i++) {
+                            String title = frames[i].getTitle();
+                            if (title != null && !title.isEmpty()) {
+                                nonImages.add(new JsonPrimitive(title));
+                            }
+                        }
+                    }
+                    result.add("nonImages", nonImages);
+
+                    holder[0] = result;
+                } catch (Exception e) {
+                    holder[0] = e;
+                } finally {
+                    latch.countDown();
+                }
+            }
+        });
+
+        try {
+            if (!latch.await(5000, TimeUnit.MILLISECONDS)) {
+                return errorResponse("Timed out getting open windows");
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return errorResponse("Interrupted");
+        }
+
+        if (holder[0] instanceof Exception) {
+            return errorResponse("Error: " + ((Exception) holder[0]).getMessage());
+        }
+        return successResponse((JsonObject) holder[0]);
+    }
+
+    private JsonObject handleGetMetadata() {
+        final Object[] holder = new Object[1];
+        final CountDownLatch latch = new CountDownLatch(1);
+
+        SwingUtilities.invokeLater(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    ImagePlus imp = WindowManager.getCurrentImage();
+                    if (imp == null) {
+                        holder[0] = "NO_IMAGE";
+                    } else {
+                        JsonObject result = new JsonObject();
+                        result.addProperty("title", imp.getTitle());
+
+                        // Info property (often contains Bio-Formats metadata)
+                        String info = (String) imp.getProperty("Info");
+                        result.addProperty("info", info != null ? info : "");
+
+                        // All properties
+                        JsonObject propsJson = new JsonObject();
+                        Properties props = imp.getProperties();
+                        if (props != null) {
+                            Enumeration<?> names = props.propertyNames();
+                            while (names.hasMoreElements()) {
+                                String key = names.nextElement().toString();
+                                Object val = props.get(key);
+                                if (val != null) {
+                                    propsJson.addProperty(key, val.toString());
+                                }
+                            }
+                        }
+                        result.add("properties", propsJson);
+
+                        // Calibration
+                        Calibration cal = imp.getCalibration();
+                        if (cal != null) {
+                            JsonObject calJson = new JsonObject();
+                            calJson.addProperty("pixelWidth", cal.pixelWidth);
+                            calJson.addProperty("pixelHeight", cal.pixelHeight);
+                            calJson.addProperty("pixelDepth", cal.pixelDepth);
+                            calJson.addProperty("unit", cal.getUnit());
+                            calJson.addProperty("timeUnit", cal.getTimeUnit());
+                            calJson.addProperty("frameInterval", cal.frameInterval);
+                            result.add("calibration", calJson);
+                        }
+
+                        holder[0] = result;
+                    }
+                } catch (Exception e) {
+                    holder[0] = e;
+                } finally {
+                    latch.countDown();
+                }
+            }
+        });
+
+        try {
+            if (!latch.await(5000, TimeUnit.MILLISECONDS)) {
+                return errorResponse("Timed out getting metadata");
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return errorResponse("Interrupted");
+        }
+
+        if (holder[0] instanceof Exception) {
+            return errorResponse("Error: " + ((Exception) holder[0]).getMessage());
+        }
+        if ("NO_IMAGE".equals(holder[0])) {
+            return errorResponse("No active image");
+        }
+        return successResponse((JsonObject) holder[0]);
     }
 
     private JsonObject handleBatch(JsonObject request) {
