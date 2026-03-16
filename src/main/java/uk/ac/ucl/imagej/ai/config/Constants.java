@@ -36,4 +36,8 @@ public final class Constants {
 
     // Macro retry
     public static final int MAX_MACRO_RETRIES = 3;
+
+    // TCP command server
+    public static final int DEFAULT_TCP_PORT = 7746;  // 7745 is AgentConsole
+    public static final int TCP_MAX_MESSAGE_SIZE = 1024 * 1024; // 1MB
 }
