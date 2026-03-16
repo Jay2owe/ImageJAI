@@ -110,6 +110,14 @@ def get_metadata():
     return imagej_command({"command": "get_metadata"})
 
 
+def get_dialogs():
+    return imagej_command({"command": "get_dialogs"})
+
+
+def close_dialogs(pattern=None):
+    return imagej_command({"command": "close_dialogs", "pattern": pattern})
+
+
 def main():
     if len(sys.argv) < 2:
         print(__doc__)
@@ -161,7 +169,20 @@ def main():
                 print("Usage: python ij.py macro \"run('Blobs (25K)');\"")
                 sys.exit(1)
             code = " ".join(sys.argv[2:])
-            print(json.dumps(execute_macro(code), indent=2))
+            resp = execute_macro(code)
+            print(json.dumps(resp, indent=2))
+            # Auto-warn about dialogs that appeared
+            if resp.get("ok") and resp.get("result", {}).get("dialogs"):
+                dlgs = resp["result"]["dialogs"]
+                print("\n*** DIALOGS DETECTED ({}) ***".format(len(dlgs)))
+                for d in dlgs:
+                    print("  [{}] {}: {}".format(
+                        d.get("type", "?").upper(),
+                        d.get("title", ""),
+                        d.get("text", "").strip()[:200]
+                    ))
+                    if d.get("buttons"):
+                        print("    Buttons: {}".format(", ".join(d["buttons"])))
 
         elif cmd == "explore":
             methods = sys.argv[2:] if len(sys.argv) > 2 else ["Otsu", "Triangle", "Li", "Huang", "MaxEntropy"]
@@ -182,6 +203,13 @@ def main():
 
         elif cmd == "metadata":
             print(json.dumps(get_metadata(), indent=2))
+
+        elif cmd == "dialogs":
+            print(json.dumps(get_dialogs(), indent=2))
+
+        elif cmd == "close_dialogs":
+            pattern = sys.argv[2] if len(sys.argv) > 2 else None
+            print(json.dumps(close_dialogs(pattern), indent=2))
 
         elif cmd == "raw":
             if len(sys.argv) < 3:

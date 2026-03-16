@@ -10,6 +10,7 @@ import com.google.gson.JsonPrimitive;
 import ij.IJ;
 import ij.ImagePlus;
 import ij.WindowManager;
+import ij.gui.ImageWindow;
 import ij.measure.Calibration;
 import ij.process.ImageStatistics;
 import imagejai.config.Constants;
@@ -23,7 +24,11 @@ import java.net.ServerSocket;
 import java.net.Socket;
 import java.net.SocketException;
 import java.nio.charset.Charset;
+import java.awt.Component;
+import java.awt.Container;
+import java.awt.Dialog;
 import java.awt.Frame;
+import java.awt.Window;
 import java.util.ArrayList;
 import java.util.Enumeration;
 import java.util.List;
@@ -299,6 +304,12 @@ public class TCPCommandServer {
             return handleGetMetadata();
         } else if ("batch".equals(command)) {
             return handleBatch(request);
+        } else if ("get_dialogs".equals(command)) {
+            return handleGetDialogs();
+        } else if ("close_dialogs".equals(command)) {
+            return handleCloseDialogs(request);
+        } else if ("close_windows".equals(command)) {
+            return handleCloseDialogs(request);
         } else {
             return errorResponse("Unknown command: " + command);
         }
@@ -347,6 +358,16 @@ public class TCPCommandServer {
                 }
             } catch (Exception ignore) {
                 // State inspection is best-effort
+            }
+
+            // Auto-detect any dialogs that appeared (errors, warnings, prompts)
+            try {
+                JsonArray dialogs = detectOpenDialogs();
+                if (dialogs.size() > 0) {
+                    result.add("dialogs", dialogs);
+                }
+            } catch (Exception ignore) {
+                // Dialog detection is best-effort
             }
 
             return successResponse(result);
@@ -949,5 +970,195 @@ public class TCPCommandServer {
     private static String base64Encode(byte[] data) {
         // java.util.Base64 is available in Java 8
         return java.util.Base64.getEncoder().encodeToString(data);
+    }
+
+    private JsonObject handleGetDialogs() {
+        final Object[] holder = new Object[1];
+        final CountDownLatch latch = new CountDownLatch(1);
+
+        SwingUtilities.invokeLater(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    holder[0] = detectOpenDialogs();
+                } catch (Exception e) {
+                    holder[0] = e;
+                } finally {
+                    latch.countDown();
+                }
+            }
+        });
+
+        try {
+            if (!latch.await(5000, TimeUnit.MILLISECONDS)) {
+                return errorResponse("Timed out detecting dialogs");
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return errorResponse("Interrupted");
+        }
+
+        if (holder[0] instanceof Exception) {
+            return errorResponse("Error: " + ((Exception) holder[0]).getMessage());
+        }
+
+        JsonObject result = new JsonObject();
+        result.add("dialogs", (JsonArray) holder[0]);
+        return successResponse(result);
+    }
+
+    /**
+     * Scan all open windows for dialogs and extract their text content.
+     * Returns a JsonArray of dialog objects with title, text, type, and buttons.
+     */
+    private JsonArray detectOpenDialogs() {
+        JsonArray dialogs = new JsonArray();
+        Window[] windows = Window.getWindows();
+
+        for (Window win : windows) {
+            if (!win.isShowing()) continue;
+
+            // Only interested in Dialog windows (error popups, prompts, etc.)
+            if (!(win instanceof Dialog)) continue;
+
+            Dialog dlg = (Dialog) win;
+            String title = dlg.getTitle();
+            if (title == null) title = "";
+
+            // Skip the AI Assistant window itself
+            if (title.contains("AI Assistant")) continue;
+
+            // Extract all text from the dialog's components
+            StringBuilder textContent = new StringBuilder();
+            List<String> buttonLabels = new ArrayList<String>();
+            extractDialogContent(dlg, textContent, buttonLabels);
+
+            JsonObject dialogInfo = new JsonObject();
+            dialogInfo.addProperty("title", title);
+            dialogInfo.addProperty("text", textContent.toString().trim());
+            dialogInfo.addProperty("modal", dlg.isModal());
+
+            JsonArray buttons = new JsonArray();
+            for (String label : buttonLabels) {
+                buttons.add(new JsonPrimitive(label));
+            }
+            dialogInfo.add("buttons", buttons);
+
+            // Classify dialog type
+            String text = textContent.toString().toLowerCase();
+            if (text.contains("error") || text.contains("exception") || text.contains("failed")) {
+                dialogInfo.addProperty("type", "error");
+            } else if (text.contains("warning") || text.contains("caution")) {
+                dialogInfo.addProperty("type", "warning");
+            } else if (buttonLabels.contains("OK") && buttonLabels.contains("Cancel")) {
+                dialogInfo.addProperty("type", "prompt");
+            } else {
+                dialogInfo.addProperty("type", "info");
+            }
+
+            dialogs.add(dialogInfo);
+        }
+
+        return dialogs;
+    }
+
+    /**
+     * Recursively extract text labels and button labels from a dialog's component tree.
+     */
+    private void extractDialogContent(Container container, StringBuilder text, List<String> buttons) {
+        for (Component comp : container.getComponents()) {
+            if (comp instanceof javax.swing.JLabel) {
+                String labelText = ((javax.swing.JLabel) comp).getText();
+                if (labelText != null && !labelText.trim().isEmpty()) {
+                    text.append(labelText.trim()).append("\n");
+                }
+            } else if (comp instanceof java.awt.Label) {
+                String labelText = ((java.awt.Label) comp).getText();
+                if (labelText != null && !labelText.trim().isEmpty()) {
+                    text.append(labelText.trim()).append("\n");
+                }
+            } else if (comp instanceof javax.swing.JButton) {
+                String btnText = ((javax.swing.JButton) comp).getText();
+                if (btnText != null && !btnText.trim().isEmpty()) {
+                    buttons.add(btnText.trim());
+                }
+            } else if (comp instanceof java.awt.Button) {
+                String btnText = ((java.awt.Button) comp).getLabel();
+                if (btnText != null && !btnText.trim().isEmpty()) {
+                    buttons.add(btnText.trim());
+                }
+            } else if (comp instanceof javax.swing.JTextArea) {
+                String areaText = ((javax.swing.JTextArea) comp).getText();
+                if (areaText != null && !areaText.trim().isEmpty()) {
+                    text.append(areaText.trim()).append("\n");
+                }
+            } else if (comp instanceof java.awt.TextArea) {
+                String areaText = ((java.awt.TextArea) comp).getText();
+                if (areaText != null && !areaText.trim().isEmpty()) {
+                    text.append(areaText.trim()).append("\n");
+                }
+            }
+
+            // Recurse into child containers
+            if (comp instanceof Container) {
+                extractDialogContent((Container) comp, text, buttons);
+            }
+        }
+    }
+
+    private JsonObject handleCloseDialogs(JsonObject request) {
+        JsonElement patternElement = request.get("pattern");
+        final String pattern = (patternElement != null && patternElement.isJsonPrimitive())
+                ? patternElement.getAsString()
+                : null;
+
+        final int[] closedCount = new int[1];
+        final CountDownLatch latch = new CountDownLatch(1);
+
+        SwingUtilities.invokeLater(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    java.awt.Window[] windows = java.awt.Window.getWindows();
+                    for (java.awt.Window win : windows) {
+                        if (win.isShowing() && (win instanceof java.awt.Dialog || win instanceof java.awt.Frame)) {
+                            String title = "";
+                            if (win instanceof java.awt.Dialog) title = ((java.awt.Dialog) win).getTitle();
+                            else if (win instanceof java.awt.Frame) title = ((java.awt.Frame) win).getTitle();
+
+                            if (title == null) title = "";
+
+                            // Never close the main ImageJ window or the AI Assistant window
+                            if (title.equals("ImageJ") || title.contains("AI Assistant")) {
+                                continue;
+                            }
+
+                            // Don't close image windows
+                            if (win instanceof ImageWindow) {
+                                continue;
+                            }
+
+                            if (pattern == null || title.toLowerCase().contains(pattern.toLowerCase())) {
+                                win.setVisible(false);
+                                win.dispose();
+                                closedCount[0]++;
+                            }
+                        }
+                    }
+                } finally {
+                    latch.countDown();
+                }
+            }
+        });
+
+        try {
+            latch.await(2000, TimeUnit.MILLISECONDS);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+
+        JsonObject result = new JsonObject();
+        result.addProperty("closedCount", closedCount[0]);
+        return successResponse(result);
     }
 }
