@@ -148,6 +148,22 @@ already provide.
   call("ij3d.ImageJ_3D_Viewer.snapshot", "512", "512");
   ```
   But these may timeout — handle gracefully
+- **3D Viewer snapshot issue**: `takeSnapshot()` and manual View > Take Snapshot
+  both produce a tiny image in the corner of a large black canvas. The 3D Viewer
+  renders at the correct zoom in its window but the snapshot doesn't match.
+  This is a known 3D Viewer bug. WORKAROUND NEEDED — possibly use OS-level
+  screenshot of the 3D Viewer window instead of the built-in snapshot.
+- **3D Viewer API via TCP** — the `3d` commands work reliably:
+  - `3d add IMAGE volume 50` — adds content (uses addContent(ImagePlus, int, int))
+  - `3d fit` — calls resetView() to fit content
+  - `3d list` — lists loaded content
+  - `3d snapshot` — takes snapshot (but has the sizing bug above)
+  - `3d status` — checks if open and what's loaded
+  - `3d close` — closes the viewer
+  - Universe reference is cached across calls
+- **3D Viewer needs 8-bit images** — convert before adding
+- **Non-binary volumes look blocky** — 3D Viewer doesn't interpolate between
+  z-slices for intensity data. For smooth surfaces, threshold to binary first.
 
 ### Save deliverables next to the source image, NOT in .tmp/
 - `.tmp/` is for agent working captures only (visual feedback for the agent)
