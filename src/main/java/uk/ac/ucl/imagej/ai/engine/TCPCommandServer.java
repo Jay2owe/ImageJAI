@@ -1342,6 +1342,33 @@ public class TCPCommandServer {
             }
             return result;
 
+        } else if ("fit".equals(action) || "reset_view".equals(action)) {
+            if (universe == null) {
+                result.addProperty("error", "3D Viewer not open");
+                return result;
+            }
+            try {
+                // Try resetView first — fits all content into view
+                java.lang.reflect.Method resetView = universeClass.getMethod("resetView");
+                resetView.invoke(universe);
+                result.addProperty("success", true);
+            } catch (Exception e) {
+                // Try centerSelected as fallback
+                try {
+                    java.lang.reflect.Method cs = universeClass.getMethod("centerSelected",
+                            Class.forName("ij3d.Content"));
+                    java.lang.reflect.Method getSelected = universeClass.getMethod("getSelected");
+                    Object selected = getSelected.invoke(universe);
+                    if (selected != null) {
+                        cs.invoke(universe, selected);
+                    }
+                    result.addProperty("success", true);
+                } catch (Exception e2) {
+                    result.addProperty("error", "Fit failed: " + e.getMessage());
+                }
+            }
+            return result;
+
         } else if ("close".equals(action)) {
             if (universe != null) {
                 try {
