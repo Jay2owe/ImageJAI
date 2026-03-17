@@ -71,6 +71,9 @@ public class TCPCommandServer {
     private volatile boolean running;
     private ServerListener listener;
 
+    // Cached 3D Viewer universe reference — survives across TCP calls
+    private volatile Object cached3DUniverse;
+
     public TCPCommandServer(int port, CommandEngine commandEngine,
                             StateInspector stateInspector,
                             PipelineBuilder pipelineBuilder,
@@ -1157,35 +1160,33 @@ public class TCPCommandServer {
             return result;
         }
 
-        // Get or create the universe instance
-        // Image3DUniverse has a static method getUniverse() or we find the open one
-        Object universe = null;
+        // Get or create the universe instance — check cache first
+        Object universe = cached3DUniverse;
 
-        // Find existing 3D Viewer window
-        java.awt.Window[] windows = java.awt.Window.getWindows();
-        for (java.awt.Window win : windows) {
-            if (win.getClass().getName().contains("Image3DUniverse")
-                    || win.getClass().getName().contains("ImageWindow3D")
-                    || (win instanceof java.awt.Frame && ((java.awt.Frame) win).getTitle() != null
-                        && ((java.awt.Frame) win).getTitle().contains("3D"))) {
-                // Try to get the universe from ImageJ_3D_Viewer
-                try {
-                    Class<?> viewerClass = Class.forName("ij3d.ImageJ_3D_Viewer");
-                    java.lang.reflect.Method getUniv = viewerClass.getMethod("getUniverse");
-                    universe = getUniv.invoke(null);
-                } catch (Exception ignore) {
-                    // Try alternate approach
+        // Verify cached reference is still valid (window might have been closed)
+        if (universe != null) {
+            try {
+                java.lang.reflect.Method getCanvas = universeClass.getMethod("getCanvas");
+                Object canvas = getCanvas.invoke(universe);
+                if (canvas == null) {
+                    universe = null; // Universe was closed
+                    cached3DUniverse = null;
                 }
-                break;
+            } catch (Exception e) {
+                universe = null;
+                cached3DUniverse = null;
             }
         }
 
-        // If no universe found, try the static accessor
+        // Try the static accessor if no cached reference
         if (universe == null) {
             try {
                 Class<?> viewerClass = Class.forName("ij3d.ImageJ_3D_Viewer");
                 java.lang.reflect.Method getUniv = viewerClass.getMethod("getUniverse");
                 universe = getUniv.invoke(null);
+                if (universe != null) {
+                    cached3DUniverse = universe;
+                }
             } catch (Exception ignore) {
                 // No universe available
             }
@@ -1247,6 +1248,7 @@ public class TCPCommandServer {
             if (universe == null) {
                 java.lang.reflect.Constructor<?> ctor = universeClass.getConstructor();
                 universe = ctor.newInstance();
+                cached3DUniverse = universe; // Cache immediately
                 java.lang.reflect.Method show = universeClass.getMethod("show");
                 show.invoke(universe);
                 // Store it via the static setter if available
