@@ -1338,8 +1338,16 @@ public class TCPCommandServer {
 
                             if (title == null) title = "";
 
-                            // Never close the main ImageJ window or the AI Assistant window
-                            if (title.equals("ImageJ") || title.contains("AI Assistant")) {
+                            // Never close the main ImageJ/Fiji window or the AI Assistant window
+                            if (title.equals("ImageJ") || title.equals("Fiji")
+                                    || title.contains("AI Assistant")
+                                    || title.contains("ImageJ")
+                                    || title.contains("Startup")) {
+                                continue;
+                            }
+
+                            // Also protect by checking if this is the IJ main frame
+                            if (win == IJ.getInstance()) {
                                 continue;
                             }
 
