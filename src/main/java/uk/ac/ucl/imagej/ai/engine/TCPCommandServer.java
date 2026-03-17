@@ -306,6 +306,8 @@ public class TCPCommandServer {
             return handleBatch(request);
         } else if ("get_pixels".equals(command)) {
             return handleGetPixels(request);
+        } else if ("3d_viewer".equals(command)) {
+            return handle3DViewer(request);
         } else if ("get_dialogs".equals(command)) {
             return handleGetDialogs();
         } else if ("close_dialogs".equals(command)) {
@@ -1115,6 +1117,270 @@ public class TCPCommandServer {
             return errorResponse("No active image");
         }
         return successResponse((JsonObject) holder[0]);
+    }
+
+    /**
+     * Control the 3D Viewer via reflection (avoids compile-time dependency).
+     *
+     * Actions:
+     *   {"command": "3d_viewer", "action": "status"}
+     *   {"command": "3d_viewer", "action": "add", "image": "title", "type": "volume", "threshold": 50}
+     *   {"command": "3d_viewer", "action": "list"}
+     *   {"command": "3d_viewer", "action": "snapshot", "width": 512, "height": 512}
+     *   {"command": "3d_viewer", "action": "close"}
+     *
+     * type: "volume" (0), "orthoslice" (1), "surface" (2), "surface_plot" (3)
+     */
+    private JsonObject handle3DViewer(JsonObject request) {
+        String action = request.has("action") ? request.get("action").getAsString() : "status";
+
+        final Object[] holder = new Object[1];
+        final CountDownLatch latch = new CountDownLatch(1);
+        final String finalAction = action;
+        final JsonObject finalRequest = request;
+
+        SwingUtilities.invokeLater(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    holder[0] = dispatch3DViewer(finalAction, finalRequest);
+                } catch (Exception e) {
+                    holder[0] = e;
+                } finally {
+                    latch.countDown();
+                }
+            }
+        });
+
+        try {
+            if (!latch.await(30000, TimeUnit.MILLISECONDS)) {
+                return errorResponse("3D Viewer operation timed out");
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return errorResponse("Interrupted");
+        }
+
+        if (holder[0] instanceof Exception) {
+            return errorResponse("3D Viewer error: " + ((Exception) holder[0]).getMessage());
+        }
+        return successResponse((JsonObject) holder[0]);
+    }
+
+    private JsonObject dispatch3DViewer(String action, JsonObject request) throws Exception {
+        // Use reflection to access ij3d classes
+        Class<?> universeClass;
+        try {
+            universeClass = Class.forName("ij3d.Image3DUniverse");
+        } catch (ClassNotFoundException e) {
+            JsonObject result = new JsonObject();
+            result.addProperty("error", "3D Viewer plugin not installed");
+            result.addProperty("installed", false);
+            return result;
+        }
+
+        // Get or create the universe instance
+        // Image3DUniverse has a static method getUniverse() or we find the open one
+        Object universe = null;
+
+        // Find existing 3D Viewer window
+        java.awt.Window[] windows = java.awt.Window.getWindows();
+        for (java.awt.Window win : windows) {
+            if (win.getClass().getName().contains("Image3DUniverse")
+                    || win.getClass().getName().contains("ImageWindow3D")
+                    || (win instanceof java.awt.Frame && ((java.awt.Frame) win).getTitle() != null
+                        && ((java.awt.Frame) win).getTitle().contains("3D"))) {
+                // Try to get the universe from ImageJ_3D_Viewer
+                try {
+                    Class<?> viewerClass = Class.forName("ij3d.ImageJ_3D_Viewer");
+                    java.lang.reflect.Method getUniv = viewerClass.getMethod("getUniverse");
+                    universe = getUniv.invoke(null);
+                } catch (Exception ignore) {
+                    // Try alternate approach
+                }
+                break;
+            }
+        }
+
+        // If no universe found, try the static accessor
+        if (universe == null) {
+            try {
+                Class<?> viewerClass = Class.forName("ij3d.ImageJ_3D_Viewer");
+                java.lang.reflect.Method getUniv = viewerClass.getMethod("getUniverse");
+                universe = getUniv.invoke(null);
+            } catch (Exception ignore) {
+                // No universe available
+            }
+        }
+
+        JsonObject result = new JsonObject();
+
+        if ("status".equals(action)) {
+            result.addProperty("installed", true);
+            result.addProperty("open", universe != null);
+            if (universe != null) {
+                try {
+                    // getContents() returns Iterator or Collection
+                    java.lang.reflect.Method getContents = universeClass.getMethod("getContents");
+                    Object contents = getContents.invoke(universe);
+                    int count = 0;
+                    JsonArray contentNames = new JsonArray();
+                    if (contents instanceof java.util.Collection) {
+                        for (Object c : (java.util.Collection<?>) contents) {
+                            java.lang.reflect.Method getName = c.getClass().getMethod("getName");
+                            String name = (String) getName.invoke(c);
+                            contentNames.add(new JsonPrimitive(name != null ? name : "unnamed"));
+                            count++;
+                        }
+                    }
+                    result.addProperty("contentCount", count);
+                    result.add("contents", contentNames);
+                } catch (Exception e) {
+                    result.addProperty("contentError", e.getMessage());
+                }
+            }
+            return result;
+
+        } else if ("add".equals(action)) {
+            String imageName = request.has("image") ? request.get("image").getAsString() : null;
+            if (imageName == null) {
+                result.addProperty("error", "Missing 'image' parameter");
+                return result;
+            }
+
+            // Find the ImagePlus
+            ImagePlus imp = WindowManager.getImage(imageName);
+            if (imp == null) {
+                result.addProperty("error", "Image not found: " + imageName);
+                return result;
+            }
+
+            String typeStr = request.has("type") ? request.get("type").getAsString() : "volume";
+            int threshold = request.has("threshold") ? request.get("threshold").getAsInt() : 50;
+            int resamplingFactor = request.has("resampling") ? request.get("resampling").getAsInt() : 1;
+
+            // Map type string to int: volume=0, orthoslice=1, surface=2, surface_plot=3
+            int typeInt = 0;
+            if ("orthoslice".equals(typeStr)) typeInt = 1;
+            else if ("surface".equals(typeStr)) typeInt = 2;
+            else if ("surface_plot".equals(typeStr)) typeInt = 3;
+
+            // Create universe if needed
+            if (universe == null) {
+                java.lang.reflect.Constructor<?> ctor = universeClass.getConstructor();
+                universe = ctor.newInstance();
+                java.lang.reflect.Method show = universeClass.getMethod("show");
+                show.invoke(universe);
+                // Store it via the static setter if available
+                try {
+                    Class<?> viewerClass = Class.forName("ij3d.ImageJ_3D_Viewer");
+                    java.lang.reflect.Field univField = viewerClass.getDeclaredField("univ");
+                    univField.setAccessible(true);
+                    univField.set(null, universe);
+                } catch (Exception ignore) {}
+            }
+
+            // addContent(ImagePlus, color, name, threshold, channels, resampling, type)
+            // Use the simpler: addContent(ImagePlus, int type, int resampling)
+            try {
+                java.lang.reflect.Method addContent = universeClass.getMethod(
+                        "addContent", ImagePlus.class, int.class, int.class);
+                Object content = addContent.invoke(universe, imp, typeInt, resamplingFactor);
+
+                if (content != null) {
+                    // Set threshold
+                    try {
+                        java.lang.reflect.Method setThreshold = content.getClass().getMethod("setThreshold", int.class);
+                        setThreshold.invoke(content, threshold);
+                    } catch (Exception ignore) {}
+
+                    java.lang.reflect.Method getName = content.getClass().getMethod("getName");
+                    result.addProperty("added", (String) getName.invoke(content));
+                    result.addProperty("success", true);
+                } else {
+                    result.addProperty("error", "addContent returned null");
+                }
+            } catch (Exception e) {
+                result.addProperty("error", "Failed to add content: " + e.getMessage());
+                if (e.getCause() != null) {
+                    result.addProperty("cause", e.getCause().getMessage());
+                }
+            }
+            return result;
+
+        } else if ("list".equals(action)) {
+            if (universe == null) {
+                result.addProperty("open", false);
+                result.add("contents", new JsonArray());
+                return result;
+            }
+            result.addProperty("open", true);
+            try {
+                java.lang.reflect.Method getContents = universeClass.getMethod("getContents");
+                Object contents = getContents.invoke(universe);
+                JsonArray contentList = new JsonArray();
+                if (contents instanceof java.util.Collection) {
+                    for (Object c : (java.util.Collection<?>) contents) {
+                        JsonObject entry = new JsonObject();
+                        try {
+                            java.lang.reflect.Method getName = c.getClass().getMethod("getName");
+                            entry.addProperty("name", (String) getName.invoke(c));
+                        } catch (Exception ignore) {}
+                        try {
+                            java.lang.reflect.Method isVisible = c.getClass().getMethod("isVisible");
+                            entry.addProperty("visible", (Boolean) isVisible.invoke(c));
+                        } catch (Exception ignore) {}
+                        contentList.add(entry);
+                    }
+                }
+                result.add("contents", contentList);
+            } catch (Exception e) {
+                result.addProperty("error", e.getMessage());
+            }
+            return result;
+
+        } else if ("snapshot".equals(action)) {
+            if (universe == null) {
+                result.addProperty("error", "3D Viewer not open");
+                return result;
+            }
+            int width = request.has("width") ? request.get("width").getAsInt() : 512;
+            int height = request.has("height") ? request.get("height").getAsInt() : 512;
+
+            try {
+                java.lang.reflect.Method takeSnapshot = universeClass.getMethod("takeSnapshot", int.class, int.class);
+                Object snapshot = takeSnapshot.invoke(universe, width, height);
+                if (snapshot instanceof ImagePlus) {
+                    ((ImagePlus) snapshot).show();
+                    result.addProperty("success", true);
+                    result.addProperty("title", ((ImagePlus) snapshot).getTitle());
+                } else {
+                    result.addProperty("error", "Snapshot did not return an ImagePlus");
+                }
+            } catch (Exception e) {
+                result.addProperty("error", "Snapshot failed: " + e.getMessage());
+            }
+            return result;
+
+        } else if ("close".equals(action)) {
+            if (universe != null) {
+                try {
+                    java.lang.reflect.Method close = universeClass.getMethod("close");
+                    close.invoke(universe);
+                    result.addProperty("closed", true);
+                } catch (Exception e) {
+                    result.addProperty("error", "Close failed: " + e.getMessage());
+                }
+            } else {
+                result.addProperty("closed", false);
+                result.addProperty("error", "3D Viewer not open");
+            }
+            return result;
+
+        } else {
+            result.addProperty("error", "Unknown action: " + action + ". Use: status, add, list, snapshot, close");
+            return result;
+        }
     }
 
     private JsonObject handleGetDialogs() {

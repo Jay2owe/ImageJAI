@@ -160,6 +160,12 @@ def get_pixels(x=None, y=None, width=None, height=None, slice_num=None, all_slic
     return imagej_command(cmd)
 
 
+def viewer3d(action="status", **kwargs):
+    cmd = {"command": "3d_viewer", "action": action}
+    cmd.update(kwargs)
+    return imagej_command(cmd)
+
+
 def get_dialogs():
     return imagej_command({"command": "get_dialogs"})
 
@@ -257,6 +263,19 @@ def main():
 
         elif cmd == "metadata":
             print(json.dumps(get_metadata(), indent=2))
+
+        elif cmd == "3d":
+            # Sub-commands: status, add, list, snapshot, close
+            sub = sys.argv[2] if len(sys.argv) > 2 else "status"
+            kwargs = {}
+            if sub == "add" and len(sys.argv) > 3:
+                kwargs["image"] = sys.argv[3]
+                if len(sys.argv) > 4: kwargs["type"] = sys.argv[4]
+                if len(sys.argv) > 5: kwargs["threshold"] = int(sys.argv[5])
+            elif sub == "snapshot":
+                kwargs["width"] = int(sys.argv[3]) if len(sys.argv) > 3 else 512
+                kwargs["height"] = int(sys.argv[4]) if len(sys.argv) > 4 else 512
+            print(json.dumps(viewer3d(sub, **kwargs), indent=2))
 
         elif cmd == "dialogs":
             print(json.dumps(get_dialogs(), indent=2))
