@@ -1387,6 +1387,59 @@ public class TCPCommandServer {
             }
             return result;
 
+        } else if ("capture".equals(action)) {
+            // Use java.awt.Robot to screenshot the 3D Viewer window directly.
+            // This avoids the broken takeSnapshot() that produces a tiny image.
+            if (universe == null) {
+                result.addProperty("error", "3D Viewer not open");
+                return result;
+            }
+            try {
+                // Find the 3D Viewer window
+                java.awt.Window viewerWindow = null;
+                java.awt.Window[] allWindows = java.awt.Window.getWindows();
+                for (java.awt.Window w : allWindows) {
+                    if (w.isShowing() && w.getClass().getName().contains("ImageWindow3D")) {
+                        viewerWindow = w;
+                        break;
+                    }
+                }
+                // Fallback: find any Frame with "3D" in the title
+                if (viewerWindow == null) {
+                    for (java.awt.Window w : allWindows) {
+                        if (w.isShowing() && w instanceof java.awt.Frame) {
+                            String title = ((java.awt.Frame) w).getTitle();
+                            if (title != null && title.contains("3D")) {
+                                viewerWindow = w;
+                                break;
+                            }
+                        }
+                    }
+                }
+
+                if (viewerWindow == null) {
+                    result.addProperty("error", "Could not find 3D Viewer window");
+                    return result;
+                }
+
+                // Screenshot the window using Robot
+                java.awt.Rectangle bounds = viewerWindow.getBounds();
+                java.awt.Robot robot = new java.awt.Robot();
+                java.awt.image.BufferedImage screenshot = robot.createScreenCapture(bounds);
+
+                // Convert to ImagePlus and show
+                ImagePlus snap = new ImagePlus("3D_Render", screenshot);
+                snap.show();
+
+                result.addProperty("success", true);
+                result.addProperty("title", "3D_Render");
+                result.addProperty("width", bounds.width);
+                result.addProperty("height", bounds.height);
+            } catch (Exception e) {
+                result.addProperty("error", "Capture failed: " + e.getMessage());
+            }
+            return result;
+
         } else if ("fit".equals(action) || "reset_view".equals(action)) {
             if (universe == null) {
                 result.addProperty("error", "3D Viewer not open");
