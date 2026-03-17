@@ -108,6 +108,58 @@ When working with z-stacks:
   6. Render with `3D Viewer` or `Volume Viewer`
 - Max projection is for VISUALIZATION only, never for 3D analysis workflows
 
+### Proper workflow for isolating and rendering a single cell in 3D
+1. **Filter a working copy** to separate cells — Gaussian blur, threshold. This is
+   just for FINDING cells, not for the final output
+2. **3D Objects Counter with REDIRECT** — this is the key:
+   ```
+   run("3D Objects Counter", "threshold=128 min.=200 max.=999999 objects
+        redirect=ORIGINAL_IMAGE_TITLE");
+   ```
+   The `redirect` option means it segments on the filtered image but produces
+   the mask/measurements from the original unfiltered image. This gives clean
+   intensity-preserved objects.
+3. **Extract the desired object** from the label map — pick by size, position,
+   or intensity. The label map has unique integer IDs per object.
+4. **Render with 3D tools** — with a clean isolated object on black background,
+   3D Viewer and 3Dscript work properly:
+   ```
+   run("3D Viewer");        // interactive OpenGL rendering
+   run("3Dscript");         // scripted animation/rendering
+   ```
+   These struggled before because background/neighbouring cells cluttered the view.
+
+**DO NOT** try to manually multiply masks by images — 3D Objects Counter's
+redirect does this automatically and correctly. Don't reinvent what plugins
+already provide.
+
+### Save deliverables next to the source image, NOT in .tmp/
+- `.tmp/` is for agent working captures only (visual feedback for the agent)
+- When the user asks you to save/produce something, save it in an `AI_output/`
+  subdirectory within the directory the source image came from
+- Get the source directory with: `dir = getInfo("image.directory");`
+  (note: this prints to Log, not macro return — check with `python ij.py log`)
+- Create the output dir: `File.makeDirectory(dir + "AI_output");`
+- Save there: `saveAs("PNG", dir + "AI_output/filename.png");`
+- This keeps outputs organized next to the data they came from
+
+### Dialogs: read them immediately, don't ignore them
+- After EVERY macro execution, check the response for `"dialogs"` in the result
+- If dialogs appeared, READ their content before doing anything else
+- Error dialogs tell you exactly what went wrong — use that info to fix the macro
+- If a plugin opens a dialog with settings (like Volume Viewer), read all the
+  fields/dropdowns/sliders to understand what parameters it accepts
+- Use `python ij.py dialogs` to check for open dialogs at any time
+- Use `python ij.py close_dialogs` to dismiss them after reading
+- NEVER just blindly close dialogs without reading what they say
+
+### Run macros headless where possible
+- Use `setBatchMode(true);` at the start of processing macros to suppress
+  unnecessary display updates and avoid dialogs where possible
+- Remember to `setBatchMode(false);` at the end
+- This also speeds up execution 10-100x for batch operations
+- Some plugins still show dialogs even in batch mode — those need to be read
+
 ### Clean up after yourself — no window clutter
 - Close temporary images, results tables, and plots as soon as you're done with them
 - After Analyze Particles: close the "Drawing of..." outlines window if not needed

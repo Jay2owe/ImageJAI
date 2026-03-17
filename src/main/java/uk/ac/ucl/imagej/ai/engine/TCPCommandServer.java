@@ -334,14 +334,15 @@ public class TCPCommandServer {
 
         // Call IJ.runMacro directly on this TCP handler thread.
         // The ImageJ macro interpreter handles its own EDT dispatch internally.
-        // Using CommandEngine's executor/invokeAndWait causes deadlocks or hangs
-        // because the executor thread lacks ImageJ's expected thread context.
+        JsonObject result = new JsonObject();
+        boolean success = false;
+
         try {
             long startTime = System.currentTimeMillis();
             String macroReturn = IJ.runMacro(code);
             long elapsed = System.currentTimeMillis() - startTime;
 
-            JsonObject result = new JsonObject();
+            success = true;
             result.addProperty("success", true);
             result.addProperty("output", macroReturn != null ? macroReturn : "");
             result.addProperty("executionTimeMs", elapsed);
@@ -361,21 +362,23 @@ public class TCPCommandServer {
             } catch (Exception ignore) {
                 // State inspection is best-effort
             }
-
-            // Auto-detect any dialogs that appeared (errors, warnings, prompts)
-            try {
-                JsonArray dialogs = detectOpenDialogs();
-                if (dialogs.size() > 0) {
-                    result.add("dialogs", dialogs);
-                }
-            } catch (Exception ignore) {
-                // Dialog detection is best-effort
-            }
-
-            return successResponse(result);
         } catch (Exception e) {
-            return errorResponse("Macro error: " + e.getMessage());
+            result.addProperty("success", false);
+            result.addProperty("error", "Macro error: " + e.getMessage());
         }
+
+        // ALWAYS check for dialogs — on success AND failure.
+        // Dialogs (especially errors) are critical for the agent to see.
+        try {
+            JsonArray dialogs = detectOpenDialogs();
+            if (dialogs.size() > 0) {
+                result.add("dialogs", dialogs);
+            }
+        } catch (Exception ignore) {
+            // Dialog detection is best-effort
+        }
+
+        return successResponse(result);
     }
 
     private JsonObject handleGetState() {
@@ -924,6 +927,18 @@ public class TCPCommandServer {
         JsonObject response = new JsonObject();
         response.addProperty("ok", false);
         response.addProperty("error", message);
+
+        // ALWAYS attach open dialogs to error responses.
+        // Errors are exactly when dialogs are most likely to appear.
+        try {
+            JsonArray dialogs = detectOpenDialogs();
+            if (dialogs.size() > 0) {
+                response.add("dialogs", dialogs);
+            }
+        } catch (Exception ignore) {
+            // Best-effort
+        }
+
         return response;
     }
 
