@@ -1134,37 +1134,15 @@ public class TCPCommandServer {
     private JsonObject handle3DViewer(JsonObject request) {
         String action = request.has("action") ? request.get("action").getAsString() : "status";
 
-        final Object[] holder = new Object[1];
-        final CountDownLatch latch = new CountDownLatch(1);
-        final String finalAction = action;
-        final JsonObject finalRequest = request;
-
-        SwingUtilities.invokeLater(new Runnable() {
-            @Override
-            public void run() {
-                try {
-                    holder[0] = dispatch3DViewer(finalAction, finalRequest);
-                } catch (Exception e) {
-                    holder[0] = e;
-                } finally {
-                    latch.countDown();
-                }
-            }
-        });
-
+        // Run directly on TCP handler thread — 3D Viewer operations (especially
+        // addContent) block for a long time during rendering. Running on EDT
+        // would freeze the entire UI. The 3D Viewer manages its own threading.
         try {
-            if (!latch.await(30000, TimeUnit.MILLISECONDS)) {
-                return errorResponse("3D Viewer operation timed out");
-            }
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            return errorResponse("Interrupted");
+            JsonObject result = dispatch3DViewer(action, request);
+            return successResponse(result);
+        } catch (Exception e) {
+            return errorResponse("3D Viewer error: " + e.getMessage());
         }
-
-        if (holder[0] instanceof Exception) {
-            return errorResponse("3D Viewer error: " + ((Exception) holder[0]).getMessage());
-        }
-        return successResponse((JsonObject) holder[0]);
     }
 
     private JsonObject dispatch3DViewer(String action, JsonObject request) throws Exception {
