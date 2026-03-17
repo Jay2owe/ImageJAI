@@ -25,7 +25,23 @@ python ij.py log                                      # ImageJ Log window conten
 python ij.py histogram                                # intensity stats + bin counts
 python ij.py windows                                  # all open window titles
 python ij.py metadata                                 # Bio-Formats info + calibration
+python ij.py dialogs                                  # check for open dialogs/errors
+python ij.py close_dialogs                            # dismiss open dialogs
+python ij.py 3d status                                # 3D Viewer: is it open? what's loaded?
+python ij.py 3d add IMAGE_TITLE volume 50             # 3D Viewer: add volume, threshold 50
+python ij.py 3d list                                  # 3D Viewer: list loaded content
+python ij.py 3d snapshot 512 512                      # 3D Viewer: capture the view
+python ij.py 3d close                                 # 3D Viewer: close
 python ij.py raw '{"command": "ping"}'                # raw JSON command
+```
+
+### Pixel analysis (Python-side, no ImageJ needed):
+```bash
+python pixels.py                                     # stats for current slice
+python pixels.py find_cells                           # auto-detect bright objects
+python pixels.py region 100 100 50 50                 # stats for a region
+python pixels.py profile 0 512 1024 512               # line profile
+python pixels.py stack_stats                          # per-slice stats for z-stack
 ```
 
 If `ij.py` is not available, use raw Python with sockets (see ij.py source for pattern).
@@ -177,6 +193,48 @@ Critical for choosing threshold methods and detecting saturation.
 → {"ok": true, "result": {"title": "...", "info": "Bio-Formats metadata...", "properties": {...}, "calibration": {"pixelWidth": 0.325, "unit": "um", ...}}}
 ```
 Essential for knowing if measurements are calibrated and what channels represent.
+
+### get_dialogs — Check for open dialog windows
+```json
+{"command": "get_dialogs"}
+→ {"ok": true, "result": {"dialogs": [{"title": "Macro Error", "text": "...", "type": "error", "buttons": ["OK"]}]}}
+```
+Reads ALL dialog content: labels, text fields, dropdowns, checkboxes, sliders.
+Dialogs are also auto-attached to every execute_macro response AND every error
+response. On TCP timeout, the agent auto-checks for dialogs as a fallback.
+
+### get_pixels — Raw pixel data as base64 float32
+```json
+{"command": "get_pixels"}
+{"command": "get_pixels", "x": 100, "y": 100, "width": 50, "height": 50, "slice": 7}
+{"command": "get_pixels", "allSlices": true}
+→ {"ok": true, "result": {"width": 50, "height": 50, "data": "base64...", "encoding": "base64_float32_le"}}
+```
+Use `pixels.py` to decode and analyse (find_cells, stats, line profiles).
+4M pixel safety limit. See `python pixels.py --help`.
+
+### 3d_viewer — Direct 3D Viewer control (via reflection, not macros)
+```json
+{"command": "3d_viewer", "action": "status"}
+→ {"ok": true, "result": {"installed": true, "open": true, "contents": ["cell"]}}
+
+{"command": "3d_viewer", "action": "add", "image": "cell_render", "type": "volume", "threshold": 50}
+→ {"ok": true, "result": {"success": true, "added": "cell_render"}}
+
+{"command": "3d_viewer", "action": "list"}
+{"command": "3d_viewer", "action": "snapshot", "width": 512, "height": 512}
+{"command": "3d_viewer", "action": "close"}
+```
+Types: "volume", "orthoslice", "surface", "surface_plot".
+This bypasses macros entirely — direct Java API calls. Much more reliable
+than run("3D Viewer") or call("ij3d...").
+
+### close_dialogs — Dismiss open dialogs
+```json
+{"command": "close_dialogs"}
+{"command": "close_dialogs", "pattern": "error"}
+```
+Protected windows (Fiji toolbar, AI Assistant) are never closed.
 
 ---
 
