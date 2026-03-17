@@ -33,7 +33,8 @@ TIMEOUT = 60
 
 
 def imagej_command(cmd, host=HOST, port=PORT, timeout=TIMEOUT):
-    """Send a JSON command to ImageJAI TCP server and return parsed response."""
+    """Send a JSON command to ImageJAI TCP server and return parsed response.
+    On timeout, automatically checks for open dialogs before returning."""
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     s.settimeout(timeout)
     try:
@@ -52,10 +53,48 @@ def imagej_command(cmd, host=HOST, port=PORT, timeout=TIMEOUT):
                 if data.endswith(b"\n"):
                     break
             except socket.timeout:
-                break
+                # TCP timeout — command may have opened a blocking dialog.
+                # Check for dialogs immediately.
+                s.close()
+                dialogs = _check_dialogs_fallback(host, port)
+                return {
+                    "ok": False,
+                    "error": "TCP timeout after {}s — command may be blocked by a dialog".format(timeout),
+                    "dialogs": dialogs,
+                }
         return json.loads(data.decode("utf-8"))
     finally:
-        s.close()
+        try:
+            s.close()
+        except Exception:
+            pass
+
+
+def _check_dialogs_fallback(host=HOST, port=PORT):
+    """Emergency dialog check after a timeout. Uses a short timeout."""
+    try:
+        s2 = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s2.settimeout(5)
+        s2.connect((host, port))
+        s2.sendall((json.dumps({"command": "get_dialogs"}) + "\n").encode("utf-8"))
+        data = b""
+        while True:
+            try:
+                chunk = s2.recv(65536)
+                if not chunk:
+                    break
+                data += chunk
+                if data.endswith(b"\n"):
+                    break
+            except socket.timeout:
+                break
+        s2.close()
+        resp = json.loads(data.decode("utf-8"))
+        if resp.get("ok") and resp.get("result", {}).get("dialogs"):
+            return resp["result"]["dialogs"]
+    except Exception:
+        pass
+    return []
 
 
 def ping():
@@ -182,9 +221,13 @@ def main():
             code = " ".join(sys.argv[2:])
             resp = execute_macro(code)
             print(json.dumps(resp, indent=2))
-            # Auto-warn about dialogs that appeared
+            # Auto-warn about dialogs — check EVERYWHERE they might be
+            dlgs = []
             if resp.get("ok") and resp.get("result", {}).get("dialogs"):
                 dlgs = resp["result"]["dialogs"]
+            elif resp.get("dialogs"):
+                dlgs = resp["dialogs"]
+            if dlgs:
                 print("\n*** DIALOGS DETECTED ({}) ***".format(len(dlgs)))
                 for d in dlgs:
                     print("  [{}] {}: {}".format(
