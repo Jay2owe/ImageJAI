@@ -1260,31 +1260,76 @@ public class TCPCommandServer {
                 } catch (Exception ignore) {}
             }
 
-            // addContent(ImagePlus, color, name, threshold, channels, resampling, type)
-            // Use the simpler: addContent(ImagePlus, int type, int resampling)
+            // Try multiple addContent signatures — API varies between versions
+            Object content = null;
+            String methodUsed = "";
+
+            // Attempt 1: addContent(ImagePlus, Color3f, String, int, boolean[], int, int)
             try {
+                Class<?> color3fClass = Class.forName("org.scijava.vecmath.Color3f");
+                java.lang.reflect.Constructor<?> colorCtor = color3fClass.getConstructor(float.class, float.class, float.class);
+                Object white = colorCtor.newInstance(1.0f, 1.0f, 1.0f);
+
                 java.lang.reflect.Method addContent = universeClass.getMethod(
-                        "addContent", ImagePlus.class, int.class, int.class);
-                Object content = addContent.invoke(universe, imp, typeInt, resamplingFactor);
-
-                if (content != null) {
-                    // Set threshold
+                        "addContent", ImagePlus.class, color3fClass, String.class,
+                        int.class, boolean[].class, int.class, int.class);
+                boolean[] channels = new boolean[]{true, true, true};
+                content = addContent.invoke(universe, imp, white, imageName,
+                        threshold, channels, resamplingFactor, typeInt);
+                methodUsed = "addContent(ImagePlus, Color3f, String, int, boolean[], int, int)";
+            } catch (Exception e1) {
+                // Attempt 2: addContent(ImagePlus, int, int) — simpler signature
+                try {
+                    java.lang.reflect.Method addContent = universeClass.getMethod(
+                            "addContent", ImagePlus.class, int.class, int.class);
+                    content = addContent.invoke(universe, imp, typeInt, resamplingFactor);
+                    methodUsed = "addContent(ImagePlus, int, int)";
+                } catch (Exception e2) {
+                    // Attempt 3: addContent(ImagePlus, int) — simplest
                     try {
-                        java.lang.reflect.Method setThreshold = content.getClass().getMethod("setThreshold", int.class);
-                        setThreshold.invoke(content, threshold);
-                    } catch (Exception ignore) {}
+                        java.lang.reflect.Method addContent = universeClass.getMethod(
+                                "addContent", ImagePlus.class, int.class);
+                        content = addContent.invoke(universe, imp, typeInt);
+                        methodUsed = "addContent(ImagePlus, int)";
+                    } catch (Exception e3) {
+                        // List available addContent methods for debugging
+                        StringBuilder methods = new StringBuilder();
+                        for (java.lang.reflect.Method m : universeClass.getMethods()) {
+                            if ("addContent".equals(m.getName())) {
+                                methods.append(m.toString()).append("; ");
+                            }
+                        }
+                        result.addProperty("error", "No compatible addContent method found. Available: " + methods.toString());
+                        return result;
+                    }
+                }
+            }
 
+            if (content != null) {
+                // Set threshold if applicable
+                try {
+                    java.lang.reflect.Method setThreshold = content.getClass().getMethod("setThreshold", int.class);
+                    setThreshold.invoke(content, threshold);
+                } catch (Exception ignore) {}
+
+                try {
                     java.lang.reflect.Method getName = content.getClass().getMethod("getName");
                     result.addProperty("added", (String) getName.invoke(content));
-                    result.addProperty("success", true);
-                } else {
-                    result.addProperty("error", "addContent returned null");
+                } catch (Exception ignore) {
+                    result.addProperty("added", imageName);
                 }
-            } catch (Exception e) {
-                result.addProperty("error", "Failed to add content: " + e.getMessage());
-                if (e.getCause() != null) {
-                    result.addProperty("cause", e.getCause().getMessage());
+                result.addProperty("success", true);
+                result.addProperty("method", methodUsed);
+            } else {
+                // List available methods for debugging
+                StringBuilder methods = new StringBuilder();
+                for (java.lang.reflect.Method m : universeClass.getMethods()) {
+                    if ("addContent".equals(m.getName())) {
+                        methods.append(m.toString()).append("; ");
+                    }
                 }
+                result.addProperty("error", "addContent returned null via " + methodUsed);
+                result.addProperty("availableMethods", methods.toString());
             }
             return result;
 
@@ -1580,6 +1625,56 @@ public class TCPCommandServer {
             } else if (comp instanceof javax.swing.JSpinner) {
                 javax.swing.JSpinner spinner = (javax.swing.JSpinner) comp;
                 text.append("[spinner: ").append(spinner.getValue()).append("]\n");
+            }
+
+            // Catch-all: try reflection for unknown components (e.g. MultiLineLabel)
+            // that have getText(), getLabel(), or getMessage() methods
+            if (text.indexOf(comp.getClass().getSimpleName()) < 0) {
+                // Only if we haven't already extracted from this component type above
+                boolean alreadyHandled = (comp instanceof javax.swing.JLabel)
+                        || (comp instanceof java.awt.Label)
+                        || (comp instanceof javax.swing.JButton)
+                        || (comp instanceof java.awt.Button)
+                        || (comp instanceof javax.swing.JTextField)
+                        || (comp instanceof java.awt.TextField)
+                        || (comp instanceof javax.swing.JTextArea)
+                        || (comp instanceof java.awt.TextArea)
+                        || (comp instanceof javax.swing.JComboBox)
+                        || (comp instanceof java.awt.Choice)
+                        || (comp instanceof javax.swing.JCheckBox)
+                        || (comp instanceof java.awt.Checkbox)
+                        || (comp instanceof javax.swing.JSlider)
+                        || (comp instanceof java.awt.Scrollbar)
+                        || (comp instanceof javax.swing.JSpinner);
+
+                if (!alreadyHandled) {
+                    // Try getText()
+                    try {
+                        java.lang.reflect.Method m = comp.getClass().getMethod("getText");
+                        Object val = m.invoke(comp);
+                        if (val != null && !val.toString().trim().isEmpty()) {
+                            text.append(val.toString().trim()).append("\n");
+                        }
+                    } catch (Exception ignore) {}
+
+                    // Try getLabel()
+                    try {
+                        java.lang.reflect.Method m = comp.getClass().getMethod("getLabel");
+                        Object val = m.invoke(comp);
+                        if (val != null && !val.toString().trim().isEmpty()) {
+                            text.append(val.toString().trim()).append("\n");
+                        }
+                    } catch (Exception ignore) {}
+
+                    // Try getMessage()
+                    try {
+                        java.lang.reflect.Method m = comp.getClass().getMethod("getMessage");
+                        Object val = m.invoke(comp);
+                        if (val != null && !val.toString().trim().isEmpty()) {
+                            text.append(val.toString().trim()).append("\n");
+                        }
+                    } catch (Exception ignore) {}
+                }
             }
 
             // Recurse into child containers
