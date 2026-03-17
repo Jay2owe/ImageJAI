@@ -176,6 +176,13 @@ already provide.
 - This also speeds up execution 10-100x for batch operations
 - Some plugins still show dialogs even in batch mode — those need to be read
 
+### ALWAYS fix things, never work around them manually
+- The goal is COMPLETE autonomous control of ImageJ — no manual user steps
+- If something doesn't work (3D Viewer, dialog reading, snapshot), FIX THE CODE
+- Never say "you can do it manually" — that defeats the entire purpose
+- Every manual workaround is a failure to be addressed by editing the plugin code
+- If a feature is missing, add it. If a command is broken, fix it. Always.
+
 ### NEVER close the ImageJ/Fiji main window
 - The main toolbar window title is "Fiji" (NOT "ImageJ") in Fiji installations
 - `close("*")` will close it — NEVER use `close("*")` blindly
