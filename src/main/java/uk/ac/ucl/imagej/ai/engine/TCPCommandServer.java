@@ -1388,8 +1388,8 @@ public class TCPCommandServer {
             return result;
 
         } else if ("capture".equals(action)) {
-            // Use java.awt.Robot to screenshot the 3D Viewer window directly.
-            // This avoids the broken takeSnapshot() that produces a tiny image.
+            // Screenshot the 3D Viewer window using java.awt.Robot.
+            // Brings the window to front first to avoid overlapping windows.
             if (universe == null) {
                 result.addProperty("error", "3D Viewer not open");
                 return result;
@@ -1404,7 +1404,6 @@ public class TCPCommandServer {
                         break;
                     }
                 }
-                // Fallback: find any Frame with "3D" in the title
                 if (viewerWindow == null) {
                     for (java.awt.Window w : allWindows) {
                         if (w.isShowing() && w instanceof java.awt.Frame) {
@@ -1422,10 +1421,29 @@ public class TCPCommandServer {
                     return result;
                 }
 
-                // Screenshot the window using Robot
+                // Bring window to front and wait for it to render
+                final java.awt.Window finalWindow = viewerWindow;
+                SwingUtilities.invokeAndWait(new Runnable() {
+                    @Override
+                    public void run() {
+                        finalWindow.toFront();
+                        finalWindow.requestFocus();
+                    }
+                });
+                Thread.sleep(500); // Wait for window to come to front and repaint
+
+                // Capture just the content area (exclude title bar and borders)
                 java.awt.Rectangle bounds = viewerWindow.getBounds();
+                java.awt.Insets insets = viewerWindow.getInsets();
+                java.awt.Rectangle contentBounds = new java.awt.Rectangle(
+                        bounds.x + insets.left,
+                        bounds.y + insets.top,
+                        bounds.width - insets.left - insets.right,
+                        bounds.height - insets.top - insets.bottom
+                );
+
                 java.awt.Robot robot = new java.awt.Robot();
-                java.awt.image.BufferedImage screenshot = robot.createScreenCapture(bounds);
+                java.awt.image.BufferedImage screenshot = robot.createScreenCapture(contentBounds);
 
                 // Convert to ImagePlus and show
                 ImagePlus snap = new ImagePlus("3D_Render", screenshot);
@@ -1433,8 +1451,8 @@ public class TCPCommandServer {
 
                 result.addProperty("success", true);
                 result.addProperty("title", "3D_Render");
-                result.addProperty("width", bounds.width);
-                result.addProperty("height", bounds.height);
+                result.addProperty("width", contentBounds.width);
+                result.addProperty("height", contentBounds.height);
             } catch (Exception e) {
                 result.addProperty("error", "Capture failed: " + e.getMessage());
             }

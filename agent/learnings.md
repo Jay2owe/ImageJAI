@@ -151,8 +151,10 @@ already provide.
 - **3D Viewer snapshot issue**: `takeSnapshot()` and manual View > Take Snapshot
   both produce a tiny image in the corner of a large black canvas. The 3D Viewer
   renders at the correct zoom in its window but the snapshot doesn't match.
-  This is a known 3D Viewer bug. WORKAROUND NEEDED — possibly use OS-level
-  screenshot of the 3D Viewer window instead of the built-in snapshot.
+  This is a known 3D Viewer bug. FIXED: use `3d capture` instead of
+  `3d snapshot`. It uses java.awt.Robot to screenshot the actual window,
+  brings it to front first, waits for repaint, and crops out the title
+  bar/borders using window insets. Captures the content area only.
 - **3D Viewer API via TCP** — the `3d` commands work reliably:
   - `3d add IMAGE volume 50` — adds content (uses addContent(ImagePlus, int, int))
   - `3d fit` — calls resetView() to fit content
