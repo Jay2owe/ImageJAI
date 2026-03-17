@@ -133,6 +133,22 @@ When working with z-stacks:
 redirect does this automatically and correctly. Don't reinvent what plugins
 already provide.
 
+### 3D rendering: use actual 3D renderers, NOT orthogonal projections
+- Orthogonal XY/XZ/YZ montages are NOT 3D renders — they're flat 2D slices
+- Only use orthogonal views if the user specifically asks for them
+- For actual 3D rendering use:
+  - `3D Viewer` — interactive OpenGL volume/surface rendering (may block macro)
+  - `Volume Viewer` — simpler volume rendering (check exact parameter names)
+  - `3Dscript` — scriptable 3D animation/rendering (if installed)
+- If 3D plugins block the macro thread, the agent should detect the timeout
+  and inform the user that the 3D viewer is open for interactive use
+- The 3D Viewer CAN be controlled via `call()` functions:
+  ```
+  call("ij3d.ImageJ_3D_Viewer.add", "title", "None", "title", "50", "true", "true", "true", "2", "0");
+  call("ij3d.ImageJ_3D_Viewer.snapshot", "512", "512");
+  ```
+  But these may timeout — handle gracefully
+
 ### Save deliverables next to the source image, NOT in .tmp/
 - `.tmp/` is for agent working captures only (visual feedback for the agent)
 - When the user asks you to save/produce something, save it in an `AI_output/`
@@ -159,6 +175,21 @@ already provide.
 - Remember to `setBatchMode(false);` at the end
 - This also speeds up execution 10-100x for batch operations
 - Some plugins still show dialogs even in batch mode — those need to be read
+
+### NEVER close the ImageJ/Fiji main window
+- The main toolbar window title is "Fiji" (NOT "ImageJ") in Fiji installations
+- `close("*")` will close it — NEVER use `close("*")` blindly
+- `close_dialogs` with no pattern WAS closing it because the protection
+  only checked for "ImageJ" not "Fiji" — THIS BUG CAUSED THE TOOLBAR TO VANISH
+- Fixed: close_dialogs now protects "ImageJ", "Fiji", anything containing
+  "ImageJ", and checks against IJ.getInstance() directly
+- Always close windows BY NAME: `close("specific_title");`
+- Protected windows that must NEVER be closed:
+  - The main Fiji/ImageJ toolbar window
+  - The AI Assistant window
+- Before closing any window, verify its title is one YOU created
+- If toolbar vanishes, user must restart Fiji — there's no reliable macro
+  to restore it
 
 ### Clean up after yourself — no window clutter
 - Close temporary images, results tables, and plots as soon as you're done with them
