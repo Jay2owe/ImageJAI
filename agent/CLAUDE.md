@@ -337,7 +337,7 @@ If a macro fails, the response will have `"success": false` and an `"error"` fie
 
 ## Macro Reference
 
-See **`macro-reference.md`** in this directory for the complete ImageJ macro
+See **`references/macro-reference.md`** for the complete ImageJ macro
 command reference with syntax, examples, recipes, and best practices.
 
 ---
@@ -666,22 +666,30 @@ python auditor.py
 
 ## Reference Documents
 
-These are comprehensive reference files for agent use. Read them when you need
-detailed information about a specific analysis type, plugin, or method:
+All reference files live in `references/`. Read them when you need detailed
+information about a specific analysis type, plugin, or method:
 
-- **`analysis-landscape.md`** — 75+ analysis tasks across 15 research domains
-  with workflows, plugins, and automation opportunities
-- **`self-improving-agent-reference.md`** — plugin API patterns, automation
-  approaches, comparison matrices, parameter optimization strategies
-- **`domain-reference.md`** — microscopy modalities, quantitative methods,
-  quality control standards, decision trees for choosing approaches
-- **`macro-reference.md`** — ImageJ macro command reference
-- **`3dscript-reference.md`** — Complete 3Dscript animation language reference
-  (all keywords, rendering properties, easing, camera controls, common patterns)
-- **`colocalization-reference.md`** — Colocalization analysis expert reference
+- **`references/macro-reference.md`** — ImageJ macro command reference
+- **`references/3d-visualisation-reference.md`** — All 3D rendering, animation, cell isolation,
+  video export (3Dscript, 3D Viewer, 3D Project, ClearVolume, BDV, napari, FFmpeg)
+- **`references/3dscript-reference.md`** — 3Dscript animation language quick reference
+  (keywords, rendering properties, easing, camera controls, common patterns)
+- **`references/colocalization-reference.md`** — Colocalization analysis expert reference
   (PCC, Manders, Costes, 7 methods, 7 plugins, decision tree, reporting standards, pitfalls)
-- **`circadian-analysis-reference.md`** — Circadian rhythm analysis of organotypic slices
+- **`references/circadian-analysis-reference.md`** — Circadian rhythm analysis of organotypic slices
   (CHRONOS pipeline, FFT/wavelet/cosinor/JTK, detrending, phase maps, Kuramoto, CircaCompare)
+- **`references/circadian-imaging-reference.md`** — Circadian imaging protocols and analysis
+- **`references/if-postprocessing-reference.md`** — Immunofluorescence post-processing
+  (filtering, thresholding, deconvolution, pipelines, decision trees, journal guidelines)
+- **`references/3d-spatial-reference.md`** — Complete 3D spatial analysis reference
+  (~300 commands: 3D ImageJ Suite, MorphoLibJ, CLIJ2, AnalyzeSkeleton, DiAna,
+  3D Manager macro API, spatial statistics, 3D colocalization, morphometry, distances)
+- **`references/domain-reference.md`** — microscopy modalities, quantitative methods,
+  quality control standards, decision trees for choosing approaches
+- **`references/analysis-landscape.md`** — 75+ analysis tasks across 15 research domains
+  with workflows, plugins, and automation opportunities
+- **`references/self-improving-agent-reference.md`** — plugin API patterns, automation
+  approaches, comparison matrices, parameter optimization strategies
 
 ---
 
