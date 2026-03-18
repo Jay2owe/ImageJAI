@@ -35,6 +35,9 @@ import java.util.List;
 import java.util.Properties;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import javax.script.ScriptEngine;
+import javax.script.ScriptEngineManager;
+import javax.script.ScriptException;
 
 /**
  * TCP server that accepts JSON commands from external clients (Claude CLI,
@@ -319,6 +322,8 @@ public class TCPCommandServer {
             return handleCloseDialogs(request);
         } else if ("probe_command".equals(command)) {
             return handleProbeCommand(request);
+        } else if ("run_script".equals(command)) {
+            return handleRunScript(request);
         } else {
             return errorResponse("Unknown command: " + command);
         }
@@ -383,6 +388,59 @@ public class TCPCommandServer {
             }
         } catch (Exception ignore) {
             // Dialog detection is best-effort
+        }
+
+        return successResponse(result);
+    }
+
+    private JsonObject handleRunScript(JsonObject request) {
+        JsonElement langElement = request.get("language");
+        String language = langElement != null && langElement.isJsonPrimitive()
+                ? langElement.getAsString()
+                : "groovy";
+
+        JsonElement codeElement = request.get("code");
+        if (codeElement == null || !codeElement.isJsonPrimitive()) {
+            return errorResponse("Missing 'code' field for run_script");
+        }
+        final String code = codeElement.getAsString();
+
+        JsonObject result = new JsonObject();
+
+        try {
+            long startTime = System.currentTimeMillis();
+
+            ScriptEngineManager manager = new ScriptEngineManager();
+            ScriptEngine engine = manager.getEngineByName(language);
+
+            if (engine == null) {
+                return errorResponse("ScriptEngine not found for language: " + language
+                        + ". Available: groovy, jython, javascript");
+            }
+
+            Object scriptResult = engine.eval(code);
+            long elapsed = System.currentTimeMillis() - startTime;
+
+            result.addProperty("success", true);
+            result.addProperty("language", language);
+            result.addProperty("output", scriptResult != null ? scriptResult.toString() : "");
+            result.addProperty("executionTimeMs", elapsed);
+
+        } catch (ScriptException e) {
+            result.addProperty("success", false);
+            result.addProperty("error", "Script error: " + e.getMessage());
+            result.addProperty("language", language);
+        } catch (Exception e) {
+            result.addProperty("success", false);
+            result.addProperty("error", "Error: " + e.getMessage());
+        }
+
+        try {
+            JsonArray dialogs = detectOpenDialogs();
+            if (dialogs.size() > 0) {
+                result.add("dialogs", dialogs);
+            }
+        } catch (Exception ignore) {
         }
 
         return successResponse(result);

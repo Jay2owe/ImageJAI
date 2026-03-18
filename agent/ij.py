@@ -293,6 +293,47 @@ def main():
             print(json.dumps(imagej_command(
                 {"command": "probe_command", "plugin": plugin_name}), indent=2))
 
+        elif cmd == "script":
+            # Run a Groovy (or other language) script inside Fiji's JVM
+            if len(sys.argv) < 3:
+                print("Usage: python ij.py script 'groovy code'")
+                print("       python ij.py script --file path/to/script.groovy")
+                print("       python ij.py script --lang jython 'python code'")
+                sys.exit(1)
+            language = "groovy"
+            code = None
+            i = 2
+            while i < len(sys.argv):
+                if sys.argv[i] == "--lang" and i + 1 < len(sys.argv):
+                    language = sys.argv[i + 1]
+                    i += 2
+                elif sys.argv[i] == "--file" and i + 1 < len(sys.argv):
+                    with open(sys.argv[i + 1], "r") as f:
+                        code = f.read()
+                    i += 2
+                else:
+                    code = " ".join(sys.argv[i:])
+                    break
+            if not code:
+                print("No code provided")
+                sys.exit(1)
+            resp = imagej_command(
+                {"command": "run_script", "language": language, "code": code},
+                timeout=180)
+            print(json.dumps(resp, indent=2))
+            # Show dialogs if any
+            dlgs = []
+            if resp.get("ok") and resp.get("result", {}).get("dialogs"):
+                dlgs = resp["result"]["dialogs"]
+            if dlgs:
+                print("\n*** DIALOGS DETECTED ({}) ***".format(len(dlgs)))
+                for d in dlgs:
+                    print("  [{}] {}: {}".format(
+                        d.get("type", "?").upper(),
+                        d.get("title", ""),
+                        d.get("text", "").strip()[:200]
+                    ))
+
         elif cmd == "raw":
             if len(sys.argv) < 3:
                 print("Usage: python ij.py raw '{\"command\": \"ping\"}'")
