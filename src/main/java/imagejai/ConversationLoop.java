@@ -155,6 +155,19 @@ public class ConversationLoop implements ChatPanel.ChatListener {
         String stateContext = stateInspector.buildStateContext();
         String contextBlock = PromptTemplates.buildContextBlock(stateContext);
 
+        // Check for /adviser toggle command
+        if (userText.trim().equalsIgnoreCase("/adviser")
+                || userText.trim().equalsIgnoreCase("/advisor")
+                || userText.trim().equalsIgnoreCase("/advise")) {
+            boolean nowActive = orchestrator.toggleAdviserMode();
+            String modeMsg = nowActive
+                    ? "Adviser mode ON — I'll answer questions and recommend approaches without executing anything. Type /adviser again to switch back to execution mode."
+                    : "Adviser mode OFF — back to normal execution mode. I'll run macros and process images again.";
+            history.add(Message.assistant(modeMsg));
+            showAssistantMessage(modeMsg);
+            return;
+        }
+
         // Check if a specialist agent should handle this request
         AgentOrchestrator.AgentType agentType = orchestrator.classifyIntent(userText);
         if (agentType != AgentOrchestrator.AgentType.GENERAL) {
@@ -162,6 +175,28 @@ public class ConversationLoop implements ChatPanel.ChatListener {
             if (agentLabel != null) {
                 showStatus(agentLabel + " processing...");
             }
+
+            // ADVISER: use adviser prompt, call LLM, but skip macro extraction
+            if (agentType == AgentOrchestrator.AgentType.ADVISER) {
+                String adviserPrompt = PromptTemplates.getAdviserSystemPrompt()
+                        + "\n\n" + contextBlock;
+                LLMResponse adviserResponse;
+                if (useVision && imageBytes != null) {
+                    adviserResponse = backend.chatWithVision(history, adviserPrompt, imageBytes);
+                } else {
+                    adviserResponse = backend.chat(history, adviserPrompt);
+                }
+                if (adviserResponse.isSuccess()) {
+                    String content = adviserResponse.getContent();
+                    history.add(Message.assistant(content));
+                    trimHistory();
+                    showAssistantMessage((agentLabel != null ? agentLabel + "\n" : "") + content);
+                } else {
+                    showAssistantMessage("Adviser error: " + adviserResponse.getError());
+                }
+                return;
+            }
+
             String specialistResponse = orchestrator.processWithSpecialist(
                     agentType, userText, stateContext, history);
             if (specialistResponse != null) {

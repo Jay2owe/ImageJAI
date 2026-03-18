@@ -34,7 +34,9 @@ public class AgentOrchestrator {
         /** Statistical tests, plots, data export. */
         STATISTICS,
         /** Hypothesis-driven analysis design. */
-        HYPOTHESIS
+        HYPOTHESIS,
+        /** Advisory mode — answers questions without executing anything. */
+        ADVISER
     }
 
     // Keyword patterns for intent classification (case-insensitive)
@@ -72,10 +74,25 @@ public class AgentOrchestrator {
             + "|\\bis\\s+\\w+\\s+decreased\\b",
             Pattern.CASE_INSENSITIVE);
 
+    private static final Pattern ADVISER_PATTERN = Pattern.compile(
+            "\\b(how\\s+(do|can|should|would|to)|what\\s+(is|are|does|plugin|tool)"
+            + "|recommend|suggest|advise|explain|tutorial"
+            + "|best\\s+(way|method|plugin|approach|practice)"
+            + "|which\\s+(plugin|method|approach|tool)"
+            + "|difference\\s+between|pros\\s+and\\s+cons"
+            + "|when\\s+to\\s+use|when\\s+should"
+            + "|install|alternative|compare|versus|\\bvs\\b"
+            + "|what\\s+plugin|why\\s+(do|should|is|does)"
+            + "|can\\s+you\\s+explain|tell\\s+me\\s+about)\\b",
+            Pattern.CASE_INSENSITIVE);
+
     private LLMBackend backend;
     private final CommandEngine commandEngine;
     private final ExplorationEngine explorationEngine;
     private final Settings settings;
+
+    /** When true, ALL messages route through the adviser (no macro execution). */
+    private boolean adviserMode = false;
 
     // Specialist agents
     private SegmentationAgent segmentationAgent;
@@ -117,6 +134,11 @@ public class AgentOrchestrator {
             return AgentType.GENERAL;
         }
 
+        // If adviser mode is locked on, everything goes to adviser
+        if (adviserMode) {
+            return AgentType.ADVISER;
+        }
+
         String lower = userMessage.toLowerCase(Locale.ROOT);
 
         // Check each specialist pattern. Priority order matters for ambiguous messages:
@@ -124,6 +146,20 @@ public class AgentOrchestrator {
         if (HYPOTHESIS_PATTERN.matcher(lower).find()) {
             return AgentType.HYPOTHESIS;
         }
+
+        // Advisory questions — checked before action agents so "how do I threshold"
+        // gets advice rather than executing a threshold
+        if (ADVISER_PATTERN.matcher(lower).find()) {
+            // But if the message also has strong action words, let action agents handle it
+            boolean hasAction = lower.contains("run ") || lower.contains("open ")
+                    || lower.contains("do it") || lower.contains("go ahead")
+                    || lower.contains("please do") || lower.contains("execute")
+                    || lower.contains("apply") || lower.contains("perform");
+            if (!hasAction) {
+                return AgentType.ADVISER;
+            }
+        }
+
         if (SEGMENTATION_PATTERN.matcher(lower).find()) {
             return AgentType.SEGMENTATION;
         }
@@ -138,6 +174,17 @@ public class AgentOrchestrator {
         }
 
         return AgentType.GENERAL;
+    }
+
+    /** Toggle persistent adviser mode on/off. */
+    public boolean toggleAdviserMode() {
+        adviserMode = !adviserMode;
+        return adviserMode;
+    }
+
+    /** Check if adviser mode is active. */
+    public boolean isAdviserMode() {
+        return adviserMode;
     }
 
     /**
@@ -165,6 +212,10 @@ public class AgentOrchestrator {
                 return statsAgent.process(userMessage, stateContext, history);
             case HYPOTHESIS:
                 return hypothesisAgent.process(userMessage, stateContext, history);
+            case ADVISER:
+                // Adviser is handled in ConversationLoop with a special system prompt
+                // Return null so it falls through to the general handler with adviser prompt
+                return null;
             default:
                 return null;
         }
@@ -188,6 +239,8 @@ public class AgentOrchestrator {
                 return "[Statistics Agent]";
             case HYPOTHESIS:
                 return "[Hypothesis Agent]";
+            case ADVISER:
+                return "[Analysis Adviser]";
             default:
                 return null;
         }
