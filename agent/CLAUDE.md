@@ -33,6 +33,9 @@ python ij.py 3d list                                  # 3D Viewer: list loaded c
 python ij.py 3d snapshot 512 512                      # 3D Viewer: capture the view
 python ij.py 3d close                                 # 3D Viewer: close
 python ij.py probe "Gaussian Blur..."                 # discover plugin parameters
+python ij.py script 'println("hello")'                # run Groovy inside Fiji's JVM
+python ij.py script --file path/to/script.groovy      # run Groovy file
+python ij.py script --lang jython 'print("hello")'   # run Jython script
 python ij.py raw '{"command": "ping"}'                # raw JSON command
 ```
 
@@ -271,6 +274,40 @@ generates example macro syntax, then cancels the dialog without executing.
 guessing at macro arguments. For choice/dropdown fields, the response includes
 ALL available options so you know exactly what values are valid.
 
+### run_script — Execute Groovy/Jython/JavaScript inside Fiji's JVM
+```json
+{"command": "run_script", "code": "println('hello')", "language": "groovy"}
+→ {"ok": true, "result": {"success": true, "language": "groovy", "output": "hello", "executionTimeMs": 100}}
+```
+Runs arbitrary scripts inside Fiji's JVM via javax.script.ScriptEngine.
+Default language is Groovy. Also supports "jython" and "javascript".
+This gives full access to Java APIs, Swing components, and plugin internals.
+
+**Key use cases:**
+- Toggle Swing UI checkboxes that macros can't reach (e.g., 3Dscript raycaster)
+- Direct Java API calls to plugins
+- Complex control flow not possible in ImageJ macro language
+
+**Helper:** `python ij.py script 'code'` or `python ij.py script --file script.groovy`
+
+**Example — toggle 3Dscript checkboxes:**
+```groovy
+import javax.swing.JCheckBox
+import java.awt.Window
+import java.awt.Container
+import java.awt.Component
+def walk(Container c) {
+    c.getComponents().each { x ->
+        if (x instanceof JCheckBox) {
+            if (x.getText()?.contains('Bounding') && x.isSelected()) x.doClick()
+            if (x.getText()?.contains('light') && !x.isSelected()) x.doClick()
+        }
+        if (x instanceof Container) walk(x)
+    }
+}
+Window.getWindows().findAll { it.class.name.contains('animation3d') }.each { walk(it) }
+```
+
 ---
 
 ## Your Workflow
@@ -341,9 +378,49 @@ python ij.py macro '
 **Step 2: Render (choose method)**
 ```bash
 # --- 3Dscript (best quality) ---
+# Menu commands:
+#   run("Interactive Animation");  ← opens Interactive Raycaster GUI + 3D canvas (linked pair)
+#   run("Batch Animation", "animation=[/path/to/file.txt]");  ← headless render to .avi stack
+# NOTE: "Interactive Raycaster" is NOT a valid command — use "Interactive Animation"
+#
+# IMPORTANT: The Interactive Raycaster dialog and 3D Animation window are a LINKED PAIR.
+# Closing one makes the other uncontrollable. You cannot reuse a dialog for a different image.
+# Batch Animation creates its OWN separate renderer — it does NOT inherit Interactive settings.
+#
+# RENDERING SETTINGS IN ANIMATION TEXT (the correct way):
+# All rendering settings can be controlled directly in the animation script:
+#   - change all channels' lighting to on          ← enables shading/depth
+#   - change all channels' object light to 1       ← light intensity
+#   - change channel 1 object light to 0.8         ← per-channel light
+#   - change bounding box visibility to off         ← removes wireframe edges
+#   - change scalebar visibility to off             ← removes scale overlay
+#   - change channel 1 front clipping to 1000      ← hide a channel
+#   - change all channels' weight to 1              ← channel visibility weight
+# These go in the "At frame 0:" block before rotation commands.
+#
+# For Swing checkbox toggling (if needed), use run_script with Groovy:
+#   python ij.py script --file .tmp/toggle_3dscript.groovy
+#
+# Animation text keywords:
+#   "horizontally" = X-axis rotation, "vertically" = Y-axis rotation
+#   "around (1,0,0)" = custom axis rotation
+#   "ease-in", "ease-out", "ease-in-out" = easing
+#   "zoom by a factor of N" = zoom
+#   "translate horizontally/vertically by N" = pan
+#
+# Example animation script with all settings:
+# ```
+# At frame 0:
+# - change all channels' lighting to on
+# - change all channels' object light to 1
+# - change bounding box visibility to off
+# From frame 0 to frame 100 rotate by 360 degrees vertically
+# ```
+#
+# Example scripts: ~/UK Dementia Research Institute Dropbox/Brancaccio Lab/Jamie/Macros and Scripts/3D Scripts/
+#
 python ij.py macro 'selectWindow("isolated"); run("8-bit");
   run("Scale...", "x=10 y=10 z=1.0 interpolation=Bicubic process create title=cell_big");'
-# Write rotate.animation.txt: "From frame 0 to frame 100 rotate by 360 degrees horizontally"
 python ij.py macro 'selectWindow("cell_big");
   run("Batch Animation", "animation=[/path/to/rotate.animation.txt]");'
 # NOTE: Do NOT Z-interpolate for 3Dscript — dims the signal below alpha threshold
@@ -473,14 +550,14 @@ user to do it through the Fiji updater GUI.
 ## Known Issues & Limitations
 
 ### Fiji deployment path
-The user runs Fiji from: `C:\Users\jamie\OneDrive - Imperial College London\ImageJ\Fiji.app`
-NOT from the Dropbox Fiji.app. Always deploy JARs to the OneDrive path.
+Deploy JARs to the Dropbox Fiji.app plugins directory.
 
 ### Build & deploy
 ```bash
-cd "C:\Users\jamie\UK Dementia Research Institute Dropbox\Brancaccio Lab\Jamie\Experiments\ImageJAI"
-mvn clean package -q
-cp target/imagej-ai-0.1.0-SNAPSHOT.jar "C:\Users\jamie\OneDrive - Imperial College London\ImageJ\Fiji.app\plugins\"
+cd "C:\Users\Owner\UK Dementia Research Institute Dropbox\Brancaccio Lab\Jamie\Experiments\ImageJAI"
+export JAVA_HOME="/c/Program Files/Eclipse Adoptium/jdk-17.0.18.8-hotspot"
+/c/Users/Owner/apache-maven-3.9.6/bin/mvn clean package -q
+cp target/imagej-ai-0.1.0-SNAPSHOT.jar "C:\Users\Owner\UK Dementia Research Institute Dropbox\Brancaccio Lab\Jamie\Fiji.app\plugins\"
 ```
 User must restart Fiji after deploying. Fiji caches classes — hot-reload does NOT work.
 
@@ -599,6 +676,12 @@ detailed information about a specific analysis type, plugin, or method:
 - **`domain-reference.md`** — microscopy modalities, quantitative methods,
   quality control standards, decision trees for choosing approaches
 - **`macro-reference.md`** — ImageJ macro command reference
+- **`3dscript-reference.md`** — Complete 3Dscript animation language reference
+  (all keywords, rendering properties, easing, camera controls, common patterns)
+- **`colocalization-reference.md`** — Colocalization analysis expert reference
+  (PCC, Manders, Costes, 7 methods, 7 plugins, decision tree, reporting standards, pitfalls)
+- **`circadian-analysis-reference.md`** — Circadian rhythm analysis of organotypic slices
+  (CHRONOS pipeline, FFT/wavelet/cosinor/JTK, detrending, phase maps, Kuramoto, CircaCompare)
 
 ---
 
@@ -670,6 +753,9 @@ recipes are for generalisable workflows.
   errors before they propagate to papers.
 - **Create recipes for new workflows** — if you solve a task that has no recipe,
   create one in `recipes/` so the next agent has it. Keep recipes generalisable.
+- **ALWAYS close error dialogs immediately** — after any macro execution that
+  produces a dialog (error or otherwise), run `python ij.py close_dialogs` right
+  away. Never leave dialogs sitting open for the user to deal with.
 - If a macro fails, try to fix it (up to 3 attempts)
 - Show the user what you're doing and why
 - For multi-step tasks, explain the plan before executing

@@ -124,9 +124,28 @@ echo '{"command": "get_state"}' | nc localhost 7746
 echo '{"command": "capture_image"}' | nc localhost 7746
 ```
 
-Available commands: `ping`, `execute_macro`, `get_state`, `get_image_info`, `get_results_table`, `capture_image`, `run_pipeline`, `explore_thresholds`, `get_state_context`, `batch`
+Available commands: `ping`, `execute_macro`, `get_state`, `get_image_info`, `get_results_table`, `capture_image`, `run_pipeline`, `explore_thresholds`, `get_state_context`, `batch`, `get_log`, `get_histogram`, `get_open_windows`, `get_metadata`, `get_pixels`, `3d_viewer`, `get_dialogs`, `close_dialogs`, `probe_command`, `run_script`
+
+The `run_script` command executes Groovy/Jython/JavaScript code directly inside Fiji's JVM — enabling access to any Java API, Swing component manipulation, and plugin internals that macros can't reach.
 
 This is completely optional — the plugin works fully without it.
+
+## Agent Directory
+
+The `agent/` directory contains a complete AI agent toolkit for controlling ImageJ via the TCP server:
+
+- **`ij.py`** — Python CLI helper for all TCP commands (macro, capture, state, script, etc.)
+- **`pixels.py`** — Python-side pixel analysis (stats, cell detection, line profiles)
+- **`adviser.py`** — Research-only analysis consultant (no TCP needed)
+- **`auditor.py`** — Validate measurement results for sanity
+- **`recipes/`** — 21+ YAML analysis recipes (colocalization, cell counting, CTCF, etc.)
+- **Reference documents:**
+  - `3dscript-reference.md` — Complete 3Dscript animation language reference
+  - `colocalization-reference.md` — Colocalization analysis expert reference
+  - `circadian-analysis-reference.md` — Circadian rhythm analysis reference
+  - `macro-reference.md` — ImageJ macro command reference
+  - `domain-reference.md` — Microscopy methods and quality control
+  - `analysis-landscape.md` — 75+ analysis tasks across 15 research domains
 
 ## License
 
