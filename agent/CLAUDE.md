@@ -521,6 +521,17 @@ These are in this directory and can be imported or run directly:
   warnings = lint_macro('run("Blobs (25K)")')
   ```
 
+- **`adviser.py`** — research-only analysis consultant. No TCP needed. Searches
+  recipes, installed commands, update sites, and reference docs to answer questions.
+  ```bash
+  python adviser.py "colocalization"                   # general query
+  python adviser.py --plugins "deconvolution"          # search plugins
+  python adviser.py --install "ilastik"                # installation help
+  python adviser.py --recipe "cell counting"           # find recipes
+  python adviser.py --macro "count cells in z-stack"   # suggest macro code
+  python adviser.py --compare "StarDist vs Cellpose"   # compare approaches
+  ```
+
 - **`recipe_search.py`** — find and recommend analysis recipes from the recipe book.
   ```bash
   python recipe_search.py "count cells"           # search by keyword
