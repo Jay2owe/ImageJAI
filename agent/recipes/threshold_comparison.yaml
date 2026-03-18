@@ -1,0 +1,98 @@
+name: Threshold Method Comparison
+id: threshold_comparison
+description: >
+  Compare multiple auto-threshold methods side by side and recommend the
+  best one for the current image. Uses the explore_thresholds command to
+  test methods and evaluate by particle count, coverage, and mean size.
+domain: preprocessing
+difficulty: beginner
+
+preconditions:
+  image_type: [8-bit, 16-bit]
+  min_channels: 1
+  needs_stack: false
+  needs_calibration: false
+  notes: "Best applied after background subtraction and optional denoising."
+
+parameters:
+  - name: methods
+    label: "Methods to compare"
+    type: string
+    default: "Otsu Triangle Li Huang MaxEntropy"
+    description: "Space-separated list of ImageJ auto-threshold method names."
+
+  - name: dark_background
+    label: "Dark background"
+    type: boolean
+    default: true
+    description: "true for fluorescence (bright objects on dark), false for brightfield."
+
+  - name: min_size
+    label: "Minimum particle size for evaluation"
+    type: numeric
+    default: 50
+    range: [1, 10000]
+    description: "Used when counting particles to evaluate each threshold."
+
+steps:
+  - id: 1
+    description: "Check the current image histogram"
+    macro: |
+      // Agent should run: python ij.py histogram
+      // Look for bimodal distribution (two peaks = easy threshold)
+      // or unimodal (one peak = harder, may need pre-processing)
+    decision_point: true
+    decision_logic: >
+      If histogram is clearly bimodal, Otsu will work well. If foreground is a
+      small fraction (<10%), Triangle is better. If the image is noisy with
+      gradual transitions, Huang works well. For fluorescence with variable
+      background, Li minimizes cross-entropy.
+    capture_after: true
+    validate: "Note histogram shape: bimodal, unimodal, or skewed."
+
+  - id: 2
+    description: "Run explore_thresholds to compare all methods"
+    macro: |
+      // Agent should run: python ij.py explore ${methods}
+      // This tests each method and returns:
+      // - particle count
+      // - coverage percentage
+      // - mean particle size
+      // - recommended method
+    decision_point: false
+    decision_logic: ""
+    capture_after: false
+    validate: "explore_thresholds should return results for each method."
+
+  - id: 3
+    description: "Apply the recommended threshold"
+    macro: |
+      run("Duplicate...", "title=thresholded");
+      setAutoThreshold("${recommended_method}");
+      run("Convert to Mask");
+    decision_point: true
+    decision_logic: >
+      The recommended method is a starting point. Visually verify the mask
+      matches the expected objects. If the recommendation looks wrong,
+      try the second-best method. The agent should capture and compare.
+    capture_after: true
+    validate: "Binary mask should cleanly separate foreground objects from background."
+
+outputs:
+  - type: measurement
+    description: "Comparison table showing particle count, coverage, mean size for each method."
+  - type: image
+    description: "Binary mask using the recommended threshold method."
+
+known_issues:
+  - condition: "All methods give poor results"
+    symptom: "No method cleanly separates foreground from background"
+    fix: "Pre-process first: apply background subtraction, denoising, or try manual threshold based on histogram."
+  - condition: "explore_thresholds times out"
+    symptom: "Command takes too long on very large images"
+    fix: "Crop to a representative region first, find the best method, then apply to the full image."
+  - condition: "'Default dark' too aggressive"
+    symptom: "Everything merges into one object"
+    fix: "Use 'Default' without 'dark', or switch to Otsu/Triangle."
+
+tags: [threshold, comparison, otsu, triangle, li, huang, binary, segmentation, preprocessing]

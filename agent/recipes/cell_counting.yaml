@@ -1,0 +1,147 @@
+name: Cell Counting (Threshold + Analyze Particles)
+id: cell_counting
+description: >
+  Count cells or nuclei using auto-thresholding, watershed separation, and
+  Analyze Particles. Works well for round, well-separated objects (nuclei,
+  beads, blobs). For dense or overlapping cells, use cell_counting_stardist instead.
+domain: cell_biology
+difficulty: beginner
+
+preconditions:
+  image_type: [8-bit, 16-bit]
+  min_channels: 1
+  needs_stack: false
+  needs_calibration: false
+  notes: "Works on single-channel grayscale images. For multi-channel, split channels first."
+
+parameters:
+  - name: blur_sigma
+    label: "Gaussian blur sigma"
+    type: numeric
+    default: 1
+    range: [0, 5]
+    description: "Smoothing to reduce noise before thresholding. 0=none, 1-2 typical for microscopy."
+
+  - name: threshold_method
+    label: "Threshold method"
+    type: choice
+    default: "Otsu"
+    options: ["Otsu", "Triangle", "Li", "Huang", "MaxEntropy", "Default"]
+    description: "Otsu for bimodal histograms, Triangle when foreground is small, Li for fluorescence."
+
+  - name: dark_background
+    label: "Dark background"
+    type: boolean
+    default: true
+    description: "true for fluorescence (bright objects on dark), false for brightfield (dark objects on light)."
+
+  - name: min_size
+    label: "Minimum particle size (pixels)"
+    type: numeric
+    default: 50
+    range: [1, 10000]
+    description: "Objects smaller than this are filtered as noise."
+
+  - name: max_size
+    label: "Maximum particle size (pixels)"
+    type: numeric
+    default: 5000
+    range: [100, 999999]
+    description: "Objects larger than this are filtered (merged clusters)."
+
+  - name: min_circularity
+    label: "Minimum circularity"
+    type: numeric
+    default: 0.5
+    range: [0.0, 1.0]
+    description: "0=any shape, 1=perfect circle. 0.5 filters elongated debris."
+
+  - name: watershed
+    label: "Apply watershed"
+    type: boolean
+    default: true
+    description: "Separate touching objects. Essential for clustered nuclei."
+
+  - name: exclude_edges
+    label: "Exclude edge objects"
+    type: boolean
+    default: true
+    description: "Ignore objects touching the image border (incomplete cells)."
+
+steps:
+  - id: 1
+    description: "Duplicate the image to preserve the original"
+    macro: |
+      run("Duplicate...", "title=mask");
+    decision_point: false
+    decision_logic: ""
+    capture_after: false
+    validate: ""
+
+  - id: 2
+    description: "Apply Gaussian blur to reduce noise"
+    macro: |
+      run("Gaussian Blur...", "sigma=${blur_sigma}");
+    decision_point: false
+    decision_logic: ""
+    capture_after: false
+    validate: ""
+
+  - id: 3
+    description: "Auto-threshold to create binary mask"
+    macro: |
+      setAutoThreshold("${threshold_method}");
+      run("Convert to Mask");
+    decision_point: true
+    decision_logic: >
+      Check histogram first. If bimodal (two clear peaks), use Otsu. If foreground
+      is a small fraction of the image, use Triangle. For fluorescence with variable
+      background, try Li. If the mask looks wrong (too much or too little selected),
+      try a different method or use explore_thresholds to compare all methods.
+    capture_after: true
+    validate: "The mask should show white objects on black background. Objects should roughly match visible cells."
+
+  - id: 4
+    description: "Watershed to separate touching objects"
+    macro: |
+      run("Watershed");
+    decision_point: true
+    decision_logic: >
+      Only apply if cells are touching/clustered. Skip if cells are well-separated
+      (watershed can over-split elongated objects). Capture and compare before/after.
+    capture_after: true
+    validate: "Previously merged clusters should now show separation lines. Individual cells should not be split."
+
+  - id: 5
+    description: "Count and measure particles"
+    macro: |
+      run("Set Measurements...", "area mean min centroid shape redirect=None decimal=3");
+      run("Analyze Particles...", "size=${min_size}-${max_size} circularity=${min_circularity}-1.00 show=Outlines display summarize exclude");
+    decision_point: false
+    decision_logic: ""
+    capture_after: true
+    validate: "Particle count should be reasonable (10-5000 for typical images). Check outlines match visible cells."
+
+outputs:
+  - type: results_table
+    description: "Per-particle measurements: Area, Mean intensity, Circularity, Centroid (x,y)"
+  - type: image
+    description: "Outlines image showing detected particles numbered"
+  - type: measurement
+    description: "Summary row with count, mean area, and standard deviation"
+
+known_issues:
+  - condition: "Using 'Default dark' threshold on certain images"
+    symptom: "All foreground merges into one giant object"
+    fix: "Use 'Default' without 'dark', or switch to 'Otsu' method"
+  - condition: "Dense cell clusters"
+    symptom: "Watershed cannot separate all touching cells"
+    fix: "Use cell_counting_stardist recipe instead, or increase blur sigma to smooth before thresholding"
+  - condition: "Very noisy images"
+    symptom: "Many small false detections"
+    fix: "Increase blur_sigma to 2-3, increase min_size, or apply Median filter (radius=2) instead of Gaussian"
+  - condition: "Uneven illumination"
+    symptom: "Threshold works on one side but not the other"
+    fix: "Apply background_subtraction recipe first (rolling ball), then threshold"
+
+tags: [cells, counting, nuclei, threshold, watershed, analyze_particles, beginner]

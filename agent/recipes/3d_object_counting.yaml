@@ -1,0 +1,129 @@
+name: 3D Object Counting
+id: 3d_object_counting
+description: >
+  Count and measure objects in 3D using the 3D Objects Counter plugin.
+  Segments connected components in a z-stack and reports volume, surface area,
+  centroid coordinates, and intensity statistics per object.
+domain: 3d
+difficulty: advanced
+
+preconditions:
+  image_type: [8-bit, 16-bit]
+  min_channels: 1
+  needs_stack: true
+  needs_calibration: true
+  notes: >
+    Requires a z-stack. Calibration (voxel dimensions) is needed for volume
+    measurements in real units. The 3D ImageJ Suite must be installed (it is
+    in this Fiji, with 64 3D commands).
+
+parameters:
+  - name: threshold
+    label: "Intensity threshold"
+    type: numeric
+    default: 128
+    range: [1, 65535]
+    description: "Voxels above this value are foreground. Set based on histogram analysis."
+
+  - name: min_volume
+    label: "Minimum object volume (voxels)"
+    type: numeric
+    default: 200
+    range: [10, 100000]
+    description: "Filter out small noise objects. In calibrated units if calibration is set."
+
+  - name: max_volume
+    label: "Maximum object volume (voxels)"
+    type: numeric
+    default: 999999
+    range: [1000, 9999999]
+    description: "Filter out very large merged objects."
+
+  - name: redirect_image
+    label: "Redirect measurements to original"
+    type: string
+    default: ""
+    description: >
+      Title of the original (unfiltered) image to measure intensities from.
+      Segment on filtered image, measure on original. Leave empty to measure
+      from the thresholded image.
+
+steps:
+  - id: 1
+    description: "Pre-process the stack for segmentation"
+    macro: |
+      run("Duplicate...", "title=for_3d_seg duplicate");
+      run("Gaussian Blur 3D...", "x=2 y=2 z=1");
+    decision_point: true
+    decision_logic: >
+      The z-sigma should be smaller than xy-sigma because confocal z-steps are
+      typically 3-5x coarser than XY pixels. Check metadata for voxel dimensions.
+      If isotropic voxels, use equal sigma in all dimensions.
+    capture_after: true
+    validate: "Stack should be smoothed. Scroll through z-slices to verify objects are visible."
+
+  - id: 2
+    description: "Determine threshold from histogram"
+    macro: |
+      // Agent should run: python ij.py histogram
+      // Find the valley between background and foreground peaks
+      // Or use: python ij.py explore Otsu Triangle Li
+      // to find the best auto-threshold value
+    decision_point: true
+    decision_logic: >
+      Check the histogram for a clear separation between background and signal.
+      Use the explore_thresholds command to compare methods. For fluorescence
+      data, the threshold should be set just above the background peak. For
+      variable-intensity stacks, consider per-slice adaptive threshold.
+    capture_after: false
+    validate: "Threshold value should separate background from objects when applied."
+
+  - id: 3
+    description: "Run 3D Objects Counter"
+    macro: |
+      run("3D Objects Counter", "threshold=${threshold} slice=10 min.=${min_volume} max.=${max_volume} objects surfaces statistics summary");
+    decision_point: true
+    decision_logic: >
+      If redirect_image is specified, add redirect=IMAGE_TITLE to measure
+      intensities from the original unfiltered image while segmenting on the
+      filtered copy. This is the recommended approach — segment on filtered,
+      measure on original.
+    capture_after: true
+    validate: "Objects map should show individually labeled objects in different colors. Check count is reasonable."
+
+  - id: 4
+    description: "Review 3D object statistics"
+    macro: |
+      // Results are in the Statistics table
+      // Agent should check: python ij.py results
+      // Columns: Volume, Surface, IntDen, Mean, Centroid X/Y/Z
+    decision_point: false
+    decision_logic: ""
+    capture_after: false
+    validate: "Statistics table should have one row per 3D object with volume and position."
+
+outputs:
+  - type: image
+    description: "Objects map: label image where each voxel has the ID of its parent object (0 = background)."
+  - type: image
+    description: "Surfaces map: surface voxels of each object labeled."
+  - type: results_table
+    description: "Per-object statistics: Volume, Surface area, Mean intensity, IntDen, Centroid (x,y,z)."
+  - type: measurement
+    description: "Summary: total object count, mean volume, volume distribution."
+
+known_issues:
+  - condition: "Anisotropic voxels not calibrated"
+    symptom: "Volume measurements are wrong because Z spacing is assumed = XY pixel size"
+    fix: "Set calibration first: run('Properties...', 'pixel_width=0.325 pixel_height=0.325 voxel_depth=1.0 unit=um');"
+  - condition: "Objects touching in Z but separated in XY"
+    symptom: "Separate objects merged into one because they share a voxel in Z"
+    fix: "Apply 3D watershed (3D Watershed Split) to separate touching objects."
+  - condition: "Using max projection to count 3D objects"
+    symptom: "Objects overlapping in Z are counted as one, count is underestimated"
+    fix: "ALWAYS use 3D Objects Counter for 3D data. Never flatten to 2D for counting."
+  - condition: "Very large stack (>2GB)"
+    symptom: "Out of memory during 3D connected components analysis"
+    fix: "Increase Fiji memory (Edit > Options > Memory) or crop to region of interest."
+
+tags: [3d, counting, objects, volume, segmentation, z_stack, connected_components]

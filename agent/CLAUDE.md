@@ -32,7 +32,17 @@ python ij.py 3d add IMAGE_TITLE volume 50             # 3D Viewer: add volume, t
 python ij.py 3d list                                  # 3D Viewer: list loaded content
 python ij.py 3d snapshot 512 512                      # 3D Viewer: capture the view
 python ij.py 3d close                                 # 3D Viewer: close
+python ij.py probe "Gaussian Blur..."                 # discover plugin parameters
 python ij.py raw '{"command": "ping"}'                # raw JSON command
+```
+
+### Plugin argument discovery (with caching):
+```bash
+python probe_plugin.py "Gaussian Blur..."              # probe + cache + pretty print
+python probe_plugin.py --batch "Median..." "Subtract Background..." "Analyze Particles..."
+python probe_plugin.py --search threshold              # search cached probes
+python probe_plugin.py --lookup "Gaussian Blur..."     # check cache only
+python probe_plugin.py --list                          # list all cached
 ```
 
 ### Pixel analysis (Python-side, no ImageJ needed):
@@ -214,6 +224,9 @@ Use `pixels.py` to decode and analyse (find_cells, stats, line profiles).
 4M pixel safety limit. See `python pixels.py --help`.
 
 ### 3d_viewer — Direct 3D Viewer control (via reflection, not macros)
+**NOTE:** For automated 3D renders, prefer `3D Project...` macro (see Quick Recipes).
+The 3D Viewer TCP API is useful for interactive volume rendering but has known
+classloader issues that were fixed — requires a Fiji restart after the fix is deployed.
 ```json
 {"command": "3d_viewer", "action": "status"}
 → {"ok": true, "result": {"installed": true, "open": true, "contents": ["cell"]}}
@@ -236,17 +249,40 @@ than run("3D Viewer") or call("ij3d...").
 ```
 Protected windows (Fiji toolbar, AI Assistant) are never closed.
 
+### probe_command — Discover plugin parameters and macro syntax
+```json
+{"command": "probe_command", "plugin": "Gaussian Blur..."}
+→ {"ok": true, "result": {
+    "plugin": "Gaussian Blur...",
+    "hasDialog": true,
+    "dialogType": "GenericDialog",
+    "fields": [
+      {"type": "numeric", "label": "Sigma (Radius):", "default": "2.00", "macro_key": "sigma"},
+      {"type": "checkbox", "label": "Stack", "default": false, "macro_key": "stack"}
+    ],
+    "macro_syntax": "run(\"Gaussian Blur...\", \"sigma=2.00\");"
+  }}
+```
+Opens the plugin's dialog, reads ALL fields (numeric, string, checkbox, choice
+with every option, slider with range), derives the macro argument key for each,
+generates example macro syntax, then cancels the dialog without executing.
+
+**IMPORTANT — probe before using any unfamiliar plugin.** This eliminates
+guessing at macro arguments. For choice/dropdown fields, the response includes
+ALL available options so you know exactly what values are valid.
+
 ---
 
 ## Your Workflow
 
 1. **Check state first**: `python ij.py state` — know what's open
 2. **Check metadata**: `python ij.py metadata` — is the image calibrated?
-3. **Execute macros**: `python ij.py macro '...'` — do the work
-4. **Capture and LOOK**: `python ij.py capture step_name` then Read the PNG
-5. **Check histogram**: `python ij.py histogram` — verify intensity distribution
-6. **Verify results**: `python ij.py results` — check measurements
-7. **Check log**: `python ij.py log` — look for warnings from plugins
+3. **Probe unfamiliar plugins**: `python probe_plugin.py "Plugin Name"` — know the arguments
+4. **Execute macros**: `python ij.py macro '...'` — do the work
+5. **Capture and LOOK**: `python ij.py capture step_name` then Read the PNG
+6. **Check histogram**: `python ij.py histogram` — verify intensity distribution
+7. **Verify results**: `python ij.py results` — check measurements
+8. **Check log**: `python ij.py log` — look for warnings from plugins
 8. **Iterate**: if something looks wrong, fix the macro, retry
 
 ---
@@ -258,6 +294,7 @@ If a macro fails, the response will have `"success": false` and an `"error"` fie
 - "Not a binary image" → threshold first
 - "Selection required" → create an ROI first
 - Command not found → check the exact command name in ImageJ menus
+- Wrong/unknown arguments → probe the plugin first: `python probe_plugin.py "Plugin Name"`
 
 ---
 
@@ -265,6 +302,75 @@ If a macro fails, the response will have `"success": false` and an `"error"` fie
 
 See **`macro-reference.md`** in this directory for the complete ImageJ macro
 command reference with syntax, examples, recipes, and best practices.
+
+---
+
+## Quick Recipes
+
+### 3D Render of a Cell
+
+When asked for a 3D render, **ask the user which method they prefer** and explain
+the trade-offs, or offer to try all three:
+
+| Method | Type | Pros | Cons |
+|--------|------|------|------|
+| **3Dscript** | Volume raycasting | Best quality, scriptable, proper depth/opacity | Z-staircase from few slices, can't disable overlays via macro |
+| **3D Viewer** | OpenGL volume | Interactive, smooth, good quality | Screenshot capture can grab wrong window |
+| **3D Project** | Rotating MIP | Always works via macro, reliable | Not true 3D — no depth/opacity, Z-striping |
+
+**Step 1: Isolate the cell (required for ALL methods)**
+```bash
+python pixels.py find_cells                    # find cells, pick by area+intensity
+python ij.py macro '
+  run("Duplicate...", "title=seg duplicate");
+  run("Gaussian Blur 3D...", "x=2 y=2 z=1");
+  run("3D Objects Counter", "threshold=37000 min.=100 max.=999999 objects");
+'
+# Find label at target (X,Y) in objects map, then create 0/1 mask:
+python ij.py macro '
+  selectWindow("Objects map of seg");
+  run("Duplicate...", "title=mask duplicate");
+  // Loop: set target label pixels to 1, all else to 0
+  imageCalculator("Multiply create stack", "ORIGINAL", "mask");
+  rename("isolated");
+  makeRectangle(X, Y, W, H); run("Crop");     # tight crop
+'
+# IMPORTANT: Use Multiply, NOT AND (AND corrupts 16-bit through 8-bit mask)
+```
+
+**Step 2: Render (choose method)**
+```bash
+# --- 3Dscript (best quality) ---
+python ij.py macro 'selectWindow("isolated"); run("8-bit");
+  run("Scale...", "x=10 y=10 z=1.0 interpolation=Bicubic process create title=cell_big");'
+# Write rotate.animation.txt: "From frame 0 to frame 100 rotate by 360 degrees horizontally"
+python ij.py macro 'selectWindow("cell_big");
+  run("Batch Animation", "animation=[/path/to/rotate.animation.txt]");'
+# NOTE: Do NOT Z-interpolate for 3Dscript — dims the signal below alpha threshold
+
+# --- 3D Viewer (interactive) ---
+python ij.py macro 'selectWindow("isolated"); run("8-bit");'
+python ij.py 3d add isolated volume 20
+python ij.py 3d fit
+python ij.py 3d capture output_name
+
+# --- 3D Project (fallback MIP) ---
+python ij.py macro 'selectWindow("isolated");
+  run("Scale...", "x=10 y=10 z=1.0 interpolation=Bicubic process create title=cell_big");
+  run("3D Project...", "projection=[Brightest Point] axis=Y-Axis slice=0.28
+       initial=0 total=360 rotation=10 lower=1 upper=255 opacity=0
+       surface=100 interior=50");
+  run("Cyan Hot");'
+```
+
+**Critical rules:**
+- **Isolate before rendering.** Crop alone is NOT enough — neighbours bleed in.
+- **Multiply not AND** for masking 16-bit images with binary masks.
+- **Never enhance contrast.** Raw intensity is the data.
+- **8-bit required** for 3D Viewer and 3Dscript.
+- **Scale XY before 3Dscript** — output size = input image size.
+- **Do NOT Z-interpolate for 3Dscript** — interpolated masked data falls below
+  alpha threshold. Z-staircase at oblique angles is a data limitation (few slices).
 
 ---
 
@@ -281,6 +387,36 @@ This writes two files:
 - `.tmp/plugins_summary.txt` — categorized summary of notable plugins
 
 Then read `.tmp/plugins_summary.txt` to know what's available.
+
+### Learning plugin arguments (DO THIS BEFORE USING ANY UNFAMILIAR PLUGIN)
+
+The scanner tells you WHAT plugins exist. To learn HOW to use one:
+
+```bash
+python probe_plugin.py "Analyze Particles..."
+```
+
+This opens the plugin's dialog, reads every field (numeric, string, checkbox,
+dropdown with all options, slider with range), derives the macro argument keys,
+generates the exact macro syntax, and caches the result. The dialog is canceled
+without executing — nothing happens to the image.
+
+**Batch-probe common plugins** at the start of a session:
+```bash
+python probe_plugin.py --batch "Gaussian Blur..." "Median..." \
+    "Subtract Background..." "Analyze Particles..." \
+    "Set Measurements..." "3D Objects Counter"
+```
+
+**Search cached probes** when you need a specific parameter:
+```bash
+python probe_plugin.py --search threshold
+```
+
+**NOTE:** Probing requires the plugin's dialog to appear. Some plugins need an
+image to be open first — open a test image before probing. The probe works for
+GenericDialog-based plugins (the vast majority). Custom Swing dialogs get
+best-effort text extraction.
 
 ### Key plugins installed in this Fiji:
 - **StarDist 2D/3D** — deep learning nuclei segmentation
@@ -385,6 +521,106 @@ These are in this directory and can be imported or run directly:
   warnings = lint_macro('run("Blobs (25K)")')
   ```
 
+- **`recipe_search.py`** — find and recommend analysis recipes from the recipe book.
+  ```bash
+  python recipe_search.py "count cells"           # search by keyword
+  python recipe_search.py --domain neuroscience   # filter by domain
+  python recipe_search.py --list                  # list all recipes
+  python recipe_search.py --show cell_counting    # show full recipe
+  ```
+
+- **`auditor.py`** — validate measurement results for sanity (plausible areas,
+  outliers, systematic biases, saturation). Run after any quantitative analysis.
+  ```bash
+  python auditor.py                               # audit current results table
+  python auditor.py --csv results.csv             # audit a CSV file
+  ```
+
+- **`practice.py`** — autonomous self-improvement. Opens sample images, runs
+  analysis workflows, validates results, tries variations, logs what works best.
+  ```bash
+  python practice.py                              # run all practice tasks
+  python practice.py --task cell_counting         # run specific task
+  python practice.py --report                     # show practice history
+  ```
+
+- **`autopsy.py`** — failure logging system. Records every macro failure with
+  context (image state, error, histogram). Check before retrying failed commands.
+  ```python
+  from autopsy import Autopsy
+  autopsy = Autopsy()
+  warnings = autopsy.check_known_issues("Analyze Particles", image_state)
+  ```
+
+---
+
+## Recipe Book (`recipes/` directory)
+
+Structured YAML files describing analysis workflows. Each recipe has:
+preconditions, parameters with defaults/ranges, step-by-step macro code,
+decision points, validation checks, and known issues.
+
+**Always check the recipe book before starting an analysis:**
+```bash
+python recipe_search.py "what the user asked for"
+```
+
+If a matching recipe exists, follow it. If not, build the workflow and
+**create a new recipe** so the next agent has it. Recipes are generalisable —
+lab-specific adjustments go in `learnings.md` instead.
+
+After completing an analysis, **audit the results**:
+```bash
+python auditor.py
+```
+
+---
+
+## Reference Documents
+
+These are comprehensive reference files for agent use. Read them when you need
+detailed information about a specific analysis type, plugin, or method:
+
+- **`analysis-landscape.md`** — 75+ analysis tasks across 15 research domains
+  with workflows, plugins, and automation opportunities
+- **`self-improving-agent-reference.md`** — plugin API patterns, automation
+  approaches, comparison matrices, parameter optimization strategies
+- **`domain-reference.md`** — microscopy modalities, quantitative methods,
+  quality control standards, decision trees for choosing approaches
+- **`macro-reference.md`** — ImageJ macro command reference
+
+---
+
+## Lab Training (First-Time Setup)
+
+Any lab can train the agent on their specific images before using it:
+
+```bash
+python train_agent.py /path/to/lab/images              # train on a directory
+python train_agent.py /path/to/lab/images --domain neuro # specify domain
+python train_agent.py --profile                         # show current lab profile
+```
+
+This runs 5 phases: image characterization, threshold discovery, segmentation
+testing, parameter tuning, and writes findings to `lab_profile.json` + `learnings.md`.
+The agent then knows the lab's typical image types, best thresholds, optimal
+parameters, and which plugins work on their data.
+
+## Self-Improvement
+
+The practice runner autonomously tests 15 analysis tasks on sample images:
+
+```bash
+python practice.py                    # run all 15 tasks
+python practice.py --task stardist    # run specific task
+python practice.py --report           # show results history
+```
+
+Tasks cover: cell counting, threshold comparison, measurements, background
+subtraction, z-stacks, channel splitting, particle filtering, StarDist, 3D
+Objects Counter, Coloc 2, CLIJ2 GPU, MorphoLibJ, AnalyzeSkeleton, Bio-Formats,
+and all measurement types. Results saved to `.tmp/practice_results.json`.
+
 ---
 
 ## Learning
@@ -395,12 +631,34 @@ As you work, update `learnings.md` in this directory with:
 - Workflows you've discovered
 - Tips about the user's specific images/data
 
+If you discover a new working workflow, **create a recipe** in `recipes/` so
+the next agent can use it directly. Learnings are for lab-specific notes;
+recipes are for generalisable workflows.
+
 ---
 
 ## Rules
 - Always check state before acting
 - Never assume an image is open — verify
+- **ALWAYS probe unfamiliar plugins before using them** — `python probe_plugin.py "Plugin Name"`
+  discovers all parameters, their types, defaults, dropdown options, and the exact macro
+  syntax. Never guess at macro arguments when you can probe.
 - **ALWAYS capture and visually inspect images after processing steps**
+- **NEVER use Enhance Contrast on output data.** `normalize` permanently modifies
+  pixel values — the user can never undo it. Raw intensity IS the data in
+  scientific microscopy. The user can always adjust display range themselves
+  later, but they can't recover destroyed pixel values. If you need better
+  visibility during YOUR inspection, use `setMinAndMax()` which only changes
+  display, not data.
+- **When multiple approaches exist, ASK the user.** Present the options with
+  pros/cons and let them choose, or offer to try all so they can compare.
+  Don't just pick one silently.
+- **Check the recipe book first** — `python recipe_search.py "task"` before
+  building a workflow from scratch. If a recipe exists, use it.
+- **Audit results after analysis** — `python auditor.py` catches measurement
+  errors before they propagate to papers.
+- **Create recipes for new workflows** — if you solve a task that has no recipe,
+  create one in `recipes/` so the next agent has it. Keep recipes generalisable.
 - If a macro fails, try to fix it (up to 3 attempts)
 - Show the user what you're doing and why
 - For multi-step tasks, explain the plan before executing

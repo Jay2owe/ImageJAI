@@ -1,0 +1,101 @@
+name: Z Projection
+id: z_project
+description: >
+  Create a 2D projection from a z-stack. Choose the projection type based on
+  your goal: Max Intensity for visualization, Sum for intensity quantification,
+  Mean for noise reduction, Min for transmitted light.
+domain: 3d
+difficulty: beginner
+
+preconditions:
+  image_type: [8-bit, 16-bit, 32-bit]
+  min_channels: 1
+  needs_stack: true
+  needs_calibration: false
+  notes: "Requires a z-stack (multiple slices). Single-slice images do not need projection."
+
+parameters:
+  - name: projection_type
+    label: "Projection type"
+    type: choice
+    default: "Max Intensity"
+    options: ["Max Intensity", "Sum Slices", "Average Intensity", "Min Intensity", "Standard Deviation", "Median"]
+    description: >
+      Max Intensity: shows brightest voxel at each XY position (best for visualization).
+      Sum Slices: sums all slices (correct for intensity quantification, preserves linearity).
+      Average Intensity: mean of slices (reduces noise, good for dim samples).
+      Min Intensity: shows darkest voxel (good for transmitted light / brightfield stacks).
+
+  - name: start_slice
+    label: "Start slice"
+    type: numeric
+    default: 1
+    range: [1, 1000]
+    description: "First slice to include. 1 = beginning of stack."
+
+  - name: end_slice
+    label: "End slice"
+    type: numeric
+    default: 0
+    range: [0, 1000]
+    description: "Last slice to include. 0 = auto-detect (use all slices)."
+
+steps:
+  - id: 1
+    description: "Check stack dimensions"
+    macro: |
+      getDimensions(w, h, ch, slices, frames);
+      print("Slices: " + slices + ", Channels: " + ch + ", Frames: " + frames);
+    decision_point: true
+    decision_logic: >
+      If slices == 1, this is not a z-stack — projection is not needed.
+      If the image is a time-lapse (frames > 1, slices == 1), the user may
+      want a temporal projection instead. Check which dimension to project.
+    capture_after: false
+    validate: "Image must have slices > 1."
+
+  - id: 2
+    description: "Create Z projection"
+    macro: |
+      run("Z Project...", "projection=[${projection_type}]");
+    decision_point: true
+    decision_logic: >
+      Choose projection based on the goal:
+      - VISUALIZATION: Max Intensity (shows all bright features regardless of z-position)
+      - INTENSITY MEASUREMENT: Sum Slices (maintains linearity — total photon count)
+      - NOISE REDUCTION: Average Intensity (averages out noise across slices)
+      - BRIGHTFIELD/PHASE: Min Intensity (shows darkest features)
+      - VARIABILITY: Standard Deviation (highlights features that change across z)
+      NEVER measure intensity from Max projections — they overestimate by taking the
+      brightest slice only.
+    capture_after: true
+    validate: "Projection should show features from across the z-stack collapsed into one plane."
+
+  - id: 3
+    description: "Rename the projection for clarity"
+    macro: |
+      rename("${projection_type}_projection");
+    decision_point: false
+    decision_logic: ""
+    capture_after: false
+    validate: ""
+
+outputs:
+  - type: image
+    description: "2D projection of the z-stack using the selected method."
+
+known_issues:
+  - condition: "Measuring intensity from Max projection"
+    symptom: "Intensity values are overestimates (only brightest slice contributes)"
+    fix: "Use Sum Slices for intensity quantification. Max is for visualization only."
+  - condition: "Multi-channel hyperstack"
+    symptom: "Projection applies to all channels simultaneously"
+    fix: "This is correct behavior. Each channel is projected independently. Use Split Channels after if needed."
+  - condition: "Very thick stack with out-of-focus slices"
+    symptom: "Projection looks blurry because out-of-focus slices contribute"
+    fix: "Set start_slice and end_slice to include only the focused range, or use Extended Depth of Focus."
+  - condition: "Sum projection exceeds 16-bit range"
+    symptom: "Pixel values clipped at 65535"
+    fix: "Convert to 32-bit before projection: run('32-bit'); then project."
+
+tags: [z_projection, max_intensity, sum, mean, stack, 3d_to_2d, visualization]

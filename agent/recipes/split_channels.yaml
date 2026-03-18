@@ -1,0 +1,94 @@
+name: Split and Process Channels
+id: split_channels
+description: >
+  Split a multi-channel composite image into individual channels for
+  independent processing. Common first step for colocalization, per-channel
+  thresholding, or channel-specific measurements.
+domain: preprocessing
+difficulty: beginner
+
+preconditions:
+  image_type: [8-bit, 16-bit, RGB]
+  min_channels: 2
+  needs_stack: false
+  needs_calibration: false
+  notes: "For RGB images, splits into Red/Green/Blue. For composites, splits into C1/C2/etc."
+
+parameters:
+  - name: keep_composite
+    label: "Keep original composite"
+    type: boolean
+    default: true
+    description: "Duplicate before splitting to preserve the original composite view."
+
+  - name: channel_names
+    label: "Channel names"
+    type: string
+    default: ""
+    description: "Optional comma-separated names (e.g., 'DAPI,GFP,RFP'). Used to rename split windows."
+
+steps:
+  - id: 1
+    description: "Check image dimensions and channel count"
+    macro: |
+      getDimensions(w, h, channels, slices, frames);
+      print("Image: " + getTitle());
+      print("Channels: " + channels + ", Slices: " + slices + ", Frames: " + frames);
+    decision_point: true
+    decision_logic: >
+      If channels=1, the image is single-channel — splitting is not needed.
+      If the image is RGB Color type, use run("Split Channels") which gives
+      Red, Green, Blue windows. For composite images, Split Channels gives
+      C1-title, C2-title, etc.
+    capture_after: false
+    validate: "Image should have 2+ channels."
+
+  - id: 2
+    description: "Duplicate to preserve original (optional)"
+    macro: |
+      original = getTitle();
+      run("Duplicate...", "title=composite_backup duplicate");
+      selectWindow(original);
+    decision_point: false
+    decision_logic: ""
+    capture_after: false
+    validate: ""
+
+  - id: 3
+    description: "Split channels"
+    macro: |
+      run("Split Channels");
+    decision_point: false
+    decision_logic: ""
+    capture_after: true
+    validate: "Multiple windows should open, one per channel (C1-title, C2-title, etc.)."
+
+  - id: 4
+    description: "Rename channels if names provided"
+    macro: |
+      // If channel_names is provided, rename each window:
+      // selectWindow("C1-original");
+      // rename("DAPI");
+      // selectWindow("C2-original");
+      // rename("GFP");
+    decision_point: false
+    decision_logic: ""
+    capture_after: false
+    validate: ""
+
+outputs:
+  - type: image
+    description: "Individual channel images as separate windows, ready for independent processing."
+
+known_issues:
+  - condition: "RGB image treated as composite"
+    symptom: "Split gives Red/Green/Blue instead of channel 1/2/3"
+    fix: "For fluorescence, open with Bio-Formats to get the real composite, not the RGB rendering."
+  - condition: "Hyperstack with Z and channels"
+    symptom: "Split creates one window per channel, each as a z-stack — this is correct"
+    fix: "No fix needed. Each channel window retains its z-stack."
+  - condition: "Time-lapse with channels"
+    symptom: "Split channels also separates time frames"
+    fix: "Use 'duplicate channels=N' to extract one channel without splitting everything."
+
+tags: [channels, split, composite, multi_channel, preprocessing, rgb]

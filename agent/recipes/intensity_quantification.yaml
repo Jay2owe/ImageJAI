@@ -1,0 +1,146 @@
+name: Per-Cell Intensity Quantification
+id: intensity_quantification
+description: >
+  Measure fluorescence intensity per cell with background correction.
+  Segments cells (via threshold or StarDist), measures integrated density
+  and mean intensity in each cell ROI, subtracts local background.
+  Suitable for quantifying protein expression levels across a population.
+domain: fluorescence
+difficulty: intermediate
+
+preconditions:
+  image_type: [8-bit, 16-bit, 32-bit]
+  min_channels: 1
+  needs_stack: false
+  needs_calibration: false
+  notes: >
+    Must use raw fluorescence data. NEVER enhance contrast or normalize
+    pixel values before measuring — this destroys quantitative information.
+
+parameters:
+  - name: segmentation_channel
+    label: "Channel for segmentation"
+    type: numeric
+    default: 1
+    range: [1, 5]
+    description: "Channel used to define cell boundaries (usually DAPI/nuclear stain)."
+
+  - name: measurement_channel
+    label: "Channel to measure"
+    type: numeric
+    default: 2
+    range: [1, 5]
+    description: "Channel containing the fluorescence signal to quantify."
+
+  - name: bg_method
+    label: "Background correction method"
+    type: choice
+    default: "rolling_ball"
+    options: ["rolling_ball", "manual_roi", "modal"]
+    description: "Rolling ball for uneven illumination, manual ROI for uniform background, modal for automatic."
+
+  - name: rolling_ball_radius
+    label: "Rolling ball radius"
+    type: numeric
+    default: 50
+    range: [10, 200]
+    description: "Radius for rolling ball background subtraction. Should be larger than the largest cell."
+
+  - name: min_cell_area
+    label: "Minimum cell area (pixels)"
+    type: numeric
+    default: 100
+    range: [10, 10000]
+    description: "Filter out small debris from measurements."
+
+steps:
+  - id: 1
+    description: "Split channels and prepare measurement image"
+    macro: |
+      // Keep original open for measurement
+      original = getTitle();
+      run("Duplicate...", "title=for_segmentation duplicate channels=${segmentation_channel}");
+    decision_point: true
+    decision_logic: >
+      If image is single-channel, segmentation and measurement channels are the
+      same — just duplicate once. If multi-channel, split to get separate windows
+      for segmentation and measurement.
+    capture_after: true
+    validate: "Segmentation channel should clearly show cell boundaries."
+
+  - id: 2
+    description: "Subtract background from measurement channel"
+    macro: |
+      // Apply to the measurement channel
+      selectWindow(original);
+      run("Duplicate...", "title=measure_ch duplicate channels=${measurement_channel}");
+      run("Subtract Background...", "rolling=${rolling_ball_radius}");
+    decision_point: true
+    decision_logic: >
+      Rolling ball works for most cases. If background is very uniform, manual
+      background ROI subtraction (CTCF method) may be more appropriate. Check
+      histogram before and after — background peak should shift toward zero.
+    capture_after: true
+    validate: "Background should be close to zero. Signal in cells should be preserved."
+
+  - id: 3
+    description: "Segment cells on segmentation channel"
+    macro: |
+      selectWindow("for_segmentation");
+      run("Gaussian Blur...", "sigma=1");
+      setAutoThreshold("Otsu dark");
+      run("Convert to Mask");
+      run("Watershed");
+      run("Analyze Particles...", "size=${min_cell_area}-Infinity add");
+      close("for_segmentation");
+    decision_point: true
+    decision_logic: >
+      After adding ROIs, switch to the measurement channel and visually verify
+      ROIs align with cells. If segmentation is poor, try StarDist instead.
+    capture_after: true
+    validate: "ROI Manager should contain cell outlines. Count should be reasonable."
+
+  - id: 4
+    description: "Measure intensity in each cell ROI on the measurement channel"
+    macro: |
+      selectWindow("measure_ch");
+      run("Set Measurements...", "area mean min max integrated redirect=None decimal=3");
+      roiManager("Measure");
+    decision_point: false
+    decision_logic: ""
+    capture_after: false
+    validate: "Results table should have one row per cell with Area, Mean, IntDen, Min, Max."
+
+  - id: 5
+    description: "Clean up temporary windows"
+    macro: |
+      close("measure_ch");
+      // ROIs remain in ROI Manager for the user
+    decision_point: false
+    decision_logic: ""
+    capture_after: false
+    validate: ""
+
+outputs:
+  - type: results_table
+    description: "Per-cell measurements: Area, Mean intensity, IntDen, Min, Max"
+  - type: roi_set
+    description: "Cell outlines in ROI Manager"
+  - type: measurement
+    description: "Mean intensity and integrated density per cell, background-corrected"
+
+known_issues:
+  - condition: "Measuring from enhanced/normalized image"
+    symptom: "Intensity values are meaningless for comparison between images"
+    fix: "ALWAYS use raw fluorescence data. setMinAndMax() for display only, never normalize."
+  - condition: "Segmentation channel and measurement channel are misaligned"
+    symptom: "ROIs do not match cells in the measurement channel"
+    fix: "This happens with shifted channels. Check registration before measuring."
+  - condition: "Rolling ball radius too small"
+    symptom: "Background subtraction removes real signal from large cells"
+    fix: "Radius should be at least 2-3x larger than the largest cell diameter."
+  - condition: "Saturated pixels in measurement channel"
+    symptom: "Mean and IntDen are underestimates because true values exceed detector range"
+    fix: "Check histogram. If last bin has many pixels, image is saturated — quantification is unreliable."
+
+tags: [fluorescence, intensity, per_cell, measurement, background_correction, quantification]

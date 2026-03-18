@@ -1,0 +1,130 @@
+name: Inter-Object Distance Measurement
+id: distance_measurement
+description: >
+  Measure distances between objects (cell-to-cell, nuclei spacing, nearest
+  neighbor distances). Segments objects, finds centroids, and computes
+  pairwise or nearest-neighbor distances.
+domain: measurement
+difficulty: intermediate
+
+preconditions:
+  image_type: [8-bit, 16-bit]
+  min_channels: 1
+  needs_stack: false
+  needs_calibration: true
+  notes: "Calibration is essential for distances in real units. Without it, distances are in pixels."
+
+parameters:
+  - name: threshold_method
+    label: "Threshold method"
+    type: choice
+    default: "Otsu"
+    options: ["Otsu", "Triangle", "Li", "Huang"]
+    description: "Method for segmenting objects."
+
+  - name: min_size
+    label: "Minimum object size (pixels)"
+    type: numeric
+    default: 50
+    range: [1, 50000]
+    description: "Filter out noise and debris."
+
+  - name: distance_type
+    label: "Distance measurement type"
+    type: choice
+    default: "nearest_neighbor"
+    options: ["nearest_neighbor", "all_pairwise", "to_reference_point"]
+    description: "Nearest neighbor: shortest distance to any other object. All pairwise: every pair. To reference: distance to a fixed point."
+
+steps:
+  - id: 1
+    description: "Segment objects and get centroids"
+    macro: |
+      run("Duplicate...", "title=dist_mask");
+      run("Gaussian Blur...", "sigma=1");
+      setAutoThreshold("${threshold_method} dark");
+      run("Convert to Mask");
+      run("Watershed");
+      run("Set Measurements...", "centroid redirect=None decimal=3");
+      run("Analyze Particles...", "size=${min_size}-Infinity display exclude");
+    decision_point: true
+    decision_logic: >
+      Verify that detected objects match real cells/nuclei. If too many or too
+      few, adjust threshold or size filter. Centroids are the basis for distance
+      calculations.
+    capture_after: true
+    validate: "Centroids should be at the center of each detected object."
+
+  - id: 2
+    description: "Extract centroid coordinates from Results table"
+    macro: |
+      // Agent reads results with: python ij.py results
+      // Extract X and Y columns for all detected objects
+      // Compute distances in Python (or via macro loop below)
+      n = nResults;
+      print("Detected " + n + " objects for distance measurement");
+    decision_point: false
+    decision_logic: ""
+    capture_after: false
+    validate: "Should have at least 2 objects to measure distances between."
+
+  - id: 3
+    description: "Calculate nearest-neighbor distances"
+    macro: |
+      // Nearest-neighbor distance for each object
+      n = nResults;
+      for (i = 0; i < n; i++) {
+        x1 = getResult("X", i);
+        y1 = getResult("Y", i);
+        minDist = 999999;
+        for (j = 0; j < n; j++) {
+          if (i != j) {
+            x2 = getResult("X", j);
+            y2 = getResult("Y", j);
+            d = sqrt((x2-x1)*(x2-x1) + (y2-y1)*(y2-y1));
+            if (d < minDist) minDist = d;
+          }
+        }
+        setResult("NearestNeighborDist", i, minDist);
+      }
+      updateResults();
+    decision_point: false
+    decision_logic: ""
+    capture_after: false
+    validate: "NearestNeighborDist column should be added to Results. Values should be positive and reasonable."
+
+  - id: 4
+    description: "Summarize distance statistics"
+    macro: |
+      // Agent calculates from Results:
+      // Mean nearest-neighbor distance
+      // Median, min, max
+      // Standard deviation
+      // These indicate clustering (small distances) or spacing (large distances)
+      print("Distance measurement complete. Check Results table.");
+    decision_point: false
+    decision_logic: ""
+    capture_after: false
+    validate: ""
+
+outputs:
+  - type: results_table
+    description: "Per-object centroid coordinates and nearest-neighbor distance."
+  - type: measurement
+    description: "Summary statistics: mean, median, SD of nearest-neighbor distances."
+
+known_issues:
+  - condition: "Image not calibrated"
+    symptom: "Distances are in pixels instead of microns"
+    fix: "Set scale before measuring: run('Set Scale...', 'distance=X known=Y unit=um');"
+  - condition: "Merged objects (clusters counted as one)"
+    symptom: "Centroid is between the real objects, distances are wrong"
+    fix: "Improve segmentation with watershed or StarDist to separate touching objects."
+  - condition: "Very large number of objects (>1000)"
+    symptom: "Pairwise distance calculation is slow (O(n^2))"
+    fix: "Use nearest-neighbor only, not all pairwise. Or use Python scipy.spatial.distance for speed."
+  - condition: "Edge objects with partial outlines"
+    symptom: "Centroids of edge objects are shifted, distances inaccurate"
+    fix: "Use 'exclude' in Analyze Particles to remove edge-touching objects."
+
+tags: [distance, nearest_neighbor, spacing, centroid, spatial, measurement]

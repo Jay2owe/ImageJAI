@@ -1,0 +1,118 @@
+name: Cell Morphometry (Shape Descriptors)
+id: cell_morphometry
+description: >
+  Measure cell shape descriptors: area, perimeter, circularity, aspect ratio,
+  roundness, solidity, and Feret diameters. Useful for comparing cell
+  morphology between conditions (e.g., elongation in migration assays,
+  rounding during apoptosis).
+domain: cell_biology
+difficulty: intermediate
+
+preconditions:
+  image_type: [8-bit, 16-bit]
+  min_channels: 1
+  needs_stack: false
+  needs_calibration: true
+  notes: "Calibration (Set Scale) is needed for area/perimeter in real units. Without it, results are in pixels."
+
+parameters:
+  - name: threshold_method
+    label: "Threshold method"
+    type: choice
+    default: "Otsu"
+    options: ["Otsu", "Triangle", "Li", "Huang"]
+    description: "Method for segmenting cells from background."
+
+  - name: min_area
+    label: "Minimum cell area (calibrated units or pixels)"
+    type: numeric
+    default: 100
+    range: [10, 50000]
+    description: "Filter out small debris."
+
+  - name: max_area
+    label: "Maximum cell area"
+    type: numeric
+    default: 50000
+    range: [500, 999999]
+    description: "Filter out merged clusters."
+
+  - name: exclude_edges
+    label: "Exclude edge cells"
+    type: boolean
+    default: true
+    description: "Remove cells touching the image border (incomplete outlines distort shape metrics)."
+
+steps:
+  - id: 1
+    description: "Duplicate and preprocess"
+    macro: |
+      run("Duplicate...", "title=morph_mask");
+      run("Gaussian Blur...", "sigma=1");
+    decision_point: false
+    decision_logic: ""
+    capture_after: false
+    validate: ""
+
+  - id: 2
+    description: "Threshold to segment cells"
+    macro: |
+      setAutoThreshold("${threshold_method} dark");
+      run("Convert to Mask");
+    decision_point: true
+    decision_logic: >
+      If cells have dark boundaries on bright background (phase contrast), do NOT
+      use 'dark'. For fluorescence, use 'dark'. Capture and verify the mask
+      accurately outlines cells.
+    capture_after: true
+    validate: "Cell outlines should be complete (no gaps). Interior should be solid white."
+
+  - id: 3
+    description: "Clean up binary mask"
+    macro: |
+      run("Fill Holes");
+      run("Watershed");
+    decision_point: true
+    decision_logic: >
+      Fill Holes is essential for shape metrics (holes reduce area and distort
+      circularity). Only apply Watershed if cells are touching; skip for
+      elongated cells where Watershed would incorrectly split them.
+    capture_after: true
+    validate: "Holes inside cells should be filled. Touching cells should be separated if round."
+
+  - id: 4
+    description: "Measure shape descriptors for all particles"
+    macro: |
+      run("Set Measurements...", "area perimeter shape feret's centroid redirect=None decimal=3");
+      run("Analyze Particles...", "size=${min_area}-${max_area} show=Outlines display summarize exclude");
+    decision_point: false
+    decision_logic: ""
+    capture_after: true
+    validate: "Each detected cell should have shape measurements. Check outlines match actual cells."
+
+outputs:
+  - type: results_table
+    description: >
+      Per-cell shape descriptors: Area, Perimeter, Circularity (4pi*Area/Perimeter^2),
+      AR (aspect ratio), Round (roundness = 1/AR), Solidity (area/convex area),
+      Feret (max caliper diameter), MinFeret, FeretAngle.
+  - type: image
+    description: "Outlines image showing detected cell boundaries."
+  - type: measurement
+    description: "Summary statistics: mean, SD for all shape descriptors."
+
+known_issues:
+  - condition: "Watershed applied to elongated cells"
+    symptom: "Elongated cells are split into multiple pieces, distorting shape metrics"
+    fix: "Skip watershed for non-round cells. Use circularity filter to identify affected cells."
+  - condition: "Image not calibrated"
+    symptom: "Area and perimeter reported in pixels, not microns"
+    fix: "Set scale first: run('Set Scale...', 'distance=X known=Y unit=um');"
+  - condition: "Incomplete cell boundaries (gaps)"
+    symptom: "Cells merge with background through gaps, shape metrics wrong"
+    fix: "Use Morphological Close (Dilate then Erode) before Fill Holes to bridge small gaps."
+  - condition: "Phase contrast halo artifacts"
+    symptom: "Bright halos around cells create double outlines"
+    fix: "Use higher blur sigma (2-3) or median filter to smooth halos before thresholding."
+
+tags: [morphology, shape, circularity, aspect_ratio, feret, area, perimeter, cell_shape]

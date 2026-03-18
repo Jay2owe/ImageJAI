@@ -1,0 +1,113 @@
+name: Background Subtraction
+id: background_subtraction
+description: >
+  Remove uneven illumination and background fluorescence using rolling ball
+  subtraction and/or flat-field correction. Essential preprocessing step
+  before intensity quantification or thresholding on images with non-uniform
+  background.
+domain: preprocessing
+difficulty: beginner
+
+preconditions:
+  image_type: [8-bit, 16-bit, 32-bit]
+  min_channels: 1
+  needs_stack: false
+  needs_calibration: false
+  notes: "Works on any grayscale image. For stacks, add 'stack' to the rolling ball command."
+
+parameters:
+  - name: method
+    label: "Background correction method"
+    type: choice
+    default: "rolling_ball"
+    options: ["rolling_ball", "flat_field", "both"]
+    description: "Rolling ball for general use, flat-field if you have a reference image, both for stubborn backgrounds."
+
+  - name: rolling_ball_radius
+    label: "Rolling ball radius (pixels)"
+    type: numeric
+    default: 50
+    range: [5, 500]
+    description: "Should be larger than the largest foreground object. Typical: 50 for cells, 200 for tissue."
+
+  - name: light_background
+    label: "Light background"
+    type: boolean
+    default: false
+    description: "true for brightfield (light background), false for fluorescence (dark background)."
+
+  - name: sliding_paraboloid
+    label: "Use sliding paraboloid"
+    type: boolean
+    default: true
+    description: "More accurate than rolling ball. Recommended to leave on."
+
+steps:
+  - id: 1
+    description: "Capture the original image and check histogram"
+    macro: ""
+    decision_point: true
+    decision_logic: >
+      Check histogram to see if background is uniform. If the histogram shows
+      a background peak well-separated from signal, rolling ball is appropriate.
+      If background varies significantly across the field (visible gradient),
+      a larger radius or flat-field correction may be needed.
+    capture_after: true
+    validate: "Note the background intensity level and any spatial gradients."
+
+  - id: 2
+    description: "Duplicate the image to preserve the original"
+    macro: |
+      run("Duplicate...", "title=bg_corrected");
+    decision_point: false
+    decision_logic: ""
+    capture_after: false
+    validate: ""
+
+  - id: 3
+    description: "Apply rolling ball background subtraction"
+    macro: |
+      run("Subtract Background...", "rolling=${rolling_ball_radius} sliding");
+    decision_point: true
+    decision_logic: >
+      If the background is light (brightfield), add 'light' to the options string.
+      If processing a stack, add 'stack' to apply to all slices. After subtraction,
+      the background should be close to zero. If significant background remains,
+      increase the radius.
+    capture_after: true
+    validate: "Background should be near zero (dark). Foreground signal should be preserved. Check histogram."
+
+  - id: 4
+    description: "Verify background correction with histogram"
+    macro: |
+      // Agent should run: python ij.py histogram
+      // Background peak should be near zero
+      // Signal peak should be preserved
+    decision_point: true
+    decision_logic: >
+      If the background peak is still significantly above zero, the radius was
+      too small. Try doubling it. If foreground signal was reduced (mean intensity
+      dropped too much), the radius was too small and the algorithm subtracted
+      real signal — increase radius.
+    capture_after: false
+    validate: "Histogram should show background peak near 0 and signal peak preserved."
+
+outputs:
+  - type: image
+    description: "Background-corrected image ready for thresholding or intensity measurement."
+
+known_issues:
+  - condition: "Rolling ball radius smaller than foreground objects"
+    symptom: "Algorithm treats large cells as background, subtracting real signal"
+    fix: "Increase radius to at least 2-3x the diameter of the largest object."
+  - condition: "Using on a stack without 'stack' flag"
+    symptom: "Only the current slice is corrected"
+    fix: "Add 'stack' to options: run('Subtract Background...', 'rolling=50 sliding stack');"
+  - condition: "Very strong illumination gradient"
+    symptom: "Rolling ball cannot fully correct extreme gradients"
+    fix: "Use flat-field correction: divide the image by a blurred version of itself (sigma=100+)."
+  - condition: "Negative pixel values after subtraction"
+    symptom: "Clipped to zero in 8-bit, visible as dark patches"
+    fix: "Convert to 32-bit before subtraction to preserve negative values, then shift."
+
+tags: [background, subtraction, rolling_ball, flat_field, preprocessing, illumination_correction]

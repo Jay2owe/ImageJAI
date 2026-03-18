@@ -1,0 +1,154 @@
+name: Sholl Analysis (Neurite Branching)
+id: sholl_analysis
+description: >
+  Quantify neurite branching complexity using Sholl analysis. Counts the
+  number of neurite intersections at increasing distances from the soma.
+  Produces a Sholl profile (intersections vs distance), critical radius,
+  ramification index, and other branching metrics.
+domain: neuroscience
+difficulty: advanced
+
+preconditions:
+  image_type: [8-bit, 16-bit]
+  min_channels: 1
+  needs_stack: false
+  needs_calibration: true
+  notes: >
+    Requires a single neuron with visible processes on a clean background.
+    Best results with a binary/skeletonized image. Calibration needed for
+    distance measurements in microns. The Sholl plugin (Neuroanatomy update
+    site) must be installed.
+
+parameters:
+  - name: center_x
+    label: "Soma center X"
+    type: numeric
+    default: 0
+    range: [0, 10000]
+    description: "X coordinate of the cell body center (start point for concentric shells)."
+
+  - name: center_y
+    label: "Soma center Y"
+    type: numeric
+    default: 0
+    range: [0, 10000]
+    description: "Y coordinate of the cell body center."
+
+  - name: start_radius
+    label: "Starting radius (calibrated units)"
+    type: numeric
+    default: 10
+    range: [0, 1000]
+    description: "Radius of first concentric shell. Should be just outside the soma."
+
+  - name: end_radius
+    label: "Ending radius (calibrated units)"
+    type: numeric
+    default: 0
+    range: [0, 5000]
+    description: "Radius of last shell. 0 = auto-detect (extends to longest neurite)."
+
+  - name: step_size
+    label: "Step size between shells (calibrated units)"
+    type: numeric
+    default: 10
+    range: [1, 100]
+    description: "Distance between concentric shells. Smaller = more detailed profile."
+
+  - name: threshold_method
+    label: "Threshold method"
+    type: choice
+    default: "Otsu"
+    options: ["Otsu", "Triangle", "Li", "MaxEntropy"]
+    description: "For segmenting neurites from background."
+
+steps:
+  - id: 1
+    description: "Preprocess: enhance neurite visibility"
+    macro: |
+      run("Duplicate...", "title=sholl_prep");
+      // Subtract background to remove uneven illumination
+      run("Subtract Background...", "rolling=50");
+    decision_point: true
+    decision_logic: >
+      For fluorescence images (GFP-filled neurons), use dark background threshold.
+      For brightfield/DAB-stained neurons, invert first then threshold. The goal
+      is a clean binary image where neurites are white on black.
+    capture_after: true
+    validate: "Neurites should be clearly visible after background subtraction."
+
+  - id: 2
+    description: "Threshold to create binary neurite mask"
+    macro: |
+      setAutoThreshold("${threshold_method} dark");
+      run("Convert to Mask");
+    decision_point: true
+    decision_logic: >
+      The mask must capture thin neurite branches without merging them. If
+      processes are faint, try lowering threshold or using MaxEntropy. If
+      background noise creates false branches, increase blur first.
+    capture_after: true
+    validate: "Binary mask should show all neurite branches as continuous white lines."
+
+  - id: 3
+    description: "Skeletonize the neurite mask"
+    macro: |
+      run("Skeletonize");
+    decision_point: false
+    decision_logic: ""
+    capture_after: true
+    validate: "Neurites should be reduced to single-pixel-wide lines. No thick blobs."
+
+  - id: 4
+    description: "Set the soma center point"
+    macro: |
+      // Place a point selection at the soma center
+      makePoint(${center_x}, ${center_y});
+    decision_point: true
+    decision_logic: >
+      The agent must visually identify the soma (cell body) center. This is
+      the origin for all concentric shells. If the user has not specified
+      coordinates, the agent should capture the image, identify the soma,
+      and use those coordinates. For multiple neurons, analyze each separately.
+    capture_after: true
+    validate: "Point selection should be at the center of the cell body."
+
+  - id: 5
+    description: "Run Sholl Analysis"
+    macro: |
+      run("Sholl Analysis...", "starting=${start_radius} ending=${end_radius} radius_step=${step_size} #_samples=1 integration=N/A enclosing=1 #_primary=[] infer fit linear polynomial=[Best fitting degree] most semi-log normalizer=Default");
+    decision_point: false
+    decision_logic: ""
+    capture_after: true
+    validate: >
+      Sholl profile plot should appear showing intersections vs distance.
+      Peak should correspond to the region of maximum branching.
+
+outputs:
+  - type: results_table
+    description: >
+      Sholl metrics: Max intersections (Nm), Critical radius (distance of max branching),
+      Schoenen ramification index (Nm / # primary branches), Polynomial fit parameters.
+  - type: image
+    description: "Sholl profile plot: intersections vs distance from soma."
+  - type: measurement
+    description: "Enclosing radius (longest neurite), mean intersections, regression coefficients."
+
+known_issues:
+  - condition: "Noisy background creates false neurite detections"
+    symptom: "Sholl counts are inflated by background noise branches"
+    fix: "Clean the binary mask manually or increase threshold. Apply Median filter before thresholding."
+  - condition: "Neurites are not continuous in the skeleton"
+    symptom: "Broken branches reduce intersection counts"
+    fix: "Use morphological closing (Dilate then Erode) before skeletonizing to bridge small gaps."
+  - condition: "Multiple neurons in the field"
+    symptom: "Sholl analysis includes processes from neighboring neurons"
+    fix: "Crop to isolate a single neuron, or manually erase neighboring processes."
+  - condition: "Soma center incorrectly placed"
+    symptom: "Sholl profile is shifted — peak is at wrong distance"
+    fix: "Verify the point selection is at the true geometric center of the soma."
+  - condition: "Image not calibrated"
+    symptom: "Distances are in pixels, not comparable between experiments"
+    fix: "Set scale from metadata or known reference. All distance measurements need calibration."
+
+tags: [sholl, neurite, branching, neuroscience, dendrite, axon, morphology, skeleton]

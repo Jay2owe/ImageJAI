@@ -14,6 +14,7 @@ Usage:
     python ij.py histogram
     python ij.py windows
     python ij.py metadata
+    python ij.py probe "Gaussian Blur..."
     python ij.py raw '{"command": "ping"}'
 
 Can also be imported:
@@ -283,6 +284,14 @@ def main():
         elif cmd == "close_dialogs":
             pattern = sys.argv[2] if len(sys.argv) > 2 else None
             print(json.dumps(close_dialogs(pattern), indent=2))
+
+        elif cmd == "probe":
+            if len(sys.argv) < 3:
+                print("Usage: python ij.py probe \"Plugin Name...\"")
+                sys.exit(1)
+            plugin_name = " ".join(sys.argv[2:])
+            print(json.dumps(imagej_command(
+                {"command": "probe_command", "plugin": plugin_name}), indent=2))
 
         elif cmd == "raw":
             if len(sys.argv) < 3:
