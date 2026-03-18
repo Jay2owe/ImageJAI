@@ -317,6 +317,8 @@ public class TCPCommandServer {
             return handleCloseDialogs(request);
         } else if ("close_windows".equals(command)) {
             return handleCloseDialogs(request);
+        } else if ("probe_command".equals(command)) {
+            return handleProbeCommand(request);
         } else {
             return errorResponse("Unknown command: " + command);
         }
@@ -1261,48 +1263,68 @@ public class TCPCommandServer {
             }
 
             // Try multiple addContent signatures — API varies between versions
+            // Use method scanning instead of getMethod() to avoid classloader mismatches
+            // (ImagePlus.class from our classloader may differ from the 3D Viewer's)
             Object content = null;
             String methodUsed = "";
 
-            // Attempt 1: addContent(ImagePlus, Color3f, String, int, boolean[], int, int)
-            try {
-                Class<?> color3fClass = Class.forName("org.scijava.vecmath.Color3f");
-                java.lang.reflect.Constructor<?> colorCtor = color3fClass.getConstructor(float.class, float.class, float.class);
-                Object white = colorCtor.newInstance(1.0f, 1.0f, 1.0f);
+            // Collect all addContent methods
+            java.lang.reflect.Method method2 = null; // (ImagePlus, int)
+            java.lang.reflect.Method method3 = null; // (ImagePlus, int, int)
+            java.lang.reflect.Method method7 = null; // (ImagePlus, Color3f, String, int, boolean[], int, int)
+            for (java.lang.reflect.Method m : universeClass.getMethods()) {
+                if (!"addContent".equals(m.getName())) continue;
+                Class<?>[] params = m.getParameterTypes();
+                if (params.length == 2 && params[1] == int.class) {
+                    method2 = m;
+                } else if (params.length == 3 && params[1] == int.class && params[2] == int.class) {
+                    method3 = m;
+                } else if (params.length == 7 && params[2] == String.class) {
+                    method7 = m;
+                }
+            }
 
-                java.lang.reflect.Method addContent = universeClass.getMethod(
-                        "addContent", ImagePlus.class, color3fClass, String.class,
-                        int.class, boolean[].class, int.class, int.class);
-                boolean[] channels = new boolean[]{true, true, true};
-                content = addContent.invoke(universe, imp, white, imageName,
-                        threshold, channels, resamplingFactor, typeInt);
-                methodUsed = "addContent(ImagePlus, Color3f, String, int, boolean[], int, int)";
-            } catch (Exception e1) {
-                // Attempt 2: addContent(ImagePlus, int, int) — simpler signature
+            // Attempt 1: full signature with Color3f
+            if (method7 != null) {
                 try {
-                    java.lang.reflect.Method addContent = universeClass.getMethod(
-                            "addContent", ImagePlus.class, int.class, int.class);
-                    content = addContent.invoke(universe, imp, typeInt, resamplingFactor);
+                    Class<?> color3fClass = method7.getParameterTypes()[1];
+                    java.lang.reflect.Constructor<?> colorCtor = color3fClass.getConstructor(float.class, float.class, float.class);
+                    Object white = colorCtor.newInstance(1.0f, 1.0f, 1.0f);
+                    boolean[] channels = new boolean[]{true, true, true};
+                    content = method7.invoke(universe, imp, white, imageName,
+                            threshold, channels, resamplingFactor, typeInt);
+                    methodUsed = "addContent(7-arg)";
+                } catch (Exception e1) {
+                    // fall through
+                }
+            }
+            // Attempt 2: addContent(ImagePlus, int, int)
+            if (content == null && method3 != null) {
+                try {
+                    content = method3.invoke(universe, imp, typeInt, resamplingFactor);
                     methodUsed = "addContent(ImagePlus, int, int)";
                 } catch (Exception e2) {
-                    // Attempt 3: addContent(ImagePlus, int) — simplest
-                    try {
-                        java.lang.reflect.Method addContent = universeClass.getMethod(
-                                "addContent", ImagePlus.class, int.class);
-                        content = addContent.invoke(universe, imp, typeInt);
-                        methodUsed = "addContent(ImagePlus, int)";
-                    } catch (Exception e3) {
-                        // List available addContent methods for debugging
-                        StringBuilder methods = new StringBuilder();
-                        for (java.lang.reflect.Method m : universeClass.getMethods()) {
-                            if ("addContent".equals(m.getName())) {
-                                methods.append(m.toString()).append("; ");
-                            }
-                        }
-                        result.addProperty("error", "No compatible addContent method found. Available: " + methods.toString());
-                        return result;
+                    // fall through
+                }
+            }
+            // Attempt 3: addContent(ImagePlus, int)
+            if (content == null && method2 != null) {
+                try {
+                    content = method2.invoke(universe, imp, typeInt);
+                    methodUsed = "addContent(ImagePlus, int)";
+                } catch (Exception e3) {
+                    // fall through
+                }
+            }
+            if (content == null) {
+                StringBuilder methods = new StringBuilder();
+                for (java.lang.reflect.Method m : universeClass.getMethods()) {
+                    if ("addContent".equals(m.getName())) {
+                        methods.append(m.toString()).append("; ");
                     }
                 }
+                result.addProperty("error", "addContent failed. Available: " + methods.toString());
+                return result;
             }
 
             if (content != null) {
@@ -1817,5 +1839,331 @@ public class TCPCommandServer {
         JsonObject result = new JsonObject();
         result.addProperty("closedCount", closedCount[0]);
         return successResponse(result);
+    }
+
+    // -----------------------------------------------------------------------
+    // Plugin probing — discover dialog fields and macro argument syntax
+    // -----------------------------------------------------------------------
+
+    private JsonObject handleProbeCommand(JsonObject request) {
+        JsonElement pluginElement = request.get("plugin");
+        if (pluginElement == null || !pluginElement.isJsonPrimitive()) {
+            return errorResponse("Missing 'plugin' parameter");
+        }
+        final String pluginName = pluginElement.getAsString();
+
+        // Snapshot currently showing dialogs so we can detect new ones
+        final java.util.Set<Window> existing = new java.util.HashSet<Window>();
+        for (Window w : Window.getWindows()) {
+            if (w.isShowing()) existing.add(w);
+        }
+
+        // Launch plugin on a new thread — it will show its dialog
+        Thread pluginThread = new Thread(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    IJ.doCommand(pluginName);
+                } catch (Exception e) {
+                    // Plugin failed — that's OK for probing
+                }
+            }
+        });
+        pluginThread.setDaemon(true);
+        pluginThread.start();
+
+        // Poll for a new dialog to appear (up to 5 seconds)
+        Dialog newDialog = null;
+        long deadline = System.currentTimeMillis() + 5000;
+        while (System.currentTimeMillis() < deadline) {
+            try { Thread.sleep(150); } catch (InterruptedException e) { break; }
+            for (Window w : Window.getWindows()) {
+                if (w.isShowing() && !existing.contains(w) && w instanceof Dialog) {
+                    newDialog = (Dialog) w;
+                    break;
+                }
+            }
+            if (newDialog != null) break;
+        }
+
+        JsonObject result = new JsonObject();
+        result.addProperty("plugin", pluginName);
+
+        if (newDialog == null) {
+            result.addProperty("hasDialog", false);
+            result.addProperty("note", "No dialog appeared within 5 seconds. "
+                    + "Plugin may have no parameters, may have already executed, "
+                    + "or may require an open image.");
+            return successResponse(result);
+        }
+
+        // Small delay to let dialog fully render its components
+        try { Thread.sleep(200); } catch (InterruptedException e) {}
+
+        result.addProperty("hasDialog", true);
+        result.addProperty("dialogTitle", newDialog.getTitle() != null ? newDialog.getTitle() : "");
+
+        // Check if it's a GenericDialog (or subclass like NonBlockingGenericDialog)
+        boolean isGD = false;
+        try {
+            isGD = Class.forName("ij.gui.GenericDialog").isInstance(newDialog);
+        } catch (Exception e) {}
+
+        if (isGD) {
+            result.addProperty("dialogType", "GenericDialog");
+            JsonArray fields = probeGenericDialogFields(newDialog);
+            result.add("fields", fields);
+            result.addProperty("macro_syntax", buildMacroSyntax(pluginName, fields));
+        } else {
+            result.addProperty("dialogType", "custom");
+            StringBuilder text = new StringBuilder();
+            List<String> buttons = new ArrayList<String>();
+            extractDialogContent(newDialog, text, buttons);
+            result.addProperty("dialog_text", text.toString().trim());
+            JsonArray btnArray = new JsonArray();
+            for (String b : buttons) btnArray.add(new JsonPrimitive(b));
+            result.add("buttons", btnArray);
+        }
+
+        // Dispose the dialog to cancel the plugin
+        final Dialog dlg = newDialog;
+        SwingUtilities.invokeLater(new Runnable() {
+            @Override
+            public void run() {
+                dlg.dispose();
+            }
+        });
+
+        // Brief wait for disposal to complete
+        try { Thread.sleep(200); } catch (InterruptedException e) {}
+
+        return successResponse(result);
+    }
+
+    /**
+     * Extract structured field information from a GenericDialog.
+     * Returns a JSON array of field objects with type, label, default, options, and macro_key.
+     */
+    private JsonArray probeGenericDialogFields(Dialog dlg) {
+        JsonArray fields = new JsonArray();
+        try {
+            // Walk up class hierarchy to find GenericDialog
+            Class<?> gdClass = dlg.getClass();
+            while (gdClass != null && !"GenericDialog".equals(gdClass.getSimpleName())) {
+                gdClass = gdClass.getSuperclass();
+            }
+            if (gdClass == null) return fields;
+
+            // --- Numeric fields ---
+            try {
+                java.lang.reflect.Method m = gdClass.getMethod("getNumericFields");
+                @SuppressWarnings("unchecked")
+                java.util.Vector<java.awt.TextField> numFields =
+                        (java.util.Vector<java.awt.TextField>) m.invoke(dlg);
+                if (numFields != null) {
+                    for (java.awt.TextField tf : numFields) {
+                        JsonObject f = new JsonObject();
+                        f.addProperty("type", "numeric");
+                        f.addProperty("default", tf.getText());
+                        String label = findFieldLabel(tf);
+                        f.addProperty("label", label);
+                        f.addProperty("macro_key", labelToMacroKey(label));
+                        fields.add(f);
+                    }
+                }
+            } catch (Exception e) {}
+
+            // --- String fields ---
+            try {
+                java.lang.reflect.Method m = gdClass.getMethod("getStringFields");
+                @SuppressWarnings("unchecked")
+                java.util.Vector<java.awt.TextField> strFields =
+                        (java.util.Vector<java.awt.TextField>) m.invoke(dlg);
+                if (strFields != null) {
+                    for (java.awt.TextField tf : strFields) {
+                        JsonObject f = new JsonObject();
+                        f.addProperty("type", "string");
+                        f.addProperty("default", tf.getText());
+                        String label = findFieldLabel(tf);
+                        f.addProperty("label", label);
+                        f.addProperty("macro_key", labelToMacroKey(label));
+                        fields.add(f);
+                    }
+                }
+            } catch (Exception e) {}
+
+            // --- Checkboxes ---
+            try {
+                java.lang.reflect.Method m = gdClass.getMethod("getCheckboxes");
+                @SuppressWarnings("unchecked")
+                java.util.Vector<java.awt.Checkbox> boxes =
+                        (java.util.Vector<java.awt.Checkbox>) m.invoke(dlg);
+                if (boxes != null) {
+                    for (java.awt.Checkbox cb : boxes) {
+                        JsonObject f = new JsonObject();
+                        f.addProperty("type", "checkbox");
+                        f.addProperty("label", cb.getLabel() != null ? cb.getLabel() : "");
+                        f.addProperty("default", cb.getState());
+                        f.addProperty("macro_key", labelToMacroKey(cb.getLabel()));
+                        fields.add(f);
+                    }
+                }
+            } catch (Exception e) {}
+
+            // --- Choices (dropdowns) ---
+            try {
+                java.lang.reflect.Method m = gdClass.getMethod("getChoices");
+                @SuppressWarnings("unchecked")
+                java.util.Vector<java.awt.Choice> choices =
+                        (java.util.Vector<java.awt.Choice>) m.invoke(dlg);
+                if (choices != null) {
+                    for (java.awt.Choice ch : choices) {
+                        JsonObject f = new JsonObject();
+                        f.addProperty("type", "choice");
+                        f.addProperty("default", ch.getSelectedItem() != null ? ch.getSelectedItem() : "");
+                        String label = findFieldLabel(ch);
+                        f.addProperty("label", label);
+                        f.addProperty("macro_key", labelToMacroKey(label));
+                        // List ALL options
+                        JsonArray opts = new JsonArray();
+                        for (int i = 0; i < ch.getItemCount(); i++) {
+                            opts.add(new JsonPrimitive(ch.getItem(i)));
+                        }
+                        f.add("options", opts);
+                        fields.add(f);
+                    }
+                }
+            } catch (Exception e) {}
+
+            // --- Sliders ---
+            try {
+                java.lang.reflect.Method m = gdClass.getMethod("getSliders");
+                @SuppressWarnings("unchecked")
+                java.util.Vector<java.awt.Scrollbar> sliders =
+                        (java.util.Vector<java.awt.Scrollbar>) m.invoke(dlg);
+                if (sliders != null) {
+                    for (java.awt.Scrollbar sb : sliders) {
+                        JsonObject f = new JsonObject();
+                        f.addProperty("type", "slider");
+                        f.addProperty("value", sb.getValue());
+                        f.addProperty("min", sb.getMinimum());
+                        f.addProperty("max", sb.getMaximum());
+                        String label = findFieldLabel(sb);
+                        f.addProperty("label", label);
+                        f.addProperty("macro_key", labelToMacroKey(label));
+                        fields.add(f);
+                    }
+                }
+            } catch (Exception e) {}
+
+        } catch (Exception e) {
+            // Couldn't access GenericDialog methods
+        }
+        return fields;
+    }
+
+    /**
+     * Find the label associated with a field component in a GenericDialog.
+     * GenericDialog places fields in Panels alongside their Labels.
+     * For sliders, the label is the component before the slider's parent Panel.
+     */
+    private String findFieldLabel(java.awt.Component field) {
+        java.awt.Container parent = field.getParent();
+        if (parent == null) return "";
+
+        // Check siblings in the same Panel for a Label
+        java.awt.Component[] siblings = parent.getComponents();
+        for (java.awt.Component sibling : siblings) {
+            if (sibling instanceof java.awt.Label) {
+                String text = ((java.awt.Label) sibling).getText();
+                if (text != null && !text.trim().isEmpty()) {
+                    return text.trim();
+                }
+            }
+        }
+
+        // For sliders/other: label is a sibling of the parent Panel in the dialog
+        java.awt.Container grandparent = parent.getParent();
+        if (grandparent != null) {
+            java.awt.Component[] comps = grandparent.getComponents();
+            for (int i = 0; i < comps.length; i++) {
+                if (comps[i] == parent) {
+                    // Walk backwards to find the nearest preceding Label
+                    for (int j = i - 1; j >= 0; j--) {
+                        if (comps[j] instanceof java.awt.Label) {
+                            String text = ((java.awt.Label) comps[j]).getText();
+                            if (text != null && !text.trim().isEmpty()) {
+                                return text.trim();
+                            }
+                        }
+                        // Stop at another Panel (belongs to a different field)
+                        if (comps[j] instanceof java.awt.Panel) break;
+                    }
+                }
+            }
+        }
+
+        return "";
+    }
+
+    /**
+     * Convert a dialog field label to the ImageJ macro argument key.
+     * Follows ImageJ Recorder conventions: strip trailing colon,
+     * lowercase, spaces to underscores.
+     */
+    private String labelToMacroKey(String label) {
+        if (label == null || label.isEmpty()) return "";
+        String key = label.trim();
+        // Strip trailing colon or equals
+        if (key.endsWith(":")) key = key.substring(0, key.length() - 1).trim();
+        if (key.endsWith("=")) key = key.substring(0, key.length() - 1).trim();
+        // Lowercase, spaces to underscores
+        key = key.toLowerCase().replace(' ', '_');
+        return key;
+    }
+
+    /**
+     * Generate example macro syntax from probed fields.
+     */
+    private String buildMacroSyntax(String pluginName, JsonArray fields) {
+        if (fields.size() == 0) {
+            return "run(\"" + pluginName + "\");";
+        }
+
+        StringBuilder args = new StringBuilder();
+        for (int i = 0; i < fields.size(); i++) {
+            JsonObject f = fields.get(i).getAsJsonObject();
+            String key = f.has("macro_key") ? f.get("macro_key").getAsString() : "";
+            if (key.isEmpty()) continue;
+            String type = f.get("type").getAsString();
+
+            if ("checkbox".equals(type)) {
+                // Checked checkboxes: include key name; unchecked: omit entirely
+                if (f.has("default") && f.get("default").getAsBoolean()) {
+                    if (args.length() > 0) args.append(" ");
+                    args.append(key);
+                }
+                continue;
+            }
+
+            if (args.length() > 0) args.append(" ");
+
+            String val = "";
+            if ("numeric".equals(type)) {
+                val = f.has("default") ? f.get("default").getAsString() : "0";
+            } else if ("slider".equals(type)) {
+                val = f.has("value") ? String.valueOf(f.get("value").getAsInt()) : "0";
+            } else if ("string".equals(type) || "choice".equals(type)) {
+                val = f.has("default") ? f.get("default").getAsString() : "";
+            }
+
+            if (val.contains(" ")) {
+                args.append(key).append("=[").append(val).append("]");
+            } else {
+                args.append(key).append("=").append(val);
+            }
+        }
+
+        return "run(\"" + pluginName + "\", \"" + args.toString() + "\");";
     }
 }

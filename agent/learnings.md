@@ -28,6 +28,45 @@ run("Analyze Particles...", "size=50-Infinity show=Outlines display summarize");
 close("*");
 ```
 
+## CRITICAL: Never Oversaturate Images
+
+**Oversaturation is unacceptable in microscopy.** When pixel intensities are
+clipped to the maximum value (255 for 8-bit, 65535 for 16-bit), real intensity
+differences are destroyed and quantitative analysis becomes invalid. Journals
+will reject figures with blown-out pixels, and reviewers treat it as data
+manipulation.
+
+### What causes it:
+- `run("Enhance Contrast...", "saturated=0.3 normalize process_all");` — `normalize`
+  permanently rescales pixel values, clipping the top 0.3% to max. Irreversible.
+- Converting 16-bit → 8-bit without setting display range first
+- Any operation that permanently modifies pixel values to fill the dynamic range
+
+### Why it's bad beyond just saturation:
+- **Destroys the user's ability to re-adjust later.** If you save enhanced data,
+  the original intensity relationships are gone. The user can always enhance
+  display later themselves, but they can never undo your enhancement.
+- Journals reject it. Reviewers treat it as data manipulation.
+
+### What to do instead:
+- **NEVER use Enhance Contrast on output data.** Do not enhance contrast at all
+  on images that will be saved or rendered. The raw intensity IS the data.
+- If you need better visibility for YOUR inspection during processing, use
+  `setMinAndMax(low, high)` which only changes the DISPLAY range, not the pixels.
+- **For 3D renders**: do NOT enhance. The projection already accumulates signal
+  along the ray path. The raw data renders fine.
+- **For quantitative work**: NEVER modify pixel values. Only adjust display
+  range (Min/Max sliders). Use `setMinAndMax()` not `normalize`.
+- **Let the user decide**: save the raw data. They can always adjust contrast
+  themselves. They can never undo yours.
+
+### Quick check for saturation:
+```bash
+python ij.py histogram
+# If max == 255 (8-bit) or 65535 (16-bit) AND the last bin has many pixels,
+# the image is saturated. Also check after processing steps.
+```
+
 ## Error Patterns & Fixes
 
 ### "Macro execution timed out after 30000ms" — EDT deadlock
@@ -133,39 +172,104 @@ When working with z-stacks:
 redirect does this automatically and correctly. Don't reinvent what plugins
 already provide.
 
-### 3D rendering: use actual 3D renderers, NOT orthogonal projections
-- Orthogonal XY/XZ/YZ montages are NOT 3D renders — they're flat 2D slices
-- Only use orthogonal views if the user specifically asks for them
-- For actual 3D rendering use:
-  - `3D Viewer` — interactive OpenGL volume/surface rendering (may block macro)
-  - `Volume Viewer` — simpler volume rendering (check exact parameter names)
-  - `3Dscript` — scriptable 3D animation/rendering (if installed)
-- If 3D plugins block the macro thread, the agent should detect the timeout
-  and inform the user that the 3D viewer is open for interactive use
-- The 3D Viewer CAN be controlled via `call()` functions:
+### 3D rendering: ranking of methods (best → worst)
+
+**1. 3Dscript (BEST — true volume raycasting, scriptable)**
+- Installed as `Batch Animation` / `Interactive Animation` (animation3d package)
+- Natural language animation scripts: `From frame 0 to frame 100 rotate by 360 degrees horizontally`
+- Macro syntax:
   ```
-  call("ij3d.ImageJ_3D_Viewer.add", "title", "None", "title", "50", "true", "true", "true", "2", "0");
-  call("ij3d.ImageJ_3D_Viewer.snapshot", "512", "512");
+  run("Batch Animation", "animation=[/path/to/script.txt] width=512 height=512");
   ```
-  But these may timeout — handle gracefully
-- **3D Viewer snapshot issue**: `takeSnapshot()` and manual View > Take Snapshot
-  both produce a tiny image in the corner of a large black canvas. The 3D Viewer
-  renders at the correct zoom in its window but the snapshot doesn't match.
-  This is a known 3D Viewer bug. FIXED: use `3d capture` instead of
-  `3d snapshot`. It uses java.awt.Robot to screenshot the actual window,
-  brings it to front first, waits for repaint, and crops out the title
-  bar/borders using window insets. Captures the content area only.
-- **3D Viewer API via TCP** — the `3d` commands work reliably:
-  - `3d add IMAGE volume 50` — adds content (uses addContent(ImagePlus, int, int))
-  - `3d fit` — calls resetView() to fit content
-  - `3d list` — lists loaded content
-  - `3d snapshot` — takes snapshot (but has the sizing bug above)
-  - `3d status` — checks if open and what's loaded
-  - `3d close` — closes the viewer
-  - Universe reference is cached across calls
-- **3D Viewer needs 8-bit images** — convert before adding
-- **Non-binary volumes look blocky** — 3D Viewer doesn't interpolate between
-  z-slices for intensity data. For smooth surfaces, threshold to binary first.
+- Script file is a plain text file with one instruction per line
+- Produces smooth volume-rendered rotation with proper depth/opacity
+- Output resolution = input image dimensions (width/height args are ignored)
+  so scale up the input image XY BEFORE running 3Dscript
+- Renders bounding box and scale bar by default (no way to disable via batch macro)
+- Input MUST be 8-bit
+- Z-staircase artefact at oblique angles when few Z slices (inherent to data,
+  not a rendering bug — confocal z-steps are ~3.5x coarser than XY pixels)
+- Do NOT Z-interpolate before 3Dscript — bicubic interpolation of masked data
+  (0→signal→0) produces very dim interpolated slices that fall below 3Dscript's
+  alpha threshold, making the cell invisible. Feed the raw z-stack instead.
+
+**2. 3D Viewer (GOOD — interactive OpenGL volume rendering)**
+- TCP API: `python ij.py 3d add IMAGE volume 50` then `3d capture`
+- Produces smooth volume renders with proper depth/opacity
+- Interactive — user can rotate/zoom in the Fiji window
+- `3d capture` uses Robot to screenshot the actual window (preferred over
+  `3d snapshot` which has a sizing bug — renders tiny in corner)
+- `3d capture` may grab the wrong window if other windows are in front
+- Input MUST be 8-bit
+- addContent classloader bug FIXED: scan methods by name+param count
+  instead of exact class matching (org.jogamp vs org.scijava vecmath)
+
+**3. 3D Project (FALLBACK — rotating max intensity projection)**
+- `run("3D Project...", "projection=[Brightest Point] axis=Y-Axis ...")`
+- NOT a volume render — it's a MIP at each rotation angle
+- No depth/opacity — just brightest voxel along each ray
+- Z-striping at side views regardless of interpolation because it renders
+  voxels as discrete columns (3D Project doesn't interpolate during projection)
+- Works reliably via macro every time — good fallback when 3D Viewer/3Dscript
+  have issues
+
+### Cell isolation workflow (REQUIRED before any 3D render)
+
+**ISOLATE FIRST** — cropping alone is NOT enough. Neighbouring cells bleed into
+the render. The volume must contain ONLY the target cell on black background.
+
+1. **Find cells**: `python pixels.py find_cells` — pick by area + intensity
+2. **Segment**: Duplicate, blur, run 3D Objects Counter:
+   ```
+   run("Duplicate...", "title=seg duplicate");
+   run("Gaussian Blur 3D...", "x=2 y=2 z=1");
+   run("3D Objects Counter", "threshold=37000 min.=100 max.=999999 objects");
+   ```
+3. **Find target label**: Read pixel value in objects map at the cell's (x,y) position.
+   Check multiple positions/slices — the cell may not be at exactly the centroid
+   from `find_cells` (that's from a single-slice 2D analysis).
+4. **Create binary mask (0/1)**: From the objects map, set target label → 1,
+   everything else → 0.
+5. **Multiply mask × original**: Use `imageCalculator("Multiply create stack", ...)`
+   NOT `AND` — bitwise AND between 8-bit mask and 16-bit image corrupts values
+   (only keeps the low byte).
+6. **Crop tightly**: `makeRectangle(x, y, w, h); run("Crop");`
+7. **Do NOT enhance contrast** — raw intensity is the data.
+
+### 3D rendering: complete recipe
+
+```
+// After isolation (step 6 above):
+// For 3Dscript (PREFERRED):
+run("8-bit");
+run("Scale...", "x=10 y=10 z=1.0 interpolation=Bicubic process create title=cell_big");
+// Write script file: "From frame 0 to frame 100 rotate by 360 degrees horizontally"
+run("Batch Animation", "animation=[/path/to/rotate.animation.txt]");
+
+// For 3D Viewer:
+run("8-bit");
+// Then via TCP: python ij.py 3d add IMAGE_TITLE volume 20
+// Then: python ij.py 3d fit
+// Then: python ij.py 3d capture name
+
+// For 3D Project (fallback):
+run("Scale...", "x=10 y=10 z=1.0 interpolation=Bicubic process create title=cell_big");
+run("3D Project...", "projection=[Brightest Point] axis=Y-Axis slice=0.28 initial=0 total=360 rotation=10 lower=1 upper=255 opacity=0 surface=100 interior=50");
+run("Cyan Hot");
+```
+
+### Key 3D rendering lessons
+- **ISOLATE FIRST** — always segment and mask, never just crop
+- **Multiply not AND** — for masking 16-bit images, use imageCalculator Multiply
+  with a 0/1 mask. Bitwise AND corrupts 16-bit data through an 8-bit mask.
+- **8-bit for renderers** — 3D Viewer and 3Dscript both need 8-bit input
+- **Scale XY before 3Dscript** — output size = input image size
+- **Do NOT Z-interpolate for 3Dscript** — interpolated masked data falls below
+  alpha threshold and renders invisible. Feed raw z-stack instead.
+- **Z-staircase is a data limitation** — 13 confocal slices at ~1µm spacing
+  will always show steps from the side. Only more z-slices during acquisition
+  can fix this.
+- **No contrast enhancement** — raw intensity is the data. User adjusts later.
 
 ### Save deliverables next to the source image, NOT in .tmp/
 - `.tmp/` is for agent working captures only (visual feedback for the agent)
@@ -176,6 +280,19 @@ already provide.
 - Create the output dir: `File.makeDirectory(dir + "AI_output");`
 - Save there: `saveAs("PNG", dir + "AI_output/filename.png");`
 - This keeps outputs organized next to the data they came from
+
+### ALWAYS probe plugins before using them
+- `python probe_plugin.py "Plugin Name..."` discovers ALL parameters
+- Returns: field types, labels, defaults, dropdown options, slider ranges, macro syntax
+- Results are cached in `.tmp/plugin_args/` — subsequent lookups are instant
+- `--batch` flag probes multiple plugins at once
+- `--search keyword` searches all cached probes
+- This eliminates trial-and-error with macro arguments
+- For GenericDialog plugins (vast majority): structured extraction via getNumericFields(),
+  getStringFields(), getCheckboxes(), getChoices(), getSliders()
+- For custom dialogs: falls back to flat text extraction
+- **Probe NEEDS an image to be open** for most plugins — open a test image first
+- The probe cancels the dialog without executing — no side effects on the image
 
 ### Dialogs: read them immediately, don't ignore them
 - After EVERY macro execution, check the response for `"dialogs"` in the result

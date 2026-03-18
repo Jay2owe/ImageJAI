@@ -1,0 +1,149 @@
+name: Corrected Total Cell Fluorescence (CTCF)
+id: ctcf
+description: >
+  Measure corrected total cell fluorescence: IntDen - (Area x Background_Mean).
+  This corrects for cell size and local background, giving a fair comparison of
+  fluorescence intensity between cells of different sizes. Standard method for
+  quantifying protein expression from fluorescence microscopy images.
+domain: cell_biology
+difficulty: intermediate
+
+preconditions:
+  image_type: [8-bit, 16-bit, 32-bit]
+  min_channels: 1
+  needs_stack: false
+  needs_calibration: false
+  notes: >
+    Requires a fluorescence image. Do NOT measure from RGB or contrast-enhanced
+    images. Work on the raw single-channel data. If multi-channel, split and
+    measure the channel of interest.
+
+parameters:
+  - name: cell_channel
+    label: "Channel to measure"
+    type: numeric
+    default: 1
+    range: [1, 5]
+    description: "Which channel contains the fluorescence signal to quantify."
+
+  - name: outline_method
+    label: "Cell outline method"
+    type: choice
+    default: "threshold"
+    options: ["threshold", "stardist", "manual"]
+    description: "How to define cell boundaries. Threshold for simple cases, StarDist for nuclei, manual if few cells."
+
+  - name: bg_regions
+    label: "Number of background ROIs"
+    type: numeric
+    default: 3
+    range: [1, 10]
+    description: "How many background regions to sample for averaging."
+
+steps:
+  - id: 1
+    description: "Set up measurements to include Integrated Density and Area"
+    macro: |
+      run("Set Measurements...", "area mean min integrated redirect=None decimal=3");
+    decision_point: false
+    decision_logic: ""
+    capture_after: false
+    validate: ""
+
+  - id: 2
+    description: "Duplicate the measurement channel if multi-channel"
+    macro: |
+      // For multi-channel: split and select the target channel
+      // For single-channel: just duplicate to preserve original
+      run("Duplicate...", "title=measure_channel");
+    decision_point: true
+    decision_logic: >
+      If the image is multi-channel (composite), use Split Channels first and
+      select the appropriate channel. If single-channel, just duplicate.
+    capture_after: true
+    validate: "Should be a single-channel grayscale image of the fluorescence signal."
+
+  - id: 3
+    description: "Create cell ROIs via thresholding or StarDist"
+    macro: |
+      // Threshold approach:
+      run("Duplicate...", "title=mask_for_rois");
+      run("Gaussian Blur...", "sigma=1");
+      setAutoThreshold("Otsu dark");
+      run("Convert to Mask");
+      run("Watershed");
+      run("Analyze Particles...", "size=100-Infinity add");
+      close("mask_for_rois");
+    decision_point: true
+    decision_logic: >
+      If cells are well-separated and round, use threshold + Analyze Particles.
+      If dense or overlapping, use StarDist to generate ROIs. If only a few cells,
+      the user can draw ROIs manually. The ROIs must be in ROI Manager.
+    capture_after: true
+    validate: "ROI Manager should contain individual cell outlines. Visually verify they match cells."
+
+  - id: 4
+    description: "Measure each cell ROI on the original fluorescence channel"
+    macro: |
+      selectWindow("measure_channel");
+      roiManager("Measure");
+    decision_point: false
+    decision_logic: ""
+    capture_after: false
+    validate: "Results table should have Area, Mean, IntDen for each cell."
+
+  - id: 5
+    description: "Measure background - draw ROIs in cell-free regions"
+    macro: |
+      // Select the measurement image
+      selectWindow("measure_channel");
+      // Draw background ROI in a cell-free region
+      // Agent should pick a region visually confirmed to be empty
+      makeRectangle(10, 10, 50, 50);
+      run("Measure");
+      // Note: Agent should sample 3+ background regions and average the Mean values
+    decision_point: true
+    decision_logic: >
+      The agent must visually identify cell-free regions for background sampling.
+      Place 3+ rectangular ROIs in areas without cells. Average their Mean values
+      to get a robust background estimate. Avoid edges and artifacts.
+    capture_after: true
+    validate: "Background Mean should be lower than cell Mean values. If not, the background ROI is on a cell."
+
+  - id: 6
+    description: "Calculate CTCF for each cell"
+    macro: |
+      // CTCF = IntDen - (Area * Background_Mean)
+      // This is computed by the agent from the Results table values
+      // bg_mean = average of background ROI Mean values from step 5
+      // For each cell row: ctcf = IntDen - (Area * bg_mean)
+      // Agent reads results with: python ij.py results
+      // Then computes CTCF in Python
+    decision_point: false
+    decision_logic: ""
+    capture_after: false
+    validate: "CTCF values should be positive. Negative CTCF means the cell is dimmer than background (possible error)."
+
+outputs:
+  - type: results_table
+    description: "Per-cell Area, Mean, IntDen, and calculated CTCF values"
+  - type: roi_set
+    description: "Cell outlines in ROI Manager (can be saved as .zip)"
+  - type: measurement
+    description: "Background mean intensity used for correction"
+
+known_issues:
+  - condition: "Measuring from contrast-enhanced or normalized images"
+    symptom: "CTCF values are meaningless because pixel values were altered"
+    fix: "ALWAYS measure from the raw, unmodified fluorescence image. Never use Enhance Contrast with normalize."
+  - condition: "Background ROI placed on a cell"
+    symptom: "Background Mean is too high, CTCF becomes negative"
+    fix: "Visually verify background ROIs are in cell-free regions. Capture and inspect."
+  - condition: "Uneven illumination across the field"
+    symptom: "CTCF varies systematically with position"
+    fix: "Apply rolling ball background subtraction first, or measure local background near each cell."
+  - condition: "RGB image instead of raw fluorescence"
+    symptom: "IntDen values are from the RGB composite, not the real signal"
+    fix: "Go back to the original file and split channels. Never measure from RGB."
+
+tags: [fluorescence, intensity, quantification, ctcf, integrated_density, background_correction]

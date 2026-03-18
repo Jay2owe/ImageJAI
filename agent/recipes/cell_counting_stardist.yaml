@@ -1,0 +1,122 @@
+name: Cell Counting (StarDist 2D)
+id: cell_counting_stardist
+description: >
+  Count cells using StarDist 2D deep learning segmentation. Superior to
+  threshold-based counting for dense, overlapping, or variable-intensity
+  nuclei. Requires the StarDist plugin (installed in this Fiji).
+domain: cell_biology
+difficulty: intermediate
+
+preconditions:
+  image_type: [8-bit, 16-bit, 32-bit]
+  min_channels: 1
+  needs_stack: false
+  needs_calibration: false
+  notes: "Single-channel image of nuclei. For multi-channel, extract the nuclear channel first."
+
+parameters:
+  - name: model
+    label: "StarDist model"
+    type: choice
+    default: "Versatile (fluorescent nuclei)"
+    options: ["Versatile (fluorescent nuclei)", "Versatile (H&E nuclei)", "DSB 2018 (from StarDist 2D paper)"]
+    description: "Versatile (fluorescent nuclei) for DAPI/Hoechst. Versatile (H&E nuclei) for histology."
+
+  - name: normalize_input
+    label: "Normalize input"
+    type: boolean
+    default: true
+    description: "Percentile-based normalization. Leave on unless image is already normalized."
+
+  - name: percentile_low
+    label: "Normalization percentile low"
+    type: numeric
+    default: 1.0
+    range: [0, 50]
+    description: "Lower percentile for normalization (1.0 is standard)."
+
+  - name: percentile_high
+    label: "Normalization percentile high"
+    type: numeric
+    default: 99.8
+    range: [50, 100]
+    description: "Upper percentile for normalization (99.8 is standard)."
+
+  - name: prob_thresh
+    label: "Probability threshold"
+    type: numeric
+    default: 0.5
+    range: [0.0, 1.0]
+    description: "Detection confidence threshold. Lower = more detections (may include noise). Higher = fewer, more confident detections."
+
+  - name: nms_thresh
+    label: "NMS overlap threshold"
+    type: numeric
+    default: 0.4
+    range: [0.0, 1.0]
+    description: "Non-maximum suppression threshold. Lower = less overlap allowed between detections."
+
+steps:
+  - id: 1
+    description: "Capture the original image for reference"
+    macro: ""
+    decision_point: false
+    decision_logic: ""
+    capture_after: true
+    validate: "Confirm a single-channel image with visible nuclei is open."
+
+  - id: 2
+    description: "Run StarDist 2D with selected model"
+    macro: |
+      run("Command From Macro", "command=[de.csbdresden.stardist.StarDist2D], args=['input':'${image_title}', 'modelChoice':'${model}', 'normalizeInput':'${normalize_input}', 'percentileBottom':'${percentile_low}', 'percentileTop':'${percentile_high}', 'probThresh':'${prob_thresh}', 'nmsThresh':'${nms_thresh}', 'outputType':'Both', 'nTiles':'1', 'excludeBoundary':'2', 'roiPosition':'Automatic', 'verbose':'false', 'showCsb498de498works498702702702progress':'false'], process=[false]");
+    decision_point: true
+    decision_logic: >
+      If StarDist fails with memory errors, increase nTiles to 4 or 8 to process
+      in patches. If too many/few detections, adjust prob_thresh: lower it (0.3)
+      for faint nuclei, raise it (0.7) for noisy images.
+    capture_after: true
+    validate: "Label image should show individually colored nuclei. ROIs should appear in ROI Manager."
+
+  - id: 3
+    description: "Measure detected nuclei from ROI Manager"
+    macro: |
+      run("Set Measurements...", "area mean min centroid shape redirect=None decimal=3");
+      roiManager("Measure");
+    decision_point: false
+    decision_logic: ""
+    capture_after: false
+    validate: "Results table should have one row per detected nucleus."
+
+  - id: 4
+    description: "Count total detections"
+    macro: |
+      n = roiManager("Count");
+      print("StarDist detected " + n + " nuclei");
+    decision_point: false
+    decision_logic: ""
+    capture_after: false
+    validate: "Check Log window for count. Should be reasonable for the image."
+
+outputs:
+  - type: roi_set
+    description: "ROI Manager contains individual nucleus outlines (polygon ROIs)"
+  - type: results_table
+    description: "Per-nucleus measurements: Area, Mean intensity, Circularity, Centroid"
+  - type: image
+    description: "Label image with unique integer ID per nucleus"
+
+known_issues:
+  - condition: "Large images (>4000x4000 pixels)"
+    symptom: "Out of memory error or very slow processing"
+    fix: "Increase nTiles to 4, 8, or 16 to process in patches"
+  - condition: "Non-nuclear objects (cytoplasm, tissue)"
+    symptom: "StarDist detects non-nuclear structures"
+    fix: "StarDist is trained on nuclei. For cytoplasm segmentation, use Cellpose instead."
+  - condition: "Very dim or high-background images"
+    symptom: "Missed detections"
+    fix: "Lower prob_thresh to 0.3, or apply background subtraction first"
+  - condition: "3D stacks"
+    symptom: "Only processes one slice"
+    fix: "Use StarDist 3D instead, or max-project first for 2D counting"
+
+tags: [cells, counting, nuclei, stardist, deep_learning, segmentation, ai]

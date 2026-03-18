@@ -1,0 +1,175 @@
+name: Particle Analysis
+id: particle_analysis
+description: >
+  Complete Analyze Particles workflow: preprocess, threshold, clean binary mask,
+  measure with size/shape filters. The workhorse of ImageJ quantification.
+  Produces per-particle measurements with flexible filtering.
+domain: measurement
+difficulty: intermediate
+
+preconditions:
+  image_type: [8-bit, 16-bit]
+  min_channels: 1
+  needs_stack: false
+  needs_calibration: false
+  notes: "Works best on images with distinct particles/objects. For dense overlapping objects, consider StarDist."
+
+parameters:
+  - name: blur_sigma
+    label: "Gaussian blur sigma"
+    type: numeric
+    default: 1
+    range: [0, 5]
+    description: "Pre-processing blur. 0=none, 1-2 for noisy images."
+
+  - name: threshold_method
+    label: "Threshold method"
+    type: choice
+    default: "Otsu"
+    options: ["Otsu", "Triangle", "Li", "Huang", "MaxEntropy", "Default"]
+    description: "Auto-threshold method for segmentation."
+
+  - name: min_size
+    label: "Minimum particle size"
+    type: numeric
+    default: 50
+    range: [0, 100000]
+    description: "Area filter minimum (in calibrated units or pixels)."
+
+  - name: max_size
+    label: "Maximum particle size"
+    type: string
+    default: "Infinity"
+    description: "Area filter maximum. Use 'Infinity' for no upper limit."
+
+  - name: min_circularity
+    label: "Minimum circularity"
+    type: numeric
+    default: 0.0
+    range: [0.0, 1.0]
+    description: "Shape filter. 0=any shape, 0.5=roughly round, 0.8=quite round."
+
+  - name: max_circularity
+    label: "Maximum circularity"
+    type: numeric
+    default: 1.0
+    range: [0.0, 1.0]
+    description: "Shape filter upper bound."
+
+  - name: show_output
+    label: "Output display"
+    type: choice
+    default: "Outlines"
+    options: ["Nothing", "Outlines", "Masks", "Ellipses", "Count Masks", "Overlay Outlines", "Overlay Masks"]
+    description: "What visual output to generate."
+
+  - name: watershed
+    label: "Apply watershed"
+    type: boolean
+    default: true
+    description: "Separate touching round particles."
+
+  - name: exclude_edges
+    label: "Exclude edge particles"
+    type: boolean
+    default: true
+    description: "Remove particles touching image border."
+
+  - name: include_holes
+    label: "Include holes in particles"
+    type: boolean
+    default: true
+    description: "Fill holes before analyzing so donut-shaped objects are measured as solid."
+
+  - name: measurements
+    label: "Measurements to include"
+    type: string
+    default: "area mean min centroid shape feret's integrated"
+    description: "Space-separated measurement options for Set Measurements."
+
+steps:
+  - id: 1
+    description: "Duplicate and preprocess"
+    macro: |
+      run("Duplicate...", "title=particle_mask");
+      run("Gaussian Blur...", "sigma=${blur_sigma}");
+    decision_point: false
+    decision_logic: ""
+    capture_after: false
+    validate: ""
+
+  - id: 2
+    description: "Apply threshold"
+    macro: |
+      setAutoThreshold("${threshold_method}");
+      run("Convert to Mask");
+    decision_point: true
+    decision_logic: >
+      If the mask looks wrong, try explore_thresholds to compare methods.
+      For fluorescence on dark background, the default orientation is usually
+      correct. If objects appear inverted (background white, objects black),
+      run("Invert");
+    capture_after: true
+    validate: "White objects on black background. Objects should match visible particles."
+
+  - id: 3
+    description: "Clean binary mask"
+    macro: |
+      run("Fill Holes");
+      run("Watershed");
+    decision_point: true
+    decision_logic: >
+      Fill Holes: always apply to prevent hollow objects from being measured incorrectly.
+      Watershed: only for round touching particles. Skip for elongated objects
+      (neurites, bacteria) as watershed would split them incorrectly.
+    capture_after: true
+    validate: "Holes filled, touching particles separated (if watershed applied)."
+
+  - id: 4
+    description: "Set measurements and run Analyze Particles"
+    macro: |
+      run("Set Measurements...", "${measurements} redirect=None decimal=3");
+      run("Analyze Particles...", "size=${min_size}-${max_size} circularity=${min_circularity}-${max_circularity} show=${show_output} display summarize exclude");
+    decision_point: false
+    decision_logic: ""
+    capture_after: true
+    validate: "Outlines should match detected particles. Count should be reasonable (10-5000)."
+
+  - id: 5
+    description: "Review results"
+    macro: |
+      // Agent reads with: python ij.py results
+      // Check: particle count, mean area, size distribution
+      // Look for outliers that may indicate merged particles or noise
+    decision_point: true
+    decision_logic: >
+      If count is too low, reduce min_size or try a different threshold.
+      If count is too high, increase min_size or increase blur.
+      If some particles are clearly merged, lower the threshold or apply
+      multiple iterations of watershed.
+    capture_after: false
+    validate: "Results table should have reasonable per-particle measurements."
+
+outputs:
+  - type: results_table
+    description: "Per-particle measurements as configured in Set Measurements."
+  - type: image
+    description: "Visual output (outlines, masks, or overlays) showing detected particles."
+  - type: measurement
+    description: "Summary row with count, mean, and standard deviation of all measurements."
+
+known_issues:
+  - condition: "Particles touching edges included"
+    symptom: "Incomplete particles at image borders distort size statistics"
+    fix: "Add 'exclude' option to Analyze Particles to remove edge-touching particles."
+  - condition: "All foreground merges into one object"
+    symptom: "Count = 1, area = nearly entire foreground"
+    fix: "Threshold is too aggressive. Try a different method or increase blur to separate objects."
+  - condition: "Too many tiny detections"
+    symptom: "Hundreds of 1-5 pixel particles detected"
+    fix: "Increase min_size to filter noise. Also increase blur sigma for pre-processing."
+  - condition: "Redirect not working"
+    symptom: "Intensity measured from binary mask instead of original"
+    fix: "Set redirect in Set Measurements: run('Set Measurements...', 'mean integrated redirect=ORIGINAL_TITLE decimal=3');"
+
+tags: [particles, analyze, counting, measurement, threshold, size_filter, shape_filter]

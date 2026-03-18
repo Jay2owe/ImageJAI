@@ -1,0 +1,126 @@
+name: Wound Healing Scratch Assay
+id: wound_healing
+description: >
+  Measure the gap area in a scratch/wound healing assay. Segments the cell-free
+  region (wound) and reports its area as a percentage of total image area.
+  Typically used at multiple time points to quantify migration/closure rate.
+domain: cell_biology
+difficulty: intermediate
+
+preconditions:
+  image_type: [8-bit, 16-bit, RGB]
+  min_channels: 1
+  needs_stack: false
+  needs_calibration: true
+  notes: "Phase contrast or brightfield images of cell monolayer with scratch. Calibration needed for real area values."
+
+parameters:
+  - name: blur_sigma
+    label: "Gaussian blur sigma"
+    type: numeric
+    default: 5
+    range: [2, 20]
+    description: "Large sigma (5-10) needed to blur individual cells and detect the gap region."
+
+  - name: threshold_method
+    label: "Threshold method"
+    type: choice
+    default: "Triangle"
+    options: ["Triangle", "Otsu", "Li", "Huang", "MaxEntropy"]
+    description: "Triangle works well when wound area is small relative to cell-covered area."
+
+  - name: min_wound_area
+    label: "Minimum wound area (pixels)"
+    type: numeric
+    default: 5000
+    range: [1000, 100000]
+    description: "Filter out small detected regions that are not the wound."
+
+steps:
+  - id: 1
+    description: "Duplicate and convert to 8-bit grayscale"
+    macro: |
+      run("Duplicate...", "title=wound_analysis");
+      run("8-bit");
+    decision_point: false
+    decision_logic: ""
+    capture_after: true
+    validate: "Scratch/gap should be visible as a lighter or darker band across the image."
+
+  - id: 2
+    description: "Heavy Gaussian blur to merge individual cells into a uniform monolayer signal"
+    macro: |
+      run("Gaussian Blur...", "sigma=${blur_sigma}");
+    decision_point: true
+    decision_logic: >
+      The blur must be strong enough that individual cells disappear and only the
+      gap vs monolayer contrast remains. If individual cells are still visible,
+      increase sigma. Typical range: 5-15 depending on cell density and image resolution.
+    capture_after: true
+    validate: "Individual cells should be blurred away. The wound should appear as a smooth dark/light band."
+
+  - id: 3
+    description: "Threshold to separate wound from monolayer"
+    macro: |
+      setAutoThreshold("${threshold_method}");
+      run("Convert to Mask");
+    decision_point: true
+    decision_logic: >
+      The wound area and cell-covered area should be clearly separated. If wound
+      is dark (phase contrast), the wound should be black in the mask. If inverted,
+      use run("Invert");. Check which region is the wound and which is cells.
+    capture_after: true
+    validate: "Mask should show two clear regions: wound area and cell-covered area."
+
+  - id: 4
+    description: "Clean up mask and measure wound area"
+    macro: |
+      run("Fill Holes");
+      // Measure the wound region (typically the smaller area)
+      run("Set Measurements...", "area area_fraction redirect=None decimal=3");
+      run("Analyze Particles...", "size=${min_wound_area}-Infinity display summarize");
+    decision_point: true
+    decision_logic: >
+      The wound should be detected as one large connected region. If it fragments
+      into multiple pieces, reduce blur sigma or try a different threshold method.
+      The wound area percentage = wound area / total image area.
+    capture_after: true
+    validate: "One or two large particles should be detected. Area fraction should make sense visually (e.g., 20-40% for a fresh scratch)."
+
+  - id: 5
+    description: "Calculate wound closure percentage"
+    macro: |
+      // Read wound area from results
+      wound_area = getResult("Area", 0);
+      total_area = getWidth() * getHeight();
+      wound_percent = (wound_area / total_area) * 100;
+      print("Wound area: " + wound_area);
+      print("Wound percentage: " + wound_percent + "%");
+    decision_point: false
+    decision_logic: ""
+    capture_after: false
+    validate: "Wound percentage should decrease over time points if cells are migrating."
+
+outputs:
+  - type: results_table
+    description: "Wound area in calibrated units and as fraction of total area."
+  - type: measurement
+    description: "Wound closure percentage for comparison between time points."
+  - type: image
+    description: "Binary mask showing wound vs monolayer regions."
+
+known_issues:
+  - condition: "Cell debris in the wound area"
+    symptom: "Small fragments detected inside the wound reduce measured area"
+    fix: "Increase blur sigma or use morphological opening (Erode then Dilate) to remove small objects."
+  - condition: "Wound runs off image edges"
+    symptom: "Area measurement is incomplete"
+    fix: "Ensure the full wound width is captured. Do not exclude edge particles for wound assays."
+  - condition: "Phase contrast bright halo at wound edge"
+    symptom: "Threshold detects halo as separate region, fragmenting the wound"
+    fix: "Use larger blur sigma (10-15) to smooth the halo into the monolayer signal."
+  - condition: "Different illumination between time points"
+    symptom: "Same threshold method gives inconsistent results across time series"
+    fix: "Apply flat-field correction or background subtraction before thresholding. Use the same parameters for all time points."
+
+tags: [wound_healing, scratch_assay, migration, gap_measurement, closure, time_course]

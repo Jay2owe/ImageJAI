@@ -1,0 +1,130 @@
+name: Add Calibrated Scale Bar
+id: scale_bar
+description: >
+  Add a calibrated scale bar to an image for publication. Verifies
+  calibration is set, configures scale bar appearance, and burns it into
+  the image or adds as an overlay.
+domain: publication
+difficulty: beginner
+
+preconditions:
+  image_type: [8-bit, 16-bit, RGB]
+  min_channels: 1
+  needs_stack: false
+  needs_calibration: true
+  notes: "Image MUST have correct pixel calibration (Set Scale) before adding a scale bar."
+
+parameters:
+  - name: bar_width
+    label: "Scale bar width (in calibrated units)"
+    type: numeric
+    default: 50
+    range: [1, 10000]
+    description: "Width of scale bar in calibrated units (e.g., 50 um). Choose a round number."
+
+  - name: bar_height
+    label: "Scale bar height (pixels)"
+    type: numeric
+    default: 5
+    range: [1, 50]
+    description: "Thickness of the scale bar line."
+
+  - name: font_size
+    label: "Font size"
+    type: numeric
+    default: 18
+    range: [8, 72]
+    description: "Size of the label text (e.g., '50 um')."
+
+  - name: color
+    label: "Scale bar color"
+    type: choice
+    default: "White"
+    options: ["White", "Black", "Yellow", "Red", "Green", "Blue"]
+    description: "White for dark images (fluorescence), Black for bright images (brightfield)."
+
+  - name: background
+    label: "Background"
+    type: choice
+    default: "None"
+    options: ["None", "Black", "White", "Dark Gray"]
+    description: "Background behind the scale bar text. None for clean look."
+
+  - name: location
+    label: "Location"
+    type: choice
+    default: "Lower Right"
+    options: ["Upper Right", "Lower Right", "Upper Left", "Lower Left", "At Selection"]
+    description: "Where to place the scale bar."
+
+  - name: bold
+    label: "Bold text"
+    type: boolean
+    default: true
+    description: "Use bold font for the scale bar label."
+
+  - name: overlay
+    label: "Add as overlay (non-destructive)"
+    type: boolean
+    default: false
+    description: "If true, adds as overlay (removable). If false, burns into the image pixels."
+
+steps:
+  - id: 1
+    description: "Verify image calibration"
+    macro: |
+      getPixelSize(unit, pw, ph);
+      print("Pixel size: " + pw + " " + unit + "/pixel");
+    decision_point: true
+    decision_logic: >
+      If unit is "pixel" or "pixels", the image is not calibrated. Set the scale
+      first using: run("Set Scale...", "distance=X known=Y unit=um");
+      where X is the number of pixels in a known distance and Y is that distance.
+      Check metadata (python ij.py metadata) for pixel size information.
+    capture_after: false
+    validate: "Unit should be um, mm, or another real unit — NOT 'pixel'."
+
+  - id: 2
+    description: "Choose appropriate scale bar width"
+    macro: |
+      // Scale bar should be ~10-20% of image width
+      // Use a round number in the calibrated unit
+      // Example: for 0.325 um/pixel on a 1024-pixel image:
+      //   image width = 1024 * 0.325 = 332.8 um
+      //   good scale bar: 50 um (15% of width)
+    decision_point: true
+    decision_logic: >
+      Calculate the image width in calibrated units. Choose a scale bar width
+      that is a round number and approximately 10-20% of the image width.
+      Common values: 10, 20, 50, 100, 200, 500 um.
+    capture_after: false
+    validate: ""
+
+  - id: 3
+    description: "Add scale bar"
+    macro: |
+      run("Scale Bar...", "width=${bar_width} height=${bar_height} font=${font_size} color=${color} background=${background} location=[${location}] bold overlay");
+    decision_point: false
+    decision_logic: ""
+    capture_after: true
+    validate: "Scale bar should be visible, readable, and not obscuring important features."
+
+outputs:
+  - type: image
+    description: "Image with calibrated scale bar added."
+
+known_issues:
+  - condition: "Image not calibrated"
+    symptom: "Scale bar shows pixels instead of real units, or wrong length"
+    fix: "Set calibration first. Check image properties or Bio-Formats metadata for pixel size."
+  - condition: "Scale bar too small or too large"
+    symptom: "Bar is barely visible or covers half the image"
+    fix: "Adjust bar_width to be ~10-20% of image width in calibrated units."
+  - condition: "Scale bar not visible on image"
+    symptom: "White bar on white background or black bar on dark image"
+    fix: "Change color to contrast with the image, or add a background (Black/White) behind the text."
+  - condition: "Scale bar burned into image"
+    symptom: "Cannot remove scale bar without losing pixel data"
+    fix: "Use overlay option to add as non-destructive overlay. Or add to a duplicate."
+
+tags: [scale_bar, calibration, publication, annotation, figure]

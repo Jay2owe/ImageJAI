@@ -1,0 +1,151 @@
+name: Publication Montage
+id: montage
+description: >
+  Create a publication-quality montage from multiple images or stack slices.
+  Arranges images in a grid with consistent sizing, optional labels, and
+  borders. Suitable for figure panels in papers.
+domain: publication
+difficulty: intermediate
+
+preconditions:
+  image_type: [8-bit, 16-bit, RGB]
+  min_channels: 1
+  needs_stack: false
+  needs_calibration: false
+  notes: >
+    Input can be a stack (each slice becomes a panel) or multiple open images
+    (use Images to Stack first). All panels should be the same dimensions.
+
+parameters:
+  - name: columns
+    label: "Number of columns"
+    type: numeric
+    default: 4
+    range: [1, 20]
+    description: "Columns in the montage grid."
+
+  - name: rows
+    label: "Number of rows"
+    type: numeric
+    default: 3
+    range: [1, 20]
+    description: "Rows in the montage grid."
+
+  - name: scale
+    label: "Scale factor"
+    type: numeric
+    default: 0.5
+    range: [0.1, 2.0]
+    description: "Scale each panel. 0.5 = half size, 1.0 = full size."
+
+  - name: border_width
+    label: "Border width (pixels)"
+    type: numeric
+    default: 2
+    range: [0, 20]
+    description: "Width of border between panels. 0 = no border."
+
+  - name: font_size
+    label: "Label font size"
+    type: numeric
+    default: 12
+    range: [0, 48]
+    description: "Font size for panel labels. 0 = no labels."
+
+  - name: use_labels
+    label: "Use slice labels"
+    type: boolean
+    default: false
+    description: "If true, use the slice labels as panel labels."
+
+  - name: first_slice
+    label: "First slice"
+    type: numeric
+    default: 1
+    range: [1, 1000]
+    description: "First slice to include in montage."
+
+  - name: last_slice
+    label: "Last slice"
+    type: numeric
+    default: 0
+    range: [0, 1000]
+    description: "Last slice to include. 0 = use all slices."
+
+steps:
+  - id: 1
+    description: "Prepare images — ensure all panels are in a single stack"
+    macro: |
+      // If working with separate images, combine into a stack:
+      // run("Images to Stack", "name=panels use");
+      // If working with a z-stack or time-lapse, it's already a stack
+      getDimensions(w, h, ch, slices, frames);
+      print("Stack has " + slices + " slices");
+    decision_point: true
+    decision_logic: >
+      If images are separate windows, use Images to Stack to combine them.
+      All images must have the same dimensions and bit depth. If they differ,
+      resize/convert them first. For multi-channel composites, flatten to RGB
+      first if you want the composite colors in the montage.
+    capture_after: false
+    validate: "All panels should be in a single stack."
+
+  - id: 2
+    description: "Add scale bars to individual panels if needed"
+    macro: |
+      // Add scale bar to each slice BEFORE making montage
+      // (scale bar on montage itself may not be at the right scale)
+      // run("Scale Bar...", "width=50 height=5 font=18 color=White background=None location=[Lower Right] bold");
+    decision_point: true
+    decision_logic: >
+      Scale bars should be added to individual panels before making the montage,
+      not after. The montage scaling would change the calibration. Add scale bar
+      to one representative panel (usually bottom-right).
+    capture_after: false
+    validate: ""
+
+  - id: 3
+    description: "Create the montage"
+    macro: |
+      run("Make Montage...", "columns=${columns} rows=${rows} scale=${scale} first=${first_slice} last=${last_slice} increment=1 border=${border_width} font=${font_size}");
+    decision_point: false
+    decision_logic: ""
+    capture_after: true
+    validate: "Montage should show all panels in a grid. Check alignment and sizing."
+
+  - id: 4
+    description: "Add panel labels (A, B, C, etc.) if needed"
+    macro: |
+      // Optional: add letter labels to panels
+      // Calculate panel positions based on grid layout
+      // setFont("SansSerif", 24, "bold");
+      // setColor(255, 255, 255);
+      // drawString("A", 10, 30);
+      // drawString("B", panel_width + 10, 30);
+    decision_point: true
+    decision_logic: >
+      Panel labels (A, B, C) are standard for journal figures. Position them in
+      the top-left corner of each panel. Use white text on dark images, black on
+      light images. Make them large enough to read at the final print size.
+    capture_after: true
+    validate: "Labels should be visible and correctly positioned in each panel."
+
+outputs:
+  - type: image
+    description: "Montage image with all panels arranged in a grid."
+
+known_issues:
+  - condition: "Images have different dimensions"
+    symptom: "Images to Stack fails or crops smaller images"
+    fix: "Resize all images to the same dimensions first. Use Canvas Size or Scale to match."
+  - condition: "Scale bar wrong after montage"
+    symptom: "Scale bar calibration is based on the montage scale, not the original"
+    fix: "Add scale bars to individual panels BEFORE making the montage."
+  - condition: "Too many panels, montage is huge"
+    symptom: "Output image very large, slow to generate"
+    fix: "Reduce scale factor (0.25 or 0.33) or select a subset of slices."
+  - condition: "Composite colors lost"
+    symptom: "Montage shows grayscale instead of colored channels"
+    fix: "Flatten composite to RGB first: run('Flatten'); then make montage."
+
+tags: [montage, figure, publication, grid, panels, layout]

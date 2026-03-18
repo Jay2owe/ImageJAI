@@ -1,0 +1,119 @@
+name: Intensity Line Profile
+id: line_profile
+description: >
+  Draw a line across a feature and plot the intensity profile along it.
+  Useful for measuring FWHM of fluorescent structures, checking signal
+  distributions, verifying colocalization along a cross-section, or
+  measuring gradient steepness.
+domain: measurement
+difficulty: beginner
+
+preconditions:
+  image_type: [8-bit, 16-bit, 32-bit]
+  min_channels: 1
+  needs_stack: false
+  needs_calibration: false
+  notes: "Works on any single-channel image. For multi-channel, measure each channel separately."
+
+parameters:
+  - name: x1
+    label: "Line start X"
+    type: numeric
+    default: 0
+    range: [0, 10000]
+    description: "X coordinate of line start point."
+
+  - name: y1
+    label: "Line start Y"
+    type: numeric
+    default: 0
+    range: [0, 10000]
+    description: "Y coordinate of line start point."
+
+  - name: x2
+    label: "Line end X"
+    type: numeric
+    default: 100
+    range: [0, 10000]
+    description: "X coordinate of line end point."
+
+  - name: y2
+    label: "Line end Y"
+    type: numeric
+    default: 100
+    range: [0, 10000]
+    description: "Y coordinate of line end point."
+
+  - name: line_width
+    label: "Line width (pixels)"
+    type: numeric
+    default: 1
+    range: [1, 50]
+    description: "Width of the line selection. Wider lines average perpendicular pixels, reducing noise."
+
+steps:
+  - id: 1
+    description: "Capture image and identify the feature to profile"
+    macro: ""
+    decision_point: true
+    decision_logic: >
+      The agent should capture the image and visually identify the feature of
+      interest. Place the line to cross the feature perpendicular to its long axis
+      for FWHM measurements, or along it for distribution analysis.
+    capture_after: true
+    validate: "Identify the feature and determine appropriate line coordinates."
+
+  - id: 2
+    description: "Draw line selection and set width"
+    macro: |
+      makeLine(${x1}, ${y1}, ${x2}, ${y2});
+      run("Line Width...", "line=${line_width}");
+    decision_point: false
+    decision_logic: ""
+    capture_after: true
+    validate: "Line should cross the feature of interest."
+
+  - id: 3
+    description: "Generate intensity profile plot"
+    macro: |
+      run("Plot Profile");
+    decision_point: false
+    decision_logic: ""
+    capture_after: true
+    validate: "Plot should show intensity variation along the line. Peaks should correspond to bright features."
+
+  - id: 4
+    description: "Get profile data as values"
+    macro: |
+      // For numerical analysis, use pixels.py:
+      // python pixels.py profile ${x1} ${y1} ${x2} ${y2}
+      // This returns intensity values at each point along the line
+      profile = getProfile();
+      for (i = 0; i < profile.length; i++) {
+        setResult("Position", i, i);
+        setResult("Intensity", i, profile[i]);
+      }
+      updateResults();
+    decision_point: false
+    decision_logic: ""
+    capture_after: false
+    validate: "Results table should have Position and Intensity columns."
+
+outputs:
+  - type: image
+    description: "Plot Profile window showing intensity vs distance."
+  - type: results_table
+    description: "Numerical profile data: position and intensity at each point."
+
+known_issues:
+  - condition: "Line placed on wrong channel of composite image"
+    symptom: "Profile shows intensity of the active channel, not the desired one"
+    fix: "Switch to the correct channel first: Stack.setChannel(N); or split channels."
+  - condition: "Noisy profile"
+    symptom: "Profile is very spiky, hard to interpret"
+    fix: "Increase line width to average across perpendicular pixels, or blur the image first."
+  - condition: "Profile in pixels instead of microns"
+    symptom: "X-axis shows pixel positions, not calibrated distance"
+    fix: "Set scale first. Profile X-axis will use calibrated units."
+
+tags: [line_profile, intensity, fwhm, cross_section, plot, measurement]

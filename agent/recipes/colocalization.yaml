@@ -1,0 +1,134 @@
+name: Colocalization Analysis (Coloc 2)
+id: colocalization
+description: >
+  Quantify colocalization between two fluorescence channels using Coloc 2 plugin.
+  Reports Pearson's correlation coefficient, Manders' M1/M2 coefficients, and
+  Li's ICQ. Proper statistical analysis with Costes' significance test.
+domain: fluorescence
+difficulty: advanced
+
+preconditions:
+  image_type: [8-bit, 16-bit]
+  min_channels: 2
+  needs_stack: false
+  needs_calibration: false
+  notes: >
+    Requires a two-channel image (composite or two separate windows).
+    Do NOT use RGB images. Must work on raw fluorescence data with no
+    contrast enhancement. Background subtraction recommended first.
+
+parameters:
+  - name: channel_1
+    label: "Channel 1"
+    type: numeric
+    default: 1
+    range: [1, 5]
+    description: "First channel for colocalization analysis."
+
+  - name: channel_2
+    label: "Channel 2"
+    type: numeric
+    default: 2
+    range: [1, 5]
+    description: "Second channel for colocalization analysis."
+
+  - name: threshold_method
+    label: "Threshold regression"
+    type: choice
+    default: "Costes"
+    options: ["Costes", "Bisection", "None"]
+    description: "Costes auto-threshold is the gold standard. Removes background contribution from coefficients."
+
+  - name: costes_randomizations
+    label: "Costes randomizations"
+    type: numeric
+    default: 100
+    range: [10, 1000]
+    description: "Number of randomizations for Costes significance test. 100 is standard, 200+ for publication."
+
+  - name: use_roi
+    label: "Restrict to ROI"
+    type: boolean
+    default: false
+    description: "If true, only analyze within the active ROI (e.g., a single cell)."
+
+steps:
+  - id: 1
+    description: "Verify image is multi-channel and inspect channels"
+    macro: |
+      getDimensions(w, h, channels, slices, frames);
+      print("Channels: " + channels);
+    decision_point: true
+    decision_logic: >
+      If channels == 1, the image needs to be opened differently (Bio-Formats
+      with split channels, or it may be an RGB that needs conversion). If RGB,
+      it cannot be used for quantitative colocalization — need the original
+      composite file.
+    capture_after: true
+    validate: "Image should be a composite with at least 2 channels."
+
+  - id: 2
+    description: "Split channels for Coloc 2 input"
+    macro: |
+      run("Split Channels");
+    decision_point: false
+    decision_logic: ""
+    capture_after: true
+    validate: "Two separate channel windows should be open (C1-title and C2-title)."
+
+  - id: 3
+    description: "Run Coloc 2 analysis"
+    macro: |
+      run("Coloc 2", "channel_1=C${channel_1}-${image_title} channel_2=C${channel_2}-${image_title} roi_or_mask=<None> threshold_regression=${threshold_method} display_images_in_result costes_randomisations=${costes_randomizations} psf=3");
+    decision_point: true
+    decision_logic: >
+      Coloc 2 opens a results window with multiple tabs. Check the Log window
+      for Pearson's R, Manders' M1/M2, and Costes p-value. If Costes p-value < 0.95,
+      colocalization is not statistically significant.
+    capture_after: false
+    validate: "Coloc 2 results window should open. Check Log for coefficient values."
+
+  - id: 4
+    description: "Read colocalization results from Log"
+    macro: |
+      // Results are printed to the Log window
+      // Agent reads with: python ij.py log
+      // Key values to extract:
+      // - Pearson's R (no threshold): overall correlation
+      // - Pearson's R (above threshold): correlation in signal regions
+      // - Manders' M1: fraction of Ch1 overlapping Ch2
+      // - Manders' M2: fraction of Ch2 overlapping Ch1
+      // - Costes p-value: significance (>0.95 = significant)
+    decision_point: false
+    decision_logic: ""
+    capture_after: false
+    validate: >
+      Pearson's R should be between -1 and 1. Manders' M1/M2 between 0 and 1.
+      Costes p-value should be reported. If all zeros, something went wrong.
+
+outputs:
+  - type: results_table
+    description: "Coloc 2 results with Pearson's R, Manders' M1/M2, ICQ, Costes p-value"
+  - type: image
+    description: "Scatter plot of channel intensities and regression line"
+  - type: measurement
+    description: "Key coefficients: Pearson's R, Manders' M1 and M2, Costes significance"
+
+known_issues:
+  - condition: "RGB image used instead of raw composite"
+    symptom: "Coloc 2 cannot separate channels properly, results are meaningless"
+    fix: "Open the original file with Bio-Formats to get the raw multi-channel data."
+  - condition: "No background subtraction applied"
+    symptom: "Background fluorescence inflates Pearson's correlation (everything > 0 correlates)"
+    fix: "Apply rolling ball background subtraction to each channel first. Use Costes threshold regression."
+  - condition: "Saturated pixels in either channel"
+    symptom: "Pearson's R is artificially high because saturated pixels cluster at maximum"
+    fix: "Check histogram for saturation. If present, results are unreliable — need to re-acquire."
+  - condition: "Bleedthrough between channels"
+    symptom: "Apparent colocalization that is actually spectral bleedthrough"
+    fix: "Use proper controls (single-stained samples). Consider spectral unmixing before analysis."
+  - condition: "Very large images"
+    symptom: "Coloc 2 runs out of memory during Costes randomization"
+    fix: "Crop to a region of interest, or reduce costes_randomizations to 25."
+
+tags: [colocalization, pearson, manders, coloc2, fluorescence, two_channel, correlation]

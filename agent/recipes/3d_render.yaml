@@ -1,0 +1,153 @@
+name: 3D Rendering
+id: 3d_render
+description: >
+  Render a z-stack in 3D using one of three methods: 3Dscript (best quality,
+  scriptable animations), 3D Viewer (interactive OpenGL), or 3D Project
+  (fallback rotating MIP). Includes cell isolation workflow for clean renders.
+domain: 3d
+difficulty: advanced
+
+preconditions:
+  image_type: [8-bit, 16-bit]
+  min_channels: 1
+  needs_stack: true
+  needs_calibration: true
+  notes: >
+    All three renderers require 8-bit input. 16-bit images must be converted.
+    For clean renders, isolate the object of interest first (remove background
+    and neighboring objects). Calibration is needed for correct Z aspect ratio.
+
+parameters:
+  - name: renderer
+    label: "Rendering method"
+    type: choice
+    default: "3dscript"
+    options: ["3dscript", "3d_viewer", "3d_project"]
+    description: >
+      3dscript: best quality volume raycasting, scriptable, produces animations.
+      3d_viewer: interactive OpenGL, good for exploration. 3d_project: fallback
+      MIP rotation, always works but lower quality.
+
+  - name: threshold
+    label: "Volume threshold"
+    type: numeric
+    default: 20
+    range: [1, 255]
+    description: "Voxels below this value are transparent. For 3D Viewer and 3Dscript."
+
+  - name: rotation_degrees
+    label: "Total rotation (degrees)"
+    type: numeric
+    default: 360
+    range: [0, 720]
+    description: "Total rotation for animation/rotation rendering."
+
+  - name: isolate_object
+    label: "Isolate single object"
+    type: boolean
+    default: true
+    description: "If true, segment and mask to isolate one object before rendering. Strongly recommended."
+
+steps:
+  - id: 1
+    description: "Isolate the object of interest (CRITICAL for clean renders)"
+    macro: |
+      // 1. Duplicate the stack for segmentation
+      original = getTitle();
+      run("Duplicate...", "title=seg duplicate");
+      // 2. Blur to smooth noise
+      run("Gaussian Blur 3D...", "x=2 y=2 z=1");
+      // 3. Threshold and find 3D objects
+      // Agent determines threshold from histogram
+      run("3D Objects Counter", "threshold=${threshold} min.=200 max.=999999 objects");
+      // 4. Find the target object label in the objects map
+      // 5. Create binary mask: target label → 1, everything else → 0
+      // 6. Multiply mask × original using imageCalculator("Multiply create stack", ...)
+      // 7. Crop tightly around the object
+    decision_point: true
+    decision_logic: >
+      ISOLATE FIRST. Cropping alone is NOT enough — neighboring cells bleed into
+      the render. The volume must contain ONLY the target object on black background.
+      Use Multiply (not AND) for masking 16-bit images — AND corrupts 16-bit data
+      through an 8-bit mask.
+    capture_after: true
+    validate: "Isolated object should be visible on black background. No neighboring objects."
+
+  - id: 2
+    description: "Convert to 8-bit for rendering"
+    macro: |
+      run("8-bit");
+    decision_point: false
+    decision_logic: ""
+    capture_after: false
+    validate: ""
+
+  - id: 3a
+    description: "Render with 3Dscript (PREFERRED)"
+    macro: |
+      // Scale up XY because 3Dscript output size = input image size
+      run("Scale...", "x=10 y=10 z=1.0 interpolation=Bicubic process create title=render_input");
+      // Write animation script to file
+      // Script: "From frame 0 to frame 100 rotate by 360 degrees horizontally"
+      // run("Batch Animation", "animation=[/path/to/script.txt]");
+    decision_point: true
+    decision_logic: >
+      Do NOT Z-interpolate before 3Dscript — interpolated masked data (0→signal→0)
+      produces dim slices that fall below 3Dscript's alpha threshold, making the
+      object invisible. Feed the raw z-stack instead. Input MUST be 8-bit.
+      Output resolution equals input image XY dimensions.
+    capture_after: true
+    validate: "Animation stack should show smooth rotation of the 3D object."
+
+  - id: 3b
+    description: "Render with 3D Viewer (INTERACTIVE)"
+    macro: |
+      // Use TCP command: python ij.py 3d add IMAGE_TITLE volume ${threshold}
+      // Then: python ij.py 3d fit
+      // Then: python ij.py 3d capture render_result
+    decision_point: false
+    decision_logic: ""
+    capture_after: true
+    validate: "3D Viewer window should show a volume render of the object."
+
+  - id: 3c
+    description: "Render with 3D Project (FALLBACK)"
+    macro: |
+      run("Scale...", "x=10 y=10 z=1.0 interpolation=Bicubic process create title=render_input");
+      run("3D Project...", "projection=[Brightest Point] axis=Y-Axis slice=0.28 initial=0 total=${rotation_degrees} rotation=10 lower=1 upper=255 opacity=0 surface=100 interior=50");
+    decision_point: false
+    decision_logic: ""
+    capture_after: true
+    validate: "Rotation stack should show the object from multiple angles."
+
+  - id: 4
+    description: "Apply LUT for presentation (optional)"
+    macro: |
+      run("Cyan Hot");
+    decision_point: false
+    decision_logic: ""
+    capture_after: true
+    validate: "Object should be colored. Do NOT enhance contrast — raw intensity is the data."
+
+outputs:
+  - type: image
+    description: "3D rendered view or animation stack of the object."
+
+known_issues:
+  - condition: "Object invisible in 3Dscript after Z-interpolation"
+    symptom: "Interpolated masked data falls below alpha threshold, nothing renders"
+    fix: "Do NOT Z-interpolate masked data for 3Dscript. Use the raw z-stack."
+  - condition: "Neighboring cells visible in render"
+    symptom: "Other objects clutter the 3D view"
+    fix: "ISOLATE FIRST. Segment with 3D Objects Counter, mask, multiply, then render."
+  - condition: "3D Viewer snapshot renders tiny in corner"
+    symptom: "Known bug in 3D Viewer snapshot via Universe.takeSnapshot()"
+    fix: "Use 3d capture (Robot screenshot) instead of 3d snapshot."
+  - condition: "Z-staircase artifact at oblique angles"
+    symptom: "Visible stepping in the Z direction"
+    fix: "Inherent to data with coarse Z spacing. Only more Z slices during acquisition can fix this."
+  - condition: "Bitwise AND corrupts 16-bit masked data"
+    symptom: "Intensity values wrong after masking — only low byte preserved"
+    fix: "Use imageCalculator('Multiply create stack', ...) with a 0/1 mask, never AND."
+
+tags: [3d, rendering, volume, 3dscript, 3d_viewer, 3d_project, animation, visualization]

@@ -1,0 +1,79 @@
+name: Gaussian Blur Denoising
+id: denoise_gaussian
+description: >
+  Reduce image noise using Gaussian blur. The simplest and most common
+  preprocessing step. Smooths noise while preserving larger features.
+  Choose sigma based on the noise level and the size of features you
+  want to preserve.
+domain: preprocessing
+difficulty: beginner
+
+preconditions:
+  image_type: [8-bit, 16-bit, 32-bit]
+  min_channels: 1
+  needs_stack: false
+  needs_calibration: false
+  notes: "Works on any image type. For stacks, the blur is applied slice-by-slice (2D). For true 3D smoothing, use Gaussian Blur 3D."
+
+parameters:
+  - name: sigma
+    label: "Sigma (radius in pixels)"
+    type: numeric
+    default: 1.0
+    range: [0.5, 10.0]
+    description: >
+      Controls smoothing strength. 0.5-1 = light (preserves detail),
+      2-3 = moderate (good for noisy images), 5+ = heavy (blurs fine features).
+
+  - name: use_3d
+    label: "3D Gaussian (for stacks)"
+    type: boolean
+    default: false
+    description: "Use Gaussian Blur 3D for z-stacks. Smooths in X, Y, and Z."
+
+  - name: sigma_z
+    label: "Z sigma (for 3D)"
+    type: numeric
+    default: 1.0
+    range: [0.5, 5.0]
+    description: "Z-axis sigma for 3D blur. Usually smaller than XY sigma due to anisotropic voxels."
+
+steps:
+  - id: 1
+    description: "Duplicate to preserve original data"
+    macro: |
+      run("Duplicate...", "title=denoised duplicate");
+    decision_point: false
+    decision_logic: ""
+    capture_after: true
+    validate: "Original image preserved."
+
+  - id: 2
+    description: "Apply Gaussian blur"
+    macro: |
+      run("Gaussian Blur...", "sigma=${sigma}");
+    decision_point: true
+    decision_logic: >
+      Start with sigma=1. If noise is still visible, increase to 2.
+      If fine features (cell edges, puncta) are lost, decrease.
+      For z-stacks, use Gaussian Blur 3D: run("Gaussian Blur 3D...", "x=2 y=2 z=1");
+      Z sigma is typically smaller because confocal z-steps are coarser than XY pixels.
+    capture_after: true
+    validate: "Noise should be visibly reduced. Cell edges and features should still be distinguishable."
+
+outputs:
+  - type: image
+    description: "Denoised image. Ready for thresholding, segmentation, or measurement."
+
+known_issues:
+  - condition: "Sigma too large"
+    symptom: "Fine features (puncta, thin processes, cell edges) are blurred away"
+    fix: "Reduce sigma. Use Median filter (radius=1-2) instead for salt-and-pepper noise — it preserves edges better."
+  - condition: "Applied to stack without 'stack' option"
+    symptom: "Only current slice is blurred"
+    fix: "For 2D blur on all slices: add 'stack' option. For true 3D blur: use Gaussian Blur 3D."
+  - condition: "Image used for intensity quantification after blurring"
+    symptom: "Blur redistributes intensity, affecting per-pixel measurements"
+    fix: "Blur is fine for segmentation/thresholding, but measure intensities on the ORIGINAL image using redirect."
+
+tags: [denoise, gaussian, blur, smooth, preprocessing, noise_reduction, filter]
