@@ -120,6 +120,14 @@ User message → AgentOrchestrator.classifyIntent() → route to specialist or g
 - Sends to LLM via chatWithVision() (Gemini Flash vision is free)
 - Optional auto-screenshot after macro execution (settings.autoScreenshot)
 
+## Context Hook (Auto-Injected Fiji State)
+A context hook (`context_hook.py`) runs automatically via `.claude/settings.local.json` to inject live Fiji state into conversations.
+
+**Session start:** Fiji connection status, installed plugins/commands list, available reference docs.
+**Every message:** Open images (titles, dims, type, calibration, ROI), results table (rows + columns), JVM memory, open dialogs (errors/warnings/prompts), IJ log (last 10 lines).
+
+All queries go through the TCP server on port 7746. If Fiji isn't running or TCP is disabled, the hook reports "not connected" and skips Fiji queries gracefully.
+
 ## User Preferences
 - **No Co-Authored-By lines on git commits** — never add Claude co-author tags
 - Home directory has a git repo — always use project-level repos
