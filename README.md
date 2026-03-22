@@ -147,6 +147,24 @@ The `agent/` directory contains a complete AI agent toolkit for controlling Imag
   - `domain-reference.md` — Microscopy methods and quality control
   - `analysis-landscape.md` — 75+ analysis tasks across 15 research domains
 
+## Context Hook (Claude Code Integration)
+
+When using Claude Code in this project directory, a context hook (`context_hook.py`) automatically injects live Fiji state into the conversation via the TCP server (port 7746).
+
+**Session start (once):**
+- Fiji connection status
+- Full list of installed Fiji commands/plugins
+- Available reference documents (agent/references/)
+
+**Every message (dynamic):**
+- Open images — titles, dimensions, bit depth, stack info, calibration, ROI
+- Results table — row count and column names
+- JVM memory — used/max/free + open image count
+- Open dialogs — errors, warnings, prompts with text and buttons
+- IJ Log — last 10 lines
+
+Requires the TCP command server to be enabled in Fiji (Settings > Advanced > "Enable TCP command server"). Gracefully degrades when Fiji is not running.
+
 ## License
 
 BSD-2-Clause
