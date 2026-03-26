@@ -204,6 +204,29 @@ def fiji_dialogs():
         return None
 
 
+def fiji_progress():
+    """Get Fiji progress bar status and status line text."""
+    try:
+        resp = tcp_send({"command": "get_progress"})
+        if not resp.get("ok"):
+            return None
+
+        result = resp.get("result", {})
+        active = result.get("active", False)
+        status = result.get("status", "")
+        percent = result.get("percent", 0)
+
+        if active:
+            return "Progress bar: " + str(percent) + "% | Status: " + status
+        elif status and not status.startswith("(Fiji Is Just)"):
+            return "Status: " + status
+        return None
+    except socket.error:
+        return None
+    except Exception:
+        return None
+
+
 def fiji_log():
     """Get the IJ log window contents (last few lines)."""
     try:
@@ -253,6 +276,10 @@ def main():
             context_parts.append("Fiji: not connected")
         else:
             context_parts.append(fiji_state())
+
+            progress = fiji_progress()
+            if progress:
+                context_parts.append(progress)
 
             dialogs = fiji_dialogs()
             if dialogs:

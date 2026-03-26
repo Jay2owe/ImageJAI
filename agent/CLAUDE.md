@@ -37,6 +37,18 @@ python ij.py script 'println("hello")'                # run Groovy inside Fiji's
 python ij.py script --file path/to/script.groovy      # run Groovy file
 python ij.py script --lang jython 'print("hello")'   # run Jython script
 python ij.py raw '{"command": "ping"}'                # raw JSON command
+python ij.py ui list                                  # list all dialog components
+python ij.py ui list "Dialog Title"                   # components in specific dialog
+python ij.py ui click "OK"                            # click button by text
+python ij.py ui check "3D Object Analysis" true       # set checkbox on/off
+python ij.py ui toggle "Create Bin File"              # flip checkbox state
+python ij.py ui text "sigma" 2.5                      # set text field by label
+python ij.py ui texti 0 hello                         # set text field by index
+python ij.py ui dropdown "Method" Otsu                # select dropdown value
+python ij.py ui slider 0 128                          # set slider by index
+python ij.py ui spinner 0 42                          # set spinner by index
+python ij.py ui scroll 0 50                           # set scrollbar by index
+python ij.py ui tab "Advanced"                        # focus a tab
 ```
 
 ### Plugin argument discovery (with caching):
@@ -251,6 +263,51 @@ than run("3D Viewer") or call("ij3d...").
 {"command": "close_dialogs", "pattern": "error"}
 ```
 Protected windows (Fiji toolbar, AI Assistant) are never closed.
+
+### interact_dialog — Interact with dialog components (buttons, checkboxes, fields, etc.)
+```json
+// List all interactable components in all open dialogs
+{"command": "interact_dialog", "action": "list_components"}
+// List components in a specific dialog
+{"command": "interact_dialog", "action": "list_components", "dialog": "IHF Analysis Pipeline"}
+
+// Click a button by text
+{"command": "interact_dialog", "action": "click_button", "target": "OK"}
+
+// Set checkbox/toggle ON or OFF (by label text)
+{"command": "interact_dialog", "action": "set_checkbox", "target": "3D Object Analysis", "value": true}
+// Toggle checkbox (flip current state)
+{"command": "interact_dialog", "action": "toggle_checkbox", "target": "Create Bin File"}
+
+// Set text field value (by nearest label)
+{"command": "interact_dialog", "action": "set_text", "target": "sigma", "value": "2.5"}
+// Set text field by index (0-based)
+{"command": "interact_dialog", "action": "set_text", "index": 0, "value": "hello"}
+
+// Set dropdown/choice selection
+{"command": "interact_dialog", "action": "set_dropdown", "target": "Method", "value": "Otsu"}
+
+// Set slider value
+{"command": "interact_dialog", "action": "set_slider", "index": 0, "value": 128}
+
+// Set spinner value
+{"command": "interact_dialog", "action": "set_spinner", "index": 0, "value": "42"}
+
+// Set scrollbar value
+{"command": "interact_dialog", "action": "set_scrollbar", "index": 0, "value": 50}
+
+// Focus a tab in a JTabbedPane
+{"command": "interact_dialog", "action": "focus_tab", "target": "Advanced"}
+
+// Get details about a specific component
+{"command": "interact_dialog", "action": "get_component", "type": "checkbox", "index": 2}
+```
+**Target matching:** `target` matches component labels by case-insensitive substring.
+`index` selects the Nth component of that type (0-based). Both can be combined.
+**Always `list_components` first** to see what's available before interacting.
+Supports: JButton, Button, JCheckBox, Checkbox, JToggleButton, JRadioButton,
+JTextField, TextField, JTextArea, TextArea, JComboBox, Choice, JSlider,
+Scrollbar, JSpinner, JTabbedPane.
 
 ### probe_command — Discover plugin parameters and macro syntax
 ```json
@@ -557,9 +614,19 @@ Deploy JARs to the Dropbox Fiji.app plugins directory.
 cd "C:\Users\Owner\UK Dementia Research Institute Dropbox\Brancaccio Lab\Jamie\Experiments\ImageJAI"
 export JAVA_HOME="/c/Program Files/Eclipse Adoptium/jdk-17.0.18.8-hotspot"
 /c/Users/Owner/apache-maven-3.9.6/bin/mvn clean package -q
-cp target/imagej-ai-0.1.0-SNAPSHOT.jar "C:\Users\Owner\UK Dementia Research Institute Dropbox\Brancaccio Lab\Jamie\Fiji.app\plugins\"
+# IMPORTANT: Remove old version before deploying — multiple JARs cause classloader conflicts
+rm -f "C:\Users\Owner\UK Dementia Research Institute Dropbox\Brancaccio Lab\Jamie\Fiji.app\plugins\imagej-ai-"*.jar
+cp target/imagej-ai-*.jar "C:\Users\Owner\UK Dementia Research Institute Dropbox\Brancaccio Lab\Jamie\Fiji.app\plugins\"
 ```
 User must restart Fiji after deploying. Fiji caches classes — hot-reload does NOT work.
+
+### Versioning (MAJOR.MINOR.PATCH)
+- **MAJOR** (first digit): new features
+- **MINOR** (second digit): big refactors or improvements
+- **PATCH** (third digit): bug fixes
+
+Version is set in `pom.xml` `<version>` tag. Current version: **0.2.0**.
+Bump the appropriate digit when making changes. No `-SNAPSHOT` suffix.
 
 ---
 
@@ -670,6 +737,9 @@ All reference files live in `references/`. Read them when you need detailed
 information about a specific analysis type, plugin, or method:
 
 - **`references/macro-reference.md`** — ImageJ macro command reference
+- **`references/file-formats-saving-reference.md`** — File formats & saving (all native + Bio-Formats
+  163 formats, saveAs() complete ref, File.* functions, TIFF deep dive, Bio-Formats Exporter,
+  batch save patterns, data integrity, Java FileSaver API, 65+ export commands, agent integration)
 - **`references/3d-visualisation-reference.md`** — All 3D rendering, animation, cell isolation,
   video export (3Dscript, 3D Viewer, 3D Project, ClearVolume, BDV, napari, FFmpeg)
 - **`references/3dscript-reference.md`** — 3Dscript animation language quick reference
@@ -681,6 +751,10 @@ information about a specific analysis type, plugin, or method:
 - **`references/circadian-imaging-reference.md`** — Circadian imaging protocols and analysis
 - **`references/if-postprocessing-reference.md`** — Immunofluorescence post-processing
   (filtering, thresholding, deconvolution, pipelines, decision trees, journal guidelines)
+- **`references/fluorescence-microscopy-reference.md`** — Fluorescence microscopy physics,
+  modalities, fluorophores, sample prep, acquisition, artifacts, quantitative methods,
+  ImageJ operations (Jablonski, Stokes shift, Nyquist, CTCF, FRAP, FRET, filter sets,
+  clearing, deconvolution, thresholding, segmentation, batch processing)
 - **`references/3d-spatial-reference.md`** — Complete 3D spatial analysis reference
   (~300 commands: 3D ImageJ Suite, MorphoLibJ, CLIJ2, AnalyzeSkeleton, DiAna,
   3D Manager macro API, spatial statistics, 3D colocalization, morphometry, distances)
@@ -690,6 +764,161 @@ information about a specific analysis type, plugin, or method:
   with workflows, plugins, and automation opportunities
 - **`references/self-improving-agent-reference.md`** — plugin API patterns, automation
   approaches, comparison matrices, parameter optimization strategies
+- **`references/fluorescence-theory-reference.md`** — physics of fluorescence, fluorophore
+  encyclopedia (nuclear stains, Alexa Fluor, fluorescent proteins, calcium indicators,
+  membrane/viability dyes), optical resolution formulas, SNR theory, spectral overlap
+  and multi-colour panel selection, CTCF/FRAP/FRET/ratiometric methods
+- **`references/histology-neurodegeneration-reference.md`** — neurodegenerative disease
+  histology: staining methods (H&E, IHC antibodies for Abeta/tau/alphaSyn/TDP-43,
+  silver stains, special stains, multiplex IF), pathological features by disease
+  (AD, PD/DLB, FTLD, HD, prion, CTE, LATE), staging systems (NIA-AA ABC, Braak,
+  CERAD, Thal, McKeith, LATE-NC, Vonsattel, CTE), ImageJ analysis pipelines
+  (DAB colour deconvolution, area fraction, plaque counting, cell counting),
+  brain anatomy for ROI selection, best practices and pitfalls
+- **`references/imagej-gui-reference.md`** — Complete ImageJ/Fiji GUI and usage reference
+  (every menu item, all dialogs with every field, toolbar tools, keyboard shortcuts,
+  plugin installation, macro recording, image types, ROIs, overlays, results tables,
+  Dialog/ROI/Overlay/Table/File macro API, batch automation, scripting, agent integration)
+- **`references/gui-interaction-reference.md`** — ImageJ macro API deep reference (companion)
+  (Plot.* charting, Fit.* curve fitting, Color.* API, Ext.* extensions, setOption,
+  pixel access, math functions, drawing/graphics, all function signatures with types)
+- **`references/publication-figures-reference.md`** — Publication-quality figure creation
+  (journal requirements, DPI, scale bars, montages, LUTs, panel labels, multi-channel
+  figures, insets, export, accessibility, image integrity checklist)
+- **`references/python-image-analysis-reference.md`** — Python image analysis libraries
+  (scikit-image 0.26, scipy.ndimage, numpy, tifffile, matplotlib, Pillow, aicsimageio,
+  colocalization, regionprops, ImageJ integration, roifile)
+- **`references/ai-image-analysis-reference.md`** — AI/deep learning for microscopy
+  (StarDist, Cellpose, WEKA, Labkit, CSBDeep/CARE, DeepImageJ, foundation models,
+  decision trees, macro syntax, training workflows, Python ecosystem, batch processing)
+- **`references/weka-segmentation-reference.md`** — Trainable Weka Segmentation (TWS)
+  deep reference (20 features explained, macro call() API, Groovy scripting API,
+  WekaSegmentation class, training workflows, batch processing, tile processing,
+  probability maps, classifier tuning, feature selection guide, memory management)
+- **`references/brain-atlas-registration-reference.md`** — Brain atlas registration
+  and neuroanatomy (ABBA, Allen CCFv3, elastix, BigWarp, QuPath integration,
+  bregma coordinates, SCN/hippocampal identification, ontology, batch workflows)
+- **`references/trackmate-reference.md`** — TrackMate particle/cell tracking
+  (all 15+ detectors incl. LoG/DoG/Hessian/StarDist/Cellpose/ilastik/Weka/Spotiflow/YOLO,
+  all trackers incl. LAP/Kalman/Overlap, complete feature lists, Jython/Groovy scripting API,
+  batch processing, TrackMate-Helper parameter optimization, export options, TrackScheme)
+- **`references/statistics-reference.md`** — Statistics for biological microscopy
+  (probability distributions, hypothesis testing framework, parametric/non-parametric tests,
+  ANOVA, post-hoc tests, correlation, mixed-effects models, multiple comparisons, effect sizes,
+  power analysis, circular statistics, transformations, R/Python/ImageJ/Prism APIs, decision trees)
+- **`references/hypothesis-testing-microscopy-reference.md`** — Question-driven hypothesis
+  testing: 36 research questions mapped to H0/H1/measurements/tests, logic of statistical
+  proof (courtroom/fire alarm analogies, effect sizes, power, fallacies, modern perspectives),
+  measurement extraction guide (intensity/morphology/counts/coloc/spatial/temporal),
+  experimental design pitfalls (pseudoreplication, selection bias, batch effects, blinding)
+- **`references/statistical-analysis-workflow-reference.md`** — End-to-end statistical
+  analysis pipelines: ImageJ measurement command reference, 8 copy-paste Python scripts
+  (two-group, multi-group, paired, correlation, mixed-effects, proportion, dose-response,
+  multiple corrections), integration workflow (ImageJ → CSV → Python → figure → report)
+- **`references/large-dataset-optimization-reference.md`** — Large dataset optimization
+  (memory management, JVM/GC tuning, setBatchMode, virtual stacks, CLIJ2 GPU acceleration,
+  file formats (OME-Zarr/N5/HDF5), Bio-Formats efficient import, Dask/Python out-of-core
+  processing, headless mode, CellProfiler/QuPath/OMERO, cluster/SLURM, data management,
+  whole-slide tiled processing, agent TCP batch patterns, decision trees, troubleshooting)
+- **`references/pipeline-construction-reference.md`** — Pipeline construction for image
+  analysis automation (batch processing, folder templates, setBatchMode, memory management,
+  input validation, multi-channel/z-stack handling, Bio-Formats iteration, matched pairs,
+  CLIJ2 GPU pipelines, Script Parameters, decision points, parameter sweeps, ImageJAI
+  PipelineBuilder API, TCP run_pipeline protocol, recipe YAML system, agent workflow)
+- **`references/registration-stitching-reference.md`** — Image registration & stitching:
+  Grid/Collection stitching (all grid types, orders, fusion methods), Pairwise stitching,
+  StackReg/TurboReg (macro syntax, -align/-transform, landmark extraction), SIFT alignment,
+  bUnwarpJ (elastic B-spline, all call() methods), BigWarp (TPS, scripting, landmarks),
+  Correct 3D Drift, Register Virtual Stack Slices, Descriptor-based Registration,
+  scikit-image (phase_cross_correlation, optical_flow, transforms, ORB, RANSAC),
+  SimpleITK (full registration framework, all metrics/optimizers/transforms),
+  OpenCV (SIFT/ORB/AKAZE, BFMatcher/FLANN, findHomography/estimateAffine2D, Stitcher),
+  pystackreg, MIST (NIST large-grid), CLIJ2 GPU registration, decision tree,
+  agent workflow patterns, batch processing, multi-channel strategies, tips/gotchas,
+  installed plugin inventory, cross-tool workflows
+- **`references/light-sheet-microscopy-reference.md`** — Light-sheet fluorescence microscopy:
+  all microscope types (SPIM, diSPIM, lattice, mesoSPIM, commercial systems), tissue clearing
+  (20+ methods: iDISCO, CUBIC, CLARITY, 3DISCO, ECI, etc.), big data handling (N5/Zarr/HDF5,
+  chunked formats, dask, out-of-core), BigStitcher/BDV, whole-brain analysis pipelines
+  (brainglobe/cellfinder/ClearMap), deconvolution, acquisition parameters, file formats,
+  Python ecosystem, Fiji integration
+- **`references/troubleshooting-quality-reference.md`** — Image troubleshooting & quality
+  assessment: QC protocol (PASS/WARN/FAIL), focus metrics (Laplacian/Brenner/Tenengrad),
+  saturation/dynamic range, SNR estimation, illumination uniformity, 25+ artifact types
+  with detection macros and fixes, journal integrity standards, batch QC, agent QC macros
+- **`references/calcium-imaging-reference.md`** — Calcium imaging analysis (GCaMP/Fura-2/Fluo-4,
+  dF/F calculation, ratiometric imaging, motion correction, event detection, frequency analysis,
+  population synchrony, all ImageJ plugins, Python analysis scripts)
+- **`references/neurite-tracing-reference.md`** — Neurite tracing & neuronal morphometry
+  (SNT Groovy API, Sholl analysis, Strahler analysis, AnalyzeSkeleton, SWC format,
+  morphometric measurements, vessel/filament analysis, batch processing)
+- **`references/colour-deconvolution-histology-reference.md`** — Colour deconvolution &
+  histological scoring (CD1/CD2, all stain vectors, custom vectors, DAB quantification,
+  H-score, Allred, Ki67, HER2, PD-L1, IHC Profiler, stain normalisation, WSI handling)
+- **`references/wound-healing-migration-reference.md`** — Wound healing & cell migration
+  (scratch assay, barrier assay, invasion assays, wound edge detection, closure rate,
+  MSD analysis, chemotaxis, TrackMate integration, all plugins)
+- **`references/live-cell-timelapse-reference.md`** — Live cell & time-lapse analysis
+  (drift correction, bleach correction, FRAP, kymographs, cell division/death detection,
+  confluency, temporal intensity, ratiometric/FRET, phototoxicity, video export)
+- **`references/batch-processing-reference.md`** — Batch processing & Bio-Formats
+  (folder iteration, setBatchMode, Bio-Formats Importer complete parameter reference,
+  macro extensions API, file format patterns, memory management, 10 batch macro templates)
+- **`references/deconvolution-reference.md`** — Image deconvolution (DeconvolutionLab2
+  all 14 algorithms, PSF generation, Iterative Deconvolve 3D, CLIJ2 GPU deconvolution,
+  iteration/regularisation guidelines, quality assessment, batch workflows)
+- **`references/proliferation-apoptosis-reference.md`** — Cell proliferation & apoptosis
+  (Ki67/EdU/BrdU/PCNA/pHH3/FUCCI, TUNEL, caspase-3, Annexin V, live/dead, colony assays,
+  cell cycle from DNA content, multi-marker classification, high-content screening)
+- **`references/fiji-scripting-reference.md`** — Fiji scripting (Groovy & Jython) via
+  run_script TCP command: IJ1/IJ2 API reference (ImagePlus, ImageProcessor, ImageStack,
+  WindowManager, RoiManager, ResultsTable, Calibration, Overlay, FileSaver), SciJava
+  script parameters (#@ injection), Groovy patterns (closures, collections, GStrings,
+  file I/O, regex, classes), Jython patterns (Java interop, jarray, gotchas), GUI
+  manipulation (Swing component walking, checkbox toggling, dialog creation), plugin
+  scripting (TrackMate, SNT, TWS, CLIJ2, MorphoLibJ, Bio-Formats), agent integration
+  (ij.py script, data passing, error handling), complete examples (batch processing,
+  CTCF, parallel processing, overlay annotations, colocalization, JSON export)
+- **`references/organoid-spheroid-reference.md`** — Organoid & spheroid image analysis
+  (brightfield segmentation methods (global/adaptive/multi-window/edge/Weka/variance),
+  fluorescence viability (calcein-AM/PI), nuclear counting, morphometric measurements
+  (25+ shape descriptors), lumen detection & classification, budding/branching analysis
+  (convex hull, skeleton, protrusion detection), 3D volume/sphericity (3D Objects Counter,
+  MorphoLibJ), growth curve fitting (exponential/logistic/Gompertz), multi-well plate
+  batch processing, drug response (IC50/AUC/dose-response), invasion assays, 10+ dedicated
+  tools (OrganoSeg, SpheroidJ, INSIDIA, MOrgAna, OrganoID, Cellos, AnaSP, Lusca),
+  statistical considerations (nested data, mixed-effects models), reporting standards)
+- **`references/method-validation-reference.md`** — Method validation & agreement statistics
+  (Bland-Altman, ICC, CCC, Dice/IoU, Hausdorff, Panoptic Quality, kappa, AP, F1,
+  inter-observer variability, power analysis, ground truth preparation, reporting templates)
+- **`references/super-resolution-reference.md`** — Super-resolution microscopy analysis
+  (ThunderSTORM complete API, NanoJ-SRRF, fairSIM/SIMcheck, FRC resolution estimation,
+  DBSCAN/Ripley's K cluster analysis, nanoscale colocalization, expansion microscopy)
+- **`references/fiber-orientation-reference.md`** — Fiber & orientation analysis
+  (OrientationJ complete API, Directionality, FibrilTool, DiameterJ, AnalyzeSkeleton,
+  coherency, anisotropy, nematic order, SHG collagen, circular statistics)
+- **`references/color-science-reference.md`** — Color science for microscopy
+  (display vs data, all Fiji LUTs, colorblind-safe palettes, composites, RGB conversion,
+  pseudocolor, calibration bars, journal color requirements, common mistakes)
+- **`references/electron-microscopy-reference.md`** — Electron microscopy analysis
+  (TEM/SEM, organelle segmentation, membrane distances, immunogold, stereology,
+  serial section alignment, TrakEM2, CLEM with BigWarp, cryo-EM)
+- **`references/spatial-statistics-reference.md`** — Spatial statistics & point patterns
+  (NND, Clark-Evans, Ripley's K/L/H, pair correlation, cross-type bivariate, Voronoi,
+  DBSCAN, distance-to-features, Moran's I, Getis-Ord hotspots, 3D spatial, Monte Carlo)
+- **`references/scn-reference.md`** — SCN (suprachiasmatic nucleus) comprehensive biology
+  (anatomy, core/shell subdivisions, cell types & markers with antibody catalog, TTFL
+  molecular clock, network properties & coupling hierarchy, oscillator theory & mathematical
+  models (Kuramoto, Goodwin, PRC), quantification methods (Lomb-Scargle, cosinor, JTK_CYCLE,
+  CircaCompare), electrophysiology, light input/output pathways, development, disease)
+- **`references/scn-analysis-reference.md`** — SCN image analysis workflows
+  (SCN identification & ROI definition, bregma coordinates, dorsal/ventral subdivision,
+  PER2::LUC bioluminescence rhythm analysis, pixel-by-pixel period/phase maps, detrending,
+  Kuramoto synchrony, fluorescence cell counting & CTCF, colocalization of clock proteins,
+  GCaMP calcium imaging, Incucyte time-lapse, phase map generation (Hilbert transform),
+  microglia morphology (Sholl/skeleton/FracLac/MotiQ), circadian microglial variation,
+  amyloid plaque quantification (DAB/ThioS), microglia-plaque proximity analysis,
+  batch workflows, statistical considerations for circadian data)
 
 ---
 

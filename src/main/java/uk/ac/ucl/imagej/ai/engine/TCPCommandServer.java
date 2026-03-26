@@ -324,6 +324,10 @@ public class TCPCommandServer {
             return handleProbeCommand(request);
         } else if ("run_script".equals(command)) {
             return handleRunScript(request);
+        } else if ("interact_dialog".equals(command)) {
+            return handleInteractDialog(request);
+        } else if ("get_progress".equals(command)) {
+            return handleGetProgress();
         } else {
             return errorResponse("Unknown command: " + command);
         }
@@ -335,6 +339,84 @@ public class TCPCommandServer {
 
     private JsonObject handlePing() {
         return successResponse(new JsonPrimitive("pong"));
+    }
+
+    private JsonObject handleGetProgress() {
+        final JsonObject result = new JsonObject();
+        final CountDownLatch latch = new CountDownLatch(1);
+
+        SwingUtilities.invokeLater(new Runnable() {
+            public void run() {
+                try {
+                    ij.ImageJ ijInstance = IJ.getInstance();
+                    if (ijInstance == null) {
+                        result.addProperty("active", false);
+                        result.addProperty("status", "");
+                        latch.countDown();
+                        return;
+                    }
+
+                    // Read progress bar via reflection
+                    boolean showBar = false;
+                    double percent = 0;
+                    try {
+                        java.lang.reflect.Field pbField = ijInstance.getClass().getDeclaredField("progressBar");
+                        pbField.setAccessible(true);
+                        Object pb = pbField.get(ijInstance);
+                        if (pb != null) {
+                            java.lang.reflect.Field showField = pb.getClass().getDeclaredField("showBar");
+                            showField.setAccessible(true);
+                            showBar = showField.getBoolean(pb);
+
+                            java.lang.reflect.Field widthField = pb.getClass().getDeclaredField("width");
+                            widthField.setAccessible(true);
+                            int barWidth = widthField.getInt(pb);
+
+                            java.lang.reflect.Field canvasWidthField = pb.getClass().getDeclaredField("canvasWidth");
+                            canvasWidthField.setAccessible(true);
+                            int canvasWidth = canvasWidthField.getInt(pb);
+
+                            if (canvasWidth > 0) {
+                                percent = (barWidth * 100.0) / canvasWidth;
+                            }
+                        }
+                    } catch (Exception e) {
+                        // reflection failed — leave defaults
+                    }
+
+                    // Read status line text via reflection
+                    String statusText = "";
+                    try {
+                        java.lang.reflect.Field slField = ijInstance.getClass().getDeclaredField("statusLine");
+                        slField.setAccessible(true);
+                        Object sl = slField.get(ijInstance);
+                        if (sl instanceof javax.swing.JLabel) {
+                            statusText = ((javax.swing.JLabel) sl).getText();
+                            if (statusText == null) statusText = "";
+                        }
+                    } catch (Exception e) {
+                        // reflection failed
+                    }
+
+                    result.addProperty("active", showBar);
+                    result.addProperty("percent", Math.round(percent));
+                    result.addProperty("status", statusText);
+                } catch (Exception e) {
+                    result.addProperty("active", false);
+                    result.addProperty("status", "error: " + e.getMessage());
+                } finally {
+                    latch.countDown();
+                }
+            }
+        });
+
+        try {
+            latch.await(5, TimeUnit.SECONDS);
+        } catch (InterruptedException e) {
+            return errorResponse("Progress check timed out");
+        }
+
+        return successResponse(result);
     }
 
     private JsonObject handleExecuteMacro(JsonObject request) {
@@ -2223,5 +2305,813 @@ public class TCPCommandServer {
         }
 
         return "run(\"" + pluginName + "\", \"" + args.toString() + "\");";
+    }
+
+    // -----------------------------------------------------------------------
+    // Dialog interaction — click buttons, toggle checkboxes, set fields, etc.
+    // -----------------------------------------------------------------------
+
+    /**
+     * Interact with components inside an open dialog window.
+     *
+     * JSON protocol:
+     *   {"command": "interact_dialog", "action": "list_components"}
+     *   {"command": "interact_dialog", "action": "list_components", "dialog": "IHF Analysis Pipeline"}
+     *   {"command": "interact_dialog", "action": "click_button", "target": "OK"}
+     *   {"command": "interact_dialog", "action": "set_checkbox", "target": "3D Object Analysis", "value": true}
+     *   {"command": "interact_dialog", "action": "set_text", "target": "sigma", "value": "2.5"}
+     *   {"command": "interact_dialog", "action": "set_text", "index": 0, "value": "hello"}
+     *   {"command": "interact_dialog", "action": "set_dropdown", "target": "Method", "value": "Otsu"}
+     *   {"command": "interact_dialog", "action": "set_slider", "index": 0, "value": 128}
+     *   {"command": "interact_dialog", "action": "set_spinner", "index": 0, "value": 42}
+     *   {"command": "interact_dialog", "action": "set_scrollbar", "index": 0, "value": 50}
+     *   {"command": "interact_dialog", "action": "focus_tab", "target": "Advanced"}
+     *   {"command": "interact_dialog", "action": "get_component", "type": "checkbox", "index": 2}
+     *
+     * "dialog" is optional — if omitted, targets the topmost visible dialog.
+     * "target" matches by label/text (case-insensitive substring).
+     * "index" selects the Nth component of that type (0-based).
+     * Both "target" and "index" can be used together for disambiguation.
+     */
+    private JsonObject handleInteractDialog(JsonObject request) {
+        JsonElement actionElement = request.get("action");
+        if (actionElement == null || !actionElement.isJsonPrimitive()) {
+            return errorResponse("Missing 'action' field for interact_dialog");
+        }
+        final String action = actionElement.getAsString();
+
+        // Find the target dialog
+        JsonElement dialogElement = request.get("dialog");
+        final String dialogTitle = (dialogElement != null && dialogElement.isJsonPrimitive())
+                ? dialogElement.getAsString() : null;
+
+        // Target matching
+        JsonElement targetElement = request.get("target");
+        final String target = (targetElement != null && targetElement.isJsonPrimitive())
+                ? targetElement.getAsString() : null;
+
+        JsonElement indexElement = request.get("index");
+        final int index = (indexElement != null && indexElement.isJsonPrimitive())
+                ? indexElement.getAsInt() : -1;
+
+        // Value for set operations
+        JsonElement valueElement = request.get("value");
+
+        // Type filter for get_component
+        JsonElement typeElement = request.get("type");
+        final String typeFilter = (typeElement != null && typeElement.isJsonPrimitive())
+                ? typeElement.getAsString() : null;
+
+        // Execute on EDT
+        final Object[] holder = new Object[1];
+        final CountDownLatch latch = new CountDownLatch(1);
+        final JsonElement valEl = valueElement;
+
+        SwingUtilities.invokeLater(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    // Find the dialog
+                    Dialog dlg = findDialog(dialogTitle);
+                    if (dlg == null && !"list_components".equals(action)) {
+                        holder[0] = errorResponse("No matching dialog found"
+                                + (dialogTitle != null ? " ('" + dialogTitle + "')" : ""));
+                        return;
+                    }
+
+                    if ("list_components".equals(action)) {
+                        holder[0] = listInteractableComponents(dlg, dialogTitle);
+                    } else if ("click_button".equals(action)) {
+                        holder[0] = doClickButton(dlg, target, index);
+                    } else if ("set_checkbox".equals(action)) {
+                        boolean val = (valEl != null && valEl.isJsonPrimitive()) ? valEl.getAsBoolean() : true;
+                        holder[0] = doSetCheckbox(dlg, target, index, val);
+                    } else if ("toggle_checkbox".equals(action)) {
+                        holder[0] = doToggleCheckbox(dlg, target, index);
+                    } else if ("set_text".equals(action)) {
+                        String val = (valEl != null && valEl.isJsonPrimitive()) ? valEl.getAsString() : "";
+                        holder[0] = doSetTextField(dlg, target, index, val);
+                    } else if ("set_dropdown".equals(action)) {
+                        String val = (valEl != null && valEl.isJsonPrimitive()) ? valEl.getAsString() : "";
+                        holder[0] = doSetDropdown(dlg, target, index, val);
+                    } else if ("set_slider".equals(action)) {
+                        int val = (valEl != null && valEl.isJsonPrimitive()) ? valEl.getAsInt() : 0;
+                        holder[0] = doSetSlider(dlg, target, index, val);
+                    } else if ("set_spinner".equals(action)) {
+                        String val = (valEl != null && valEl.isJsonPrimitive()) ? valEl.getAsString() : "0";
+                        holder[0] = doSetSpinner(dlg, target, index, val);
+                    } else if ("set_scrollbar".equals(action)) {
+                        int val = (valEl != null && valEl.isJsonPrimitive()) ? valEl.getAsInt() : 0;
+                        holder[0] = doSetScrollbar(dlg, target, index, val);
+                    } else if ("focus_tab".equals(action)) {
+                        holder[0] = doFocusTab(dlg, target, index);
+                    } else if ("get_component".equals(action)) {
+                        holder[0] = doGetComponent(dlg, typeFilter, target, index);
+                    } else {
+                        holder[0] = errorResponse("Unknown interact_dialog action: " + action);
+                    }
+                } catch (Exception e) {
+                    holder[0] = errorResponse("interact_dialog error: " + e.getMessage());
+                } finally {
+                    latch.countDown();
+                }
+            }
+        });
+
+        try {
+            if (!latch.await(5000, TimeUnit.MILLISECONDS)) {
+                return errorResponse("interact_dialog timed out");
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return errorResponse("Interrupted");
+        }
+
+        return (JsonObject) holder[0];
+    }
+
+    /**
+     * Find a dialog by title (case-insensitive substring match).
+     * If title is null, returns the topmost visible dialog.
+     */
+    private Dialog findDialog(String title) {
+        Window[] windows = Window.getWindows();
+        Dialog topmost = null;
+
+        for (Window win : windows) {
+            if (!win.isShowing() || !(win instanceof Dialog)) continue;
+            Dialog dlg = (Dialog) win;
+            String dlgTitle = dlg.getTitle();
+            if (dlgTitle == null) dlgTitle = "";
+
+            // Skip protected windows
+            if (dlgTitle.contains("AI Assistant")) continue;
+
+            if (title != null) {
+                if (dlgTitle.toLowerCase().contains(title.toLowerCase())) {
+                    return dlg;
+                }
+            } else {
+                // Pick the topmost (last in array tends to be topmost)
+                topmost = dlg;
+            }
+        }
+
+        return topmost;
+    }
+
+    // --- Structured component inventory ---
+
+    /**
+     * Index for tracking a component with its metadata.
+     */
+    private static class ComponentEntry {
+        String type;
+        String label;         // text on the component itself
+        String nearestLabel;  // nearest preceding label text
+        int typeIndex;        // 0-based index among components of same type
+        Component component;
+
+        JsonObject toJson() {
+            JsonObject obj = new JsonObject();
+            obj.addProperty("type", type);
+            obj.addProperty("label", label != null ? label : "");
+            obj.addProperty("nearestLabel", nearestLabel != null ? nearestLabel : "");
+            obj.addProperty("index", typeIndex);
+            // Add current value
+            if (component instanceof javax.swing.JCheckBox) {
+                obj.addProperty("checked", ((javax.swing.JCheckBox) component).isSelected());
+            } else if (component instanceof java.awt.Checkbox) {
+                obj.addProperty("checked", ((java.awt.Checkbox) component).getState());
+            } else if (component instanceof javax.swing.JToggleButton) {
+                obj.addProperty("selected", ((javax.swing.JToggleButton) component).isSelected());
+            } else if (component instanceof javax.swing.JTextField) {
+                obj.addProperty("value", ((javax.swing.JTextField) component).getText());
+            } else if (component instanceof java.awt.TextField) {
+                obj.addProperty("value", ((java.awt.TextField) component).getText());
+            } else if (component instanceof javax.swing.JComboBox) {
+                javax.swing.JComboBox<?> combo = (javax.swing.JComboBox<?>) component;
+                Object sel = combo.getSelectedItem();
+                obj.addProperty("value", sel != null ? sel.toString() : "");
+                JsonArray options = new JsonArray();
+                for (int i = 0; i < combo.getItemCount(); i++) {
+                    Object item = combo.getItemAt(i);
+                    options.add(new JsonPrimitive(item != null ? item.toString() : ""));
+                }
+                obj.add("options", options);
+            } else if (component instanceof java.awt.Choice) {
+                java.awt.Choice choice = (java.awt.Choice) component;
+                obj.addProperty("value", choice.getSelectedItem());
+                JsonArray options = new JsonArray();
+                for (int i = 0; i < choice.getItemCount(); i++) {
+                    options.add(new JsonPrimitive(choice.getItem(i)));
+                }
+                obj.add("options", options);
+            } else if (component instanceof javax.swing.JSlider) {
+                javax.swing.JSlider s = (javax.swing.JSlider) component;
+                obj.addProperty("value", s.getValue());
+                obj.addProperty("min", s.getMinimum());
+                obj.addProperty("max", s.getMaximum());
+            } else if (component instanceof java.awt.Scrollbar) {
+                java.awt.Scrollbar s = (java.awt.Scrollbar) component;
+                obj.addProperty("value", s.getValue());
+                obj.addProperty("min", s.getMinimum());
+                obj.addProperty("max", s.getMaximum());
+            } else if (component instanceof javax.swing.JSpinner) {
+                javax.swing.JSpinner sp = (javax.swing.JSpinner) component;
+                obj.addProperty("value", sp.getValue().toString());
+                javax.swing.SpinnerModel model = sp.getModel();
+                if (model instanceof javax.swing.SpinnerNumberModel) {
+                    javax.swing.SpinnerNumberModel nm = (javax.swing.SpinnerNumberModel) model;
+                    Comparable<?> min = nm.getMinimum();
+                    Comparable<?> max = nm.getMaximum();
+                    Number step = nm.getStepSize();
+                    if (min != null) obj.addProperty("min", min.toString());
+                    if (max != null) obj.addProperty("max", max.toString());
+                    if (step != null) obj.addProperty("step", step.toString());
+                }
+            } else if (component instanceof javax.swing.JTextArea) {
+                obj.addProperty("value", ((javax.swing.JTextArea) component).getText());
+            } else if (component instanceof java.awt.TextArea) {
+                obj.addProperty("value", ((java.awt.TextArea) component).getText());
+            }
+            // Add enabled state
+            obj.addProperty("enabled", component.isEnabled());
+            obj.addProperty("visible", component.isVisible());
+            return obj;
+        }
+    }
+
+    /**
+     * Walk a container tree and build a flat list of all interactable components
+     * with labels, types, indices, and current values.
+     */
+    private List<ComponentEntry> indexComponents(Container container) {
+        List<ComponentEntry> entries = new ArrayList<ComponentEntry>();
+        // Counters per type for indexing
+        java.util.Map<String, Integer> typeCounts = new java.util.LinkedHashMap<String, Integer>();
+
+        String[] lastLabel = new String[]{""};
+        indexComponentsRecursive(container, entries, typeCounts, lastLabel);
+        return entries;
+    }
+
+    private void indexComponentsRecursive(Container container, List<ComponentEntry> entries,
+                                          java.util.Map<String, Integer> typeCounts,
+                                          String[] lastLabel) {
+        for (Component comp : container.getComponents()) {
+            // Track labels for association
+            String labelText = null;
+            if (comp instanceof javax.swing.JLabel) {
+                labelText = ((javax.swing.JLabel) comp).getText();
+            } else if (comp instanceof java.awt.Label) {
+                labelText = ((java.awt.Label) comp).getText();
+            }
+            if (labelText != null && !labelText.trim().isEmpty()) {
+                lastLabel[0] = labelText.trim();
+            }
+
+            // Identify interactable component type
+            String type = null;
+            String ownLabel = null;
+
+            if (comp instanceof javax.swing.JButton) {
+                type = "button";
+                ownLabel = ((javax.swing.JButton) comp).getText();
+            } else if (comp instanceof java.awt.Button) {
+                type = "button";
+                ownLabel = ((java.awt.Button) comp).getLabel();
+            } else if (comp instanceof javax.swing.JCheckBox) {
+                type = "checkbox";
+                ownLabel = ((javax.swing.JCheckBox) comp).getText();
+            } else if (comp instanceof java.awt.Checkbox) {
+                type = "checkbox";
+                ownLabel = ((java.awt.Checkbox) comp).getLabel();
+            } else if (comp instanceof javax.swing.JToggleButton) {
+                // Catches toggle switches, radio-style buttons, etc.
+                // (JCheckBox extends JToggleButton so this comes after)
+                type = "toggle";
+                ownLabel = ((javax.swing.JToggleButton) comp).getText();
+            } else if (comp instanceof javax.swing.JRadioButton) {
+                type = "radio";
+                ownLabel = ((javax.swing.JRadioButton) comp).getText();
+            } else if (comp instanceof javax.swing.JTextField
+                    && !(comp instanceof javax.swing.JPasswordField)) {
+                type = "text";
+                ownLabel = null; // text fields don't have own label
+            } else if (comp instanceof java.awt.TextField) {
+                type = "text";
+            } else if (comp instanceof javax.swing.JTextArea) {
+                type = "textarea";
+            } else if (comp instanceof java.awt.TextArea) {
+                type = "textarea";
+            } else if (comp instanceof javax.swing.JComboBox) {
+                type = "dropdown";
+            } else if (comp instanceof java.awt.Choice) {
+                type = "dropdown";
+            } else if (comp instanceof javax.swing.JSlider) {
+                type = "slider";
+            } else if (comp instanceof java.awt.Scrollbar) {
+                type = "scrollbar";
+            } else if (comp instanceof javax.swing.JSpinner) {
+                type = "spinner";
+            } else if (comp instanceof javax.swing.JTabbedPane) {
+                type = "tabs";
+                javax.swing.JTabbedPane tabs = (javax.swing.JTabbedPane) comp;
+                ownLabel = "selected=" + tabs.getTitleAt(tabs.getSelectedIndex());
+            }
+
+            if (type != null && comp.isVisible()) {
+                ComponentEntry entry = new ComponentEntry();
+                entry.type = type;
+                entry.label = (ownLabel != null) ? ownLabel.trim() : null;
+                entry.nearestLabel = lastLabel[0];
+                entry.component = comp;
+
+                Integer count = typeCounts.get(type);
+                if (count == null) count = 0;
+                entry.typeIndex = count;
+                typeCounts.put(type, count + 1);
+
+                entries.add(entry);
+            }
+
+            // Recurse
+            if (comp instanceof Container) {
+                indexComponentsRecursive((Container) comp, entries, typeCounts, lastLabel);
+            }
+        }
+    }
+
+    /**
+     * Find a component matching type, target text, and/or index.
+     */
+    private ComponentEntry findComponent(List<ComponentEntry> entries, String type,
+                                         String target, int index) {
+        List<ComponentEntry> candidates = new ArrayList<ComponentEntry>();
+        for (ComponentEntry e : entries) {
+            if (type != null && !e.type.equals(type)) continue;
+            if (target != null) {
+                boolean matchesLabel = e.label != null
+                        && e.label.toLowerCase().contains(target.toLowerCase());
+                boolean matchesNearest = e.nearestLabel != null
+                        && e.nearestLabel.toLowerCase().contains(target.toLowerCase());
+                if (!matchesLabel && !matchesNearest) continue;
+            }
+            candidates.add(e);
+        }
+
+        if (candidates.isEmpty()) return null;
+
+        if (index >= 0 && index < candidates.size()) {
+            return candidates.get(index);
+        }
+        // Default: return first match
+        return candidates.get(0);
+    }
+
+    // --- List components ---
+
+    private JsonObject listInteractableComponents(Dialog specificDialog, String dialogTitle) {
+        JsonObject result = new JsonObject();
+        JsonArray dialogsArr = new JsonArray();
+
+        if (specificDialog != null) {
+            // List components for a specific dialog
+            JsonObject dlgObj = buildDialogComponentList(specificDialog);
+            dialogsArr.add(dlgObj);
+        } else {
+            // List all dialogs and their components
+            Window[] windows = Window.getWindows();
+            for (Window win : windows) {
+                if (!win.isShowing() || !(win instanceof Dialog)) continue;
+                Dialog dlg = (Dialog) win;
+                String title = dlg.getTitle();
+                if (title != null && title.contains("AI Assistant")) continue;
+                JsonObject dlgObj = buildDialogComponentList(dlg);
+                dialogsArr.add(dlgObj);
+            }
+        }
+
+        result.add("dialogs", dialogsArr);
+        return successResponse(result);
+    }
+
+    private JsonObject buildDialogComponentList(Dialog dlg) {
+        JsonObject dlgObj = new JsonObject();
+        dlgObj.addProperty("title", dlg.getTitle() != null ? dlg.getTitle() : "");
+        dlgObj.addProperty("modal", dlg.isModal());
+
+        // Get window bounds
+        java.awt.Rectangle bounds = dlg.getBounds();
+        dlgObj.addProperty("x", bounds.x);
+        dlgObj.addProperty("y", bounds.y);
+        dlgObj.addProperty("width", bounds.width);
+        dlgObj.addProperty("height", bounds.height);
+
+        List<ComponentEntry> entries = indexComponents(dlg);
+        JsonArray components = new JsonArray();
+        for (ComponentEntry e : entries) {
+            components.add(e.toJson());
+        }
+        dlgObj.add("components", components);
+
+        return dlgObj;
+    }
+
+    // --- Click button ---
+
+    private JsonObject doClickButton(Dialog dlg, String target, int index) {
+        List<ComponentEntry> entries = indexComponents(dlg);
+        ComponentEntry entry = findComponent(entries, "button", target, index);
+        if (entry == null) {
+            return errorResponse("No button found matching target='" + target + "' index=" + index);
+        }
+
+        if (entry.component instanceof javax.swing.JButton) {
+            ((javax.swing.JButton) entry.component).doClick();
+        } else if (entry.component instanceof java.awt.Button) {
+            // AWT Button — dispatch an ActionEvent
+            java.awt.Button btn = (java.awt.Button) entry.component;
+            java.awt.event.ActionEvent evt = new java.awt.event.ActionEvent(
+                    btn, java.awt.event.ActionEvent.ACTION_PERFORMED, btn.getActionCommand());
+            for (java.awt.event.ActionListener al : btn.getActionListeners()) {
+                al.actionPerformed(evt);
+            }
+        }
+
+        JsonObject result = new JsonObject();
+        result.addProperty("clicked", entry.label != null ? entry.label : "button[" + entry.typeIndex + "]");
+        return successResponse(result);
+    }
+
+    // --- Set checkbox ---
+
+    private JsonObject doSetCheckbox(Dialog dlg, String target, int index, boolean value) {
+        List<ComponentEntry> entries = indexComponents(dlg);
+
+        // Try checkbox first, then toggle buttons
+        ComponentEntry entry = findComponent(entries, "checkbox", target, index);
+        if (entry == null) {
+            entry = findComponent(entries, "toggle", target, index);
+        }
+
+        if (entry == null) {
+            return errorResponse("No checkbox/toggle found matching target='" + target + "' index=" + index);
+        }
+
+        String compLabel = entry.label != null ? entry.label : "checkbox[" + entry.typeIndex + "]";
+        boolean oldValue;
+
+        if (entry.component instanceof javax.swing.JCheckBox) {
+            javax.swing.JCheckBox cb = (javax.swing.JCheckBox) entry.component;
+            oldValue = cb.isSelected();
+            if (cb.isSelected() != value) {
+                cb.doClick();
+            }
+        } else if (entry.component instanceof java.awt.Checkbox) {
+            java.awt.Checkbox cb = (java.awt.Checkbox) entry.component;
+            oldValue = cb.getState();
+            cb.setState(value);
+            // Fire ItemEvent for listeners
+            java.awt.event.ItemEvent evt = new java.awt.event.ItemEvent(
+                    cb, java.awt.event.ItemEvent.ITEM_STATE_CHANGED, cb.getLabel(),
+                    value ? java.awt.event.ItemEvent.SELECTED : java.awt.event.ItemEvent.DESELECTED);
+            for (java.awt.event.ItemListener il : cb.getItemListeners()) {
+                il.itemStateChanged(evt);
+            }
+        } else if (entry.component instanceof javax.swing.JToggleButton) {
+            javax.swing.JToggleButton tb = (javax.swing.JToggleButton) entry.component;
+            oldValue = tb.isSelected();
+            if (tb.isSelected() != value) {
+                tb.doClick();
+            }
+        } else {
+            return errorResponse("Component is not a checkbox/toggle: " + entry.type);
+        }
+
+        JsonObject result = new JsonObject();
+        result.addProperty("component", compLabel);
+        result.addProperty("oldValue", oldValue);
+        result.addProperty("newValue", value);
+        return successResponse(result);
+    }
+
+    // --- Toggle checkbox (flip current state) ---
+
+    private JsonObject doToggleCheckbox(Dialog dlg, String target, int index) {
+        List<ComponentEntry> entries = indexComponents(dlg);
+        ComponentEntry entry = findComponent(entries, "checkbox", target, index);
+        if (entry == null) {
+            entry = findComponent(entries, "toggle", target, index);
+        }
+        if (entry == null) {
+            return errorResponse("No checkbox/toggle found matching target='" + target + "' index=" + index);
+        }
+
+        boolean newValue;
+        if (entry.component instanceof javax.swing.JCheckBox) {
+            javax.swing.JCheckBox cb = (javax.swing.JCheckBox) entry.component;
+            cb.doClick();
+            newValue = cb.isSelected();
+        } else if (entry.component instanceof java.awt.Checkbox) {
+            java.awt.Checkbox cb = (java.awt.Checkbox) entry.component;
+            cb.setState(!cb.getState());
+            newValue = cb.getState();
+            java.awt.event.ItemEvent evt = new java.awt.event.ItemEvent(
+                    cb, java.awt.event.ItemEvent.ITEM_STATE_CHANGED, cb.getLabel(),
+                    newValue ? java.awt.event.ItemEvent.SELECTED : java.awt.event.ItemEvent.DESELECTED);
+            for (java.awt.event.ItemListener il : cb.getItemListeners()) {
+                il.itemStateChanged(evt);
+            }
+        } else if (entry.component instanceof javax.swing.JToggleButton) {
+            javax.swing.JToggleButton tb = (javax.swing.JToggleButton) entry.component;
+            tb.doClick();
+            newValue = tb.isSelected();
+        } else {
+            return errorResponse("Component is not a checkbox/toggle");
+        }
+
+        JsonObject result = new JsonObject();
+        result.addProperty("component", entry.label != null ? entry.label : "checkbox[" + entry.typeIndex + "]");
+        result.addProperty("newValue", newValue);
+        return successResponse(result);
+    }
+
+    // --- Set text field ---
+
+    private JsonObject doSetTextField(Dialog dlg, String target, int index, String value) {
+        List<ComponentEntry> entries = indexComponents(dlg);
+        ComponentEntry entry = findComponent(entries, "text", target, index);
+        if (entry == null) {
+            // Also try textarea
+            entry = findComponent(entries, "textarea", target, index);
+        }
+        if (entry == null) {
+            return errorResponse("No text field found matching target='" + target + "' index=" + index);
+        }
+
+        String oldValue = "";
+        if (entry.component instanceof javax.swing.JTextField) {
+            javax.swing.JTextField tf = (javax.swing.JTextField) entry.component;
+            oldValue = tf.getText();
+            tf.setText(value);
+            // Fire action event to notify listeners
+            tf.postActionEvent();
+        } else if (entry.component instanceof java.awt.TextField) {
+            java.awt.TextField tf = (java.awt.TextField) entry.component;
+            oldValue = tf.getText();
+            tf.setText(value);
+            // Fire TextEvent
+            java.awt.event.ActionEvent evt = new java.awt.event.ActionEvent(
+                    tf, java.awt.event.ActionEvent.ACTION_PERFORMED, value);
+            for (java.awt.event.ActionListener al : tf.getActionListeners()) {
+                al.actionPerformed(evt);
+            }
+        } else if (entry.component instanceof javax.swing.JTextArea) {
+            javax.swing.JTextArea ta = (javax.swing.JTextArea) entry.component;
+            oldValue = ta.getText();
+            ta.setText(value);
+        } else if (entry.component instanceof java.awt.TextArea) {
+            java.awt.TextArea ta = (java.awt.TextArea) entry.component;
+            oldValue = ta.getText();
+            ta.setText(value);
+        }
+
+        JsonObject result = new JsonObject();
+        result.addProperty("nearestLabel", entry.nearestLabel != null ? entry.nearestLabel : "");
+        result.addProperty("oldValue", oldValue);
+        result.addProperty("newValue", value);
+        return successResponse(result);
+    }
+
+    // --- Set dropdown / choice ---
+
+    private JsonObject doSetDropdown(Dialog dlg, String target, int index, String value) {
+        List<ComponentEntry> entries = indexComponents(dlg);
+        ComponentEntry entry = findComponent(entries, "dropdown", target, index);
+        if (entry == null) {
+            return errorResponse("No dropdown found matching target='" + target + "' index=" + index);
+        }
+
+        String oldValue = "";
+        boolean found = false;
+
+        if (entry.component instanceof javax.swing.JComboBox) {
+            javax.swing.JComboBox<?> combo = (javax.swing.JComboBox<?>) entry.component;
+            Object sel = combo.getSelectedItem();
+            oldValue = sel != null ? sel.toString() : "";
+
+            // Try exact match first, then case-insensitive substring
+            for (int i = 0; i < combo.getItemCount(); i++) {
+                Object item = combo.getItemAt(i);
+                if (item != null && item.toString().equals(value)) {
+                    combo.setSelectedIndex(i);
+                    found = true;
+                    break;
+                }
+            }
+            if (!found) {
+                for (int i = 0; i < combo.getItemCount(); i++) {
+                    Object item = combo.getItemAt(i);
+                    if (item != null && item.toString().toLowerCase().contains(value.toLowerCase())) {
+                        combo.setSelectedIndex(i);
+                        found = true;
+                        break;
+                    }
+                }
+            }
+        } else if (entry.component instanceof java.awt.Choice) {
+            java.awt.Choice choice = (java.awt.Choice) entry.component;
+            oldValue = choice.getSelectedItem();
+
+            for (int i = 0; i < choice.getItemCount(); i++) {
+                if (choice.getItem(i).equals(value)) {
+                    choice.select(i);
+                    found = true;
+                    break;
+                }
+            }
+            if (!found) {
+                for (int i = 0; i < choice.getItemCount(); i++) {
+                    if (choice.getItem(i).toLowerCase().contains(value.toLowerCase())) {
+                        choice.select(i);
+                        found = true;
+                        break;
+                    }
+                }
+            }
+        }
+
+        if (!found) {
+            return errorResponse("Value '" + value + "' not found in dropdown options");
+        }
+
+        JsonObject result = new JsonObject();
+        result.addProperty("nearestLabel", entry.nearestLabel != null ? entry.nearestLabel : "");
+        result.addProperty("oldValue", oldValue);
+        result.addProperty("newValue", value);
+        return successResponse(result);
+    }
+
+    // --- Set slider ---
+
+    private JsonObject doSetSlider(Dialog dlg, String target, int index, int value) {
+        List<ComponentEntry> entries = indexComponents(dlg);
+        ComponentEntry entry = findComponent(entries, "slider", target, index);
+        if (entry == null) {
+            return errorResponse("No slider found matching target='" + target + "' index=" + index);
+        }
+
+        if (!(entry.component instanceof javax.swing.JSlider)) {
+            return errorResponse("Component is not a JSlider");
+        }
+
+        javax.swing.JSlider slider = (javax.swing.JSlider) entry.component;
+        int oldValue = slider.getValue();
+        int clamped = Math.max(slider.getMinimum(), Math.min(slider.getMaximum(), value));
+        slider.setValue(clamped);
+
+        JsonObject result = new JsonObject();
+        result.addProperty("nearestLabel", entry.nearestLabel != null ? entry.nearestLabel : "");
+        result.addProperty("oldValue", oldValue);
+        result.addProperty("newValue", clamped);
+        result.addProperty("min", slider.getMinimum());
+        result.addProperty("max", slider.getMaximum());
+        return successResponse(result);
+    }
+
+    // --- Set spinner ---
+
+    private JsonObject doSetSpinner(Dialog dlg, String target, int index, String value) {
+        List<ComponentEntry> entries = indexComponents(dlg);
+        ComponentEntry entry = findComponent(entries, "spinner", target, index);
+        if (entry == null) {
+            return errorResponse("No spinner found matching target='" + target + "' index=" + index);
+        }
+
+        if (!(entry.component instanceof javax.swing.JSpinner)) {
+            return errorResponse("Component is not a JSpinner");
+        }
+
+        javax.swing.JSpinner spinner = (javax.swing.JSpinner) entry.component;
+        String oldValue = spinner.getValue().toString();
+
+        javax.swing.SpinnerModel model = spinner.getModel();
+        try {
+            if (model instanceof javax.swing.SpinnerNumberModel) {
+                // Parse as number
+                try {
+                    spinner.setValue(Integer.parseInt(value));
+                } catch (NumberFormatException e) {
+                    spinner.setValue(Double.parseDouble(value));
+                }
+            } else if (model instanceof javax.swing.SpinnerListModel) {
+                spinner.setValue(value);
+            } else {
+                // Try setting directly
+                spinner.setValue(value);
+            }
+        } catch (Exception e) {
+            return errorResponse("Failed to set spinner value: " + e.getMessage());
+        }
+
+        JsonObject result = new JsonObject();
+        result.addProperty("nearestLabel", entry.nearestLabel != null ? entry.nearestLabel : "");
+        result.addProperty("oldValue", oldValue);
+        result.addProperty("newValue", spinner.getValue().toString());
+        return successResponse(result);
+    }
+
+    // --- Set scrollbar ---
+
+    private JsonObject doSetScrollbar(Dialog dlg, String target, int index, int value) {
+        List<ComponentEntry> entries = indexComponents(dlg);
+        ComponentEntry entry = findComponent(entries, "scrollbar", target, index);
+        if (entry == null) {
+            return errorResponse("No scrollbar found matching target='" + target + "' index=" + index);
+        }
+
+        if (!(entry.component instanceof java.awt.Scrollbar)) {
+            return errorResponse("Component is not a Scrollbar");
+        }
+
+        java.awt.Scrollbar sb = (java.awt.Scrollbar) entry.component;
+        int oldValue = sb.getValue();
+        int clamped = Math.max(sb.getMinimum(), Math.min(sb.getMaximum(), value));
+        sb.setValue(clamped);
+
+        // Fire adjustment event
+        java.awt.event.AdjustmentEvent evt = new java.awt.event.AdjustmentEvent(
+                sb, java.awt.event.AdjustmentEvent.ADJUSTMENT_VALUE_CHANGED,
+                java.awt.event.AdjustmentEvent.TRACK, clamped);
+        for (java.awt.event.AdjustmentListener al : sb.getAdjustmentListeners()) {
+            al.adjustmentValueChanged(evt);
+        }
+
+        JsonObject result = new JsonObject();
+        result.addProperty("nearestLabel", entry.nearestLabel != null ? entry.nearestLabel : "");
+        result.addProperty("oldValue", oldValue);
+        result.addProperty("newValue", clamped);
+        result.addProperty("min", sb.getMinimum());
+        result.addProperty("max", sb.getMaximum());
+        return successResponse(result);
+    }
+
+    // --- Focus tab in JTabbedPane ---
+
+    private JsonObject doFocusTab(Dialog dlg, String target, int index) {
+        List<ComponentEntry> entries = indexComponents(dlg);
+        ComponentEntry entry = findComponent(entries, "tabs", null, -1);
+        if (entry == null) {
+            return errorResponse("No tabbed pane found in dialog");
+        }
+
+        if (!(entry.component instanceof javax.swing.JTabbedPane)) {
+            return errorResponse("Component is not a JTabbedPane");
+        }
+
+        javax.swing.JTabbedPane tabs = (javax.swing.JTabbedPane) entry.component;
+        int oldIndex = tabs.getSelectedIndex();
+
+        if (index >= 0 && index < tabs.getTabCount()) {
+            tabs.setSelectedIndex(index);
+        } else if (target != null) {
+            boolean found = false;
+            for (int i = 0; i < tabs.getTabCount(); i++) {
+                String tabTitle = tabs.getTitleAt(i);
+                if (tabTitle != null && tabTitle.toLowerCase().contains(target.toLowerCase())) {
+                    tabs.setSelectedIndex(i);
+                    found = true;
+                    break;
+                }
+            }
+            if (!found) {
+                return errorResponse("No tab matching '" + target + "'");
+            }
+        }
+
+        JsonObject result = new JsonObject();
+        result.addProperty("oldTab", tabs.getTitleAt(oldIndex));
+        result.addProperty("newTab", tabs.getTitleAt(tabs.getSelectedIndex()));
+        result.addProperty("tabCount", tabs.getTabCount());
+        JsonArray tabNames = new JsonArray();
+        for (int i = 0; i < tabs.getTabCount(); i++) {
+            tabNames.add(new JsonPrimitive(tabs.getTitleAt(i)));
+        }
+        result.add("tabs", tabNames);
+        return successResponse(result);
+    }
+
+    // --- Get single component details ---
+
+    private JsonObject doGetComponent(Dialog dlg, String typeFilter, String target, int index) {
+        List<ComponentEntry> entries = indexComponents(dlg);
+        ComponentEntry entry = findComponent(entries, typeFilter, target, index);
+        if (entry == null) {
+            return errorResponse("No component found matching type='" + typeFilter
+                    + "' target='" + target + "' index=" + index);
+        }
+        return successResponse(entry.toJson());
     }
 }
