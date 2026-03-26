@@ -67,6 +67,37 @@ python ij.py histogram
 # the image is saturated. Also check after processing steps.
 ```
 
+## CRITICAL: Incucyte Calibration Breaks Subtract Background
+
+Incucyte images have spatial calibration of ~0.01 inch/pixel. `Subtract Background...`
+(rolling ball and sliding paraboloid) interprets the radius in calibrated units, so
+`rolling=50` becomes ~5000 pixels, zeroing out the entire image.
+
+**Always remove calibration before using Subtract Background on Incucyte images:**
+```
+run("Properties...", "pixel_width=1 pixel_height=1 voxel_depth=1 unit=pixel");
+```
+
+Note: `Gaussian Blur...` uses pixel units regardless of calibration, which is why
+Gaussian subtraction works fine but rolling ball/paraboloid doesn't.
+
+## Incucyte GFP Extraction: HSB Saturation + Double Paraboloid
+
+Best pipeline for extracting GFP signal from Incucyte RGB stacks:
+1. Remove calibration (see above)
+2. RGB → HSB Stack → extract Saturation channel (isolates GFP from phase contrast)
+3. Sliding Paraboloid r=50 (removes broad ventricle glow)
+4. Sliding Paraboloid r=15 (cleans residual edge glow)
+5. Median r=1 (fills single-pixel holes from HSB conversion)
+
+Recipe: `recipes/incucyte_gfp_extraction.yaml`
+
+Key findings:
+- HSB Saturation naturally separates GFP (colour-saturated) from phase contrast (grey)
+- HSB conversion creates single-pixel holes at near-zero brightness pixels
+- Median filter should go AFTER paraboloid to catch any holes enlarged by subtraction
+- Double paraboloid (large then small) handles both broad glow and edge glow
+
 ## Error Patterns & Fixes
 
 ### "Macro execution timed out after 30000ms" — EDT deadlock
@@ -371,9 +402,40 @@ File.close(f);
 | explore_thresholds | PASS | compares methods, recommends best |
 | batch | PASS | multiple commands in one call |
 
+## Drift Correction for Moving Cells (Incucyte hIba1-EGFP)
+
+### Key insight: register on blue channel
+- RGB Incucyte images have green microglia that MOVE — cannot use for registration
+- Blue channel has only tissue texture (no fluorescence) — ideal for cross-correlation
+- Convert RGB to composite (`run("Make Composite")`), then `channel=3` for blue
+- `run("Correct 3D drift", "channel=3 edge_enhance max_shift_x=250 max_shift_y=250")`
+
+### Crop-based registration for large drift
+- Full-image registration can be confused by moving cells even in the blue channel
+- For large drift (>100px): crop to a stable tissue region, register the crop, apply shifts to full image
+- The crop must avoid: black edges from previous registration, fluorescent cells, image borders
+- Top-left corner usually good (tissue texture, no cells)
+- Save log immediately after registration — log gets cleared between commands
+
+### SIFT does NOT work for refinement
+- SIFT rigid alignment on full image completely fails when microglia are present
+- Moving cells create spurious feature matches that produce wild rotations
+- Never use SIFT on images with moving fluorescent objects
+
+### Green signal extraction (Incucyte GFP)
+- HSB Saturation channel separates GFP from phase contrast
+- Double sliding paraboloid (r=50 then r=15) removes ambient glow
+- Median r=1 fills HSB conversion holes
+- Must remove inch calibration first (`pixel_width=1 unit=pixel`)
+
+### Build & deploy
+- Build: `JAVA_HOME="/c/Program Files/Java/jdk-25.0.2" mvn clean package -q`
+- Deploy to Dropbox Fiji: `Brancaccio Lab/Jamie/Fiji.app/plugins/`
+- Fiji caches classes — must restart after deploy
+
 ## User-Specific Notes
 
-- User runs Fiji from OneDrive, not Dropbox: `C:\Users\jamie\OneDrive - Imperial College London\ImageJ\Fiji.app`
+- User runs Fiji from Dropbox: `C:\Users\jamie\UK Dementia Research Institute Dropbox\Brancaccio Lab\Jamie\Fiji.app`
 - Fiji caches JARs — must fully restart after deploying new plugin JAR
 - User prefers no Co-Authored-By lines on commits
-- Fiji has 1966 available commands including StarDist, Cellpose, TrackMate, Weka, CLIJ2 (504 GPU ops), Bio-Formats, ABBA brain atlas
+- Fiji has 1966 available commands including StarDist, Cellpose, TrackMate, Weka, CLIJ2 (504 GPU ops), Bio-Formats. Note: ABBA JARs are present but menu commands may not appear — PTBIOP update site needs re-enabling and elastix binary must be installed separately

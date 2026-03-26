@@ -1,0 +1,161 @@
+name: Time-Lapse Drift Correction (Channel-Based Registration)
+id: drift_correction_timelapse
+description: >
+  Register a multi-channel time-lapse by computing drift from a stable reference
+  channel (e.g. transmitted light / tissue texture in blue) and applying the
+  correction to all channels. Essential when one channel contains moving objects
+  (e.g. migrating cells, GFP-labelled microglia) that would confuse registration.
+domain: registration
+difficulty: intermediate
+
+preconditions:
+  image_type: [RGB, multi-channel]
+  min_channels: 2
+  needs_stack: false
+  needs_time: true
+  notes: >
+    Requires at least one channel with stable, stationary features (tissue texture,
+    scratches, fixed landmarks). The fluorescent channel(s) with moving objects must
+    NOT be used for registration. Works with RGB images (Incucyte, widefield) and
+    multi-channel hyperstacks. Correct 3D Drift plugin must be installed (comes with
+    Fiji by default).
+
+parameters:
+  - name: registration_channel
+    label: "Channel for registration"
+    type: choice
+    default: "blue"
+    options: ["red", "green", "blue", "1", "2", "3", "4"]
+    description: >
+      Which channel contains stable landmarks. For RGB Incucyte images: blue or red
+      usually show tissue texture without fluorescence. For hyperstacks: specify the
+      channel number. Choose whichever channel has NO moving fluorescent signal.
+
+  - name: edge_enhance
+    label: "Edge enhance for registration"
+    type: boolean
+    default: true
+    description: >
+      Enhance edges before cross-correlation. Improves drift detection when the
+      stable channel has subtle texture (e.g. tissue background). Recommended ON
+      for phase-contrast-like images.
+
+  - name: max_shift_xy
+    label: "Maximum XY shift (pixels)"
+    type: numeric
+    default: 50
+    range: [5, 200]
+    description: >
+      Maximum allowed shift per frame in X and Y. Set higher than expected drift.
+      For Incucyte-style data, 50px is usually sufficient. For manual stage
+      repositioning, increase to 100-200.
+
+  - name: multi_timescale
+    label: "Multi time scale computation"
+    type: boolean
+    default: false
+    description: >
+      Enable for slow, gradual drifts that accumulate over many frames. Uses
+      multiple frame intervals to detect drift that is too small to see between
+      consecutive frames. Slower but more robust for long acquisitions.
+
+  - name: sub_pixel
+    label: "Sub-pixel drift correction"
+    type: boolean
+    default: false
+    description: >
+      Enable for sub-pixel accuracy. May help with slow drifts but adds
+      interpolation. Usually not needed for typical microscope stage drift.
+
+steps:
+  - id: 1
+    description: "Check the input image and identify channels"
+    decision_point: >
+      Inspect each channel to determine which has stable landmarks and which has
+      moving objects. For RGB: split channels temporarily and compare. The stable
+      channel should show tissue texture, scratches, or fixed structures that do
+      not change across frames.
+    macro: |
+      // Check what we have
+      title = getTitle();
+      type = bitDepth();
+      Stack.getDimensions(w, h, c, z, t);
+      print("Image: " + title);
+      print("Dimensions: " + w + "x" + h + ", " + c + "ch, " + z + "z, " + t + "t");
+      print("Type: " + type + "-bit");
+
+  - id: 2
+    description: "Convert RGB to composite hyperstack (if needed)"
+    notes: >
+      Correct 3D Drift needs a multi-channel hyperstack to select a registration
+      channel. RGB images must be converted first. Already-composite images skip
+      this step.
+    macro: |
+      // Duplicate to preserve the original
+      original = getTitle();
+      run("Duplicate...", "title=for_registration duplicate");
+      selectWindow("for_registration");
+      // Convert RGB to composite (3 channels: R=1, G=2, B=3)
+      if (bitDepth() == 24) {
+          run("Make Composite");
+      }
+
+  - id: 3
+    description: "Run Correct 3D Drift using stable channel"
+    notes: >
+      Channel numbering: for RGB composites, 1=Red, 2=Green, 3=Blue.
+      The plugin computes XY (and optionally Z) shifts by cross-correlating
+      the selected channel between consecutive frames, then applies the same
+      shifts to ALL channels.
+    macro: |
+      selectWindow("for_registration");
+      // Blue channel = 3 for RGB composites
+      // Adjust channel number for your data
+      run("Correct 3D drift", "channel=3 edge_enhance max_shift_x=50 max_shift_y=50 max_shift_z=10");
+    timeout_seconds: 600
+    expected_output: "registered time points"
+
+  - id: 4
+    description: "Verify registration quality"
+    decision_point: >
+      Scroll through the registered time series. The background tissue should be
+      stable while the fluorescent cells show natural movement. Check edges for
+      black padding from the shifts — this is normal and can be cropped. Compare
+      frame 1 vs last frame: tissue features should be perfectly aligned.
+    macro: |
+      selectWindow("registered time points");
+      Stack.getDimensions(w, h, c, z, t);
+      print("Registered: " + w + "x" + h + ", " + c + "ch, " + t + " frames");
+
+  - id: 5
+    description: "Clean up intermediates"
+    macro: |
+      close("for_registration");
+
+validation:
+  - check: "registered time points window exists"
+    method: "Window title contains 'registered'"
+  - check: "Frame count matches original"
+    method: "Compare t dimension of original vs registered"
+  - check: "All channels present"
+    method: "Compare c dimension — should match original"
+  - check: "Background is stable across frames"
+    method: "Visual inspection of tissue features at frame 1 vs last frame"
+
+known_issues:
+  - issue: "Plugin runs twice if macro times out"
+    fix: "Use longer timeout (300-600s). The plugin is computationally intensive for large images."
+  - issue: "Black edges after registration"
+    fix: "Normal — caused by shift padding. Crop with makeRectangle() + run('Crop') if needed."
+  - issue: "Output is composite, not RGB"
+    fix: "Convert back with run('RGB Color') or Stack > Hyperstack to Stack if needed."
+  - issue: "Plugin dialog appears instead of running with arguments"
+    fix: "Ensure the image is a hyperstack (not plain stack). run('Make Composite') first."
+  - issue: "Poor registration with moving cells"
+    fix: "Verify you selected the correct channel. The registration channel must have ONLY stable features."
+
+tips:
+  - "For dual-fluorescence (GFP + RFP) without brightfield, the blue channel of an RGB composite often contains only background noise and tissue texture — ideal for registration."
+  - "Check the Log window after running — it prints the drift vector for every frame. Large sudden jumps may indicate a problem frame."
+  - "For very long acquisitions (>500 frames), enable multi_timescale to catch slow cumulative drift."
+  - "If no channel has stable landmarks, consider adding brightfield or DIC to your acquisition protocol."
