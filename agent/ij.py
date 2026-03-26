@@ -256,6 +256,9 @@ def main():
             else:
                 print(json.dumps(resp, indent=2))
 
+        elif cmd == "progress":
+            print(json.dumps(send_command({"command": "get_progress"}), indent=2))
+
         elif cmd == "histogram":
             print(json.dumps(get_histogram(), indent=2))
 
@@ -333,6 +336,138 @@ def main():
                         d.get("title", ""),
                         d.get("text", "").strip()[:200]
                     ))
+
+        elif cmd == "ui":
+            # Dialog interaction: list components, click buttons, set values
+            if len(sys.argv) < 3:
+                print("Usage:")
+                print("  python ij.py ui list                              # list all dialog components")
+                print("  python ij.py ui list \"Dialog Title\"                # list components in specific dialog")
+                print("  python ij.py ui click \"OK\"                        # click a button by text")
+                print("  python ij.py ui check \"3D Object Analysis\" true   # set checkbox on/off")
+                print("  python ij.py ui toggle \"Create Bin File\"          # flip checkbox state")
+                print("  python ij.py ui text \"sigma\" 2.5                  # set text field by label")
+                print("  python ij.py ui texti 0 hello                     # set text field by index")
+                print("  python ij.py ui dropdown \"Method\" Otsu            # select dropdown value")
+                print("  python ij.py ui slider 0 128                      # set slider by index")
+                print("  python ij.py ui spinner 0 42                      # set spinner by index")
+                print("  python ij.py ui scroll 0 50                       # set scrollbar by index")
+                print("  python ij.py ui tab \"Advanced\"                    # focus a tab")
+                sys.exit(1)
+
+            sub = sys.argv[2]
+            req = {"command": "interact_dialog"}
+
+            if sub == "list":
+                req["action"] = "list_components"
+                if len(sys.argv) > 3:
+                    req["dialog"] = sys.argv[3]
+                resp = imagej_command(req)
+                # Pretty-print the component list
+                if resp.get("ok") and resp.get("result", {}).get("dialogs"):
+                    for dlg in resp["result"]["dialogs"]:
+                        print("=== {} ===".format(dlg.get("title", "(untitled)")))
+                        for c in dlg.get("components", []):
+                            line = "  [{:>3}] {:10s}".format(c["index"], c["type"])
+                            if c.get("label"):
+                                line += '  "{}"'.format(c["label"])
+                            if c.get("nearestLabel"):
+                                line += '  (near: "{}")'.format(c["nearestLabel"])
+                            if "checked" in c:
+                                line += "  [{}]".format("ON" if c["checked"] else "OFF")
+                            elif "selected" in c:
+                                line += "  [{}]".format("ON" if c["selected"] else "OFF")
+                            elif "value" in c:
+                                line += "  = {}".format(c["value"])
+                            if "options" in c:
+                                line += "  options={}".format(c["options"])
+                            if "min" in c:
+                                line += "  ({}-{})".format(c["min"], c["max"])
+                            if not c.get("enabled", True):
+                                line += "  [DISABLED]"
+                            print(line)
+                else:
+                    print(json.dumps(resp, indent=2))
+
+            elif sub == "click":
+                req["action"] = "click_button"
+                req["target"] = sys.argv[3] if len(sys.argv) > 3 else None
+                if len(sys.argv) > 4 and sys.argv[4].isdigit():
+                    req["index"] = int(sys.argv[4])
+                print(json.dumps(imagej_command(req), indent=2))
+
+            elif sub == "check":
+                req["action"] = "set_checkbox"
+                req["target"] = sys.argv[3] if len(sys.argv) > 3 else None
+                if len(sys.argv) > 4:
+                    req["value"] = sys.argv[4].lower() in ("true", "1", "on", "yes")
+                else:
+                    req["value"] = True
+                print(json.dumps(imagej_command(req), indent=2))
+
+            elif sub == "toggle":
+                req["action"] = "toggle_checkbox"
+                req["target"] = sys.argv[3] if len(sys.argv) > 3 else None
+                if len(sys.argv) > 4 and sys.argv[4].isdigit():
+                    req["index"] = int(sys.argv[4])
+                print(json.dumps(imagej_command(req), indent=2))
+
+            elif sub == "text":
+                req["action"] = "set_text"
+                req["target"] = sys.argv[3] if len(sys.argv) > 3 else None
+                req["value"] = sys.argv[4] if len(sys.argv) > 4 else ""
+                print(json.dumps(imagej_command(req), indent=2))
+
+            elif sub == "texti":
+                req["action"] = "set_text"
+                req["index"] = int(sys.argv[3]) if len(sys.argv) > 3 else 0
+                req["value"] = sys.argv[4] if len(sys.argv) > 4 else ""
+                print(json.dumps(imagej_command(req), indent=2))
+
+            elif sub == "dropdown":
+                req["action"] = "set_dropdown"
+                req["target"] = sys.argv[3] if len(sys.argv) > 3 else None
+                req["value"] = sys.argv[4] if len(sys.argv) > 4 else ""
+                print(json.dumps(imagej_command(req), indent=2))
+
+            elif sub == "slider":
+                req["action"] = "set_slider"
+                if len(sys.argv) > 3 and sys.argv[3].isdigit():
+                    req["index"] = int(sys.argv[3])
+                else:
+                    req["target"] = sys.argv[3] if len(sys.argv) > 3 else None
+                req["value"] = int(sys.argv[4]) if len(sys.argv) > 4 else 0
+                print(json.dumps(imagej_command(req), indent=2))
+
+            elif sub == "spinner":
+                req["action"] = "set_spinner"
+                if len(sys.argv) > 3 and sys.argv[3].isdigit():
+                    req["index"] = int(sys.argv[3])
+                else:
+                    req["target"] = sys.argv[3] if len(sys.argv) > 3 else None
+                req["value"] = sys.argv[4] if len(sys.argv) > 4 else "0"
+                print(json.dumps(imagej_command(req), indent=2))
+
+            elif sub == "scroll":
+                req["action"] = "set_scrollbar"
+                if len(sys.argv) > 3 and sys.argv[3].isdigit():
+                    req["index"] = int(sys.argv[3])
+                else:
+                    req["target"] = sys.argv[3] if len(sys.argv) > 3 else None
+                req["value"] = int(sys.argv[4]) if len(sys.argv) > 4 else 0
+                print(json.dumps(imagej_command(req), indent=2))
+
+            elif sub == "tab":
+                req["action"] = "focus_tab"
+                if len(sys.argv) > 3 and sys.argv[3].isdigit():
+                    req["index"] = int(sys.argv[3])
+                else:
+                    req["target"] = sys.argv[3] if len(sys.argv) > 3 else None
+                print(json.dumps(imagej_command(req), indent=2))
+
+            else:
+                print("Unknown ui subcommand: " + sub)
+                sys.exit(1)
 
         elif cmd == "raw":
             if len(sys.argv) < 3:

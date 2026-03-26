@@ -1,0 +1,410 @@
+name: 3D Ring Render (Ch4 around DAPI)
+description: >
+  Publication-quality 3D render of ring structures (e.g. amyloid plaques) in
+  channel 4 surrounding DAPI-labelled nuclei. Uses strict display ranges (no
+  masks) with median 3D filtering and 3Dscript combined transparency rendering.
+
+domain: amyloid, immunofluorescence
+tags: [3d, render, ring, plaque, dapi, 3dscript, batch]
+
+preconditions:
+  - Multi-channel z-stack open (16-bit), typically from .lif file
+  - Ch1 = DAPI, Ch4 = ring signal (e.g. MOAB-2 AF488)
+  - 3Dscript installed in Fiji
+  - TCP server running on port 7746
+
+# ============================================================
+# BEST QUALITY SETTINGS (proven 2026-03-23)
+# ============================================================
+# These are the settings that produce the best results.
+# Use these by default unless the user requests otherwise.
+
+quality_settings:
+  median_radius: 2           # Median 3D radius — smooths edges while preserving ring shape
+  scale_factor: 15           # XY upscale — 50px crop becomes 750px render output
+  interpolation: Bicubic     # Best quality scaling
+  rendering: "combined transparency"  # Channels affect each other's opacity — proper depth
+  lighting: on               # Enables shading for 3D depth perception
+  object_light: 1            # Full light intensity
+  bounding_box: off          # No wireframe
+  scalebar: off              # No scale overlay
+  ring_lut: Green            # ALWAYS green for ring channel
+  dapi_lut: Blue             # ALWAYS blue for DAPI
+
+# ============================================================
+# DECISION POINTS — ask the user BEFORE starting
+# ============================================================
+decisions:
+  - question: "How many candidates do you want rendered?"
+    options:
+      - label: "All viable candidates"
+        description: "Render every ring so you can choose the best — recommended for first pass"
+        sets: {candidate_mode: all}
+      - label: "Specific candidate(s)"
+        description: "User picks which ones after seeing the candidate montage"
+        sets: {candidate_mode: pick}
+      - label: "Best single candidate"
+        description: "Agent picks the brightest/largest ring and renders it"
+        sets: {candidate_mode: single}
+    note: >
+      For IgG controls there may only be 1 real ring — look for massive outliers
+      in area and mean intensity. Everything else is background/autofluorescence.
+
+  - question: "What background do you want?"
+    default: both
+    options:
+      - label: "Both isolated and in-context (Recommended)"
+        description: >
+          Isolated: tight 50px crop, strict display range — just ring + nucleus,
+          no diffuse signal. In-context: 80px crop, wider display range — surrounding
+          cells visible for spatial context. Saves both so you can choose.
+        sets: {background_mode: both}
+      - label: "Isolated only"
+        description: "Ring + nucleus only, black background, no neighbours, no haze"
+        sets: {background_mode: isolated}
+      - label: "In-context only"
+        description: "Ring with surrounding cells visible"
+        sets: {background_mode: context}
+
+  - question: "Which animation style?"
+    default: both
+    options:
+      - label: "Both rotation and spin (Recommended)"
+        description: >
+          Rotation: simple 360° vertical turn (201 frames). Spin: multi-axis orbit
+          with wobble (505 frames) — covers far more angles, much better for finding
+          the perfect shot for a figure.
+        sets: {animation_mode: both}
+      - label: "Rotation only"
+        description: "Simple 360° vertical rotation (201 frames)"
+        sets: {animation_mode: rotate}
+      - label: "Spin only"
+        description: "Multi-axis orbit (505 frames) — best for finding perfect angles"
+        sets: {animation_mode: spin}
+
+  - question: "Output format?"
+    default: tif
+    options:
+      - label: "TIF stack (Recommended)"
+        description: "Each frame is a slice — browse in Fiji, pick the perfect angle for a figure"
+        sets: {output_format: tif}
+      - label: "Both TIF and AVI"
+        description: "TIF for browsing + AVI for presentations"
+        sets: {output_format: both}
+
+# ============================================================
+# DISPLAY RANGE PRESETS
+# ============================================================
+# Two presets depending on background mode.
+# These clip diffuse signal and background to black.
+# Adjust based on actual image intensity statistics.
+
+display_ranges:
+  isolated:
+    ring_min: 12000          # Strict — clips ALL diffuse ch4 background
+    ring_max: 42000
+    dapi_min: 5000           # Clips diffuse DAPI haze
+    dapi_max: 22000
+    crop_size: 120           # 120 px = ~34 um at 0.284 um/px
+    dapi_inner_radius: 30    # 30 px = ~8.5 um — zero out DAPI outside this radius from center
+    note: >
+      For truly isolated renders, the DAPI channel is zeroed outside a small
+      central square (30px / ~8.5 um radius = 60×60px / ~17 um) so ONLY the
+      nucleus inside the ring is visible. The ring channel keeps the full
+      120px (~34 um) crop.
+
+  context:
+    ring_min: 4000           # Wider — shows dimmer ring signal and some background
+    ring_max: 42000
+    dapi_min: 1500           # Shows surrounding DAPI nuclei
+    dapi_max: 20000
+    crop_size: 120           # 120 px = ~34 um at 0.284 um/px
+
+  note: >
+    Both modes use 120px (~34 um) crops for better 3D viewing angles. The difference is:
+    isolated = DAPI zeroed outside center (only ring's own nucleus visible);
+    context = full DAPI showing surrounding cells.
+    These defaults work for MOAB-2.AF488 and H31L21.IgG images (0.284 um/px).
+
+# ============================================================
+# ANIMATION FILES
+# ============================================================
+animations:
+  rotation:
+    file: .tmp/ring_rotate.animation.txt
+    frames: 200
+    content: |
+      At frame 0:
+      - change rendering algorithm to combined transparency
+      - change all channels' lighting to on
+      - change all channels' object light to 1
+      - change bounding box visibility to off
+      - change scalebar visibility to off
+      From frame 0 to frame 200 rotate by 360 degrees vertically ease-in-out
+
+  spin:
+    file: .tmp/spin_animation.txt
+    frames: 504
+    source: "Based on Macros and Scripts/3D Scripts/Spin Animation.txt, frame-scaled to 1/5"
+    content: |
+      At frame 0:
+      - change rendering algorithm to combined transparency
+      - change all channels' lighting to on
+      - change all channels' object light to 1
+      - change bounding box visibility to off
+      - change scalebar visibility to off
+      At frame 0 rotate by -67.5 degrees vertically
+      At frame 0 rotate by 0 degrees around (0,0,1)
+      From frame 0 to frame 36 rotate by -45 degrees around (1,0,0) ease-out
+      From frame 36 to frame 72 rotate by 45 degrees around (1,0,0) ease-in-out
+      ... (continues wobble pattern to frame 504)
+      From frame 0 to frame 504 rotate by 2520 degrees horizontally
+    note: >
+      Original is 2520 frames — crashes Fiji on upscaled images (~9GB+ stack).
+      This 504-frame version covers the same angles at 1/5 density. Still excellent
+      for finding the perfect viewing angle.
+
+# ============================================================
+# PIPELINE STEPS
+# ============================================================
+steps:
+  - id: 1
+    description: "Open .lif series and find ring candidates"
+    notes: >
+      Use Bio-Formats to open the correct series. To find series indices, open
+      series one at a time in batch mode and print titles to the log (slow but
+      reliable — no fast scanner yet).
+
+      Extract ch4, max-project, use pixels.py find_cells OR Analyze Particles
+      with threshold ~20000 to find bright objects. Sort by area × mean intensity.
+
+      For MOAB-2 antibody images: expect many candidates (5-15 real rings).
+      For IgG controls: expect 0-2 real rings. Look for massive outliers in
+      area and mean — the real ring will be 5-10× bigger than background objects.
+
+      Filter out candidates within 40px (~11 um) of image edges.
+
+  - id: 2
+    description: "Save candidate montage"
+    notes: >
+      Crop ch4+ch1 around each candidate (80×80 px / ~23 um), merge as green+blue composite,
+      set display ranges (ch4: 8000-45000, ch1: 2000-20000), flatten, arrange
+      as montage. Scale up 4× for visibility. Save as PNG to export directory.
+      This lets the user see all candidates at a glance.
+
+  - id: 3
+    description: "Save ROI overlay image"
+    notes: >
+      Max-project ch4 and ch1, apply GREEN and Blue LUTs respectively, merge,
+      flatten to RGB, draw numbered yellow rectangles (lineWidth=3) at each
+      candidate location. Save as PNG. The GREEN LUT on ch4 is important —
+      matches the ring colour in the 3D render.
+    code: |
+      // Ch4 max proj with GREEN LUT
+      selectWindow("SOURCE");
+      run("Duplicate...", "title=rov_ch4 duplicate channels=4");
+      run("Z Project...", "projection=[Max Intensity]");
+      run("Green"); setMinAndMax(5000, 40000);
+      // Ch1 max proj with Blue LUT
+      // ... merge, flatten, draw yellow rectangles, save PNG
+
+  - id: 4
+    description: "Crop ROI from original z-stack"
+    code: |
+      selectWindow("SOURCE");
+      run("Select None");
+      makeRectangle(X0, Y0, CROP_SIZE, CROP_SIZE);
+      run("Duplicate...", "title=ring_crop duplicate");
+    notes: >
+      CROP_SIZE = 120 for both modes (large crop = better 3D viewing angles).
+      Must run Select None first to clear any previous ROI.
+
+  - id: 5
+    description: "Split channels, keep ch4 + ch1"
+    code: |
+      selectWindow("ring_crop");
+      run("Split Channels");
+      selectWindow("C2-ring_crop"); close();
+      selectWindow("C3-ring_crop"); close();
+    notes: "Ch2 is usually autofluorescence, Ch3 varies — always exclude them."
+
+  - id: 5b
+    description: "ISOLATED MODE ONLY: Zero out DAPI outside center"
+    condition: "mode == isolated"
+    code: |
+      // Zero out DAPI outside a central square (DAPI_INNER_RADIUS px from center)
+      selectWindow("C1-ring_crop");
+      half = CROP / 2;
+      inner = DAPI_INNER_RADIUS;  // e.g. 30
+      x0 = half - inner;
+      y0 = half - inner;
+      size = inner * 2;
+      nS = nSlices;
+      for (s = 1; s <= nS; s++) {
+          setSlice(s);
+          makeRectangle(0, 0, CROP, y0);           // top strip
+          run("Set...", "value=0 slice");
+          makeRectangle(0, y0+size, CROP, CROP-y0-size);  // bottom strip
+          run("Set...", "value=0 slice");
+          makeRectangle(0, y0, x0, size);            // left strip
+          run("Set...", "value=0 slice");
+          makeRectangle(x0+size, y0, CROP-x0-size, size); // right strip
+          run("Set...", "value=0 slice");
+      }
+      run("Select None");
+    notes: >
+      For the isolated version, zero out all DAPI signal outside a small central
+      area so ONLY the nucleus inside the ring is visible. The ring channel (ch4)
+      keeps the full 120px crop — only DAPI is masked. This gives a clean render
+      with no neighbouring blue nuclei cluttering the view.
+
+  - id: 6
+    description: "Median 3D filter (radius=2 for smooth edges)"
+    code: |
+      selectWindow("C4-ring_crop");
+      run("Median 3D...", "x=2 y=2 z=2");
+      selectWindow("C1-ring_crop");
+      run("Median 3D...", "x=2 y=2 z=2");
+    notes: >
+      Median filter preserves ring edges while removing noise.
+      Radius=2 gives noticeably smoother edges than radius=1.
+      Do NOT use Gaussian Blur — it blurs the ring edges too much.
+      Do NOT skip filtering — raw data looks noisy in 3D.
+
+  - id: 7
+    description: "Merge channels with correct LUT slots"
+    code: |
+      // c2 slot = Green LUT, c3 slot = Blue LUT
+      run("Merge Channels...", "c2=[C4-ring_crop] c3=[C1-ring_crop] create");
+      rename("ring_merged");
+    notes: "c2=Green, c3=Blue are the Merge Channels LUT assignments."
+
+  - id: 8
+    description: "Set display ranges, convert to 8-bit, reapply LUTs"
+    code: |
+      selectWindow("ring_merged");
+      Stack.setPosition(1, 7, 1);
+      setMinAndMax(RING_MIN, RING_MAX);
+      Stack.setPosition(2, 7, 1);
+      setMinAndMax(DAPI_MIN, DAPI_MAX);
+      run("8-bit");
+      // CRITICAL: LUTs reset after 8-bit conversion — must reapply
+      Stack.setPosition(1, 7, 1); run("Green");
+      Stack.setPosition(2, 7, 1); run("Blue");
+    notes: >
+      The display range IS the isolation method. High min clips background to
+      black — no masks needed. This gives smooth natural fluorescence falloff.
+      MUST reapply LUTs after 8-bit conversion — they always reset.
+
+  - id: 9
+    description: "Scale up 15× XY with Bicubic interpolation"
+    code: |
+      selectWindow("ring_merged");
+      run("Scale...", "x=15 y=15 z=1.0 interpolation=Bicubic process create title=ring_render");
+      selectWindow("ring_merged"); close();
+    notes: >
+      3Dscript output size = input image size. 120px (~34 um) crop × 15 = 1800px render.
+      Field of view remains ~34 um; effective pixel size = 0.019 um/px (19 nm/px).
+      Bicubic gives the smoothest result. Do NOT Z-interpolate — interpolated
+      masked data falls below 3Dscript's alpha threshold.
+
+  - id: 10
+    description: "Save pre-render TIF"
+    code: |
+      selectWindow("ring_render");
+      saveAs("Tiff", "EXPORT_DIR/NAME_prerender.tif");
+      rename("ring_render");
+    notes: >
+      Save BEFORE rendering. This lets the user re-render with different
+      animation settings, or manually adjust display range/LUTs in Fiji,
+      or scale up further, without re-processing from scratch.
+
+  - id: 11
+    description: "Render with 3Dscript Batch Animation"
+    code: |
+      selectWindow("ring_render");
+      run("Batch Animation", "animation=[/path/to/animation.txt]");
+    notes: >
+      Render both rotation AND spin animations for maximum angle coverage.
+      Save each as a TIF stack — user browses slices to find the perfect frame.
+      Close the rendered stack immediately after saving to free memory.
+      Close any 3Dscript dialogs after EVERY render.
+
+  - id: 12
+    description: "Save render as TIF stack"
+    code: |
+      list = getList("image.titles");
+      for (i = 0; i < list.length; i++) {
+          selectWindow(list[i]);
+          if (nSlices >= MIN_SLICES) {
+              saveAs("Tiff", "EXPORT_DIR/NAME_ANIMATION_3Drender.tif");
+              rename("rendered_stack"); close();
+          }
+      }
+    notes: "MIN_SLICES = 200 for rotation, 500 for spin."
+
+# ============================================================
+# NAMING CONVENTION
+# ============================================================
+naming: |
+  PREFIX_MODE_ANIMATION_3Drender.tif
+
+  PREFIX = DATASET_GENOTYPE  (e.g. MOAB_hAPP12, H31L21_NLGF9)
+  MODE   = isolated | context
+  ANIMATION = rotate | spin
+
+  Examples:
+    MOAB_hAPP12_ROI_overlay.png
+    MOAB_hAPP12_isolated_prerender.tif
+    MOAB_hAPP12_isolated_rotate_3Drender.tif
+    MOAB_hAPP12_isolated_spin_3Drender.tif
+    MOAB_hAPP12_context_prerender.tif
+    MOAB_hAPP12_context_rotate_3Drender.tif
+    MOAB_hAPP12_context_spin_3Drender.tif
+
+# ============================================================
+# BATCH AUTOMATION SCRIPT
+# ============================================================
+batch_script:
+  file: .tmp/best_render_v2.py
+  description: >
+    All-in-one script that processes multiple candidates from different .lif files.
+    Opens each series, saves green ROI overlay, crops 120px, zeros DAPI outside
+    center for isolated mode, filters (median r=2), merges, sets display ranges,
+    scales 15×, renders rotation + spin for both isolated and context modes.
+    Supports resume via start_cand and start_mode args.
+  usage: |
+    python .tmp/best_render_v2.py [START_CAND] [START_MODE]
+    # Edit CANDIDATES list in the script to specify targets.
+
+# ============================================================
+# KNOWN ISSUES
+# ============================================================
+known_issues:
+  - "LUTs reset after 8-bit conversion — MUST reapply Green and Blue"
+  - "Spin animation at 2520 frames with 15x upscaling crashes Fiji (~9GB stack) — use 504-frame version"
+  - "120px (~34 um) crop × 15x scale = 1800px renders — large files, can crash if not cleaned up between renders"
+  - "Close rendered stacks AND 3Dscript dialogs after EVERY render — they accumulate and crash Fiji"
+  - "Run Collect Garbage between renders when doing large batches"
+  - ".lif series discovery is slow — no fast scanner yet, must open each series"
+  - "IgG controls have very few real rings — look for massive area/intensity outliers (5-10× bigger)"
+  - "Candidates near image edges (within 60px / ~17 um for 120px / ~34 um crop) get clipped — skip them"
+  - "Z-staircase artifact at oblique angles — inherent to few Z slices, unavoidable"
+  - "Do NOT use Enhance Contrast — destroys pixel values permanently"
+  - "Do NOT Z-interpolate for 3Dscript — interpolated data falls below alpha threshold"
+  - "Do NOT create custom multi-axis animations without testing — they can produce bizarre results"
+  - "Stick to rotation (simple 360° vertical) and spin (proven multi-axis wobble) animations"
+
+# ============================================================
+# VALIDATION
+# ============================================================
+validation:
+  - "Ring channel is GREEN (not red/magenta) in both render and ROI overlay"
+  - "Ring shows shell/ring morphology with dark center"
+  - "DAPI (blue) shows nucleus inside the ring"
+  - "Isolated: background is BLACK, no diffuse haze, no neighbour nuclei"
+  - "Context: surrounding cells visible for spatial reference"
+  - "No bounding box, scalebar, or wireframe artifacts"
+  - "ROI overlay shows yellow rectangle at correct position on green+blue composite"
+  - "Pre-render TIFs open correctly with Green+Blue LUTs"
+  - "Spin animation covers multiple viewing angles (wobble + continuous rotation)"

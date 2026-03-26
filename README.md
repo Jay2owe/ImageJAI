@@ -16,10 +16,14 @@ A single Fiji plugin that adds a conversational AI assistant to ImageJ. Install 
 - **Hypothesis-driven analysis** — State a scientific hypothesis, AI designs the complete analysis plan
 - **Cross-tool integration** — Optional Python/R script execution for advanced statistics
 - **TCP command server** — Optional TCP server (port 7746) for external agent access (Claude CLI, AgentConsole, scripts). Off by default.
+- **Plugin argument discovery** — Probe any plugin's dialog to learn exact macro syntax before using it
+- **Dialog interaction** — Read, fill, and click any open dialog (buttons, checkboxes, dropdowns, text fields, sliders)
+- **Progress monitoring** — Track progress bar state and status line from external agents
+- **Groovy/Jython scripting** — Run scripts inside Fiji's JVM for full Java API access
 
 ## Install
 
-1. Download `imagej-ai-0.1.0-SNAPSHOT.jar` (196KB)
+1. Download `imagej-ai-0.2.0.jar`
 2. Copy to your `Fiji.app/plugins/` directory
 3. Restart Fiji
 4. Go to **Plugins > AI Assistant**
@@ -61,6 +65,10 @@ mvn clean package -q
 # Build and deploy to local Fiji
 bash build.sh
 ```
+
+## Versioning
+
+MAJOR.MINOR.PATCH — first digit for new features, second for big refactors/improvements, third for bug fixes.
 
 ## Architecture
 
@@ -122,11 +130,23 @@ echo '{"command": "get_state"}' | nc localhost 7746
 
 # Capture image as base64 PNG
 echo '{"command": "capture_image"}' | nc localhost 7746
+
+# Probe a plugin's parameters
+echo '{"command": "probe_command", "plugin": "Gaussian Blur..."}' | nc localhost 7746
+
+# Check progress bar
+echo '{"command": "get_progress"}' | nc localhost 7746
 ```
 
-Available commands: `ping`, `execute_macro`, `get_state`, `get_image_info`, `get_results_table`, `capture_image`, `run_pipeline`, `explore_thresholds`, `get_state_context`, `batch`, `get_log`, `get_histogram`, `get_open_windows`, `get_metadata`, `get_pixels`, `3d_viewer`, `get_dialogs`, `close_dialogs`, `probe_command`, `run_script`
+Available commands: `ping`, `execute_macro`, `get_state`, `get_image_info`, `get_results_table`, `capture_image`, `run_pipeline`, `explore_thresholds`, `get_state_context`, `batch`, `get_log`, `get_histogram`, `get_open_windows`, `get_metadata`, `get_pixels`, `3d_viewer`, `get_dialogs`, `close_dialogs`, `probe_command`, `run_script`, `interact_dialog`, `get_progress`
 
 The `run_script` command executes Groovy/Jython/JavaScript code directly inside Fiji's JVM — enabling access to any Java API, Swing component manipulation, and plugin internals that macros can't reach.
+
+The `probe_command` command opens a plugin's dialog, reads every field (numeric, string, checkbox, dropdown with all options), derives macro argument keys, generates example macro syntax, and cancels without executing.
+
+The `interact_dialog` command reads and interacts with any open dialog — list components, click buttons, set checkboxes, fill text fields, select dropdowns, adjust sliders.
+
+The `get_progress` command reads the Fiji progress bar state and status line text — useful for monitoring long-running operations from external agents.
 
 This is completely optional — the plugin works fully without it.
 
@@ -134,18 +154,16 @@ This is completely optional — the plugin works fully without it.
 
 The `agent/` directory contains a complete AI agent toolkit for controlling ImageJ via the TCP server:
 
-- **`ij.py`** — Python CLI helper for all TCP commands (macro, capture, state, script, etc.)
+- **`ij.py`** — Python CLI helper for all TCP commands (macro, capture, state, script, probe, UI interaction, progress, etc.)
 - **`pixels.py`** — Python-side pixel analysis (stats, cell detection, line profiles)
+- **`scan_plugins.py`** — Discover all installed Fiji commands and update sites
+- **`probe_plugin.py`** — Probe plugin dialogs for parameters, cache results, batch-probe
 - **`adviser.py`** — Research-only analysis consultant (no TCP needed)
 - **`auditor.py`** — Validate measurement results for sanity
-- **`recipes/`** — 21+ YAML analysis recipes (colocalization, cell counting, CTCF, etc.)
-- **Reference documents:**
-  - `3dscript-reference.md` — Complete 3Dscript animation language reference
-  - `colocalization-reference.md` — Colocalization analysis expert reference
-  - `circadian-analysis-reference.md` — Circadian rhythm analysis reference
-  - `macro-reference.md` — ImageJ macro command reference
-  - `domain-reference.md` — Microscopy methods and quality control
-  - `analysis-landscape.md` — 75+ analysis tasks across 15 research domains
+- **`practice.py`** — Autonomous self-improvement on sample images
+- **`train_agent.py`** — Train the agent on a lab's specific images
+- **`recipes/`** — YAML analysis recipes (colocalization, cell counting, CTCF, 3D rendering, etc.)
+- **`references/`** — 50+ expert reference documents covering microscopy, analysis methods, plugins, statistics, and neuroscience workflows
 
 ## Context Hook (Claude Code Integration)
 
@@ -160,6 +178,7 @@ When using Claude Code in this project directory, a context hook (`context_hook.
 - Open images — titles, dimensions, bit depth, stack info, calibration, ROI
 - Results table — row count and column names
 - JVM memory — used/max/free + open image count
+- Progress bar — active state, percent complete, status line text
 - Open dialogs — errors, warnings, prompts with text and buttons
 - IJ Log — last 10 lines
 

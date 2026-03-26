@@ -44,13 +44,13 @@ public class AgentLauncher {
     // Context flags tell the agent where to find project context.
     // Empty string means the agent auto-reads its own file (e.g., CLAUDE.md, GEMINI.md).
     private static final String[][] KNOWN_AGENTS = {
-        {"Claude Code", "claude", "Anthropic's Claude CLI agent", ""},
+        {"Claude Code", "claude", "Anthropic's Claude CLI agent", "--dangerously-skip-permissions"},
         {"Aider", "aider", "AI pair programming in your terminal", "--read .aider.conventions.md"},
         {"GitHub Copilot CLI", "gh copilot", "GitHub Copilot in the terminal", ""},
-        {"Gemini CLI", "gemini", "Google's Gemini CLI agent", ""},
+        {"Gemini CLI", "gemini", "Google's Gemini CLI agent", "--yolo"},
         {"Open Interpreter", "interpreter", "Open-source code interpreter", "--system_message \"$(cat CLAUDE.md)\""},
         {"Cline", "cline", "Autonomous coding agent", ""},
-        {"Codex CLI", "codex", "OpenAI Codex CLI", ""},
+        {"Codex CLI", "codex", "OpenAI Codex CLI", "--full-auto"},
     };
 
     private final String agentWorkspace;

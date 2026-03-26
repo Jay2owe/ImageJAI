@@ -73,6 +73,20 @@ steps:
     capture_after: true
     validate: "Isolated object should be visible on black background. No neighboring objects."
 
+  - id: 1b
+    description: "Median 3D filter for smooth edges in render"
+    macro: |
+      run("Median 3D...", "x=2 y=2 z=2");
+    decision_point: false
+    decision_logic: ""
+    capture_after: false
+    validate: ""
+    notes: >
+      Median 3D with radius=2 smooths noise and voxel edges while preserving
+      object boundaries. This makes the 3D render much cleaner. Do NOT use
+      Gaussian Blur here — it blurs edges too much. Do NOT skip — raw data
+      looks noisy in volume rendering.
+
   - id: 2
     description: "Convert to 8-bit for rendering"
     macro: |
@@ -149,5 +163,14 @@ known_issues:
   - condition: "Bitwise AND corrupts 16-bit masked data"
     symptom: "Intensity values wrong after masking — only low byte preserved"
     fix: "Use imageCalculator('Multiply create stack', ...) with a 0/1 mask, never AND."
+
+related_recipes:
+  - name: "3D Ring Render (Ch4 around DAPI)"
+    file: "3d_ring_render.yaml"
+    when: >
+      Use this specialized recipe when rendering ring/plaque structures around
+      DAPI nuclei. It has decision points for isolated vs context, rotation vs
+      spin, upscaled vs native, single vs batch candidates. Always ASK the user
+      which options they want before starting.
 
 tags: [3d, rendering, volume, 3dscript, 3d_viewer, 3d_project, animation, visualization]
