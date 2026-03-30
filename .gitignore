@@ -17,3 +17,18 @@ agent/AGENTS.md
 agent/.clinerules
 agent/.cursorrules
 agent/.aider.conventions.md
+
+# Claude/AI context and planning files
+CLAUDE*.md
+CONTEXT.md
+PLAN.md
+.claude/
+.task/
+agent/CLAUDE.md
+agent/learnings.md
+
+# Temp and OS files
+*.tmp.*
+Thumbs.db
+desktop.ini
+.env
