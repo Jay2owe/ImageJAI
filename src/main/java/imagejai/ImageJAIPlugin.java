@@ -7,7 +7,10 @@ import imagejai.config.Constants;
 import imagejai.config.Settings;
 import imagejai.engine.AgentLauncher;
 import imagejai.engine.CommandEngine;
+import imagejai.engine.DialogWatcher;
+import imagejai.engine.EventBus;
 import imagejai.engine.ExplorationEngine;
+import imagejai.engine.ImageMonitor;
 import imagejai.engine.PipelineBuilder;
 import imagejai.engine.StateInspector;
 import imagejai.engine.TCPCommandServer;
@@ -30,6 +33,8 @@ public class ImageJAIPlugin implements Command {
     private static ChatPanel chatPanel;
     private static ConversationLoop conversationLoop;
     private static TCPCommandServer tcpServer;
+    private static ImageMonitor imageMonitor;
+    private static DialogWatcher dialogWatcher;
 
     @Override
     public void run() {
@@ -82,6 +87,11 @@ public class ImageJAIPlugin implements Command {
             startTcpServer(settings, chatPanel);
         }
 
+        // Phase 2: start the event-bus publishers so dialog / image / memory
+        // / results events flow to any connected subscribers, independent of
+        // whether the chat panel or TCP is active.
+        startEventPublishers();
+
         chatFrame = new JFrame(Constants.PLUGIN_NAME + " v" + Constants.VERSION);
         chatFrame.setDefaultCloseOperation(JFrame.DISPOSE_ON_CLOSE);
         chatFrame.getContentPane().add(chatPanel);
@@ -96,6 +106,15 @@ public class ImageJAIPlugin implements Command {
                 if (tcpServer != null) {
                     tcpServer.stop();
                     tcpServer = null;
+                }
+                // Stop event publishers
+                if (imageMonitor != null) {
+                    imageMonitor.stop();
+                    imageMonitor = null;
+                }
+                if (dialogWatcher != null) {
+                    dialogWatcher.stop();
+                    dialogWatcher = null;
                 }
                 // Null out static references so they can be GC'd
                 chatPanel = null;
@@ -167,6 +186,26 @@ public class ImageJAIPlugin implements Command {
     }
 
     /**
+     * Phase 2: start the background publishers that feed {@link EventBus}.
+     * Called once at plugin startup. Idempotent if called with publishers
+     * already running.
+     */
+    private static void startEventPublishers() {
+        try {
+            if (imageMonitor == null) {
+                imageMonitor = new ImageMonitor(new StateInspector());
+                imageMonitor.start();
+            }
+            if (dialogWatcher == null) {
+                dialogWatcher = new DialogWatcher(EventBus.getInstance());
+                dialogWatcher.start();
+            }
+        } catch (Exception e) {
+            System.err.println("[ImageJAI] Failed to start event publishers: " + e.getMessage());
+        }
+    }
+
+    /**
      * Create and start the TCP command server with a listener that
      * reports status and activity to the chat panel.
      */
@@ -177,6 +216,11 @@ public class ImageJAIPlugin implements Command {
         ExplorationEngine exploration = new ExplorationEngine(engine);
 
         tcpServer = new TCPCommandServer(settings.tcpPort, engine, inspector, pipeline, exploration);
+        // Phase 7: wire the chat panel as a ChatPanelController so external
+        // gui_action commands can drive inline previews, toasts, ROI flashes,
+        // markdown, and confirms. Safe even if the panel isn't visible — the
+        // dispatcher's controller methods log+no-op in that case.
+        tcpServer.setChatPanelController(panel);
         tcpServer.start(new TCPCommandServer.ServerListener() {
             @Override
             public void onServerStarted(int port) {

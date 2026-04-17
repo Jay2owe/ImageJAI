@@ -1,5 +1,6 @@
 package imagejai.engine;
 
+import com.google.gson.JsonObject;
 import ij.IJ;
 import ij.ImagePlus;
 import ij.WindowManager;
@@ -14,6 +15,35 @@ import java.util.List;
  * Queries current ImageJ state for context injection into LLM prompts.
  */
 public class StateInspector {
+
+    private final EventBus bus = EventBus.getInstance();
+    // Last-known row count for results.changed edge detection. Shared across
+    // callers; mutations are serialised via the synchronized check method.
+    private int lastResultsRowCount = 0;
+    private int lastResultsColCount = 0;
+
+    /**
+     * Publish a {@code results.changed} event if the ResultsTable row or
+     * column count has changed since the last call. Safe to call frequently;
+     * the bus coalesces to 200ms.
+     */
+    public synchronized void checkResultsTableChange() {
+        ResultsTable rt = ResultsTable.getResultsTable();
+        int rows = (rt == null) ? 0 : rt.getCounter();
+        String[] headings = (rt == null) ? new String[0] : rt.getHeadings();
+        int cols = headings == null ? 0 : headings.length;
+        if (rows != lastResultsRowCount || cols != lastResultsColCount) {
+            JsonObject data = new JsonObject();
+            data.addProperty("rows", rows);
+            data.addProperty("cols", cols);
+            if (rows != lastResultsRowCount) {
+                data.addProperty("delta", rows - lastResultsRowCount);
+            }
+            bus.publish("results.changed", data);
+            lastResultsRowCount = rows;
+            lastResultsColCount = cols;
+        }
+    }
 
     /**
      * Get info about the currently active image, or null if none is open.

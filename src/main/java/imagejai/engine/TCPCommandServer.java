@@ -4,6 +4,7 @@ import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
+import com.google.gson.JsonNull;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import com.google.gson.JsonPrimitive;
@@ -14,27 +15,38 @@ import ij.gui.ImageWindow;
 import ij.measure.Calibration;
 import ij.process.ImageStatistics;
 import imagejai.config.Constants;
+import imagejai.ui.ChatPanelController;
 
 import javax.swing.SwingUtilities;
 import java.io.BufferedReader;
+import java.io.IOException;
 import java.io.InputStreamReader;
+import java.io.OutputStream;
 import java.io.OutputStreamWriter;
 import java.io.PrintWriter;
 import java.net.ServerSocket;
 import java.net.Socket;
 import java.net.SocketException;
 import java.nio.charset.Charset;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
 import java.awt.Component;
 import java.awt.Container;
 import java.awt.Dialog;
 import java.awt.Frame;
 import java.awt.Window;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Enumeration;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Properties;
+import java.util.Set;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.LinkedBlockingDeque;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import javax.script.ScriptEngine;
 import javax.script.ScriptEngineManager;
 import javax.script.ScriptException;
@@ -64,11 +76,55 @@ public class TCPCommandServer {
     private static final long MACRO_TIMEOUT_MS = 30000;
     private static final long PIPELINE_TIMEOUT_MS = 60000;
 
+    // Phase 2: event-bus subscription caps.
+    private static final int MAX_SUBSCRIBERS = 8;
+    private static final int SUBSCRIBER_QUEUE_CAPACITY = 256;
+    private static final long SUBSCRIBER_HEARTBEAT_MS = 30_000L;
+    private final AtomicInteger activeSubscribers = new AtomicInteger(0);
+    private final EventBus eventBus = EventBus.getInstance();
+    // Monotonic macro-id counter so TCP-path execute_macro emits a well-formed
+    // macro.started/macro.completed pair like CommandEngine does.
+    private static final java.util.concurrent.atomic.AtomicLong MACRO_ID_SEQ =
+            new java.util.concurrent.atomic.AtomicLong(0);
+
+    /**
+     * Commands treated as pure readers — eligible for hash dedup via the
+     * optional {@code if_none_match} request field. Every entry must be a
+     * command that does not mutate ImageJ state.
+     */
+    private static final Set<String> READONLY_COMMANDS = new HashSet<String>(Arrays.asList(
+            "ping",
+            "get_state",
+            "get_image_info",
+            "get_log",
+            "get_results_table",
+            "get_histogram",
+            "get_open_windows",
+            "get_metadata",
+            "get_dialogs",
+            "get_state_context",
+            "get_progress",
+            "get_friction_log",
+            "get_friction_patterns",
+            "intent_list",
+            "job_status",
+            "job_list",
+            "list_reactive_rules",
+            "reactive_stats"
+    ));
+
     private final int port;
     private final CommandEngine commandEngine;
     private final StateInspector stateInspector;
     private final PipelineBuilder pipelineBuilder;
     private final ExplorationEngine explorationEngine;
+    private final FrictionLog frictionLog = new FrictionLog();
+    private final IntentRouter intentRouter = new IntentRouter();
+    private final JobRegistry jobRegistry;
+    // Phase 8: reactive rules engine. Subscribes to the bus, fires rule
+    // actions in response to matching events. Lifecycle tied to the TCP
+    // server — {@link #start} / {@link #stop}.
+    private final ReactiveEngine reactiveEngine;
     private ServerSocket serverSocket;
     private Thread serverThread;
     private volatile boolean running;
@@ -76,6 +132,11 @@ public class TCPCommandServer {
 
     // Cached 3D Viewer universe reference — survives across TCP calls
     private volatile Object cached3DUniverse;
+
+    // Phase 7: GUI_ACTION dispatcher. Constructed eagerly with a null
+    // controller so {@link #dispatch} never NPEs; the plugin upgrades it via
+    // {@link #setChatPanelController} once the chat panel is built.
+    private volatile GuiActionDispatcher guiActionDispatcher = new GuiActionDispatcher(null);
 
     public TCPCommandServer(int port, CommandEngine commandEngine,
                             StateInspector stateInspector,
@@ -86,6 +147,14 @@ public class TCPCommandServer {
         this.stateInspector = stateInspector;
         this.pipelineBuilder = pipelineBuilder;
         this.explorationEngine = explorationEngine;
+        this.jobRegistry = new JobRegistry(commandEngine);
+        this.reactiveEngine = new ReactiveEngine(
+                eventBus, commandEngine, intentRouter, guiActionDispatcher);
+    }
+
+    /** Phase 3: expose the job registry (primarily for tests). */
+    public JobRegistry getJobRegistry() {
+        return jobRegistry;
     }
 
     /**
@@ -96,6 +165,15 @@ public class TCPCommandServer {
     public void start(ServerListener listener) {
         this.listener = listener;
         running = true;
+
+        // Phase 8: start the reactive rules engine alongside the socket so
+        // rules fire from the moment the plugin is up, regardless of whether
+        // any TCP client ever connects.
+        try {
+            reactiveEngine.start();
+        } catch (Throwable t) {
+            System.err.println("[ImageJAI-TCP] Reactive engine start failed: " + t.getMessage());
+        }
 
         serverThread = new Thread(new Runnable() {
             @Override
@@ -112,6 +190,22 @@ public class TCPCommandServer {
      */
     public void stop() {
         running = false;
+        // Phase 8: stop the reactive engine first so it unsubscribes from the
+        // bus and tears down the WatchService thread cleanly before the rest
+        // of the plugin shuts down.
+        try {
+            reactiveEngine.stop();
+        } catch (Exception e) {
+            System.err.println("[ImageJAI-TCP] Error stopping reactive engine: " + e.getMessage());
+        }
+        // Phase 3: cancel every running async job before tearing down — an
+        // orphaned worker thread would otherwise outlive the TCP surface and
+        // keep publishing events into a silent bus.
+        try {
+            jobRegistry.shutdown();
+        } catch (Exception e) {
+            System.err.println("[ImageJAI-TCP] Error shutting down job registry: " + e.getMessage());
+        }
         if (serverSocket != null && !serverSocket.isClosed()) {
             try {
                 serverSocket.close();
@@ -130,6 +224,29 @@ public class TCPCommandServer {
 
     public int getPort() {
         return port;
+    }
+
+    /** Phase 2: number of active subscribe-stream sockets. Primarily used for tests. */
+    public int getActiveSubscriberCount() {
+        return activeSubscribers.get();
+    }
+
+    /**
+     * Phase 7: attach the chat panel as the controller for {@code gui_action}
+     * commands. Safe to call multiple times — the latest controller wins.
+     * Pass {@code null} to disable GUI dispatch (e.g. when the panel closes).
+     */
+    public void setChatPanelController(ChatPanelController controller) {
+        this.guiActionDispatcher = new GuiActionDispatcher(controller);
+        // Keep the reactive engine's dispatcher ref in sync so gui_action
+        // rules reach the newly-attached chat panel, not the null-controller
+        // stub we constructed at startup.
+        this.reactiveEngine.setGuiDispatcher(this.guiActionDispatcher);
+    }
+
+    /** Phase 7: visible for tests. */
+    GuiActionDispatcher getGuiActionDispatcher() {
+        return guiActionDispatcher;
     }
 
     // -----------------------------------------------------------------------
@@ -213,8 +330,26 @@ public class TCPCommandServer {
                 return;
             }
 
+            // Phase 2: intercept "subscribe" — upgrade to a streaming channel
+            // instead of the standard request/response cycle.
+            String trimmed = line.trim();
+            if (isSubscribeCommand(trimmed)) {
+                JsonObject req;
+                try {
+                    req = new JsonParser().parse(trimmed).getAsJsonObject();
+                } catch (Exception e) {
+                    writer.println(errorJson("Invalid JSON: " + e.getMessage()));
+                    return;
+                }
+                if (listener != null) {
+                    listener.onCommandReceived("subscribe");
+                }
+                handleSubscribeStream(socket, req);
+                return; // finally closes the socket
+            }
+
             // Parse and dispatch
-            JsonObject response = dispatch(line.trim());
+            JsonObject response = dispatch(trimmed);
             writer.println(GSON.toJson(response));
 
         } catch (Exception e) {
@@ -237,6 +372,199 @@ public class TCPCommandServer {
                 socket.close();
             } catch (Exception ignored) {}
         }
+    }
+
+    /** Cheap peek: true if the incoming line is a subscribe command. */
+    private boolean isSubscribeCommand(String jsonStr) {
+        if (jsonStr == null) return false;
+        // Fast path — avoid full JSON parse on non-subscribe commands.
+        return jsonStr.contains("\"subscribe\"") && jsonStr.contains("\"command\"");
+    }
+
+    /**
+     * Phase 2: long-lived subscribe stream. The socket is held open and event
+     * frames are written as newline-terminated JSON: {@code {"event": ..., "data": ..., "ts": ..., "seq": ...}}.
+     * <p>
+     * Contract:
+     * <ul>
+     *   <li>Enforces a hard cap of {@value #MAX_SUBSCRIBERS} concurrent subscribers.</li>
+     *   <li>Per-socket bounded queue of {@value #SUBSCRIBER_QUEUE_CAPACITY} frames; overflow drops
+     *       the oldest frame and injects an {@code event_dropped} sentinel.</li>
+     *   <li>Heartbeat {@code {"event": "heartbeat"}} every {@value #SUBSCRIBER_HEARTBEAT_MS} ms when
+     *       no other traffic flowed in that window.</li>
+     *   <li>Unsubscribes and releases the slot when the socket closes or the server stops.</li>
+     * </ul>
+     */
+    private void handleSubscribeStream(final Socket socket, JsonObject req) {
+        final OutputStream rawOut;
+        try {
+            rawOut = socket.getOutputStream();
+        } catch (IOException e) {
+            return;
+        }
+
+        // Disable read timeout — subscriptions are long-lived write-only streams.
+        try {
+            socket.setSoTimeout(0);
+            socket.setKeepAlive(true);
+            socket.setTcpNoDelay(true);
+        } catch (Exception ignore) {}
+
+        // Reserve a subscriber slot. Roll back if we exceed the cap.
+        int newCount = activeSubscribers.incrementAndGet();
+        if (newCount > MAX_SUBSCRIBERS) {
+            activeSubscribers.decrementAndGet();
+            writeRawJson(rawOut, errorJsonObject(
+                    "Subscriber cap reached (max " + MAX_SUBSCRIBERS + ")"));
+            return;
+        }
+
+        // Parse requested topic patterns. Default to "*" when omitted or empty.
+        final List<String> patterns = new ArrayList<String>();
+        JsonElement topicsEl = req.get("topics");
+        if (topicsEl != null && topicsEl.isJsonArray()) {
+            JsonArray arr = topicsEl.getAsJsonArray();
+            for (int i = 0; i < arr.size(); i++) {
+                JsonElement t = arr.get(i);
+                if (t != null && t.isJsonPrimitive()) {
+                    String s = t.getAsString();
+                    if (s != null && !s.isEmpty()) patterns.add(s);
+                }
+            }
+        }
+        if (patterns.isEmpty()) patterns.add("*");
+
+        // Per-socket bounded queue with drop-oldest semantics.
+        final LinkedBlockingDeque<JsonObject> queue =
+                new LinkedBlockingDeque<JsonObject>(SUBSCRIBER_QUEUE_CAPACITY);
+        final Object queueLock = new Object();
+
+        final EventBus.Listener listener = new EventBus.Listener() {
+            @Override
+            public void onEvent(JsonObject frame) {
+                synchronized (queueLock) {
+                    if (queue.offerLast(frame)) return;
+                    // Overflow: drop oldest, inject sentinel, retry with the new frame.
+                    JsonObject dropped = queue.pollFirst();
+                    JsonObject sentinel = new JsonObject();
+                    sentinel.addProperty("event", "event_dropped");
+                    JsonObject data = new JsonObject();
+                    if (dropped != null) {
+                        if (dropped.has("event")) {
+                            data.addProperty("oldest_event",
+                                    dropped.get("event").getAsString());
+                        }
+                        if (dropped.has("seq")) {
+                            data.addProperty("oldest_seq",
+                                    dropped.get("seq").getAsLong());
+                        }
+                    }
+                    data.addProperty("queue_capacity", SUBSCRIBER_QUEUE_CAPACITY);
+                    sentinel.add("data", data);
+                    sentinel.addProperty("ts", System.currentTimeMillis());
+                    sentinel.addProperty("seq", eventBus.nextSeq());
+                    // Defensive: if the deque is *still* full (extreme bursts),
+                    // keep discarding until both sentinel and new frame fit.
+                    while (!queue.offerLast(sentinel)) {
+                        if (queue.pollFirst() == null) break;
+                    }
+                    while (!queue.offerLast(frame)) {
+                        if (queue.pollFirst() == null) break;
+                    }
+                }
+            }
+        };
+
+        // Register the listener for every requested pattern.
+        for (String p : patterns) eventBus.subscribe(p, listener);
+
+        // Initial "subscribed" ack frame so the client can confirm connection.
+        JsonObject ack = new JsonObject();
+        ack.addProperty("event", "subscribed");
+        JsonObject ackData = new JsonObject();
+        JsonArray patternsArr = new JsonArray();
+        for (String p : patterns) patternsArr.add(p);
+        ackData.add("topics", patternsArr);
+        ackData.addProperty("active_subscribers", activeSubscribers.get());
+        ackData.addProperty("max_subscribers", MAX_SUBSCRIBERS);
+        ack.add("data", ackData);
+        ack.addProperty("ts", System.currentTimeMillis());
+        ack.addProperty("seq", eventBus.nextSeq());
+
+        try {
+            writeFrame(rawOut, ack);
+        } catch (IOException e) {
+            eventBus.unsubscribe(listener);
+            activeSubscribers.decrementAndGet();
+            return;
+        }
+
+        // Main pump: pull frames until the socket dies; inject heartbeats
+        // during idle windows.
+        long lastSent = System.currentTimeMillis();
+        try {
+            while (running && !socket.isClosed()) {
+                long now = System.currentTimeMillis();
+                long sinceLastSent = now - lastSent;
+                long waitMs = SUBSCRIBER_HEARTBEAT_MS - sinceLastSent;
+                if (waitMs <= 0) {
+                    // Heartbeat time.
+                    JsonObject hb = new JsonObject();
+                    hb.addProperty("event", "heartbeat");
+                    hb.add("data", new JsonObject());
+                    hb.addProperty("ts", now);
+                    hb.addProperty("seq", eventBus.nextSeq());
+                    try {
+                        writeFrame(rawOut, hb);
+                    } catch (IOException e) {
+                        break;
+                    }
+                    lastSent = now;
+                    continue;
+                }
+
+                JsonObject frame;
+                try {
+                    frame = queue.pollFirst(waitMs, TimeUnit.MILLISECONDS);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    break;
+                }
+                if (frame == null) continue; // back to heartbeat check
+                try {
+                    writeFrame(rawOut, frame);
+                } catch (IOException e) {
+                    break; // socket died
+                }
+                lastSent = System.currentTimeMillis();
+            }
+        } finally {
+            eventBus.unsubscribe(listener);
+            activeSubscribers.decrementAndGet();
+        }
+    }
+
+    /** Write a JSON frame followed by '\n' to the raw output stream. */
+    private void writeFrame(OutputStream out, JsonObject frame) throws IOException {
+        byte[] bytes = (GSON.toJson(frame) + "\n").getBytes(UTF8);
+        synchronized (out) {
+            out.write(bytes);
+            out.flush();
+        }
+    }
+
+    /** Best-effort raw JSON write — swallows IO errors. Used for rejection frames. */
+    private void writeRawJson(OutputStream out, JsonObject obj) {
+        try {
+            writeFrame(out, obj);
+        } catch (IOException ignore) {}
+    }
+
+    private JsonObject errorJsonObject(String msg) {
+        JsonObject o = new JsonObject();
+        o.addProperty("ok", false);
+        o.addProperty("error", msg);
+        return o;
     }
 
     /**
@@ -271,7 +599,14 @@ public class TCPCommandServer {
         } catch (Exception e) {
             return errorResponse("Invalid JSON: " + e.getMessage());
         }
+        return dispatch(request);
+    }
 
+    /**
+     * Dispatch a parsed request. Post-processing adds hash dedup for readonly
+     * commands and records friction on failure responses.
+     */
+    private JsonObject dispatch(JsonObject request) {
         JsonElement cmdElement = request.get("command");
         if (cmdElement == null || !cmdElement.isJsonPrimitive()) {
             return errorResponse("Missing 'command' field");
@@ -282,6 +617,40 @@ public class TCPCommandServer {
             listener.onCommandReceived(command);
         }
 
+        JsonObject response = dispatchCore(command, request);
+
+        // Phase 7: surface a handler-attached gui_action piggyback into the
+        // outer response. Handlers may set result.gui_action = {...}; this
+        // path lifts it to top-level so external clients can react without
+        // knowing whether the field came from the handler or the dispatcher.
+        // For v1 only the dedicated gui_action command writes a top-level
+        // entry directly; this hook is infrastructure future phases can tap.
+        if (response != null) {
+            promoteGuiActionPiggyback(response);
+        }
+
+        // Phase 1: readonly fast-path — hash successful readonly results and
+        // short-circuit repeat callers that supply a matching if_none_match.
+        if (response != null && READONLY_COMMANDS.contains(command)) {
+            response = applyReadonlyDedup(request, response);
+        }
+
+        // Phase 6: record failures to the friction log. Counts both transport-level
+        // failures (ok:false) and operation-level failures (ok:true but
+        // result.success:false — macros / scripts can fail inside a successful
+        // protocol response).
+        if (response != null) {
+            try {
+                recordFrictionIfFailure(command, request, response);
+            } catch (Exception ignore) {
+                // friction logging is best-effort
+            }
+        }
+
+        return response;
+    }
+
+    private JsonObject dispatchCore(String command, JsonObject request) {
         if ("ping".equals(command)) {
             return handlePing();
         } else if ("execute_macro".equals(command)) {
@@ -310,6 +679,8 @@ public class TCPCommandServer {
             return handleGetMetadata();
         } else if ("batch".equals(command)) {
             return handleBatch(request);
+        } else if ("run".equals(command)) {
+            return handleRunChain(request);
         } else if ("get_pixels".equals(command)) {
             return handleGetPixels(request);
         } else if ("3d_viewer".equals(command)) {
@@ -328,8 +699,325 @@ public class TCPCommandServer {
             return handleInteractDialog(request);
         } else if ("get_progress".equals(command)) {
             return handleGetProgress();
+        } else if ("get_friction_log".equals(command)) {
+            return handleGetFrictionLog(request);
+        } else if ("get_friction_patterns".equals(command)) {
+            return handleGetFrictionPatterns();
+        } else if ("clear_friction_log".equals(command)) {
+            return handleClearFrictionLog();
+        } else if ("intent".equals(command)) {
+            return handleIntent(request);
+        } else if ("intent_teach".equals(command)) {
+            return handleIntentTeach(request);
+        } else if ("intent_list".equals(command)) {
+            return handleIntentList();
+        } else if ("intent_forget".equals(command)) {
+            return handleIntentForget(request);
+        } else if ("gui_action".equals(command)) {
+            return handleGuiAction(request);
+        } else if ("execute_macro_async".equals(command)) {
+            return handleExecuteMacroAsync(request);
+        } else if ("job_status".equals(command)) {
+            return handleJobStatus(request);
+        } else if ("job_cancel".equals(command)) {
+            return handleJobCancel(request);
+        } else if ("job_list".equals(command)) {
+            return handleJobList();
+        } else if ("list_reactive_rules".equals(command)) {
+            return handleListReactiveRules();
+        } else if ("reactive_stats".equals(command)) {
+            return handleReactiveStats();
+        } else if ("reactive_enable".equals(command)) {
+            return handleReactiveToggle(request, true);
+        } else if ("reactive_disable".equals(command)) {
+            return handleReactiveToggle(request, false);
+        } else if ("reactive_reload".equals(command)) {
+            return handleReactiveReload();
         } else {
             return errorResponse("Unknown command: " + command);
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase 8: reactive rules TCP surface
+    // -----------------------------------------------------------------------
+
+    private JsonObject handleListReactiveRules() {
+        JsonObject result = new JsonObject();
+        result.addProperty("locked", reactiveEngine.isLocked());
+        JsonArray rules = new JsonArray();
+        for (ReactiveEngine.Rule r : reactiveEngine.getRules()) {
+            rules.add(reactiveRuleToJson(r));
+        }
+        result.add("rules", rules);
+        JsonArray qu = new JsonArray();
+        for (ReactiveEngine.Quarantined q : reactiveEngine.getQuarantined()) {
+            JsonObject o = new JsonObject();
+            o.addProperty("path", q.path);
+            o.addProperty("error", q.error != null ? q.error : "");
+            qu.add(o);
+        }
+        result.add("quarantined", qu);
+        return successResponse(result);
+    }
+
+    private JsonObject handleReactiveStats() {
+        JsonObject result = new JsonObject();
+        result.addProperty("locked", reactiveEngine.isLocked());
+        JsonObject hits = new JsonObject();
+        long total = 0L;
+        for (ReactiveEngine.Rule r : reactiveEngine.getRules()) {
+            hits.addProperty(r.name, r.hits);
+            total += r.hits;
+        }
+        result.add("hits", hits);
+        result.addProperty("total", total);
+        result.addProperty("quarantined", reactiveEngine.getQuarantined().size());
+        return successResponse(result);
+    }
+
+    private JsonObject handleReactiveToggle(JsonObject request, boolean enabled) {
+        JsonElement nameEl = request.get("name");
+        if (nameEl == null || !nameEl.isJsonPrimitive()) {
+            return errorResponse("Missing 'name' field");
+        }
+        String name = nameEl.getAsString();
+        boolean found = reactiveEngine.setEnabled(name, enabled);
+        if (!found) {
+            return errorResponse("No reactive rule named '" + name + "'");
+        }
+        JsonObject result = new JsonObject();
+        result.addProperty("name", name);
+        result.addProperty("enabled", enabled);
+        return successResponse(result);
+    }
+
+    private JsonObject handleReactiveReload() {
+        try {
+            reactiveEngine.reload();
+        } catch (Exception e) {
+            return errorResponse("Reload failed: " + e.getMessage());
+        }
+        JsonObject result = new JsonObject();
+        result.addProperty("rules", reactiveEngine.getRules().size());
+        result.addProperty("quarantined", reactiveEngine.getQuarantined().size());
+        return successResponse(result);
+    }
+
+    private JsonObject reactiveRuleToJson(ReactiveEngine.Rule r) {
+        JsonObject o = new JsonObject();
+        o.addProperty("name", r.name);
+        o.addProperty("description", r.description != null ? r.description : "");
+        o.addProperty("enabled", r.enabled);
+        o.addProperty("priority", r.priority);
+        o.addProperty("event", r.event);
+        o.addProperty("hits", r.hits);
+        o.addProperty("lastFired", r.lastFired);
+        o.addProperty("sourceFile", r.sourceFile);
+        if (r.rateLimitSpec != null) {
+            o.addProperty("rate_limit", r.rateLimitSpec);
+        }
+        if (r.actions != null) {
+            o.addProperty("actions", r.actions.size());
+        }
+        return o;
+    }
+
+    /** Phase 8: visible for tests. */
+    ReactiveEngine getReactiveEngine() {
+        return reactiveEngine;
+    }
+
+    /**
+     * Phase 7: top-level {@code gui_action} command. Delegates to
+     * {@link GuiActionDispatcher}, whose response already carries an
+     * {@code ok} field — standard post-processing (dedup, friction logging)
+     * treats it like any other command response.
+     */
+    private JsonObject handleGuiAction(JsonObject request) {
+        return guiActionDispatcher.dispatch(request);
+    }
+
+    /**
+     * Phase 7: promote a {@code gui_action} field nested inside {@code result}
+     * to the top-level response. Idempotent — top-level wins if both exist.
+     * Future phases (e.g. macro/pipeline handlers) can attach a piggyback
+     * sentinel without knowing how the outer envelope is built.
+     */
+    private static void promoteGuiActionPiggyback(JsonObject response) {
+        if (response == null) return;
+        if (response.has("gui_action")) return;
+        JsonElement resultEl = response.get("result");
+        if (resultEl == null || !resultEl.isJsonObject()) return;
+        JsonObject result = resultEl.getAsJsonObject();
+        JsonElement piggyback = result.get("gui_action");
+        if (piggyback == null) return;
+        response.add("gui_action", piggyback);
+        result.remove("gui_action");
+    }
+
+    /**
+     * Keys stripped before hashing readonly results because they tick on every
+     * call for reasons unrelated to user-visible Fiji state. Without this, the
+     * dedup cache would miss on every {@code get_state} / {@code get_metadata}
+     * call, defeating Phase 1 entirely.
+     */
+    private static final Set<String> HASH_EXCLUDED_KEYS = new HashSet<String>(Arrays.asList(
+            "usedMB",     // JVM free-memory ticks continuously
+            "freeMB",     // JVM free-memory ticks continuously
+            "percent"     // get_progress percentage during long ops
+    ));
+
+    /**
+     * For readonly responses: compute an MD5 hash over the canonical JSON of
+     * the {@code result} field and either (a) return the full payload plus
+     * {@code hash}, or (b) if the caller's {@code if_none_match} matches,
+     * strip the payload and return {@code unchanged: true}.
+     *
+     * <p>The hash is computed over a canonicalised copy of the result
+     * (volatile fields stripped, JsonObject keys sorted) so that logically
+     * identical state always hashes identically even though the wire payload
+     * preserves insertion order.
+     */
+    private JsonObject applyReadonlyDedup(JsonObject request, JsonObject response) {
+        if (response == null) return null;
+        JsonElement okEl = response.get("ok");
+        if (okEl == null || !okEl.isJsonPrimitive() || !okEl.getAsBoolean()) {
+            return response; // don't dedup error responses
+        }
+
+        JsonElement result = response.get("result");
+        String hash = md5Hex(canonicalForHash(result));
+
+        String ifNone = null;
+        JsonElement ifNoneEl = request.get("if_none_match");
+        if (ifNoneEl != null && ifNoneEl.isJsonPrimitive()) {
+            ifNone = ifNoneEl.getAsString();
+        }
+
+        if (ifNone != null && ifNone.equals(hash)) {
+            JsonObject r = new JsonObject();
+            r.addProperty("ok", true);
+            r.addProperty("unchanged", true);
+            r.addProperty("hash", hash);
+            return r;
+        }
+
+        response.addProperty("hash", hash);
+        return response;
+    }
+
+    /**
+     * Produce a deterministic canonical JSON form suitable for hashing:
+     * volatile keys dropped, JsonObject keys sorted alphabetically. Input is
+     * not mutated.
+     */
+    private static String canonicalForHash(JsonElement el) {
+        if (el == null) return "";
+        return GSON.toJson(canonicalise(el));
+    }
+
+    private static JsonElement canonicalise(JsonElement el) {
+        if (el == null || el.isJsonNull()) return JsonNull.INSTANCE;
+        if (el.isJsonPrimitive()) return el;
+        if (el.isJsonArray()) {
+            JsonArray src = el.getAsJsonArray();
+            JsonArray dst = new JsonArray();
+            for (int i = 0; i < src.size(); i++) dst.add(canonicalise(src.get(i)));
+            return dst;
+        }
+        // Object — sort keys, strip volatile.
+        JsonObject src = el.getAsJsonObject();
+        java.util.TreeMap<String, JsonElement> sorted = new java.util.TreeMap<String, JsonElement>();
+        for (Map.Entry<String, JsonElement> e : src.entrySet()) {
+            String k = e.getKey();
+            if (HASH_EXCLUDED_KEYS.contains(k)) continue;
+            sorted.put(k, canonicalise(e.getValue()));
+        }
+        JsonObject dst = new JsonObject();
+        for (Map.Entry<String, JsonElement> e : sorted.entrySet()) {
+            dst.add(e.getKey(), e.getValue());
+        }
+        return dst;
+    }
+
+    private void recordFrictionIfFailure(String command, JsonObject request, JsonObject response) {
+        // Never log meta-queries about friction; that would self-reference and churn.
+        if ("get_friction_log".equals(command)
+                || "get_friction_patterns".equals(command)
+                || "clear_friction_log".equals(command)) {
+            return;
+        }
+
+        JsonElement okEl = response.get("ok");
+        boolean transportOk = okEl != null && okEl.isJsonPrimitive() && okEl.getAsBoolean();
+
+        String error = null;
+        if (!transportOk) {
+            JsonElement errEl = response.get("error");
+            error = (errEl != null && errEl.isJsonPrimitive()) ? errEl.getAsString() : "unknown error";
+        } else {
+            // Inspect result for nested success:false (macros/scripts can fail
+            // inside a transport-ok response). Guard against non-boolean
+            // primitives — Gson's getAsBoolean() happily parses strings.
+            JsonElement resultEl = response.get("result");
+            if (resultEl != null && resultEl.isJsonObject()) {
+                JsonObject r = resultEl.getAsJsonObject();
+                JsonElement successEl = r.get("success");
+                if (successEl != null
+                        && successEl.isJsonPrimitive()
+                        && successEl.getAsJsonPrimitive().isBoolean()
+                        && !successEl.getAsBoolean()) {
+                    JsonElement errEl = r.get("error");
+                    error = (errEl != null && errEl.isJsonPrimitive())
+                            ? errEl.getAsString() : "operation failed";
+                }
+            }
+        }
+
+        if (error == null) return;
+        frictionLog.record(command, summariseArgs(request), error);
+    }
+
+    private String summariseArgs(JsonObject request) {
+        if (request == null) return "";
+        StringBuilder sb = new StringBuilder();
+        for (Map.Entry<String, JsonElement> e : request.entrySet()) {
+            String k = e.getKey();
+            if ("command".equals(k) || "if_none_match".equals(k)) continue;
+            JsonElement v = e.getValue();
+            if (v == null || v.isJsonNull()) continue;
+            String s;
+            try {
+                s = v.isJsonPrimitive() ? v.getAsString() : v.toString();
+            } catch (Exception ex) {
+                s = v.toString();
+            }
+            if (s == null) s = "";
+            if (s.length() > 80) s = s.substring(0, 80) + "...";
+            if (sb.length() > 0) sb.append(" ");
+            sb.append(k).append("=").append(s);
+            if (sb.length() > 240) {
+                sb.append("...");
+                break;
+            }
+        }
+        return sb.toString();
+    }
+
+    private static String md5Hex(String s) {
+        try {
+            MessageDigest md = MessageDigest.getInstance("MD5");
+            byte[] bytes = md.digest(s.getBytes(StandardCharsets.UTF_8));
+            StringBuilder sb = new StringBuilder(bytes.length * 2);
+            for (byte b : bytes) {
+                int v = b & 0xff;
+                if (v < 0x10) sb.append('0');
+                sb.append(Integer.toHexString(v));
+            }
+            return sb.toString();
+        } catch (Exception e) {
+            return "";
         }
     }
 
@@ -431,6 +1119,34 @@ public class TCPCommandServer {
         JsonObject result = new JsonObject();
         boolean success = false;
 
+        // Phase 2: emit macro.started so event subscribers can react.
+        long macroId = MACRO_ID_SEQ.incrementAndGet();
+        try {
+            JsonObject startData = new JsonObject();
+            startData.addProperty("macro_id", macroId);
+            String preview = code.trim();
+            if (preview.length() > 160) preview = preview.substring(0, 160) + "...";
+            startData.addProperty("preview", preview);
+            startData.addProperty("source", "tcp");
+            eventBus.publish("macro.started", startData);
+        } catch (Throwable ignore) {}
+
+        // B4: snapshot log length + prior error messages before runMacro so
+        // we can diff afterwards. IJ.runMacro does NOT throw when a macro
+        // calls IJ.error(...) or hits e.g. setAutoThreshold("NonExistent") —
+        // it returns normally while IJ.error prints to the log / shows a
+        // dialog. Without this diff the handler would report success and the
+        // friction log would never see the failure. We snapshot the prior
+        // error message so a stale error from a previous macro can't be
+        // mis-attributed to this call.
+        int logLenBefore = 0;
+        try {
+            String preLog = IJ.getLog();
+            logLenBefore = preLog != null ? preLog.length() : 0;
+        } catch (Throwable ignore) {}
+        String priorInterpError = readInterpreterErrorMessage();
+        String priorIjError = readIjErrorMessage();
+
         try {
             long startTime = System.currentTimeMillis();
             String macroReturn = IJ.runMacro(code);
@@ -453,18 +1169,38 @@ public class TCPCommandServer {
                 if (csv != null && !csv.isEmpty()) {
                     result.addProperty("resultsTable", csv);
                 }
+                // Fire results.changed edge event if the table grew.
+                stateInspector.checkResultsTableChange();
             } catch (Exception ignore) {
                 // State inspection is best-effort
             }
+
+            // Phase 2: macro.completed (success).
+            try {
+                JsonObject doneData = new JsonObject();
+                doneData.addProperty("macro_id", macroId);
+                doneData.addProperty("success", true);
+                doneData.addProperty("executionTimeMs", elapsed);
+                eventBus.publish("macro.completed", doneData);
+            } catch (Throwable ignore) {}
         } catch (Exception e) {
             result.addProperty("success", false);
             result.addProperty("error", "Macro error: " + e.getMessage());
+            // Phase 2: macro.completed (failure).
+            try {
+                JsonObject doneData = new JsonObject();
+                doneData.addProperty("macro_id", macroId);
+                doneData.addProperty("success", false);
+                doneData.addProperty("error", "Macro error: " + e.getMessage());
+                eventBus.publish("macro.completed", doneData);
+            } catch (Throwable ignore) {}
         }
 
         // ALWAYS check for dialogs — on success AND failure.
         // Dialogs (especially errors) are critical for the agent to see.
+        JsonArray dialogs = null;
         try {
-            JsonArray dialogs = detectOpenDialogs();
+            dialogs = detectOpenDialogs();
             if (dialogs.size() > 0) {
                 result.add("dialogs", dialogs);
             }
@@ -472,7 +1208,188 @@ public class TCPCommandServer {
             // Dialog detection is best-effort
         }
 
+        // B4: post-hoc error detection — only when we *think* we succeeded.
+        // Four conservative signals, any one of which flips success=false:
+        //   1. ij.macro.Interpreter.getErrorMessage() non-empty (interpreter
+        //      caught an error but runMacro still returned).
+        //   2. IJ.getErrorMessage() non-empty (IJ.error() sink outside the
+        //      interpreter).
+        //   3. New log lines starting with "Error in macro", "Error:" or
+        //      "Exception:" (extracted from the tail added by this call).
+        //   4. An open dialog classified as "type":"error" by detectOpenDialogs.
+        // Dialog reuses the already-captured array above (no double scan).
+        JsonElement successEl = result.get("success");
+        boolean currentlySuccess = successEl != null
+                && successEl.isJsonPrimitive()
+                && successEl.getAsJsonPrimitive().isBoolean()
+                && successEl.getAsBoolean();
+        if (currentlySuccess) {
+            String detected = detectIjMacroError(logLenBefore, priorInterpError, priorIjError, dialogs);
+            if (detected != null) {
+                result.addProperty("success", false);
+                result.addProperty("error", detected);
+                // Emit a late macro.completed(failure) so subscribers
+                // observe the real outcome. The earlier success event is
+                // accepted as noise — failure is the authoritative signal.
+                try {
+                    JsonObject doneData = new JsonObject();
+                    doneData.addProperty("macro_id", macroId);
+                    doneData.addProperty("success", false);
+                    doneData.addProperty("error", detected);
+                    eventBus.publish("macro.completed", doneData);
+                } catch (Throwable ignore) {}
+            }
+        }
+
         return successResponse(result);
+    }
+
+    /**
+     * B4: detect IJ-reported errors from a macro that returned normally.
+     * Returns a best-effort error string, or null if no error signal fires.
+     * Conservative — only trips on lines that look like ImageJ's own error
+     * markers, never on arbitrary print() output.
+     *
+     * <p>Signals consulted, in order:
+     * <ol>
+     *   <li>{@code ij.macro.Interpreter.getErrorMessage()} — the macro
+     *       interpreter records the most recent runtime error here even when
+     *       it chose to keep running to completion rather than throw.</li>
+     *   <li>{@code IJ.getErrorMessage()} — catches errors routed through
+     *       {@code IJ.error(...)} (plugin-side, non-interpreter failures).</li>
+     *   <li>Tail of {@code IJ.getLog()} added during this call — catches
+     *       log-only errors emitted by plugins that don't set the above.</li>
+     *   <li>Any dialog classified {@code type=error} by
+     *       {@link #detectOpenDialogs()} — reused, not re-scanned.</li>
+     * </ol>
+     * All four are wrapped in try/catch — any reflection or API failure falls
+     * through rather than false-positively reporting an error.
+     */
+    private String detectIjMacroError(int logLenBefore,
+                                      String priorInterpError,
+                                      String priorIjError,
+                                      JsonArray dialogs) {
+        // Signal 1: ij.macro.Interpreter error message. Only report if it
+        // differs from the snapshot taken before runMacro — otherwise a stale
+        // error from a prior run would be mis-attributed to this call.
+        String curInterp = readInterpreterErrorMessage();
+        if (curInterp != null && !curInterp.isEmpty()
+                && !curInterp.equals(priorInterpError)) {
+            String trimmed = curInterp.trim();
+            if (trimmed.length() > 240) trimmed = trimmed.substring(0, 240) + "...";
+            return "Macro error (interpreter): " + trimmed;
+        }
+
+        // Signal 2: IJ.getErrorMessage() — catches IJ.error() sinks outside
+        // the interpreter (plugin-reported errors). Same snapshot-diff guard.
+        String curIj = readIjErrorMessage();
+        if (curIj != null && !curIj.isEmpty()
+                && !curIj.equals(priorIjError)) {
+            String trimmed = curIj.trim();
+            if (trimmed.length() > 240) trimmed = trimmed.substring(0, 240) + "...";
+            return "Macro error (IJ.error): " + trimmed;
+        }
+
+        // Signal 3: tail of IJ.getLog() added during this call.
+        try {
+            String postLog = IJ.getLog();
+            if (postLog != null && postLog.length() > logLenBefore) {
+                String added = postLog.substring(logLenBefore);
+                // Line-by-line scan — keep bounded to avoid huge allocations.
+                if (added.length() > 16384) {
+                    added = added.substring(added.length() - 16384);
+                }
+                String[] lines = added.split("\\r?\\n");
+                for (int i = 0; i < lines.length; i++) {
+                    String ln = lines[i].trim();
+                    if (ln.isEmpty()) continue;
+                    if (ln.startsWith("Error in macro")
+                            || ln.startsWith("Error:")
+                            || ln.startsWith("Exception:")
+                            || ln.startsWith("Exception in ")) {
+                        String snippet = ln;
+                        if (snippet.length() > 240) snippet = snippet.substring(0, 240) + "...";
+                        return "Macro error (log): " + snippet;
+                    }
+                }
+            }
+        } catch (Throwable ignore) {}
+
+        // Signal 4: any dialog detected with type=error.
+        if (dialogs != null) {
+            for (int i = 0; i < dialogs.size(); i++) {
+                try {
+                    JsonElement el = dialogs.get(i);
+                    if (el == null || !el.isJsonObject()) continue;
+                    JsonObject d = el.getAsJsonObject();
+                    JsonElement typeEl = d.get("type");
+                    if (typeEl != null
+                            && typeEl.isJsonPrimitive()
+                            && "error".equals(typeEl.getAsString())) {
+                        String title = "";
+                        JsonElement tEl = d.get("title");
+                        if (tEl != null && tEl.isJsonPrimitive()) title = tEl.getAsString();
+                        String text = "";
+                        JsonElement txtEl = d.get("text");
+                        if (txtEl != null && txtEl.isJsonPrimitive()) text = txtEl.getAsString();
+                        String combined = (title + ": " + text).trim();
+                        if (combined.length() > 240) combined = combined.substring(0, 240) + "...";
+                        return "Macro error (dialog): " + combined;
+                    }
+                } catch (Throwable ignore) {}
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * Best-effort read of {@code ij.macro.Interpreter}'s current error message.
+     * Returns the message string, or {@code null} if unreadable. Tries method
+     * variants (static / instance) and falls back to a public static field —
+     * whichever your ImageJ build exposes.
+     */
+    private String readInterpreterErrorMessage() {
+        try {
+            Class<?> interp = Class.forName("ij.macro.Interpreter");
+            try {
+                java.lang.reflect.Method m = interp.getMethod("getErrorMessage");
+                Object em;
+                if (java.lang.reflect.Modifier.isStatic(m.getModifiers())) {
+                    em = m.invoke(null);
+                } else {
+                    java.lang.reflect.Method getInst = interp.getMethod("getInstance");
+                    Object instance = getInst.invoke(null);
+                    em = (instance != null) ? m.invoke(instance) : null;
+                }
+                if (em instanceof String) return (String) em;
+            } catch (NoSuchMethodException ignoreInner) {
+                try {
+                    java.lang.reflect.Field f = interp.getField("errorMessage");
+                    if (java.lang.reflect.Modifier.isStatic(f.getModifiers())) {
+                        Object em = f.get(null);
+                        if (em instanceof String) return (String) em;
+                    }
+                } catch (Throwable ignoreField) {}
+            }
+        } catch (Throwable ignore) {}
+        return null;
+    }
+
+    /**
+     * Best-effort read of {@code IJ.getErrorMessage()}. Returns the message or
+     * {@code null} if unavailable.
+     */
+    private String readIjErrorMessage() {
+        try {
+            java.lang.reflect.Method m = IJ.class.getMethod("getErrorMessage");
+            if (java.lang.reflect.Modifier.isStatic(m.getModifiers())) {
+                Object em = m.invoke(null);
+                if (em instanceof String) return (String) em;
+            }
+        } catch (NoSuchMethodException ignore) {
+        } catch (Throwable ignore) {}
+        return null;
     }
 
     private JsonObject handleRunScript(JsonObject request) {
@@ -1049,7 +1966,7 @@ public class TCPCommandServer {
         for (int i = 0; i < commands.size(); i++) {
             JsonElement elem = commands.get(i);
             if (elem.isJsonObject()) {
-                JsonObject subResult = dispatch(GSON.toJson(elem));
+                JsonObject subResult = dispatch(elem.getAsJsonObject());
                 results.add(subResult);
             } else {
                 results.add(errorResponse("Invalid batch command at index " + i));
@@ -1057,6 +1974,311 @@ public class TCPCommandServer {
         }
 
         return successResponse(results);
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase 4: ||| shorthand chain
+    // -----------------------------------------------------------------------
+
+    /**
+     * Execute a {@code |||}-delimited chain of commands in order. Each segment
+     * is parsed by {@link BatchParser} into a command object and dispatched
+     * through the normal pipeline. Halts on the first failure by default;
+     * pass {@code "halt_on_error": false} to execute the whole chain best-effort.
+     *
+     * <p>Request:
+     * <pre>
+     *   {"command": "run", "chain": "run('Blobs (25K)') ||| run('Invert') ||| capture inverted"}
+     *   {"command": "run", "chain": "...", "halt_on_error": false}
+     * </pre>
+     *
+     * <p>Response:
+     * <pre>
+     *   {"ok": true, "result": {"results": [...], "executed": N, "total": M, "halted": bool}}
+     * </pre>
+     */
+    private JsonObject handleRunChain(JsonObject request) {
+        JsonElement chainEl = request.get("chain");
+        if (chainEl == null || !chainEl.isJsonPrimitive()) {
+            return errorResponse("Missing 'chain' string for run command");
+        }
+        boolean haltOnError = true;
+        JsonElement haltEl = request.get("halt_on_error");
+        if (haltEl != null && haltEl.isJsonPrimitive()) {
+            haltOnError = haltEl.getAsBoolean();
+        }
+
+        List<JsonObject> segments;
+        try {
+            segments = BatchParser.parse(chainEl.getAsString());
+        } catch (Exception e) {
+            return errorResponse("Chain parse error: " + e.getMessage());
+        }
+        if (segments.isEmpty()) {
+            // No segments after split is a no-op, not a failure. Returning ok
+            // avoids polluting the friction log when an agent passes a blank
+            // or whitespace-only chain.
+            JsonObject empty = new JsonObject();
+            empty.add("results", new JsonArray());
+            empty.addProperty("executed", 0);
+            empty.addProperty("total", 0);
+            empty.addProperty("halted", false);
+            empty.addProperty("note", "empty chain — no segments after splitting on '|||'");
+            return successResponse(empty);
+        }
+
+        JsonArray results = new JsonArray();
+        boolean halted = false;
+        int firstFailureIdx = -1;
+
+        for (int i = 0; i < segments.size(); i++) {
+            JsonObject subReq = segments.get(i);
+            JsonObject subResp = dispatch(subReq);
+            results.add(subResp);
+
+            boolean failed = isFailure(subResp);
+            if (failed && firstFailureIdx < 0) firstFailureIdx = i;
+            if (failed && haltOnError) {
+                halted = true;
+                break;
+            }
+        }
+
+        JsonObject out = new JsonObject();
+        out.add("results", results);
+        out.addProperty("executed", results.size());
+        out.addProperty("total", segments.size());
+        out.addProperty("halted", halted);
+        if (firstFailureIdx >= 0) {
+            out.addProperty("firstFailureIndex", firstFailureIdx);
+        }
+        return successResponse(out);
+    }
+
+    private boolean isFailure(JsonObject resp) {
+        if (resp == null) return true;
+        JsonElement okEl = resp.get("ok");
+        if (okEl == null || !okEl.isJsonPrimitive() || !okEl.getAsBoolean()) return true;
+        JsonElement r = resp.get("result");
+        if (r != null && r.isJsonObject()) {
+            JsonElement success = r.getAsJsonObject().get("success");
+            if (success != null && success.isJsonPrimitive() && !success.getAsBoolean()) return true;
+        }
+        return false;
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase 6: friction log queries
+    // -----------------------------------------------------------------------
+
+    private JsonObject handleGetFrictionLog(JsonObject request) {
+        int limit = 20;
+        JsonElement limEl = request.get("limit");
+        if (limEl != null && limEl.isJsonPrimitive()) {
+            try {
+                limit = Math.max(1, Math.min(FrictionLog.CAPACITY, limEl.getAsInt()));
+            } catch (Exception ignore) {}
+        }
+
+        List<FrictionLog.FailureEntry> recent = frictionLog.recent(limit);
+        JsonArray arr = new JsonArray();
+        for (FrictionLog.FailureEntry e : recent) {
+            JsonObject o = new JsonObject();
+            o.addProperty("ts", e.ts);
+            o.addProperty("command", e.command);
+            o.addProperty("args", e.argsSummary);
+            o.addProperty("error", e.error);
+            o.addProperty("normalised", e.normalisedError);
+            arr.add(o);
+        }
+
+        JsonObject result = new JsonObject();
+        result.addProperty("total", frictionLog.size());
+        result.addProperty("returned", arr.size());
+        result.add("entries", arr);
+        return successResponse(result);
+    }
+
+    private JsonObject handleGetFrictionPatterns() {
+        List<FrictionLog.Pattern> patterns = frictionLog.patterns();
+        JsonArray arr = new JsonArray();
+        for (FrictionLog.Pattern p : patterns) {
+            JsonObject o = new JsonObject();
+            o.addProperty("command", p.command);
+            o.addProperty("normalised", p.normalisedError);
+            o.addProperty("sample", p.sampleError);
+            o.addProperty("count", p.count);
+            o.addProperty("firstTs", p.firstTs);
+            o.addProperty("lastTs", p.lastTs);
+            arr.add(o);
+        }
+        JsonObject result = new JsonObject();
+        result.addProperty("windowMs", FrictionLog.WINDOW_MS);
+        result.addProperty("threshold", FrictionLog.PATTERN_THRESHOLD);
+        result.add("patterns", arr);
+        return successResponse(result);
+    }
+
+    private JsonObject handleClearFrictionLog() {
+        int before = frictionLog.size();
+        frictionLog.clear();
+        JsonObject result = new JsonObject();
+        result.addProperty("cleared", before);
+        return successResponse(result);
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase 3: async job commands
+    // -----------------------------------------------------------------------
+
+    /**
+     * Submit a macro for asynchronous execution. Returns immediately with a
+     * job id; progress/completion/failure are published via the event bus as
+     * {@code job.*} events (Phase 2), and the client can also poll
+     * {@code job_status}. For short macros prefer the synchronous
+     * {@code execute_macro} — this command only wins when the caller cannot
+     * afford to block the socket.
+     */
+    private JsonObject handleExecuteMacroAsync(JsonObject request) {
+        JsonElement codeEl = request.get("code");
+        if (codeEl == null || !codeEl.isJsonPrimitive()) {
+            return errorResponse("Missing 'code' field for execute_macro_async");
+        }
+        String code = codeEl.getAsString();
+        JobRegistry.Job job = jobRegistry.submit(code);
+        JsonObject result = new JsonObject();
+        result.addProperty("job_id", job.id);
+        result.addProperty("state", job.state);
+        result.addProperty("startedAt", job.startedAt);
+        return successResponse(result);
+    }
+
+    private JsonObject handleJobStatus(JsonObject request) {
+        JsonElement idEl = request.get("job_id");
+        if (idEl == null || !idEl.isJsonPrimitive()) {
+            return errorResponse("Missing 'job_id' for job_status");
+        }
+        String id = idEl.getAsString();
+        JobRegistry.Job j = jobRegistry.get(id);
+        if (j == null) return errorResponse("Unknown job_id: " + id);
+        return successResponse(jobRegistry.toJson(j));
+    }
+
+    private JsonObject handleJobCancel(JsonObject request) {
+        JsonElement idEl = request.get("job_id");
+        if (idEl == null || !idEl.isJsonPrimitive()) {
+            return errorResponse("Missing 'job_id' for job_cancel");
+        }
+        String id = idEl.getAsString();
+        JobRegistry.Job j = jobRegistry.get(id);
+        if (j == null) return errorResponse("Unknown job_id: " + id);
+        boolean signalled = jobRegistry.cancel(id);
+        JsonObject result = new JsonObject();
+        result.addProperty("job_id", id);
+        result.addProperty("cancelled", signalled);
+        result.addProperty("state", j.state);
+        return successResponse(result);
+    }
+
+    private JsonObject handleJobList() {
+        List<JobRegistry.Job> all = jobRegistry.list();
+        JsonArray arr = new JsonArray();
+        for (JobRegistry.Job j : all) arr.add(jobRegistry.toJson(j));
+        JsonObject result = new JsonObject();
+        result.addProperty("count", arr.size());
+        result.add("jobs", arr);
+        return successResponse(result);
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase 5: intent router
+    // -----------------------------------------------------------------------
+
+    /**
+     * Resolve a phrase via {@link IntentRouter}. On hit, builds a synthetic
+     * {@code execute_macro} request and dispatches it — the regular macro
+     * path handles macro.started / macro.completed events, dialog capture,
+     * and friction logging. The outer response is wrapped with
+     * {@code mapped_to} describing which mapping fired. On miss, returns
+     * {@code {ok: false, miss: true, suggestion: null}}.
+     */
+    private JsonObject handleIntent(JsonObject request) {
+        JsonElement phraseEl = request.get("phrase");
+        if (phraseEl == null || !phraseEl.isJsonPrimitive()) {
+            return errorResponse("Missing 'phrase' field for intent");
+        }
+        String phrase = phraseEl.getAsString();
+
+        java.util.Optional<IntentRouter.Resolved> opt = intentRouter.resolve(phrase);
+        if (!opt.isPresent()) {
+            JsonObject miss = new JsonObject();
+            miss.addProperty("ok", false);
+            miss.addProperty("miss", true);
+            miss.add("suggestion", JsonNull.INSTANCE);
+            return miss;
+        }
+        IntentRouter.Resolved resolved = opt.get();
+
+        JsonObject macroReq = new JsonObject();
+        macroReq.addProperty("command", "execute_macro");
+        macroReq.addProperty("code", resolved.macro);
+        JsonObject execResp = handleExecuteMacro(macroReq);
+
+        JsonObject mappedTo = new JsonObject();
+        mappedTo.addProperty("pattern", resolved.mapping.patternSrc);
+        if (resolved.mapping.description != null) {
+            mappedTo.addProperty("description", resolved.mapping.description);
+        }
+        mappedTo.addProperty("macro", resolved.macro);
+        mappedTo.addProperty("hits", resolved.mapping.hits);
+        execResp.add("mapped_to", mappedTo);
+        return execResp;
+    }
+
+    private JsonObject handleIntentTeach(JsonObject request) {
+        JsonElement phraseEl = request.get("phrase");
+        JsonElement macroEl = request.get("macro");
+        if (phraseEl == null || !phraseEl.isJsonPrimitive()) {
+            return errorResponse("Missing 'phrase' field for intent_teach");
+        }
+        if (macroEl == null || !macroEl.isJsonPrimitive()) {
+            return errorResponse("Missing 'macro' field for intent_teach");
+        }
+        String phrase = phraseEl.getAsString();
+        String macro = macroEl.getAsString();
+        String description = null;
+        JsonElement descEl = request.get("description");
+        if (descEl != null && descEl.isJsonPrimitive()) {
+            description = descEl.getAsString();
+        }
+
+        IntentRouter.Mapping m;
+        try {
+            m = intentRouter.teach(phrase, macro, description);
+        } catch (IllegalArgumentException e) {
+            return errorResponse(e.getMessage());
+        }
+
+        JsonObject result = new JsonObject();
+        result.addProperty("saved", true);
+        result.add("mapping", intentRouter.mappingToJson(m));
+        result.addProperty("path", intentRouter.getStorePath().toString());
+        return successResponse(result);
+    }
+
+    private JsonObject handleIntentList() {
+        return successResponse(intentRouter.list());
+    }
+
+    private JsonObject handleIntentForget(JsonObject request) {
+        JsonElement phraseEl = request.get("phrase");
+        if (phraseEl == null || !phraseEl.isJsonPrimitive()) {
+            return errorResponse("Missing 'phrase' field for intent_forget");
+        }
+        boolean removed = intentRouter.forget(phraseEl.getAsString());
+        JsonObject result = new JsonObject();
+        result.addProperty("removed", removed);
+        return successResponse(result);
     }
 
     // -----------------------------------------------------------------------

@@ -1,0 +1,13 @@
+{
+  "name": "auto_close_stale_error_dialogs",
+  "description": "Dispose any error dialog that's been sitting around ten seconds.",
+  "when": {
+    "event": "dialog.appeared",
+    "where": {"kind": "error"}
+  },
+  "do": [
+    {"wait": "10s"},
+    {"close_dialog": {"title_matches": ".*"}}
+  ],
+  "rate_limit": "5/min"
+}
