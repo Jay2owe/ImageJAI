@@ -1,5 +1,6 @@
 package uk.ac.ucl.imagej.ai.engine;
 
+import com.google.gson.JsonObject;
 import ij.ImagePlus;
 import ij.WindowManager;
 import ij.measure.Calibration;
@@ -41,12 +42,18 @@ public class ImageMonitor {
     private static final String WARN_LARGE = "large";
 
     private final StateInspector stateInspector;
+    private final EventBus bus = EventBus.getInstance();
     private MonitorListener listener;
     private Timer pollTimer;
     private boolean running;
 
     private int lastImageCount;
     private String lastImageTitle;
+    // Track open image titles between polls — diff drives image.opened/image.closed events.
+    private final Set<String> lastOpenImages = new HashSet<String>();
+    // Track whether memory.pressure is currently latched; re-fire only when it
+    // crosses back above the threshold from below.
+    private boolean memoryPressureActive = false;
 
     // Track warning timestamps per image+type to avoid spamming
     // Key: "imageTitle:warningType"
@@ -82,6 +89,11 @@ public class ImageMonitor {
         pollTimer.start();
     }
 
+    /** Start monitoring without a chat listener — useful for TCP-only mode so events still flow. */
+    public void start() {
+        start(null);
+    }
+
     /**
      * Stop monitoring.
      */
@@ -107,12 +119,96 @@ public class ImageMonitor {
      * Called on each timer tick.
      */
     private void pollCheck() {
-        if (!running || listener == null) {
+        if (!running) {
             return;
         }
+        // Image-open/close diff runs every tick regardless of whether a chat
+        // listener is attached — events flow to the bus independently.
+        publishImageDiffEvents();
+
+        // Edge-detect ResultsTable growth too. StateInspector coalesces its
+        // own emissions through the bus.
+        try {
+            stateInspector.checkResultsTableChange();
+        } catch (Throwable ignore) {
+        }
+
         List<String> warnings = new ArrayList<String>();
         collectWarnings(warnings);
         // Warnings and infos are dispatched inside collectWarnings
+    }
+
+    /**
+     * Diff the current open-image set against the last snapshot and publish
+     * {@code image.opened} / {@code image.closed} events through the bus.
+     * Also publishes {@code image.updated} for the active image whenever the
+     * active title changes — a coarse "something switched" signal.
+     */
+    private void publishImageDiffEvents() {
+        Set<String> current = new HashSet<String>();
+        Map<String, ImagePlus> byTitle = new HashMap<String, ImagePlus>();
+        int[] ids = WindowManager.getIDList();
+        if (ids != null) {
+            for (int id : ids) {
+                ImagePlus imp = WindowManager.getImage(id);
+                if (imp != null) {
+                    String t = imp.getTitle();
+                    if (t == null) t = "";
+                    current.add(t);
+                    byTitle.put(t, imp);
+                }
+            }
+        }
+
+        // New titles -> image.opened
+        for (String t : current) {
+            if (!lastOpenImages.contains(t)) {
+                ImagePlus imp = byTitle.get(t);
+                JsonObject data = new JsonObject();
+                data.addProperty("title", t);
+                if (imp != null) {
+                    JsonObject dims = new JsonObject();
+                    dims.addProperty("width", imp.getWidth());
+                    dims.addProperty("height", imp.getHeight());
+                    dims.addProperty("channels", imp.getNChannels());
+                    dims.addProperty("slices", imp.getNSlices());
+                    dims.addProperty("frames", imp.getNFrames());
+                    data.add("dims", dims);
+                    Calibration cal = imp.getCalibration();
+                    if (cal != null) {
+                        JsonObject calJson = new JsonObject();
+                        calJson.addProperty("pixelWidth", cal.pixelWidth);
+                        calJson.addProperty("pixelHeight", cal.pixelHeight);
+                        calJson.addProperty("unit", cal.getUnit() == null ? "" : cal.getUnit());
+                        data.add("calibration", calJson);
+                    }
+                }
+                bus.publish("image.opened", data);
+            }
+        }
+
+        // Disappeared titles -> image.closed
+        for (String t : lastOpenImages) {
+            if (!current.contains(t)) {
+                JsonObject data = new JsonObject();
+                data.addProperty("title", t);
+                bus.publish("image.closed", data);
+            }
+        }
+
+        // Active image switch -> image.updated (coalesced to 200ms by the bus).
+        ImagePlus active = WindowManager.getCurrentImage();
+        String activeTitle = active == null ? "" : active.getTitle();
+        if (activeTitle == null) activeTitle = "";
+        if (!activeTitle.equals(lastImageTitle) && !activeTitle.isEmpty()) {
+            JsonObject data = new JsonObject();
+            data.addProperty("title", activeTitle);
+            data.addProperty("reason", "active_changed");
+            bus.publish("image.updated", data);
+        }
+
+        lastOpenImages.clear();
+        lastOpenImages.addAll(current);
     }
 
     private void collectWarnings(List<String> output) {
@@ -147,7 +243,22 @@ public class ImageMonitor {
     private void checkMemory(List<String> output) {
         MemoryInfo mem = stateInspector.getMemoryInfo();
         int percent = mem.getUsagePercent();
-        if (percent > MEMORY_THRESHOLD_PERCENT) {
+        boolean aboveThreshold = percent > MEMORY_THRESHOLD_PERCENT;
+
+        // Event-bus side: fire memory.pressure on rising edge only. Re-arm once
+        // usage drops back below threshold so repeated crossings are reported.
+        if (aboveThreshold && !memoryPressureActive) {
+            JsonObject data = new JsonObject();
+            data.addProperty("used_pct", percent);
+            data.addProperty("usedMB", mem.getUsedMB());
+            data.addProperty("maxMB", mem.getMaxMB());
+            bus.publish("memory.pressure", data);
+            memoryPressureActive = true;
+        } else if (!aboveThreshold && memoryPressureActive) {
+            memoryPressureActive = false;
+        }
+
+        if (aboveThreshold) {
             String key = WARN_MEMORY;
             if (canWarn(key)) {
                 String msg = "ImageJ is using " + mem.getUsedMB() + "MB of " + mem.getMaxMB()

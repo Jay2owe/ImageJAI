@@ -1,0 +1,13 @@
+{
+  "name": "strip_incucyte_calibration",
+  "description": "Incucyte inch calibration breaks Subtract Background.",
+  "when": {
+    "event": "image.opened",
+    "where": {"unit": "inch"}
+  },
+  "do": [
+    {"execute_macro": "run(\"Properties...\", \"unit=pixel pixel_width=1 pixel_height=1\");"},
+    {"gui_action": {"type": "toast", "message": "Stripped inch calibration", "level": "info"}}
+  ],
+  "rate_limit": "1/sec"
+}
