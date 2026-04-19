@@ -278,6 +278,27 @@ def _rule_bitshift_in_for_condition(code, state):
     return None
 
 
+def _rule_doubled_identifier(code, state):
+    """Warn when a 4+ char identifier is immediately repeated — `methodsmethods`.
+
+    Gemma sometimes doubles an identifier during loop drafting, e.g.
+    `for (i=0; i<<methodsmethods.length; i++)`. The 4-char floor avoids false
+    positives on legitimate repeats like `aa` in identifiers; ImageJ macro
+    variables this long never contain a natural doubled suffix.
+    """
+    clean = _strip_comments(code)
+    # Strip string literals so "hellohello" inside a log message doesn't trip.
+    no_strings = re.sub(r'"[^"]*"', '""', clean)
+    m = re.search(r"\b([A-Za-z_]\w{3,})\1\b", no_strings)
+    if not m:
+        return None
+    token = m.group(1)
+    return (
+        "doubled identifier '{0}{0}' detected — almost certainly a typo where "
+        "you meant '{0}'. Check the for-loop condition and array indexing."
+    ).format(token)
+
+
 # --- rule table -----------------------------------------------------------
 
 
@@ -347,6 +368,12 @@ RULES = [
         "severity": "warn",
         "description": "'<<' inside a for-loop test clause is almost always a typo of '<'.",
         "check": _rule_bitshift_in_for_condition,
+    },
+    {
+        "id": "doubled_identifier",
+        "severity": "warn",
+        "description": "A 4+ char identifier is immediately repeated (e.g. 'methodsmethods') — almost always a typo.",
+        "check": _rule_doubled_identifier,
     },
 ]
 
