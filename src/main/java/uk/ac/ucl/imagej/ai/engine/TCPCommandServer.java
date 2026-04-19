@@ -1119,6 +1119,17 @@ public class TCPCommandServer {
         }
         final String code = codeElement.getAsString();
 
+        // Gate image.* events while this macro runs. The agent's event
+        // subscribers react to image.opened by sending get_image_info /
+        // get_histogram — those wrap work in SwingUtilities.invokeLater
+        // which contends with Duplicate's own imp.show() EDT work. The
+        // contention can leave WindowManager.currentImage pointing at
+        // the source window when the macro's next line runs, so
+        // setAutoThreshold / Convert to Mask land on the wrong image.
+        // Suppressing image.* removes the trigger entirely. macro.* and
+        // dialog.* still flow so the agent's progress / error paths work.
+        eventBus.pushSuppress("image.*");
+        try {
         // Run IJ.runMacro on a worker thread so the TCP handler can keep polling
         // for dialogs / timeout and return structured failure feedback instead
         // of leaving the client blocked until its socket times out.
@@ -1290,6 +1301,9 @@ public class TCPCommandServer {
 
         publishTcpMacroCompleted(macroId, success, elapsed, failureMessage);
         return successResponse(result);
+        } finally {
+            eventBus.popSuppress("image.*");
+        }
     }
 
     private JsonArray safeDetectOpenDialogs() {
@@ -3385,6 +3399,43 @@ public class TCPCommandServer {
         return null;
     }
 
+    /**
+     * For custom (non-GenericDialog) dialogs where we cannot flip a
+     * {@code wasCanceled} flag, scan the component tree for a button
+     * whose label is a common cancel variant and programmatically fire
+     * its action. Used by {@link #handleProbeCommand} so probing does
+     * not accidentally execute the plugin.
+     */
+    private void clickCancelButton(Container root) {
+        for (Component c : root.getComponents()) {
+            if (c instanceof java.awt.Button) {
+                String lbl = ((java.awt.Button) c).getLabel();
+                if (isCancelLabel(lbl)) {
+                    ((java.awt.Button) c).dispatchEvent(
+                            new java.awt.event.ActionEvent(c,
+                                    java.awt.event.ActionEvent.ACTION_PERFORMED,
+                                    lbl));
+                    return;
+                }
+            } else if (c instanceof javax.swing.JButton) {
+                String lbl = ((javax.swing.JButton) c).getText();
+                if (isCancelLabel(lbl)) {
+                    ((javax.swing.JButton) c).doClick();
+                    return;
+                }
+            }
+            if (c instanceof Container) {
+                clickCancelButton((Container) c);
+            }
+        }
+    }
+
+    private boolean isCancelLabel(String lbl) {
+        if (lbl == null) return false;
+        String l = lbl.trim().toLowerCase();
+        return l.equals("cancel") || l.equals("close") || l.equals("no");
+    }
+
     private JsonObject handleCloseDialogs(JsonObject request) {
         JsonElement patternElement = request.get("pattern");
         final String pattern = (patternElement != null && patternElement.isJsonPrimitive())
@@ -3592,11 +3643,37 @@ public class TCPCommandServer {
             result.add("buttons", btnArray);
         }
 
-        // Dispose the dialog to cancel the plugin
+        // Cancel the dialog before disposing. GenericDialog.dispose() does
+        // NOT set the private wasCanceled flag, so the calling plugin reads
+        // gd.wasCanceled() == false, collects the default field values, and
+        // executes the plugin against the active image. Probing is supposed
+        // to be side-effect-free, so we flip wasCanceled via field reflection
+        // (walking the class hierarchy to cover NonBlockingGenericDialog and
+        // other subclasses) before disposing. For custom non-GenericDialog
+        // dialogs we fall back to clicking a Cancel-style button if the
+        // plugin provides one.
         final Dialog dlg = newDialog;
         SwingUtilities.invokeLater(new Runnable() {
             @Override
             public void run() {
+                boolean canceled = false;
+                Class<?> c = dlg.getClass();
+                while (c != null && c != Object.class) {
+                    try {
+                        java.lang.reflect.Field f = c.getDeclaredField("wasCanceled");
+                        f.setAccessible(true);
+                        f.setBoolean(dlg, true);
+                        canceled = true;
+                        break;
+                    } catch (NoSuchFieldException nsf) {
+                        c = c.getSuperclass();
+                    } catch (Exception ignore) {
+                        break;
+                    }
+                }
+                if (!canceled) {
+                    clickCancelButton(dlg);
+                }
                 dlg.dispose();
             }
         });
