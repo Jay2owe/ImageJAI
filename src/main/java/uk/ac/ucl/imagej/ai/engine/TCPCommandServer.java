@@ -3286,6 +3286,8 @@ public class TCPCommandServer {
                         || (comp instanceof javax.swing.JSpinner);
 
                 if (!alreadyHandled) {
+                    int lenBefore = text.length();
+
                     // Try getText()
                     try {
                         java.lang.reflect.Method m = comp.getClass().getMethod("getText");
@@ -3312,6 +3314,21 @@ public class TCPCommandServer {
                             text.append(val.toString().trim()).append("\n");
                         }
                     } catch (Exception ignore) {}
+
+                    // If no public getter yielded anything, fall back to
+                    // private-field reflection. Required for
+                    // ij.gui.MultiLineLabel — the Canvas subclass that
+                    // GenericDialog.addMessage uses to host the real compile/
+                    // runtime error text on the Macro Error dialog. Its text
+                    // lives in private fields (text2 / lines[]) with no
+                    // public getter on many ImageJ builds, so the method
+                    // probes above silently miss it.
+                    if (text.length() == lenBefore) {
+                        String fieldText = readFieldText(comp);
+                        if (fieldText != null && !fieldText.isEmpty()) {
+                            text.append(fieldText).append("\n");
+                        }
+                    }
                 }
             }
 
@@ -3320,6 +3337,52 @@ public class TCPCommandServer {
                 extractDialogContent((Container) comp, text, buttons);
             }
         }
+    }
+
+    /**
+     * Last-resort text extraction for Component types that carry their
+     * text in private fields instead of a public getter. Walks the
+     * declared-field hierarchy (skipping Object) and returns the first
+     * non-empty String found under a common name — {@code text2, text,
+     * label, msg, message} — or a newline-joined {@code lines[]} if
+     * present. The primary motivator is {@code ij.gui.MultiLineLabel},
+     * which hosts the real compile/runtime error text on the Macro Error
+     * dialog but has no public {@code getText()} on many ImageJ builds.
+     * Returns {@code null} if nothing usable was found.
+     */
+    private String readFieldText(Component comp) {
+        final String[] stringFields = { "text2", "text", "label", "msg", "message" };
+        Class<?> cls = comp.getClass();
+        while (cls != null && cls != Object.class) {
+            for (String fieldName : stringFields) {
+                try {
+                    java.lang.reflect.Field f = cls.getDeclaredField(fieldName);
+                    f.setAccessible(true);
+                    Object val = f.get(comp);
+                    if (val instanceof String) {
+                        String s = ((String) val).trim();
+                        if (!s.isEmpty()) return s;
+                    }
+                } catch (Exception ignore) {}
+            }
+            try {
+                java.lang.reflect.Field f = cls.getDeclaredField("lines");
+                f.setAccessible(true);
+                Object val = f.get(comp);
+                if (val instanceof String[]) {
+                    StringBuilder sb = new StringBuilder();
+                    for (String ln : (String[]) val) {
+                        if (ln != null && !ln.trim().isEmpty()) {
+                            if (sb.length() > 0) sb.append("\n");
+                            sb.append(ln.trim());
+                        }
+                    }
+                    if (sb.length() > 0) return sb.toString();
+                }
+            } catch (Exception ignore) {}
+            cls = cls.getSuperclass();
+        }
+        return null;
     }
 
     private JsonObject handleCloseDialogs(JsonObject request) {
