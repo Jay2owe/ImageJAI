@@ -78,7 +78,7 @@ python ij.py macro 'run("Correct 3D Drift", "channel=1");'
 # Creates new corrected hyperstack. Parameters: channel, only, lowest, highest.
 
 # Fast4DReg (macro — check if installed)
-grep -i "fast4dreg" .tmp/commands.txt
+grep -i "fast4dreg" .tmp/commands.md
 python ij.py macro 'run("Estimate and apply 3D+t drift");'
 
 # SIFT alignment — for large drift
@@ -280,7 +280,7 @@ t_half = tau * np.log(2)
 
 ### FRAP Tools plugin
 ```bash
-grep -i "frap" .tmp/commands.txt
+grep -i "frap" .tmp/commands.md
 python ij.py macro 'run("FRAP Tools");'
 ```
 
@@ -524,7 +524,7 @@ From confluency data: find when confluency doubles (e.g., 20% → 40%), divide f
 | MRI Wound Healing Tool | Coherency, directional migration |
 
 ```bash
-grep -i "wound\|scratch" .tmp/commands.txt
+grep -i "wound\|scratch" .tmp/commands.md
 python ij.py macro 'run("Wound healing size tool");'
 ```
 
@@ -642,7 +642,7 @@ Three-filter: DD (donor-donor), DA (donor-acceptor = FRET), AA (acceptor-accepto
 E_FRET = FRET_corrected / (FRET_corrected + Donor).
 
 ```bash
-grep -i "fret\|rifret" .tmp/commands.txt
+grep -i "fret\|rifret" .tmp/commands.md
 python ij.py macro 'run("RiFRET");'
 ```
 
@@ -822,7 +822,7 @@ Large frame-to-frame changes (>5%) suggest condensation or temperature cycling. 
 | "Not a hyperstack" | Convert with Stack to Hyperstack |
 | "Selection required" | Create ROI first |
 | "Out of memory" | Close other images, increase JVM memory |
-| "Plugin not found" | Check .tmp/commands.txt |
+| "Plugin not found" | Check .tmp/commands.md |
 
 ---
 

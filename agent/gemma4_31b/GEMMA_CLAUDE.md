@@ -20,7 +20,7 @@ base64 you can't decode.
 | `threshold_shootout` | Otsu/Li/Triangle/Minimum/Huang side by side with counts + montage. Extensible via `methods=`/`manual_thresholds=`. **Its `count` IS the count — don't re-segment to re-count.** |
 | `describe_image` | Intensity stats, histogram shape, rough object counts. Skip when the `[triage]` banner already suffices. |
 | `get_state` / `get_image_info` / `get_metadata` / `windows` | State inspection. |
-| `get_log` / `get_results` / `get_histogram` | After-the-fact reads. `get_log` only holds ImageJ's Log window (`print`/`IJ.log`). Script-engine errors, probe rejections, lint blocks, TCP failures arrive in the tool reply — not here. |
+| `get_log` / `get_results` / `get_histogram` | After-the-fact reads. **`print(...)` lines from a macro come back inline in `run_macro`'s `logDelta` field — do NOT auto-call `get_log` after every macro.** Use `get_log` only for the full Log history. Script-engine errors, probe rejections, lint blocks, TCP failures arrive in the tool reply — not here. |
 | `capture_image` | Screenshot (pair with `describe_image`). |
 | `region_stats` / `histogram_summary` / `line_profile` / `quick_object_count` / `count_bright_regions` | NumPy-side, cheap, no macro. |
 | `list_dialog_components` / `click_dialog_button` / `set_dialog_text` / `set_dialog_checkbox` / `set_dialog_dropdown` / `close_dialogs` | Drive Swing dialogs macros can't reach. |
@@ -107,7 +107,6 @@ Unsure? Use `run_macro` instead — the macro language is auto-probed.
 - `run("Plugin Name...")` with no argument string — opens a dialog and hangs.
 - `waitForUser()` — freezes the session.
 - `run("Analyze Particles...", "... add ...")` — the keyword is `add_to_manager`.
-- `run("Laplacian")` / `run("Difference of Gaussians")` / `run("DoG")` don't exist in base Fiji. Use `FeatureJ Laplacian` (if installed), or two Gaussians + `imageCalculator("Subtract create", "blur1", "blur2")`. Pre-check with `run_shell("type .tmp\\commands.txt | findstr /I laplacian")`.
 - `run(A, B, C)` with 3+ string args — `run()` takes at most `(name, args)`. For saving use `saveAs(type, path)` directly.
 
 ---

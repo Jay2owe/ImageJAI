@@ -4,8 +4,8 @@
 
 ~330 update sites (22 enabled), 1966 installed commands. Discover with:
 ```bash
-python scan_plugins.py          # → .tmp/commands.txt + .tmp/plugins_summary.txt
-grep -i "keyword" .tmp/commands.txt
+python scan_plugins.py          # → .tmp/commands.md + .tmp/plugins_summary.txt
+grep -i "keyword" .tmp/commands.md
 ```
 
 ### Key Installed Plugins
@@ -107,7 +107,7 @@ validation:
 | "Not a binary image" | Auto-threshold + Convert to Mask |
 | "Selection required" | `run("Select All")` or detect objects |
 | "Macro execution timed out" | Check for dialogs; increase timeout |
-| "Unknown command" | Search commands.txt; suggest update site |
+| "Unknown command" | Search commands.md; suggest update site |
 | Dialog appears | Read dialog, extract params, close, re-run |
 
 ### Benchmark Images

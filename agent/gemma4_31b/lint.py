@@ -225,6 +225,98 @@ def _rule_run_with_no_argument_string(code, state):
     return None
 
 
+_HALLUCINATED_COMMANDS = {
+    "Laplacian...": (
+        'run("Laplacian...") is not a base-Fiji command. Use '
+        'run("FeatureJ Laplacian", "compute smoothing=1.0") if FeatureJ is '
+        'installed, or build it from a Gaussian + Convolve.'
+    ),
+    "Laplacian": (
+        'run("Laplacian") is not a base-Fiji command. Use '
+        'run("FeatureJ Laplacian", "compute smoothing=1.0") if FeatureJ is '
+        'installed, or build it from a Gaussian + Convolve.'
+    ),
+    "Difference of Gaussians...": (
+        'run("Difference of Gaussians...") does not exist in base Fiji. '
+        'Build DoG from two Gaussian blurs then '
+        'imageCalculator("Subtract create", "blur_small", "blur_large").'
+    ),
+    "Difference of Gaussians": (
+        'run("Difference of Gaussians") does not exist in base Fiji. '
+        'Build DoG from two Gaussian blurs then '
+        'imageCalculator("Subtract create", "blur_small", "blur_large").'
+    ),
+    "DoG...": (
+        'run("DoG...") does not exist. Build DoG from two '
+        'run("Gaussian Blur...") calls then '
+        'imageCalculator("Subtract create", "blur_small", "blur_large").'
+    ),
+    "DoG": (
+        'run("DoG") does not exist. Build DoG from two '
+        'run("Gaussian Blur...") calls then '
+        'imageCalculator("Subtract create", "blur_small", "blur_large").'
+    ),
+    "Band-pass Filter...": (
+        'run("Band-pass Filter...") is misspelled. The real name is '
+        '"Bandpass Filter..." (one word, no hyphen): '
+        'run("Bandpass Filter...", "filter_large=40 filter_small=3").'
+    ),
+    "Band-pass Filter": (
+        'run("Band-pass Filter") is misspelled. The real name is '
+        '"Bandpass Filter..." (one word, no hyphen): '
+        'run("Bandpass Filter...", "filter_large=40 filter_small=3").'
+    ),
+}
+
+
+def _rule_hallucinated_run_command(code, state):
+    """Block run('<name>') calls that name commands not present in base Fiji.
+
+    Hardcoded blocklist of names Gemma keeps inventing — Laplacian, DoG,
+    Difference of Gaussians, Band-pass Filter (real name has no hyphen).
+    Each entry returns a repair-hint with the correct recipe.
+    """
+    clean = _strip_comments(code)
+    for m in re.finditer(r'run\s*\(\s*"([^"]+)"\s*(?:,|\))', clean):
+        name = m.group(1)
+        if name in _HALLUCINATED_COMMANDS:
+            return _HALLUCINATED_COMMANDS[name]
+    return None
+
+
+def _rule_analyze_particles_no_output_flag(code, state):
+    """Warn when Analyze Particles runs with no output flag and nResults is read after.
+
+    Analyze Particles only populates the Results table when args contain
+    `summarize`, `display`/`display_results`, or `results`. With `add_to_manager`
+    the count comes from roiManager("count") instead. Without any of those, a
+    later read of `nResults` always returns 0 — a trap Gemma chased through
+    seven macros in the filter-shootout transcript.
+    """
+    clean = _strip_comments(code)
+    ap = re.search(
+        r'run\s*\(\s*"Analyze Particles\.\.\."\s*,\s*"([^"]*)"\s*\)', clean
+    )
+    if not ap:
+        return None
+    args = ap.group(1).lower()
+    if re.search(r'\b(display|display_results|summarize|results|add_to_manager)\b', args):
+        return None
+    after = clean[ap.end():]
+    nres = re.search(r'\bnResults\b', after)
+    if not nres:
+        return None
+    clear = re.search(r'run\s*\(\s*"Clear Results"', after)
+    if clear and clear.start() < nres.start():
+        return None
+    return (
+        'run("Analyze Particles...", "size=...") with no output flag does '
+        'not populate the Results table — nResults will always be 0. Add '
+        '`summarize` (or `display results`) to the args, OR add '
+        '`add_to_manager` and read roiManager("count") instead.'
+    )
+
+
 def _rule_wait_for_user_in_autonomous(code, state):
     """Reject any waitForUser call — autonomous mode cannot click OK on the popup."""
     clean = _strip_comments(code)
@@ -473,6 +565,18 @@ RULES = [
         "severity": "block",
         "description": "run('Plugin...') without a second argument hangs on the plugin dialog.",
         "check": _rule_run_with_no_argument_string,
+    },
+    {
+        "id": "hallucinated_run_command",
+        "severity": "block",
+        "description": "run('<name>') names a command that does not exist in base Fiji (Laplacian, DoG, Band-pass Filter).",
+        "check": _rule_hallucinated_run_command,
+    },
+    {
+        "id": "analyze_particles_no_output_flag",
+        "severity": "warn",
+        "description": "Analyze Particles without summarize/display/add_to_manager leaves nResults at 0.",
+        "check": _rule_analyze_particles_no_output_flag,
     },
     {
         "id": "wait_for_user_in_autonomous",

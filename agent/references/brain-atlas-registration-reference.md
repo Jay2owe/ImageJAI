@@ -18,7 +18,7 @@ QuPath for downstream analysis.
 
 ```bash
 # Verify ABBA is available
-grep -i "abba\|atlas.*start" .tmp/commands.txt
+grep -i "abba\|atlas.*start" .tmp/commands.md
 ```
 
 ---

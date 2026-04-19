@@ -859,7 +859,7 @@ run("Properties...", "pixel_width=0.325 pixel_height=0.325 voxel_depth=1.0 unit=
 | MosaicIA | Mosaic ToolSuite | Interaction analysis |
 | SNT | Neuroanatomy | Neurite tracing + Sholl |
 
-Check availability: `grep -i "diana\|spatial stat" .tmp/commands.txt`
+Check availability: `grep -i "diana\|spatial stat" .tmp/commands.md`
 
 ---
 

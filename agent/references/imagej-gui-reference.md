@@ -344,7 +344,7 @@ eval("js", "IJ.getVersion()");
 ### Probe Flow
 
 ```
-scan_plugins.py → .tmp/commands.txt (what exists)
+scan_plugins.py → .tmp/commands.md (what exists, with lookup map)
 probe_plugin.py "Plugin..." → field types, defaults, macro syntax (how to use)
 ij.py macro 'run(...)' → result + auto-attached dialogs
 ij.py close_dialogs → dismiss error/info dialogs
