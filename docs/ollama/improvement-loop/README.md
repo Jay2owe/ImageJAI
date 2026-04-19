@@ -33,44 +33,53 @@ or edits they didn't want.
    verbatim to `conversations/YYYY-MM-DD-<short-slug>.md` *before*
    doing anything else. Use today's date and a 3–5 word slug from the
    user's first turn (`blobs-10-filters`, `cellpose-on-tile-scan`).
-2. **Analyse.** Read the saved file end to end. List 3–7 concrete
+2. **Prior-round context.** Before analysing the new file, glance at
+   the most recent previous annotated transcript in `conversations/`
+   and run `git log --oneline -5 --grep "gemma improvement loop"`.
+   Note what was fixed last round in one sentence — this lets you
+   spot regressions of previous fixes instead of treating them as
+   fresh frictions. Skip if no prior rounds exist.
+3. **Analyse.** Read the saved file end to end. List 3–7 concrete
    friction points with a one-line diagnosis each. Quote the offending
-   turn briefly. Do not yet propose code changes in detail.
-3. **Gate 1 — confirm what to research.** Ask the user which friction
+   turn briefly. Mark anything that looks like a regression of a
+   previous round's fix. Do not yet propose code changes in detail.
+4. **Gate 1 — confirm what to research.** Ask the user which friction
    points are worth deep investigation. Some are obvious and need no
    research; some will be dropped ("ignore that one"). Wait for an
    explicit pick before spending tokens on subagents.
-4. **Research.** For each *confirmed* friction whose root cause needs
+5. **Research.** For each *confirmed* friction whose root cause needs
    code I haven't read, spawn focused research subagents in parallel
    (Explore or general-purpose). One subagent per code area —
    `auto_probe`, `safety`/`active_image`, `loop.py`, `events.py`, Java
    probe handler, etc. Each subagent gets the bug, the files to read,
    the report format, a word cap (≤500 words). Keep the orchestrator
    context clean by delegating reads.
-5. **Plan.** Once subagents return, write a comprehensive plan: per
+6. **Plan.** Once subagents return, write a comprehensive plan: per
    friction, give file:line, the smallest change, and a draft of the
    new code or prompt text. Group by where the fix lives (prompt vs
    wrapper vs lint vs probe). Note rebuild / redeploy requirements
    for any Java changes.
-6. **Gate 2 — confirm what to apply.** Present the plan grouped into
+7. **Gate 2 — confirm what to apply.** Present the plan grouped into
    waves (high-pain-low-risk first). The user picks which sections
    and which waves. Don't edit until they pick.
-7. **Apply.** Edit only the chosen items. Use TaskCreate to track
+8. **Apply.** Edit only the chosen items. Use TaskCreate to track
    each section so progress is visible. Verify each file reads
    cleanly end-to-end after.
-8. **Rebuild + redeploy** (when Java changed). Run `bash build.sh`
+9. **Rebuild + redeploy** (when Java changed). Run `bash build.sh`
    from the project root; it compiles with Maven and drops the JAR
    into `Fiji.app/plugins/`. Ask the user to restart Fiji and
    confirm the TCP server is back up before marking anything
    "applied". If only Python was touched, the user just restarts
    the Gemma terminal. Catching a build failure here is much
    cheaper than catching it after the annotations are written.
-9. **Annotate.** Append lightweight HTML comments to the saved
-   transcript next to each friction line, e.g.
-   `<!-- F3: auto-probe Median schema mismatch → plan §3, applied -->`.
-   These are audit markers only — keep them short, do not refactor
-   the transcript, do not summarise.
-10. **Commit + push.** One commit per round — rollback point between
+10. **Annotate.** Append lightweight HTML comments to the saved
+    transcript next to each friction line, e.g.
+    `<!-- F3: auto-probe Median schema mismatch → plan §3, applied -->`.
+    If a friction is a regression of a previous round's fix (flagged
+    in step 2), prefix with `REGRESSION of <prev-round §n>`. These
+    are audit markers only — keep them short, do not refactor the
+    transcript, do not summarise.
+11. **Commit + push.** One commit per round — rollback point between
     rounds. Include every file the apply step touched, the updated
     plugin cache (or deletion), and the annotated transcript. Commit
     message: `gemma improvement loop: <slug> (<N>/<M> frictions)`
