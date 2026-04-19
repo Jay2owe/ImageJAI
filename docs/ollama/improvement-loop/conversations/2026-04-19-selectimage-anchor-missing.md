@@ -21,7 +21,11 @@ which image is being operated on.
 | # | Section | Change | File |
 |---|---|---|---|
 | F1 | §1 | new prompt section "Anchor every image macro with `selectImage`" — enumerates the active-image-touching calls, names the title sources (triage banner, `windows({})`, last `newImages`), lists three benefits (fail fast, self-documenting, disambiguated) | `GEMMA_CLAUDE.md` |
+| F2 | §2 | `detectBlockingDialog` branches on `"Macro Error"` title — replaces the misleading "supply parameters via run(name, args)" suffix with a compile-error-oriented hint pointing at `get_log({})`; plugin-dialog cases keep the original hint. | `TCPCommandServer.java` *(rebuild + redeploy done)* |
+| F3 | §3 | new lint block rule `run_with_three_args` — catches `run("A", "B", "C")`; when the first arg matches a Save-As pattern, suggests the canonical `saveAs(type, path)` macro function. | `lint.py` |
 
 <!-- F1: macro assumed an active image without selectImage, failed with "No image is open" → plan §1, applied -->
+<!-- F2: "supply parameters" suffix was misleading for Macro Error compile-failure dialogs → plan §2, applied -->
+<!-- F3: run("Save As", "Tiff", path) — macro run() takes 2 args max → plan §3, applied -->
 
-**Outstanding action for the user**: close and reopen the Gemma terminal so the updated `GEMMA_CLAUDE.md` loads. No Java change this round.
+**Outstanding action for the user**: close and reopen the Gemma terminal so `GEMMA_CLAUDE.md` + `lint.py` reload. Close and relaunch Fiji so the new JAR's classes take effect (the new JAR is already at `Fiji.app/plugins/imagej-ai-0.2.0.jar`).

@@ -1469,7 +1469,21 @@ public class TCPCommandServer {
                     String trimmed = body.length() > 400 ? body.substring(0, 400) + "…" : body;
                     msg.append(" — body: ").append(trimmed);
                 }
-                msg.append(" — supply parameters via run(name, args) or dismiss via interact_dialog/close_dialogs");
+                // Branch the remediation hint on dialog kind: a Macro Error
+                // popup is a compile/runtime failure in the macro itself, so
+                // "supply parameters via run(name, args)" is misleading — the
+                // agent needs to inspect the code and the log, not probe a
+                // plugin. Plugin dialogs (Gaussian Blur..., Duplicate..., etc.)
+                // keep the original hint.
+                if ("Macro Error".equals(title)) {
+                    msg.append(" — the macro itself failed to compile or run; "
+                            + "call get_log({}) to read the line number and "
+                            + "message, then fix the macro code (do not probe "
+                            + "a plugin — this is not a missing-args case)");
+                } else {
+                    msg.append(" — supply parameters via run(name, args) or "
+                            + "dismiss via interact_dialog/close_dialogs");
+                }
                 return msg.toString();
             } catch (Throwable ignore) {}
         }

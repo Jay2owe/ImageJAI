@@ -278,6 +278,42 @@ def _rule_bitshift_in_for_condition(code, state):
     return None
 
 
+def _rule_run_with_three_args(code, state):
+    """Reject run('A', 'B', 'C', ...) — macro run() only takes (name) or (name, args).
+
+    ImageJ macro `run()` is a two-argument function. A third string argument
+    is always a bug — Gemma tends to write it when conflating `IJ.saveAs(type,
+    path)` with `run()`. When the first arg looks like a Save-As command,
+    suggest the canonical `saveAs(type, path)` macro function.
+    """
+    clean = _strip_comments(code)
+    # Match run(...) with exactly 3+ comma-separated string args. We do not
+    # try to parse full general expressions — any positional string args are
+    # enough to catch the real-world bug.
+    pattern = r'run\s*\(\s*"([^"]*)"\s*,\s*"([^"]*)"\s*,\s*"([^"]*)"'
+    m = re.search(pattern, clean)
+    if not m:
+        return None
+    first = m.group(1)
+    second = m.group(2)
+    third = m.group(3)
+    suggestion = (
+        'run("{0}", "{1}", "{2}", ...) passes a third argument to run() — the '
+        'macro function only accepts (name) or (name, args). '
+    ).format(first, second, third)
+    if re.search(r"save\s*as|^\s*save\s*$", first, re.IGNORECASE):
+        suggestion += (
+            'This looks like a save call; use `saveAs("{0}", "{1}");` instead '
+            'of wrapping it in run().'
+        ).format(second, third)
+    else:
+        suggestion += (
+            'Merge the extra arg into the second string (space-separated '
+            'key=value pairs) or use the plugin\'s macro-level function.'
+        )
+    return suggestion
+
+
 def _rule_doubled_identifier(code, state):
     """Warn when a 4+ char identifier is immediately repeated — `methodsmethods`.
 
@@ -374,6 +410,12 @@ RULES = [
         "severity": "warn",
         "description": "A 4+ char identifier is immediately repeated (e.g. 'methodsmethods') — almost always a typo.",
         "check": _rule_doubled_identifier,
+    },
+    {
+        "id": "run_with_three_args",
+        "severity": "block",
+        "description": "run() only takes (name) or (name, args) — a third string argument is always a bug.",
+        "check": _rule_run_with_three_args,
     },
 ]
 
