@@ -11,9 +11,45 @@ connection.
 
 from __future__ import annotations
 
+import pathlib
 import re
 
 from .registry import send
+
+
+# --- known-command set (read once from scan_plugins.py output) ------------
+
+
+_COMMANDS_RAW_PATH = (
+    pathlib.Path(__file__).resolve().parent.parent / ".tmp" / "commands.raw.txt"
+)
+
+
+def _load_known_commands() -> frozenset:
+    """Parse agent/.tmp/commands.raw.txt into a set of valid run() command names.
+
+    File format is one `Name=java.class.path` per line, written by
+    scan_plugins.py. Leading whitespace on names and divider lines like
+    `-=null` are stripped. Returns an empty frozenset when the file is
+    missing; the unknown_run_command rule short-circuits in that case so
+    a user who hasn't run scan_plugins.py gets no spurious warnings.
+    """
+    try:
+        text = _COMMANDS_RAW_PATH.read_text(encoding="utf-8", errors="replace")
+    except (OSError, FileNotFoundError):
+        return frozenset()
+    names = set()
+    for line in text.splitlines():
+        if "=" not in line:
+            continue
+        name = line.split("=", 1)[0].strip()
+        if not name or name in ("-",) or name.startswith("#"):
+            continue
+        names.add(name)
+    return frozenset(names)
+
+
+_KNOWN_COMMANDS: frozenset = _load_known_commands()
 
 
 # --- image state probe ----------------------------------------------------
@@ -266,6 +302,21 @@ _HALLUCINATED_COMMANDS = {
         '"Bandpass Filter..." (one word, no hyphen): '
         'run("Bandpass Filter...", "filter_large=40 filter_small=3").'
     ),
+    "Band Pass Filter...": (
+        'run("Band Pass Filter...") is misspelled. The real name is '
+        '"Bandpass Filter..." (one word, no space, no hyphen): '
+        'run("Bandpass Filter...", "filter_large=40 filter_small=3").'
+    ),
+    "Band Pass Filter": (
+        'run("Band Pass Filter") is misspelled. The real name is '
+        '"Bandpass Filter..." (one word, no space, no hyphen): '
+        'run("Bandpass Filter...", "filter_large=40 filter_small=3").'
+    ),
+    "Variance": (
+        'run("Variance") is missing the ellipsis. The real name is '
+        '"Variance..." (Process > Filters > Variance...): '
+        'run("Variance...", "radius=2").'
+    ),
 }
 
 
@@ -311,10 +362,41 @@ def _rule_analyze_particles_no_output_flag(code, state):
         return None
     return (
         'run("Analyze Particles...", "size=...") with no output flag does '
-        'not populate the Results table — nResults will always be 0. Add '
-        '`summarize` (or `display results`) to the args, OR add '
-        '`add_to_manager` and read roiManager("count") instead.'
+        'not populate the Results table — nResults will always be 0. '
+        'Preferred fix: add `add_to_manager` and read `roiManager("count")` '
+        '— this is the most reliable count. Alternative: add `display` (not '
+        '`summarize`; `summarize` writes to the Summary window, not the '
+        'Results table, so nResults STILL stays 0).'
     )
+
+
+def _rule_unknown_run_command(code, state):
+    """Warn when run('<name>') calls a command that isn't in the scanned Fiji set.
+
+    Defense in depth over _rule_hallucinated_run_command's exact-match blocklist.
+    Reads agent/.tmp/commands.raw.txt (written by scan_plugins.py) once at
+    module import. Fires only as a warning, not a block, because the scan
+    may miss dynamically-registered commands, sample-image URLopener entries
+    (e.g. "Blobs (25K)"), or plugins installed after the last scan.
+    """
+    if not _KNOWN_COMMANDS:
+        return None
+    clean = _strip_comments(code)
+    for m in re.finditer(r'run\s*\(\s*"([^"]+)"\s*(?:,|\))', clean):
+        name = m.group(1)
+        if name in _HALLUCINATED_COMMANDS:
+            continue
+        if name in _KNOWN_COMMANDS:
+            continue
+        return (
+            'run("{0}") is not in the scanned Fiji command list '
+            '(agent/.tmp/commands.raw.txt). If you just installed a plugin, '
+            're-run `python scan_plugins.py` from agent/. Otherwise, call '
+            'probe_plugin("{0}") to find the real name — most likely a typo '
+            'or ellipsis issue (e.g. "Variance" vs "Variance...", '
+            '"Band Pass Filter..." vs "Bandpass Filter...").'
+        ).format(name)
+    return None
 
 
 def _rule_wait_for_user_in_autonomous(code, state):
@@ -404,6 +486,29 @@ def _rule_run_with_three_args(code, state):
             'key=value pairs) or use the plugin\'s macro-level function.'
         )
     return suggestion
+
+
+def _rule_ijm_array_literal_syntax(code, state):
+    """Block `foo = [...]` Python/JS array literals; IJM uses newArray(...).
+
+    Gemma occasionally writes `results = [];` or `xs = [1, 2, 3];` in macro
+    source. The ImageJ macro parser rejects `=[` as "Number or numeric
+    function expected". Must skip matches inside string arguments — e.g.
+    `run("Convolve...", "kernel=[0 -1 0 -1 4 -1 0 -1 0]")` is legitimate
+    — by scrubbing quoted strings before the regex runs.
+    """
+    clean = _strip_comments(code)
+    no_strings = re.sub(r'"[^"]*"', '""', clean)
+    m = re.search(r'\b([A-Za-z_]\w*)\s*=\s*\[', no_strings)
+    if not m:
+        return None
+    name = m.group(1)
+    return (
+        'Variable "{0}" assigned with `= [...]` syntax. ImageJ macro '
+        'language has no `[]` array literals — use newArray(): '
+        '`{0} = newArray();` for an empty array or '
+        '`{0} = newArray(1, 2, 3);` with initial values.'
+    ).format(name)
 
 
 def _rule_doubled_identifier(code, state):
@@ -569,7 +674,7 @@ RULES = [
     {
         "id": "hallucinated_run_command",
         "severity": "block",
-        "description": "run('<name>') names a command that does not exist in base Fiji (Laplacian, DoG, Band-pass Filter).",
+        "description": "run('<name>') names a command that does not exist in base Fiji (Laplacian, DoG, Band-pass / Band Pass Filter, Variance without ellipsis).",
         "check": _rule_hallucinated_run_command,
     },
     {
@@ -577,6 +682,12 @@ RULES = [
         "severity": "warn",
         "description": "Analyze Particles without summarize/display/add_to_manager leaves nResults at 0.",
         "check": _rule_analyze_particles_no_output_flag,
+    },
+    {
+        "id": "unknown_run_command",
+        "severity": "warn",
+        "description": "run('<name>') names a command not in the scanned Fiji command list — likely a typo or missing ellipsis.",
+        "check": _rule_unknown_run_command,
     },
     {
         "id": "wait_for_user_in_autonomous",
@@ -601,6 +712,12 @@ RULES = [
         "severity": "warn",
         "description": "A 4+ char identifier is immediately repeated (e.g. 'methodsmethods') — almost always a typo.",
         "check": _rule_doubled_identifier,
+    },
+    {
+        "id": "ijm_array_literal_syntax",
+        "severity": "block",
+        "description": "IJM has no array literals — `foo = [...]` must be `foo = newArray(...)`.",
+        "check": _rule_ijm_array_literal_syntax,
     },
     {
         "id": "run_with_three_args",

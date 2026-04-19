@@ -188,6 +188,7 @@ def run_macro(code: str) -> dict:
     # Mark any images this macro just created so auto-triage on image.opened
     # events skips them — the agent's intermediate masks should never fire
     # "saturation" or "clipped blacks" warnings at the chat.
+    new_images: list = []
     if isinstance(resp, dict):
         _result = resp.get("result")
         if isinstance(_result, dict):
@@ -195,7 +196,9 @@ def run_macro(code: str) -> dict:
             if isinstance(_new, list):
                 for _title in _new:
                     if _title is not None:
-                        events.mark_image_created_by_agent(str(_title))
+                        _title_str = str(_title)
+                        events.mark_image_created_by_agent(_title_str)
+                        new_images.append(_title_str)
     if isinstance(lint_result, str) and lint_result.startswith("WARNING"):
         if isinstance(resp, dict):
             resp = dict(resp)
@@ -214,7 +217,7 @@ def run_macro(code: str) -> dict:
         except Exception:
             after_thumb = None
         if isinstance(after_thumb, dict) and "error" not in after_thumb:
-            report = visual_diff.diff_report(before_thumb, after_thumb, code)
+            report = visual_diff.diff_report(before_thumb, after_thumb, code, new_images=new_images)
             if isinstance(resp, dict):
                 resp = dict(resp)
                 resp["visual_diff"] = report

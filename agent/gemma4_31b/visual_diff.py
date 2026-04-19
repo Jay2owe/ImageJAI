@@ -354,7 +354,7 @@ def _fmt_pct(value) -> str:
     return "{:.1%}".format(value)
 
 
-def diff_report(before: dict, after: dict, code: str) -> dict:
+def diff_report(before: dict, after: dict, code: str, new_images=None) -> dict:
     """Compute before/after pixel-change metrics and flag inconsistencies with macro intent.
 
     Always returns a three-key dict {"consistent": bool, "reason": str,
@@ -366,6 +366,10 @@ def diff_report(before: dict, after: dict, code: str) -> dict:
         before: Thumbnail dict from capture_thumbnail() taken before the macro ran.
         after: Thumbnail dict from capture_thumbnail() taken after the macro ran.
         code: The macro source; used to pick which plausibility rule applies.
+        new_images: Optional list of image titles the macro created. When the
+            macro made two or more new images, the "after" thumbnail is of a
+            different canvas than the "before" thumbnail, so before/after
+            filter-plausibility comparisons are meaningless and get suppressed.
     """
     if not isinstance(before, dict) or not isinstance(after, dict):
         return {"consistent": True, "reason": "thumbnails unavailable", "numbers": {}}
@@ -425,7 +429,14 @@ def diff_report(before: dict, after: dict, code: str) -> dict:
         else:
             reason = "Convert to Mask produced a near-two-value histogram as expected."
     elif re.search(r'Median|Gaussian Blur', code_str):
-        if pix_frac is not None and pix_frac > 0.40:
+        multi_image = isinstance(new_images, (list, tuple)) and len(new_images) >= 2
+        if multi_image:
+            reason = (
+                "macro created {} new images ({}); before/after active-image "
+                "comparison skipped — filter target may have changed between "
+                "snapshots."
+            ).format(len(new_images), ", ".join(str(t) for t in new_images[:5]))
+        elif pix_frac is not None and pix_frac > 0.40:
             consistent = False
             reason = (
                 "Median / Gaussian Blur changed {} of pixels — expected "
