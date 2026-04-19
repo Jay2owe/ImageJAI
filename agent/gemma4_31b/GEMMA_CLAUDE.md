@@ -96,6 +96,28 @@ All filenames end with `-reference.md`. Read the index with
 
 ---
 
+## Before writing Groovy / Jython
+
+Do not invent ImageJ class paths from memory — they are almost always wrong.
+Read `fiji-scripting-reference.md` (the "Classes" table) before writing any
+`import ij.*` line:
+
+```
+run_shell("type agent\\references\\fiji-scripting-reference.md | more")
+```
+
+Most-hallucinated wrong imports (do NOT use these):
+
+- `ij.plugin.AnalyzeParticles` — does not exist. Correct: `ij.plugin.filter.ParticleAnalyzer`.
+- `ij.plugin.AnalyzeParticlesSettings` — does not exist. Particle options are set via flags on `ParticleAnalyzer` constructor.
+- `ij.imageprocessors.*` — wrong package. Correct: `ij.process.*` (e.g. `ij.process.ByteProcessor`, `ij.process.ColorProcessor`).
+- `ij.plugin.filter.ThresholdFilter` — does not exist. Use `ij.process.AutoThresholder` for automatic thresholds or `ImageProcessor.setThreshold(min, max)` for manual.
+
+If you are not sure a class exists, prefer `run_macro` — the IJ macro language
+is auto-probed and rejects bad plugin args before they reach Fiji.
+
+---
+
 ## Common mistakes the lint layer catches
 
 Avoid these by design so you don't waste turns on rejections:
@@ -128,6 +150,16 @@ When a macro produces a table of per-method or per-channel numbers, use
 `setResult("Label", row, value)` and then `updateResults()` so
 `get_results` returns a clean CSV. Never `print("Method: " + n)` and
 grep it out of `get_log`; the table is the right surface.
+
+---
+
+## Recovering from errors
+
+These rules are hard. Break them and you will waste the user's time in a retry loop.
+
+- **Two identical errors → stop.** If the same error class fires twice in a row (same `Macro Error`, same `No Image`, same probe rejection, same dialog title), do NOT send a third macro. Call `get_log({})` and `windows({})` to gather facts, then ask the user what to do. Repeating a broken macro with small edits almost never converges.
+- **`No Image` → `windows()` first.** If any error contains the string `No Image`, your very next call MUST be `windows({})` before any `run_macro`. Do not assume the image you opened is still there — the previous macro may have closed it.
+- **`dismissedDialogs` non-empty → inspect it.** When a `run_macro` response has a `dismissedDialogs` array, a popup appeared mid-macro and the server zapped it. The macro may have *looked* successful but a "No valid thresholds" / "Measurements: none" / "Done" notice was dismissed silently. Read the titles and bodies before trusting the result.
 
 ---
 

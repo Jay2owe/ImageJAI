@@ -216,13 +216,122 @@ def _object_count(value):
         return None
 
 
+def _run_manual_threshold(value, total_pixels):
+    """Run one manual `setThreshold(value, 255)` pass and return a panels/summary pair.
+
+    Duplicates the active image, applies the threshold, converts to a mask,
+    runs Analyze Particles, and reports the count + mean area back through a
+    single-row Results table so we can read it from execute_macro's CSV reply.
+    The duplicate is closed before returning.
+    """
+    label = "Manual {}".format(value)
+    macro = (
+        'setOption("BlackBackground", true);\n'
+        'run("Clear Results");\n'
+        'run("Duplicate...", "title=_shootout_manual_{v}");\n'
+        'setThreshold({v}, 255);\n'
+        'run("Convert to Mask");\n'
+        'run("Analyze Particles...", "size=0-Infinity display clear");\n'
+        '__count = nResults;\n'
+        '__meanArea = 0;\n'
+        'if (__count > 0) {{\n'
+        '    __sum = 0;\n'
+        '    for (__i = 0; __i < __count; __i++) __sum += getResult("Area", __i);\n'
+        '    __meanArea = __sum / __count;\n'
+        '}}\n'
+        'run("Clear Results");\n'
+        'setResult("count", 0, __count);\n'
+        'setResult("meanArea", 0, __meanArea);\n'
+        'updateResults();\n'
+        'close("_shootout_manual_{v}");\n'
+    ).format(v=int(value))
+    resp = _safe_send("execute_macro", code=macro)
+    if not isinstance(resp, dict) or not resp.get("ok"):
+        err = resp.get("error") if isinstance(resp, dict) else "no reply"
+        return (
+            {"name": label, "count": None, "image": None},
+            {
+                "name": label,
+                "success": False,
+                "count": None,
+                "coverage_pct": None,
+                "mean_size": None,
+                "summary": "manual threshold {} failed: {}".format(value, err),
+            },
+        )
+    # execute_macro attaches the Results table CSV as result.resultsTable
+    # (see TCPCommandServer.handleExecuteMacro — resultsTable is populated
+    # whenever nResults > 0 after the macro finishes).
+    result_payload = resp.get("result") if isinstance(resp, dict) else None
+    csv_text = None
+    if isinstance(result_payload, dict):
+        csv_text = result_payload.get("resultsTable")
+    count = None
+    mean_sz = None
+    if isinstance(csv_text, str) and csv_text.strip():
+        lines = [ln for ln in csv_text.splitlines() if ln.strip()]
+        if len(lines) >= 2:
+            header = [h.strip().strip('"').lower() for h in lines[0].split(",")]
+            row = [c.strip().strip('"') for c in lines[1].split(",")]
+            data = dict(zip(header, row))
+            count = _object_count(data.get("count"))
+            mean_sz = _mean_size(data.get("meanarea"))
+    coverage_pct = _derive_coverage_pct(count, mean_sz, total_pixels)
+    summary = "{}: {} objects, mean area={}, coverage={}%".format(
+        label,
+        count if count is not None else "?",
+        mean_sz if mean_sz is not None else "?",
+        coverage_pct if coverage_pct is not None else "?",
+    )
+    return (
+        {"name": label, "count": count, "image": None},
+        {
+            "name": label,
+            "success": count is not None,
+            "count": count,
+            "coverage_pct": coverage_pct,
+            "mean_size": mean_sz,
+            "summary": summary,
+        },
+    )
+
+
 @tool
-def threshold_shootout() -> dict:
-    """Run Otsu, Li, Triangle, Minimum and Huang on the active image side by side and save a labelled montage to AI_Exports/.
+def threshold_shootout(
+    methods: list = None,
+    manual_thresholds: list = None,
+) -> dict:
+    """Run several threshold methods on the active image side by side and save a labelled montage to AI_Exports/.
 
     Args:
-        None.
+        methods: optional list of auto-threshold method names to run. Defaults to Otsu, Li, Triangle, Minimum, Huang. Any method ImageJ's setAutoThreshold accepts is valid ("Default", "IsoData", "Percentile", "Yen", etc.).
+        manual_thresholds: optional list of integer lower-threshold values (0-255 for 8-bit); each is run via setThreshold(v, 255) and appended to the results after the auto-methods.
     """
+    # Normalise args — accept None (defaults) or list-of-values.
+    if methods is None:
+        active_methods = list(METHODS)
+    elif isinstance(methods, (list, tuple)):
+        active_methods = [str(m) for m in methods if isinstance(m, (str, int, float))]
+        if not active_methods:
+            active_methods = list(METHODS)
+    else:
+        return {"ok": False, "error": "methods must be a list of strings"}
+
+    if manual_thresholds is None:
+        active_manuals = []
+    elif isinstance(manual_thresholds, (list, tuple)):
+        active_manuals = []
+        for v in manual_thresholds:
+            try:
+                active_manuals.append(int(v))
+            except (TypeError, ValueError):
+                return {
+                    "ok": False,
+                    "error": "manual_thresholds entries must be integers (got {!r})".format(v),
+                }
+    else:
+        return {"ok": False, "error": "manual_thresholds must be a list of ints"}
+
     export_folder = active_image.current_export_folder()
     if not export_folder:
         # Sample images (e.g. Blobs) have no file on disk so there is no
@@ -239,7 +348,7 @@ def threshold_shootout() -> dict:
             }
         export_folder = str(tmp)
 
-    resp = _safe_send("explore_thresholds", methods=METHODS)
+    resp = _safe_send("explore_thresholds", methods=active_methods)
     if not isinstance(resp, dict) or not resp.get("ok"):
         err = resp.get("error") if isinstance(resp, dict) else "no reply from Fiji"
         return {"ok": False, "error": err or "explore_thresholds failed"}
@@ -268,7 +377,7 @@ def threshold_shootout() -> dict:
     panels = []
     methods_summary = []
     missing_methods = []
-    for method_name in METHODS:
+    for method_name in active_methods:
         entry = by_name.get(method_name)
         if not isinstance(entry, dict):
             missing_methods.append(method_name)
@@ -302,6 +411,14 @@ def threshold_shootout() -> dict:
                 "summary": entry.get("summary"),
             }
         )
+
+    # Manual thresholds run after the auto-methods; each gets its own macro
+    # pass that Duplicate → setThreshold → Convert to Mask → Analyze Particles
+    # on a fresh copy so they don't leak state into the auto-methods above.
+    for v in active_manuals:
+        panel, summary = _run_manual_threshold(v, total_pixels)
+        panels.append(panel)
+        methods_summary.append(summary)
 
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     out_path = os.path.join(

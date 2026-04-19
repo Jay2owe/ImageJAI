@@ -1198,10 +1198,16 @@ public class TCPCommandServer {
                         future.cancel(true);
                         // Actively dismiss the blocking dialog so it does not
                         // linger on screen and block subsequent macros. The
-                        // dismiss runs on the EDT and waits up to 2 s.
-                        int dismissed = dismissOpenDialogs(null);
+                        // dismiss runs on the EDT and waits up to 2 s and
+                        // captures the title+body of every window it closes
+                        // so the agent can inspect silent popups.
+                        JsonArray dismissedCaptured = new JsonArray();
+                        int dismissed = dismissOpenDialogsCapturing(null, dismissedCaptured);
                         if (dismissed > 0) {
                             result.addProperty("dialogsAutoDismissed", dismissed);
+                            if (dismissedCaptured.size() > 0) {
+                                result.add("dismissedDialogs", dismissedCaptured);
+                            }
                             failureMessage = blocking
                                     + " — the dialog has been auto-dismissed by the server; "
                                     + "probe the plugin and re-run with explicit args.";
@@ -1391,6 +1397,37 @@ public class TCPCommandServer {
                     }
                 } catch (Throwable ignore) {}
             }
+        }
+
+        // Signal 5: "Macro Error" dialog fallback. ImageJ's Macro Error popup
+        // carries only a "Show Debug Window" checkbox as its body — useless to
+        // the agent — but the real compile/runtime error has usually been
+        // written to the log with a prefix we don't recognise (e.g. "Undefined
+        // variable in line 7 (...)"). When signals 1–4 all missed AND a
+        // Macro Error dialog is open, surface the last non-empty log line
+        // added during this call as the error text.
+        if (hasMacroErrorDialog(dialogs)) {
+            try {
+                String postLog = IJ.getLog();
+                if (postLog != null && postLog.length() > logLenBefore) {
+                    String added = postLog.substring(logLenBefore);
+                    if (added.length() > 16384) {
+                        added = added.substring(added.length() - 16384);
+                    }
+                    String[] lines = added.split("\\r?\\n");
+                    String lastNonEmpty = null;
+                    for (int i = lines.length - 1; i >= 0; i--) {
+                        String ln = lines[i].trim();
+                        if (!ln.isEmpty()) { lastNonEmpty = ln; break; }
+                    }
+                    if (lastNonEmpty != null) {
+                        if (lastNonEmpty.length() > 400) {
+                            lastNonEmpty = lastNonEmpty.substring(0, 400) + "...";
+                        }
+                        return "Macro error (log tail, Debug dialog open): " + lastNonEmpty;
+                    }
+                }
+            } catch (Throwable ignore) {}
         }
 
         return null;
@@ -3282,6 +3319,16 @@ public class TCPCommandServer {
      * watchdog inside handleExecuteMacro) without EDT violations.
      */
     private int dismissOpenDialogs(final String pattern) {
+        return dismissOpenDialogsCapturing(pattern, null);
+    }
+
+    /**
+     * Same as {@link #dismissOpenDialogs(String)} but records the title and
+     * a short body snippet of every window it disposes, so callers can
+     * surface "these popups were auto-closed during your run" in the response.
+     * {@code captured} may be null when the caller does not need the detail.
+     */
+    private int dismissOpenDialogsCapturing(final String pattern, final JsonArray captured) {
         final int[] closedCount = new int[1];
         final CountDownLatch latch = new CountDownLatch(1);
 
@@ -3317,6 +3364,18 @@ public class TCPCommandServer {
                             }
 
                             if (pattern == null || title.toLowerCase().contains(pattern.toLowerCase())) {
+                                if (captured != null) {
+                                    try {
+                                        JsonObject entry = new JsonObject();
+                                        entry.addProperty("title", title);
+                                        String body = extractDialogBody(win);
+                                        if (body != null && !body.isEmpty()) {
+                                            if (body.length() > 400) body = body.substring(0, 400) + "…";
+                                            entry.addProperty("body", body);
+                                        }
+                                        captured.add(entry);
+                                    } catch (Throwable ignore) {}
+                                }
                                 win.setVisible(false);
                                 win.dispose();
                                 closedCount[0]++;
@@ -3336,6 +3395,28 @@ public class TCPCommandServer {
         }
 
         return closedCount[0];
+    }
+
+    /**
+     * Best-effort scrape of a dialog's text content for the
+     * {@code dismissedDialogs} report. Reuses {@link #extractDialogContent}
+     * to walk child components, then collapses whitespace to a single line.
+     * Returns an empty string when nothing is readable.
+     */
+    private String extractDialogBody(java.awt.Window win) {
+        if (!(win instanceof java.awt.Container)) return "";
+        StringBuilder text = new StringBuilder();
+        java.util.ArrayList<String> buttons = new java.util.ArrayList<String>();
+        try {
+            extractDialogContent((java.awt.Container) win, text, buttons);
+        } catch (Throwable ignore) {
+            return "";
+        }
+        String raw = text.toString();
+        if (raw.isEmpty()) return "";
+        // Collapse any run of whitespace (including embedded newlines) to a
+        // single space so the captured body fits on one line.
+        return raw.replaceAll("\\s+", " ").trim();
     }
 
     // -----------------------------------------------------------------------
