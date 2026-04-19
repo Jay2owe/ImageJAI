@@ -1173,6 +1173,16 @@ public class TCPCommandServer {
                     break;
                 } catch (TimeoutException e) {
                     dialogs = safeDetectOpenDialogs();
+                    // ImageJ opens the "Macro Error" dialog a fraction of a second
+                    // before Interpreter.getErrorMessage() / IJ.getErrorMessage()
+                    // populate. Grant a 50 ms grace window on that specific dialog
+                    // so detectIjMacroError can read the settled signals instead
+                    // of falling through to the generic blocking-dialog stub.
+                    if (hasMacroErrorDialog(dialogs)) {
+                        try { Thread.sleep(50); }
+                        catch (InterruptedException ie) { Thread.currentThread().interrupt(); }
+                        dialogs = safeDetectOpenDialogs();
+                    }
                     String detected = detectIjMacroError(logLenBefore, priorInterpError, priorIjError, dialogs);
                     if (detected != null) {
                         future.cancel(true);
@@ -1413,12 +1423,41 @@ public class TCPCommandServer {
                 String title = "";
                 JsonElement tEl = d.get("title");
                 if (tEl != null && tEl.isJsonPrimitive()) title = tEl.getAsString();
-                return "Macro paused on modal dialog: "
-                        + (title.isEmpty() ? "(untitled)" : title)
-                        + " — supply parameters via run(name, args) or dismiss via interact_dialog/close_dialogs";
+                String body = "";
+                JsonElement bEl = d.get("text");
+                if (bEl != null && bEl.isJsonPrimitive()) body = bEl.getAsString();
+                StringBuilder msg = new StringBuilder("Macro paused on modal dialog: ");
+                msg.append(title.isEmpty() ? "(untitled)" : title);
+                if (!body.isEmpty()) {
+                    String trimmed = body.length() > 400 ? body.substring(0, 400) + "…" : body;
+                    msg.append(" — body: ").append(trimmed);
+                }
+                msg.append(" — supply parameters via run(name, args) or dismiss via interact_dialog/close_dialogs");
+                return msg.toString();
             } catch (Throwable ignore) {}
         }
         return null;
+    }
+
+    /**
+     * True when any open dialog has the title {@code "Macro Error"}. Used to
+     * grant a brief settle window before reading error signals — see the
+     * polling loop above.
+     */
+    private boolean hasMacroErrorDialog(JsonArray dialogs) {
+        if (dialogs == null) return false;
+        for (int i = 0; i < dialogs.size(); i++) {
+            try {
+                JsonElement el = dialogs.get(i);
+                if (el == null || !el.isJsonObject()) continue;
+                JsonElement tEl = el.getAsJsonObject().get("title");
+                if (tEl != null && tEl.isJsonPrimitive()
+                        && "Macro Error".equals(tEl.getAsString())) {
+                    return true;
+                }
+            } catch (Throwable ignore) {}
+        }
+        return false;
     }
 
     /**

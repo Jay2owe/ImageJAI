@@ -51,16 +51,21 @@ public class AgentLauncher {
         {"Open Interpreter", "interpreter", "Open-source code interpreter", "--system_message \"$(cat CLAUDE.md)\""},
         {"Cline", "cline", "Autonomous coding agent", ""},
         {"Codex CLI", "codex", "OpenAI Codex CLI", "--full-auto"},
+        {"Gemma 4 31B", "gemma4_31b_agent", "Local Ollama agent (free, no API key)", ""},
+        {"Gemma 4 31B (Claude-style)", "gemma4_31b_agent", "Gemma with Claude-style narrative prompt (A/B test)", "--style claude"},
     };
 
     private final String agentWorkspace;
+    private final int tcpPort;
     private List<AgentInfo> cachedAgents;
 
     /**
      * @param agentWorkspace the directory to use as working directory for launched agents
+     * @param tcpPort the ImageJAI TCP server port to expose to launched agents
      */
-    public AgentLauncher(String agentWorkspace) {
+    public AgentLauncher(String agentWorkspace, int tcpPort) {
         this.agentWorkspace = agentWorkspace;
+        this.tcpPort = tcpPort;
     }
 
     /**
@@ -149,6 +154,7 @@ public class AgentLauncher {
 
             ProcessBuilder pb = new ProcessBuilder(cmd);
             pb.directory(new File(agentWorkspace));
+            pb.environment().put("IMAGEJAI_TCP_PORT", String.valueOf(tcpPort));
             pb.start();
 
             IJ.log("[AgentLauncher] Launched: " + agent.name + " (" + agent.command + ")");

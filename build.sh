@@ -3,13 +3,14 @@
 set -e
 
 PROJECT_DIR="$(cd "$(dirname "$0")" && pwd)"
-FIJI_DIR="$(dirname "$PROJECT_DIR")/../../Fiji.app"
+FIJI_DIR="$(cd "$PROJECT_DIR/../.." && pwd)/Fiji.app"
 echo "Building ImageJAI..."
 cd "$PROJECT_DIR"
-mvn clean package -q 2>/dev/null
+mvn clean package -DskipTests -q 2>/dev/null
 
-# Find the built JAR (version comes from pom.xml)
-JAR_FILE=$(ls target/imagej-ai-*.jar 2>/dev/null | head -1)
+# Find the main plugin JAR (exclude sources/tests classifiers)
+JAR_FILE=$(find target -maxdepth 1 -type f -name 'imagej-ai-*.jar' \
+    ! -name '*-sources.jar' ! -name '*-tests.jar' | head -1)
 
 if [ -n "$JAR_FILE" ]; then
     JAR_NAME=$(basename "$JAR_FILE")

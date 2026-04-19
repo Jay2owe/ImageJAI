@@ -15,7 +15,7 @@ A single Fiji plugin that adds a conversational AI assistant to ImageJ. Install 
 - **Live monitoring** — Warns about saturated pixels, uncalibrated images, memory pressure
 - **Hypothesis-driven analysis** — State a scientific hypothesis, AI designs the complete analysis plan
 - **Cross-tool integration** — Optional Python/R script execution for advanced statistics
-- **TCP command server** — Optional TCP server (port 7746) for external agent access (Claude CLI, AgentConsole, scripts). Off by default.
+- **TCP command server** — Optional TCP server (port 7746) for external agent access (CLI agents and scripts). Off by default.
 - **Plugin argument discovery** — Probe any plugin's dialog to learn exact macro syntax before using it
 - **Dialog interaction** — Read, fill, and click any open dialog (buttons, checkboxes, dropdowns, text fields, sliders)
 - **Progress monitoring** — Track progress bar state and status line from external agents
@@ -112,7 +112,7 @@ ImageJAIPlugin.java          Entry point (Plugins > AI Assistant)
 
 ## TCP Command Server (Advanced)
 
-For power users who want to control ImageJ from Claude CLI, AgentConsole, or custom scripts:
+For power users who want to control ImageJ from CLI agents or custom scripts:
 
 1. Open Settings > check "Enable TCP command server"
 2. Default port: 7746 (configurable)
