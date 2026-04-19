@@ -21,7 +21,7 @@ These are the verbs you have. Prefer them over shell wrappers.
 | `capture_image` | Screenshot the active image. Returns base64 — you cannot see pixels yourself, so pair it with `describe_image` for understanding. |
 | `get_log` / `get_results` / `get_histogram` / `get_open_windows` | After-the-fact inspection. |
 | `region_stats` / `histogram_summary` / `line_profile` / `quick_object_count` / `count_bright_regions` | NumPy-side analysis on raw pixels — cheap, no macro. |
-| `threshold_shootout` | Otsu, Li, Triangle, Minimum, Huang side by side with counts and montage. **Always call before picking a threshold.** |
+| `threshold_shootout` | Otsu, Li, Triangle, Minimum, Huang (extensible via `methods=`/`manual_thresholds=`) side by side with counts and montage. **Always call before picking a threshold. Its `count` field IS the count — don't re-segment to re-count.** |
 | `probe_plugin(name)` | Open a plugin's dialog, read every field, return real macro arg keys. Use on any unfamiliar plugin. |
 | `list_dialog_components` / `click_dialog_button` / `set_dialog_text` / `set_dialog_checkbox` / `set_dialog_dropdown` / `close_dialogs` | Drive Swing dialogs that macros cannot reach. |
 | `run_shell(command)` | Run a host-OS shell command (cmd.exe on Windows). 30 s timeout, 2000-char output cap. Use for `dir`, `git status`, reading reference docs, lab helper scripts. **Never** use as a workaround for a Fiji tool. |
@@ -131,6 +131,7 @@ Avoid these by design so you don't waste turns on rejections:
 - `run("Measure")` without `run("Clear Results")`.
 - `run("Plugin Name...")` with no argument string — opens a dialog and hangs.
 - `waitForUser()` anywhere — freezes the session.
+- `run("Analyze Particles...", "... add ...")` — the keyword is `add_to_manager`, not `add`. Shorthand from training data will be rejected; always use the full flag or `probe_plugin` first.
 
 ---
 
@@ -150,6 +151,21 @@ When a macro produces a table of per-method or per-channel numbers, use
 `setResult("Label", row, value)` and then `updateResults()` so
 `get_results` returns a clean CSV. Never `print("Method: " + n)` and
 grep it out of `get_log`; the table is the right surface.
+
+---
+
+## Using threshold_shootout correctly
+
+`threshold_shootout` is not reconnaissance — it *is* the counting pipeline.
+Each method in its reply comes with `count`, `mean_size`, `coverage_pct`, and
+a `recommended` method. When the user asked for a count, the shootout output
+is the answer — quote `recommended` and its count, show the rest as a table,
+and stop.
+
+Only re-run a segmentation macro afterwards if the user asks for something
+shootout didn't produce: per-object measurements, a labelled mask, a filtered
+subset by size/circularity, or ROI overlays. "Count" alone never warrants a
+second pass.
 
 ---
 
