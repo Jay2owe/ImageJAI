@@ -39,10 +39,16 @@ RECV_CHUNK = 8192
 # Convert to Mask), which otherwise yield nonsense warnings like
 # "33% saturated / 67% clipped blacks" that pollute the chat context.
 _AGENT_CREATED_IMAGES: dict[str, float] = {}
-_AGENT_IMAGE_TTL_S = 5.0
+# Cloud-model macros that duplicate then filter a stack can take 8–12 seconds
+# before the agent finishes the loop; 5 s expired mid-run on real transcripts
+# and let triage fire on filter intermediates like `mean_2`.
+_AGENT_IMAGE_TTL_S = 15.0
 _MASK_TITLE_KEYWORDS = (
     "mask", "temp", "otsu", "li", "triangle", "huang", "minimum",
     "default", "gauss", "med", "binary", "duplicate",
+    # Filter-output intermediate titles Gemma generates during shootouts.
+    "mean", "laplacian", "unsharp", "variance", "bandpass",
+    "filter", "convolve", "sharp",
 )
 
 

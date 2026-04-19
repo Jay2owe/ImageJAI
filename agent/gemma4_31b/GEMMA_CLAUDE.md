@@ -56,6 +56,11 @@ When the user asked for a count, shootout's `recommended` + its `count` is the f
 answer — report it as a table and stop. Only re-segment if the user asked for
 per-object measurements, a labelled mask, a size-filtered subset, or ROI overlays.
 
+**Vocabulary.** *Filter* = intensity operation on the image (Gaussian, Median,
+Mean, Unsharp, Convolve, Variance, Bandpass). *Threshold* = binarisation method
+(Otsu, Li, Default). *Segmentation* = threshold + mask + Analyze Particles.
+"10 filters" never means "10 threshold methods" — don't substitute `threshold_shootout`.
+
 ---
 
 ## Recovering from errors
