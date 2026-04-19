@@ -354,6 +354,18 @@ def _fmt_pct(value) -> str:
     return "{:.1%}".format(value)
 
 
+def _macro_likely_created_new_canvas(code: str) -> bool:
+    """True when the macro likely switched the active image to a new canvas."""
+    if not isinstance(code, str):
+        return False
+    patterns = (
+        r'run\s*\(\s*"Duplicate\.\.\."',
+        r'\bnewImage\s*\(',
+        r'\bimageCalculator\s*\(\s*"[^"]*\bcreate\b',
+    )
+    return any(re.search(pat, code, flags=re.IGNORECASE) for pat in patterns)
+
+
 def diff_report(before: dict, after: dict, code: str, new_images=None) -> dict:
     """Compute before/after pixel-change metrics and flag inconsistencies with macro intent.
 
@@ -429,13 +441,29 @@ def diff_report(before: dict, after: dict, code: str, new_images=None) -> dict:
         else:
             reason = "Convert to Mask produced a near-two-value histogram as expected."
     elif re.search(r'Median|Gaussian Blur', code_str):
-        multi_image = isinstance(new_images, (list, tuple)) and len(new_images) >= 2
-        if multi_image:
-            reason = (
-                "macro created {} new images ({}); before/after active-image "
-                "comparison skipped — filter target may have changed between "
-                "snapshots."
-            ).format(len(new_images), ", ".join(str(t) for t in new_images[:5]))
+        created_new_canvas = (
+            isinstance(new_images, (list, tuple))
+            and len(new_images) >= 1
+            and _macro_likely_created_new_canvas(code_str)
+        )
+        if created_new_canvas:
+            shown = [str(t) for t in new_images[:5] if str(t).strip()]
+            if shown:
+                reason = (
+                    "macro created {} new image{} ({}); before/after active-image "
+                    "comparison skipped — filter target may have changed between "
+                    "snapshots."
+                ).format(
+                    len(new_images),
+                    "" if len(new_images) == 1 else "s",
+                    ", ".join(shown),
+                )
+            else:
+                reason = (
+                    "macro created a new image; before/after active-image "
+                    "comparison skipped — filter target may have changed between "
+                    "snapshots."
+                )
         elif pix_frac is not None and pix_frac > 0.40:
             consistent = False
             reason = (

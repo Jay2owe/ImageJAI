@@ -499,7 +499,7 @@ def _rule_ijm_array_literal_syntax(code, state):
     """
     clean = _strip_comments(code)
     no_strings = re.sub(r'"[^"]*"', '""', clean)
-    m = re.search(r'\b([A-Za-z_]\w*)\s*=\s*\[', no_strings)
+    m = re.search(r'\b((?:[^\W\d]|_)\w*)\s*=\s*\[', no_strings)
     if not m:
         return None
     name = m.group(1)
@@ -603,12 +603,35 @@ def _rule_groovy_macro_only_functions(code, state):
     return None
 
 
+def _rule_groovy_hallucinated_run_command(code, state):
+    """Block Groovy IJ.run(...) calls that use known hallucinated command names."""
+    clean = _strip_comments(code)
+    patterns = (
+        r'\bIJ\.run\s*\(\s*["\']([^"\']+)["\']',
+        r'\bIJ\.run\s*\(\s*(?!["\'])[^,]+,\s*["\']([^"\']+)["\']',
+    )
+    for pattern in patterns:
+        for match in re.finditer(pattern, clean):
+            name = match.group(1)
+            if name in _HALLUCINATED_COMMANDS:
+                return (
+                    'IJ.run("{0}", ...) uses a hallucinated command name. {1}'
+                ).format(name, _HALLUCINATED_COMMANDS[name])
+    return None
+
+
 GROOVY_RULES = [
     {
         "id": "groovy_bad_filter_imports",
         "severity": "block",
         "description": "Hallucinated ij.plugin.filter.* class imports.",
         "check": _rule_groovy_bad_filter_imports,
+    },
+    {
+        "id": "groovy_hallucinated_run_command",
+        "severity": "block",
+        "description": "IJ.run('<name>', ...) uses a command name Gemma hallucinates.",
+        "check": _rule_groovy_hallucinated_run_command,
     },
     {
         "id": "groovy_macro_only_functions",

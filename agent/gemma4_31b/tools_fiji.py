@@ -7,6 +7,7 @@ declarative.
 import base64
 import datetime
 import os
+import re
 
 from . import events
 from . import lint
@@ -37,6 +38,63 @@ def _error_text(resp: object) -> str:
     if isinstance(result, dict) and isinstance(result.get("error"), str):
         return result["error"]
     return "unknown error"
+
+
+def _strip_macro_comments(code: str) -> str:
+    """Remove // and /* */ comments before lightweight regex inspection."""
+    if not isinstance(code, str):
+        return ""
+    out = re.sub(r"/\*.*?\*/", "", code, flags=re.DOTALL)
+    out = re.sub(r"//[^\n]*", "", out)
+    return out
+
+
+def _macro_likely_creates_images(code: str) -> bool:
+    """True when the macro text contains an image-creation operation."""
+    clean = _strip_macro_comments(code)
+    patterns = (
+        r'run\s*\(\s*"Duplicate\.\.\."',
+        r'\bnewImage\s*\(',
+        r'\bimageCalculator\s*\(\s*"[^"]*\bcreate\b',
+    )
+    return any(re.search(pat, clean, flags=re.IGNORECASE) for pat in patterns)
+
+
+def _extract_title_arg(arg_string: str) -> str | None:
+    """Parse title=... or title=[...] from a macro argument string."""
+    if not isinstance(arg_string, str):
+        return None
+    bracketed = re.search(r'(?<!\w)title\s*=\s*\[([^\]]+)\]', arg_string, flags=re.IGNORECASE)
+    if bracketed:
+        title = bracketed.group(1).strip()
+        return title or None
+    plain = re.search(r'(?<!\w)title\s*=\s*([^\s]+)', arg_string, flags=re.IGNORECASE)
+    if plain:
+        title = plain.group(1).strip()
+        return title or None
+    return None
+
+
+def _created_titles_from_macro(code: str) -> list[str]:
+    """Extract explicit created-image titles from Duplicate/newImage calls."""
+    clean = _strip_macro_comments(code)
+    titles: list[str] = []
+    seen: set[str] = set()
+
+    def add(title: str | None) -> None:
+        if not isinstance(title, str):
+            return
+        title = title.strip()
+        if not title or title in seen:
+            return
+        seen.add(title)
+        titles.append(title)
+
+    for match in re.finditer(r'run\s*\(\s*"Duplicate\.\.\."\s*,\s*"([^"]*)"\s*\)', clean):
+        add(_extract_title_arg(match.group(1)))
+    for match in re.finditer(r'\bnewImage\s*\(\s*"([^"]+)"', clean):
+        add(match.group(1))
+    return titles
 
 
 def _attach_post_timeout_state(resp: object) -> object:
@@ -185,20 +243,25 @@ def run_macro(code: str) -> dict:
     resp = send("execute_macro", code=code)
     resp = _attach_post_timeout_state(resp)
     resp = _handle_dialog_aftermath(resp, code)
-    # Mark any images this macro just created so auto-triage on image.opened
-    # events skips them — the agent's intermediate masks should never fire
-    # "saturation" or "clipped blacks" warnings at the chat.
-    new_images: list = []
-    if isinstance(resp, dict):
+    created_titles = _created_titles_from_macro(code)
+    for _title in created_titles:
+        events.mark_image_created_by_agent(_title)
+    # The synchronous execute_macro reply currently returns the active-image
+    # title as result.newImages even when no new image was created. Use that
+    # field only as a diff-suppression fallback when the macro source itself
+    # clearly contains an image-creation operation.
+    new_images_for_diff = list(created_titles)
+    if not new_images_for_diff and _macro_likely_creates_images(code) and isinstance(resp, dict):
         _result = resp.get("result")
         if isinstance(_result, dict):
             _new = _result.get("newImages")
             if isinstance(_new, list):
                 for _title in _new:
-                    if _title is not None:
-                        _title_str = str(_title)
-                        events.mark_image_created_by_agent(_title_str)
-                        new_images.append(_title_str)
+                    if _title is None:
+                        continue
+                    _title_str = str(_title).strip()
+                    if _title_str:
+                        new_images_for_diff.append(_title_str)
     if isinstance(lint_result, str) and lint_result.startswith("WARNING"):
         if isinstance(resp, dict):
             resp = dict(resp)
@@ -217,7 +280,12 @@ def run_macro(code: str) -> dict:
         except Exception:
             after_thumb = None
         if isinstance(after_thumb, dict) and "error" not in after_thumb:
-            report = visual_diff.diff_report(before_thumb, after_thumb, code, new_images=new_images)
+            report = visual_diff.diff_report(
+                before_thumb,
+                after_thumb,
+                code,
+                new_images=new_images_for_diff,
+            )
             if isinstance(resp, dict):
                 resp = dict(resp)
                 resp["visual_diff"] = report
