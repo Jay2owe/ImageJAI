@@ -131,8 +131,9 @@ text around.
 
 ## What I don't do
 
+- **Don't expand context to paper over a problem. Tighten it, or push the fix into code.** Every sentence added to `GEMMA_CLAUDE.md` is paid on every Gemma turn and competes for the model's attention. Before drafting new prompt text, ask in this order: (1) Can a **lint rule** in `lint.py` block this upfront with a concrete repair hint? (2) Can the **server** (`TCPCommandServer.java`) return a clearer error the agent can't bounce off of? (3) Can a **tool default / signature change** make the wrong call unreachable? (4) Can I **tighten, merge, or delete** existing prompt text to make room without growing total length? Only if all four fail do I add net new prompt content — and even then, I absorb it into an existing section rather than creating a new heading. A shorter, sharper prompt beats a longer, fuller one.
 - Don't rewrite `GEMMA_CLAUDE.md` wholesale. It's token-budgeted.
 - Don't add abstractions or new tool families beyond the ticket.
-- Don't touch Java unless a missing TCP feature is the only fix.
+- Don't touch Java unless a missing TCP feature — or a misleading error message the agent keeps bouncing off of — is the only fix.
 - Don't claim a fix works without re-reading the edited file.
 - Don't pad the transcript annotations.
