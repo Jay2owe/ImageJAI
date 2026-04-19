@@ -15,6 +15,7 @@ Read the relevant reference before starting any analysis in that domain.
 | [fiji-scripting-reference.md](fiji-scripting-reference.md) | 1078 | Groovy/Jython, IJ1/IJ2 API, SciJava params, plugin scripting, GUI manipulation |
 | [batch-processing-reference.md](batch-processing-reference.md) | 1029 | setBatchMode, Bio-Formats API, batch templates, memory management |
 | [file-formats-saving-reference.md](file-formats-saving-reference.md) | 521 | All formats, saveAs(), File.* functions, Bio-Formats Exporter, TIFF deep dive |
+| [bioformats-multiseries-reference.md](bioformats-multiseries-reference.md) | 220 | .lif/.czi/.nd2: list series without opening, open by index, filter by name, batch |
 | [pipeline-construction-reference.md](pipeline-construction-reference.md) | 862 | Pipeline patterns, TCP protocol, parameter sweeps, recipe YAML |
 
 ## Image Analysis Methods

@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import queue
+import re
 import socket
 import threading
 import time
@@ -43,13 +44,13 @@ _AGENT_CREATED_IMAGES: dict[str, float] = {}
 # before the agent finishes the loop; 5 s expired mid-run on real transcripts
 # and let triage fire on filter intermediates like `mean_2`.
 _AGENT_IMAGE_TTL_S = 15.0
-_MASK_TITLE_KEYWORDS = (
+_AGENT_TITLE_TOKENS = frozenset((
     "mask", "temp", "otsu", "li", "triangle", "huang", "minimum",
-    "default", "gauss", "med", "binary", "duplicate",
+    "default", "gauss", "gaussian", "med", "median", "binary",
+    "duplicate",
     # Filter-output intermediate titles Gemma generates during shootouts.
-    "mean", "laplacian", "unsharp", "variance", "bandpass",
-    "filter", "convolve", "sharp",
-)
+    "mean", "laplacian", "unsharp", "variance", "bandpass", "convolve",
+))
 
 
 def mark_image_created_by_agent(title: str) -> None:
@@ -68,8 +69,11 @@ def is_likely_agent_created_mask(title: str) -> bool:
         _AGENT_CREATED_IMAGES.pop(k, None)
     if title.strip() in _AGENT_CREATED_IMAGES:
         return True
-    lower = title.lower()
-    return any(kw in lower for kw in _MASK_TITLE_KEYWORDS)
+    stem = title.strip().lower().rsplit(".", 1)[0]
+    tokens = [tok for tok in re.split(r"[^a-z0-9]+", stem) if tok]
+    if not tokens:
+        return False
+    return all(tok.isdigit() or tok in _AGENT_TITLE_TOKENS for tok in tokens)
 
 
 def start_subscriber(topics: list[str]) -> None:

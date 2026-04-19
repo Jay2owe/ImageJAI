@@ -19,6 +19,7 @@ trimmed down for the standalone Gemma 4 31B agent. What stays:
 
 from __future__ import annotations
 
+import base64
 import json
 import os
 import queue
@@ -27,9 +28,11 @@ import sys
 import threading
 import time
 from collections import deque
+from io import BytesIO
 from pathlib import Path
 
 import ollama
+from PIL import Image
 
 try:
     from prompt_toolkit import prompt as _pt_prompt
@@ -54,6 +57,7 @@ from . import describe_image  # noqa: F401
 from . import events
 from . import safety
 from . import threshold_shootout  # noqa: F401
+from . import tools_bioformats  # noqa: F401
 from . import tools_dialogs  # noqa: F401
 from . import tools_fiji  # noqa: F401
 from . import tools_jobs  # noqa: F401
@@ -62,16 +66,26 @@ from . import tools_python  # noqa: F401
 from . import tools_recipes
 from . import tools_shell  # noqa: F401
 from . import triage_image  # noqa: F401
+from .console_text import normalize_inline_latex_symbols
 from .registry import REGISTRY, _rebuild_tool_map
 
 DEFAULT_MODEL = "gemma4:31b-cloud"
 NUM_CTX = 131072
 TEMPERATURE = 0.2
+SAMPLING_PROFILES: dict[str, dict] = {
+    "tool": {"temperature": 0.25, "top_p": 0.90, "top_k": 30, "thinking": False},
+    "plan": {"temperature": 0.60, "top_p": 0.92, "top_k": 50, "thinking": True},
+    "recover": {"temperature": 0.30, "top_p": 0.90, "top_k": 35, "thinking": True},
+    "explain": {"temperature": 0.60, "top_p": 0.95, "top_k": 64, "thinking": False},
+    "recipe": {"temperature": 0.40, "top_p": 0.92, "top_k": 40, "thinking": False},
+}
+DEFAULT_MODE = "tool"
 MAX_IDENTICAL_TOOL_REPEATS = 8
 BUNDLED_CCOMMANDS_DIR = Path(__file__).resolve().parent / "ccommands"
 _PROMPT_STYLE = (
     Style.from_dict(
         {
+            "": "ansigreen",
             "bottom-toolbar": "noinherit noreverse bg:default default",
             "bottom-toolbar.text": "noinherit noreverse bg:default default",
         }
@@ -83,6 +97,10 @@ _THINKING_STATUS = "Thinking"
 _INSPECTING_STATUS = "Inspecting image"
 _WRITING_STATUS = "Writing macro/script"
 _RUNNING_FIJI_STATUS = "Running in Fiji"
+_STATUS_REFRESH_S = 0.16
+_STATUS_ANIMATION_FRAME_S = 0.5
+_STATUS_TEXT_FRAME_S = 0.16
+_STATUS_PULSE_REST_FRAMES = 4
 _THINKING_DELAY_S = 1.0
 _INSPECTING_DELAY_S = 2.0
 _WRITING_DELAY_S = 1.0
@@ -116,8 +134,115 @@ _INSPECT_TOOLS = frozenset(
 )
 _SCRIPT_TOOLS = frozenset({"run_macro", "run_macro_async", "run_script"})
 _RUN_IN_FIJI_TOOLS = frozenset({"threshold_shootout"})
+_TOOL_ICONS = {
+    "describe_image": "🔎",
+    "triage_image": "🔎",
+    "get_image_info": "🔎",
+    "get_state": "🔎",
+    "get_metadata": "🔎",
+    "get_open_windows": "🔎",
+    "get_log": "🔎",
+    "capture_image": "📸",
+    "get_pixels_array": "🔬",
+    "region_stats": "🔬",
+    "line_profile": "🔬",
+    "get_histogram": "▁▃█▃▁",
+    "histogram_summary": "▁▃█▃▁",
+    "get_results": "💡",
+    "quick_object_count": "∑",
+    "count_bright_regions": "∑",
+    "threshold_shootout": "🪄",
+    "close_dialogs": "✖️",
+    "list_dialog_components": "🧾",
+    "click_dialog_button": "🖱️",
+    "set_dialog_text": "📝",
+    "set_dialog_checkbox": "✔️",
+    "set_dialog_dropdown": "▾",
+    "probe_plugin": "🧩",
+    "run_macro": "🪄",
+    "run_script": "🪄",
+    "run_macro_async": "🪄",
+    "job_status": "⏱️",
+    "cancel_job": "🛑",
+    "offer_recipe_save": "💾",
+    "save_recipe": "💾",
+    "run_shell": "💻",
+}
+_TOOL_ICON_PALETTES = {
+    "get_histogram": (
+        (92, 214, 255),
+        (102, 236, 173),
+        (255, 205, 82),
+        (255, 142, 92),
+        (206, 126, 255),
+    ),
+    "histogram_summary": (
+        (92, 214, 255),
+        (102, 236, 173),
+        (255, 205, 82),
+        (255, 142, 92),
+        (206, 126, 255),
+    ),
+}
+_TOOL_ICON_RGB = {
+    "quick_object_count": (88, 224, 255),
+    "count_bright_regions": (88, 224, 255),
+}
 _THRESHOLD_TRIGGER_RE = re.compile(
     r"\b(threshold(?:ing)?|segment(?:ation|ing)?|mask(?:ing)?|binary|binar(?:ise|ize|isation|ization))\b",
+    re.IGNORECASE,
+)
+_FILTER_TRIGGER_RE = re.compile(
+    r"\b(filter(?:s|ing)?|smoothing)\b",
+    re.IGNORECASE,
+)
+_MULTISERIES_TRIGGER_RE = re.compile(
+    r"\.(lif|czi|nd2|lsm)\b",
+    re.IGNORECASE,
+)
+_SCRIPT_LANG_TRIGGER_RE = re.compile(
+    r"\b(groovy|jython|javascript|run[_-]?script)\b",
+    re.IGNORECASE,
+)
+_HALLUCINATED_FILTER_TRIGGER_RE = re.compile(
+    r"\b(?:\d+|ten|several|different|various|compare|many|multiple)\b"
+    r"[^.?!\n]{0,40}?"
+    r"\b(?:filter(?:s|ing)?|filter\s+sets?)\b",
+    re.IGNORECASE,
+)
+_SAMPLE_IMAGE_NAME_RE = re.compile(
+    r"\b(blobs?|cell\s+colony|mri\s+stack|mri|fluorescent\s+cells?|"
+    r"t1\s+head|embryos?|leafs?|boats?|bridge|clown|hela(?:\s+cells?)?|"
+    r"m51\s+galaxy|m51)\b",
+    re.IGNORECASE,
+)
+_SAMPLE_IMAGE_VERB_RE = re.compile(
+    r"\b(open|load|use|show|get|give\s+me)\b",
+    re.IGNORECASE,
+)
+_RECIPE_LOOP_TRIGGER_RE = re.compile(
+    r"\b(?:\d+|several|each|all|every|multiple|many)\s+"
+    r"(?:different\s+|distinct\s+|\w+\s+){0,2}"
+    r"(?:filter|threshold|method|image|slice|series|condition)s?\b",
+    re.IGNORECASE,
+)
+_3D_RENDER_TRIGGER_RE = re.compile(
+    r"\b(3d\s+render(?:ing)?|3d\s+view(?:er)?|"
+    r"rotate\s+(?:the\s+)?(?:image|stack|cell|volume)|"
+    r"3dscript|batch\s+animation|volume\s+render|animation)\b",
+    re.IGNORECASE,
+)
+_ACTIVE_IMAGE_VERB_RE = re.compile(
+    r"\b(measure|threshold|segment|duplicate|save\s+(?:as|the)|crop|"
+    r"analy[sz]e|mask|histogram|count\s+particles)\b",
+    re.IGNORECASE,
+)
+_DECISION_MODE_RE = re.compile(
+    r"\b(?:should|which|compare|better|recommend|choose\s+between)\b",
+    re.IGNORECASE,
+)
+_EXPLAIN_MODE_RE = re.compile(
+    r"\b(?:why|explain|what\s+does|how\s+does|what\s+is\s+the)\b",
     re.IGNORECASE,
 )
 _PHASE9_POSITIVE_RE = re.compile(
@@ -130,6 +255,8 @@ _SLASH_COMMANDS: tuple[tuple[str, str], ...] = (
     ("/clear", "Reset the conversation history."),
     ("/queue <text>", "Queue a prompt to run after the current turn."),
     ("/interrupt [text]", "Abort the current turn and optionally queue replacement text."),
+    ("/think [on|off|auto]", "Force thinking mode on/off, or return to auto. No arg = show state."),
+    ("/mode [<name>|auto]", "Lock sampling mode (tool/plan/recover/explain/recipe) or return to auto."),
     ("/ccommands [name]", "List or load custom command prompts."),
     ("/save-recipe", "Offer to save the current workflow as a reusable recipe."),
 )
@@ -146,6 +273,47 @@ if sys.platform == "win32":
 
 class _TurnAborted(Exception):
     """Raised when the user hits Ctrl-C during a turn."""
+
+
+def _encode_capture_for_vision(path_str: str) -> str | None:
+    """Convert a capture PNG into a bounded JPEG base64 payload for Gemma vision."""
+    try:
+        if path_str.startswith('ERROR:'):
+            return None
+        path = Path(path_str)
+        if not path.is_file() or not os.access(path, os.R_OK):
+            return None
+        with Image.open(path) as src:
+            image = src.copy()
+        if image.mode != 'RGB':
+            image = image.convert('RGB')
+        if max(image.size) > 896:
+            scale = 896.0 / float(max(image.size))
+            image = image.resize(
+                (max(1, round(image.width * scale)), max(1, round(image.height * scale))),
+                Image.Resampling.LANCZOS,
+            )
+        while True:
+            buf = BytesIO()
+            image.save(buf, format='JPEG', quality=85)
+            data = buf.getvalue()
+            if len(data) <= 500_000:
+                return base64.b64encode(data).decode('ascii')
+            if max(image.size) < 256:
+                return None
+            image = image.resize(
+                (max(1, round(image.width * 0.75)), max(1, round(image.height * 0.75))),
+                Image.Resampling.LANCZOS,
+            )
+    except Exception:
+        return None
+
+
+def _prune_older_capture_images(messages: list[dict]) -> None:
+    """Drop any older tool-attached images before adding a fresh capture."""
+    for msg in reversed(messages):
+        if isinstance(msg, dict) and msg.get('role') == 'tool':
+            msg.pop('images', None)
 
 
 def _default_data_dir() -> Path:
@@ -278,78 +446,135 @@ def _colorize_chars(text: str, colors: tuple[tuple[int, int, int], ...]) -> str:
     if not text:
         return ""
     colored: list[str] = []
-    color_index = 0
-    for char in text:
+    for color_index, char in enumerate(text):
+        rgb = colors[color_index % len(colors)]
         if char == " ":
             colored.append(char)
             continue
-        rgb = colors[color_index % len(colors)]
         colored.append(_rgb_text(char, rgb))
-        color_index += 1
     return "".join(colored)
 
 
-def _status_animation_frame(label: str, elapsed_s: int) -> str:
+def _status_frame_index(elapsed_s: float, frame_s: float) -> int:
+    """Return the frame index for the current elapsed time."""
+    return max(0, int(elapsed_s / frame_s))
+
+
+def _status_animation_index(elapsed_s: float) -> int:
+    """Return the steady animation frame index."""
+    return _status_frame_index(elapsed_s, _STATUS_ANIMATION_FRAME_S)
+
+
+def _status_text_pulse_slot(elapsed_s: float, active_slots: int) -> int | None:
+    """Return the active text-pulse slot, or None during the resting gap."""
+    cycle = max(1, active_slots) + _STATUS_PULSE_REST_FRAMES
+    frame = _status_frame_index(elapsed_s, _STATUS_TEXT_FRAME_S) % cycle
+    if frame >= active_slots:
+        return None
+    return frame
+
+
+def _status_animation_frame(label: str, elapsed_s: float) -> str:
     """Return a one-frame ImageJ-themed activity animation."""
     frames: tuple[str, ...]
+    animation_index = _status_animation_index(elapsed_s)
     if label == _THINKING_STATUS:
         frames = (
-            "▁▃█▃▁",
-            "▃█▃▁▁",
-            "█▃▁▁▃",
-            "▃▁▁▃█",
-            "▁▁▃█▃",
+            "•···•",
+            "·•·•·",
+            "··●··",
+            "·•·•·",
         )
         palette = (
-            (78, 110, 255),
-            (76, 191, 255),
-            (76, 242, 187),
-            (181, 247, 92),
-            (255, 209, 102),
+            (255, 82, 82),
+            (255, 166, 92),
+            (255, 232, 92),
+            (168, 236, 96),
+            (88, 255, 132),
         )
     elif label == _INSPECTING_STATUS:
         frames = ("●○○", "○●○", "○○●", "○●○")
         palette = (
-            (99, 235, 255),
-            (72, 98, 124),
-            (72, 98, 124),
+            (92, 163, 255),
+            (92, 227, 159),
+            (215, 112, 255),
         )
     elif label == _WRITING_STATUS:
         frames = ("[>__]", "[_>_]", "[__>]", "[_>_]")
         palette = (
-            (84, 104, 120),
-            (77, 232, 123),
-            (56, 166, 106),
-            (56, 166, 106),
-            (84, 104, 120),
+            (92, 163, 255),
+            (255, 179, 71),
+            (255, 92, 141),
+            (92, 227, 159),
+            (92, 163, 255),
         )
     elif label == _RUNNING_FIJI_STATUS:
         frames = ("[▮  ]", "[ ▮ ]", "[  ▮]", "[ ▮ ]")
         palette = (
-            (79, 96, 112),
-            (120, 245, 167),
-            (120, 245, 167),
-            (120, 245, 167),
-            (79, 96, 112),
+            (92, 163, 255),
+            (255, 92, 141),
+            (255, 179, 71),
+            (92, 227, 159),
+            (92, 163, 255),
         )
     else:
         return ""
-    return _colorize_chars(frames[elapsed_s % len(frames)], palette)
+    return _colorize_chars(frames[animation_index % len(frames)], palette)
 
 
-def _format_status_line(label: str, elapsed_s: int) -> str:
+def _status_label_wave(label: str, elapsed_s: float) -> str:
+    """Render the activity label with a moving highlight wave."""
+    chars = list(str(label or ""))
+    wave_positions = [index for index, char in enumerate(chars) if not char.isspace()]
+    if not wave_positions:
+        return "\033[90m{}\033[0m".format(label)
+
+    pulse_slot = _status_text_pulse_slot(elapsed_s, len(wave_positions))
+    highlighted: list[str] = []
+
+    if pulse_slot is None:
+        for char in chars:
+            if char.isspace():
+                highlighted.append("\033[90m ")
+            else:
+                highlighted.append(_rgb_text(char, (128, 138, 156)))
+        return "".join(highlighted)
+
+    center_index = wave_positions[pulse_slot]
+
+    for index, char in enumerate(chars):
+        if char.isspace():
+            highlighted.append("\033[90m ")
+            continue
+        distance = abs(index - center_index)
+        if distance == 0:
+            rgb = (255, 255, 255)
+        elif distance == 1:
+            rgb = (214, 225, 255)
+        elif distance == 2:
+            rgb = (176, 190, 230)
+        else:
+            rgb = (128, 138, 156)
+        highlighted.append(_rgb_text(char, rgb))
+
+    return "".join(highlighted)
+
+
+def _format_status_line(label: str, elapsed_s: float) -> str:
     """Render one complete status line with colored animation."""
     animation = _status_animation_frame(label, elapsed_s)
+    label_text = _status_label_wave(label, elapsed_s)
+    elapsed_display = max(0, int(elapsed_s))
     if animation:
-        return "  \033[90m{} {}\033[90m ({}s)\033[0m".format(label, animation, elapsed_s)
-    return "  \033[90m{} ({}s)\033[0m".format(label, elapsed_s)
+        return "  {} {} \033[90m({}s)\033[0m".format(animation, label_text, elapsed_display)
+    return "  {} \033[90m({}s)\033[0m".format(label_text, elapsed_display)
 
 
 def _prompt_status_text() -> str:
     """Render the live working status line shown above the prompt."""
     label, started_at = _get_prompt_status()
     if label:
-        elapsed = max(0, int(time.time() - started_at))
+        elapsed = max(0.0, time.time() - started_at)
         return _format_status_line(label, elapsed)
     return ""
 
@@ -491,7 +716,7 @@ class _ActivityTicker:
                     self._visible_started_at = target_started_at
                     _set_prompt_status(target_label, target_started_at)
                 elif target_label:
-                    elapsed_s = max(0, int(now - self._visible_started_at))
+                    elapsed_s = max(0.0, now - self._visible_started_at)
                     line = _format_status_line(target_label, elapsed_s)
             if _prompt_status_enabled():
                 _invalidate_prompt()
@@ -503,7 +728,7 @@ class _ActivityTicker:
                 with _CONSOLE_LOCK:
                     sys.stdout.write("\r\033[K")
                     sys.stdout.flush()
-            self._stop.wait(1.0)
+            self._stop.wait(_STATUS_REFRESH_S)
 
 
 def _status_plan_for_model_round(
@@ -566,6 +791,24 @@ def _update_async_job_state(tool_name: str, result, async_job_active: bool) -> b
     return async_job_active
 
 
+def _tool_icon(tool_name: str) -> str:
+    """Return the display icon for one tool call."""
+    return _TOOL_ICONS.get(str(tool_name or "").strip(), "⚡")
+
+
+def _tool_icon_display(tool_name: str) -> str:
+    """Return one tool icon, with standalone coloring when needed."""
+    tool_key = str(tool_name or "").strip()
+    icon = _TOOL_ICONS.get(tool_key, "⚡")
+    palette = _TOOL_ICON_PALETTES.get(tool_key)
+    if palette:
+        return _colorize_chars(icon, palette) + "\033[0m"
+    rgb = _TOOL_ICON_RGB.get(tool_key)
+    if rgb:
+        return _rgb_text(icon, rgb) + "\033[0m"
+    return icon
+
+
 def _chat_interruptible(abort_event: threading.Event | None = None, **kwargs):
     """Run ollama.chat() in a worker thread so Ctrl-C on the main thread is responsive.
 
@@ -575,6 +818,11 @@ def _chat_interruptible(abort_event: threading.Event | None = None, **kwargs):
     the normal way.
     """
     return _run_interruptible(ollama.chat, abort_event=abort_event, **kwargs)
+
+
+def _format_assistant_reply(text: str) -> str:
+    """Normalize assistant text before writing it to the console."""
+    return normalize_inline_latex_symbols(text or "")
 
 
 def _format_tool_result(value) -> str:
@@ -600,12 +848,277 @@ def _format_tool_result(value) -> str:
         return str(value)
 
 
+def _format_tool_args_for_display(value, indent: int = 0) -> str:
+    """Pretty-print tool arguments, expanding multiline strings for readability."""
+    pad = " " * indent
+    child_pad = " " * (indent + 2)
+
+    if isinstance(value, dict):
+        if not value:
+            return "{}"
+        lines = ["{"]
+        items = list(value.items())
+        for index, (key, item) in enumerate(items):
+            rendered = _format_tool_args_for_display(item, indent + 2)
+            rendered_lines = rendered.splitlines() or [""]
+            entry = '{}: {}'.format(
+                json.dumps(str(key), ensure_ascii=False),
+                rendered_lines[0],
+            )
+            lines.append(child_pad + entry)
+            for extra_line in rendered_lines[1:]:
+                lines.append(extra_line)
+            if index < len(items) - 1:
+                lines[-1] += ","
+        lines.append(pad + "}")
+        return "\n".join(lines)
+
+    if isinstance(value, list):
+        if not value:
+            return "[]"
+        lines = ["["]
+        for index, item in enumerate(value):
+            rendered = _format_tool_args_for_display(item, indent + 2)
+            rendered_lines = rendered.splitlines() or [""]
+            lines.append(child_pad + rendered_lines[0])
+            for extra_line in rendered_lines[1:]:
+                lines.append(extra_line)
+            if index < len(value) - 1:
+                lines[-1] += ","
+        lines.append(pad + "]")
+        return "\n".join(lines)
+
+    if isinstance(value, str):
+        text = value.replace("\r\n", "\n").replace("\r", "\n")
+        if "\n" not in text:
+            return json.dumps(text, ensure_ascii=False)
+        lines = ["|"]
+        block_pad = " " * (indent + 2)
+        for raw_line in text.split("\n"):
+            lines.append(block_pad + raw_line)
+        return "\n".join(lines)
+
+    try:
+        return json.dumps(value, ensure_ascii=False)
+    except (TypeError, ValueError):
+        return str(value)
+
+
 def _canonical_json(value) -> str:
     """Stable JSON form used for exact-tool-repeat detection."""
     try:
         return json.dumps(value, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
     except (TypeError, ValueError):
         return str(value)
+
+
+def _sampling_profile_for_mode(mode: str) -> tuple[dict, bool]:
+    """Return one mode's sampling settings and default thinking flag."""
+    profile = SAMPLING_PROFILES.get(str(mode or ""))
+    if not isinstance(profile, dict):
+        return {"temperature": TEMPERATURE}, False
+    sampling = {key: value for key, value in profile.items() if key != "thinking"}
+    if not sampling:
+        sampling = {"temperature": TEMPERATURE}
+    return sampling, bool(profile.get("thinking"))
+
+
+def _auto_turn_mode(user_text: str, last_turn_had_failure: bool) -> str:
+    """Pick the automatic turn mode from text and carry-over failure state."""
+    if last_turn_had_failure:
+        return "recover"
+    text = str(user_text or "")
+    if _PHASE9_SLASH_RE.search(text):
+        return "recipe"
+    if _EXPLAIN_MODE_RE.search(text):
+        return "explain"
+    if _DECISION_MODE_RE.search(text):
+        return "plan"
+    return DEFAULT_MODE
+
+
+def _resolve_turn_config(
+    user_text: str,
+    mode_lock: str | None,
+    think_lock: bool | None,
+    last_turn_had_failure: bool,
+) -> dict:
+    """Pick mode + thinking once at the start of a user turn."""
+    auto_mode = _auto_turn_mode(user_text, last_turn_had_failure)
+    locked_mode = str(mode_lock or "").strip().lower() or None
+    if locked_mode not in SAMPLING_PROFILES:
+        locked_mode = None
+    mode = locked_mode or auto_mode
+    source = "lock" if locked_mode is not None else ("recover" if auto_mode == "recover" else "auto")
+    sampling, default_thinking = _sampling_profile_for_mode(mode)
+    thinking = bool(default_thinking if think_lock is None else think_lock)
+    return {
+        "mode": mode,
+        "thinking": thinking,
+        "sampling": sampling,
+        "source": source,
+        "mode_lock": locked_mode,
+        "think_lock": think_lock,
+        "auto_mode": auto_mode,
+        "recover_flipped": False,
+        "had_failure_state": {"value": False},
+    }
+
+
+def _turn_had_failure(turn_config: dict) -> bool:
+    """Return whether the current turn hit a failure path."""
+    state = turn_config.get("had_failure_state")
+    if isinstance(state, dict):
+        return bool(state.get("value"))
+    return False
+
+
+def _mark_turn_failure(turn_config: dict) -> None:
+    """Mark the turn as failed so the next turn can resolve to recover mode."""
+    state = turn_config.get("had_failure_state")
+    if not isinstance(state, dict):
+        state = {"value": False}
+        turn_config["had_failure_state"] = state
+    state["value"] = True
+
+
+def _log_turn_config(mode: str, thinking: bool, source: str) -> None:
+    """Log the current mode/thinking choice for later tuning."""
+    safety.friction_log(
+        {
+            "event": "turn_config",
+            "mode": str(mode or DEFAULT_MODE),
+            "thinking": bool(thinking),
+            "source": str(source or "auto"),
+        }
+    )
+
+
+def _apply_mode_to_turn_config(turn_config: dict, mode: str, source: str) -> None:
+    """Mutate an existing turn config to a new mode, respecting think locks."""
+    sampling, default_thinking = _sampling_profile_for_mode(mode)
+    think_lock = turn_config.get("think_lock")
+    turn_config["mode"] = mode
+    turn_config["source"] = source
+    turn_config["sampling"] = sampling
+    turn_config["thinking"] = bool(default_thinking if think_lock is None else think_lock)
+
+
+def _flip_turn_config_to_recover(turn_config: dict) -> bool:
+    """Switch the current turn to recover mode once, after a failure."""
+    _mark_turn_failure(turn_config)
+    if str(turn_config.get("mode") or "") == "recover":
+        return False
+    if bool(turn_config.get("recover_flipped")):
+        return False
+    _apply_mode_to_turn_config(turn_config, "recover", "recover")
+    turn_config["recover_flipped"] = True
+    _log_turn_config(turn_config["mode"], turn_config["thinking"], "recover")
+    return True
+
+
+def _looks_like_think_option_rejection(exc: BaseException) -> bool:
+    """True when Ollama rejected the native think option."""
+    text = "{}: {}".format(type(exc).__name__, exc).lower()
+    if "think" not in text:
+        return False
+    return any(
+        needle in text
+        for needle in (
+            "unknown",
+            "unexpected",
+            "invalid",
+            "unsupported",
+            "not allowed",
+            "not recognised",
+            "not recognized",
+        )
+    )
+
+
+def _mode_lock_label(mode_lock: str | None) -> str:
+    """Render one mode-lock label for slash-command status output."""
+    return str(mode_lock or "auto")
+
+
+def _think_lock_label(think_lock: bool | None) -> str:
+    """Render one think-lock label for slash-command status output."""
+    if think_lock is None:
+        return "auto"
+    return "on" if think_lock else "off"
+
+
+def _mode_profiles_summary() -> str:
+    """Render the list of available sampling profiles."""
+    return ", ".join(SAMPLING_PROFILES.keys())
+
+
+def _handle_think_command(
+    command_arg: str,
+    mode_state: dict,
+    think_state: dict,
+    last_turn_had_failure: bool,
+) -> str:
+    """Apply /think and return the one-line console confirmation."""
+    arg = str(command_arg or "").strip().lower()
+    if not arg:
+        preview = _resolve_turn_config(
+            "",
+            mode_state.get("lock"),
+            think_state.get("lock"),
+            last_turn_had_failure,
+        )
+        return "(thinking lock: {}; next turn: {} via {})".format(
+            _think_lock_label(think_state.get("lock")),
+            "on" if preview["thinking"] else "off",
+            preview["mode"],
+        )
+    if arg == "auto":
+        think_state["lock"] = None
+        return "(thinking lock: auto)"
+    if arg == "on":
+        think_state["lock"] = True
+        return "(thinking lock: on)"
+    if arg == "off":
+        think_state["lock"] = False
+        return "(thinking lock: off)"
+    return "(unknown think mode: {}; choose on, off, or auto)".format(arg)
+
+
+def _handle_mode_command(command_arg: str, mode_state: dict) -> str:
+    """Apply /mode and return the one-line console confirmation."""
+    arg = str(command_arg or "").strip().lower()
+    if not arg:
+        return "(mode lock: {}; profiles: {})".format(
+            _mode_lock_label(mode_state.get("lock")),
+            _mode_profiles_summary(),
+        )
+    if arg == "auto":
+        mode_state["lock"] = None
+        return "(mode lock: auto)"
+    if arg in SAMPLING_PROFILES:
+        mode_state["lock"] = arg
+        return "(mode lock: {})".format(arg)
+    return "(unknown mode: {}; choose auto or {})".format(arg, _mode_profiles_summary())
+
+
+def _turn_banner_text(
+    turn_config: dict,
+    mode_state: dict,
+    think_state: dict,
+    previous_auto_mode: str | None,
+) -> str:
+    """Build the per-turn mode/thinking banner, if needed."""
+    lines: list[str] = []
+    mode_lock = mode_state.get("lock")
+    think_lock = think_state.get("lock")
+    if mode_lock is not None:
+        lines.append("[mode] {} (locked)".format(turn_config["mode"]))
+    elif previous_auto_mode is not None and turn_config["mode"] != previous_auto_mode:
+        lines.append("[mode] {}".format(turn_config["mode"]))
+    if think_lock is not None:
+        lines.append("[thinking] {} (locked)".format("on" if turn_config["thinking"] else "off"))
+    return "\n".join(lines)
 
 
 def _format_error_result(error_text: str, dialogs) -> str:
@@ -728,7 +1241,10 @@ def _read_input(prompt_text: str, ctx_state: dict | None = None, completer=None)
                     int(ctx_state.get("limit", NUM_CTX)),
                 )
             )
-        return input(prompt_text)
+        line = input("\033[32myou> ")
+        sys.stdout.write("\033[0m")
+        sys.stdout.flush()
+        return line
 
     kwargs = {
         "bottom_toolbar": lambda: _render_prompt_toolbar(ctx_state),
@@ -763,8 +1279,10 @@ def _one_turn(
     messages: list,
     tools: list,
     tool_map: dict,
+    turn_config: dict,
+    think_capability_state: dict | None = None,
     abort_event: threading.Event | None = None,
-) -> str:
+) -> tuple[str, bool]:
     """Run one user turn through ollama.chat(), dispatching tools as needed."""
     ticker = _ActivityTicker()
     turn_start = time.time()
@@ -772,6 +1290,11 @@ def _one_turn(
     last_tool_signature = None
     identical_tool_repeats = 0
     async_job_active = False
+    think_capability_state = think_capability_state or {"supported": True, "logged": False}
+    # Scratchpad shared across post-tool injectors within this turn.
+    # Injectors can read/write any key; example: _stale_error_loop_injector
+    # uses turn_state["last_tool_error"] to compare consecutive errors.
+    turn_state: dict = {}
 
     ticker.start(_THINKING_STATUS)
     try:
@@ -783,15 +1306,47 @@ def _one_turn(
                 async_job_active,
             )
             ticker.set_phase(model_initial, model_transitions)
+            options = {
+                **turn_config["sampling"],
+                "num_ctx": NUM_CTX,
+            }
+            if turn_config["thinking"] and think_capability_state.get("supported", True):
+                options["think"] = True
             try:
-                resp = _chat_interruptible(
-                    abort_event=abort_event,
-                    model=model,
-                    messages=messages,
-                    tools=tools,
-                    stream=False,
-                    options={"temperature": TEMPERATURE, "num_ctx": NUM_CTX},
-                )
+                try:
+                    resp = _chat_interruptible(
+                        abort_event=abort_event,
+                        model=model,
+                        messages=messages,
+                        tools=tools,
+                        stream=False,
+                        options=options,
+                    )
+                except Exception as exc:
+                    if not (
+                        options.get("think") is True
+                        and _looks_like_think_option_rejection(exc)
+                    ):
+                        raise
+                    think_capability_state["supported"] = False
+                    if not think_capability_state.get("logged", False):
+                        safety.friction_log(
+                            {
+                                "event": "ollama_think_unsupported",
+                                "error": "{}: {}".format(type(exc).__name__, exc),
+                            }
+                        )
+                        think_capability_state["logged"] = True
+                    fallback_options = dict(options)
+                    fallback_options.pop("think", None)
+                    resp = _chat_interruptible(
+                        abort_event=abort_event,
+                        model=model,
+                        messages=messages,
+                        tools=tools,
+                        stream=False,
+                        options=fallback_options,
+                    )
             finally:
                 _invalidate_prompt()
 
@@ -811,7 +1366,10 @@ def _one_turn(
                     stats += " ({} tok, {:.1f} tok/s)".format(eval_tokens, tok_s)
                 stats += "\033[0m"
                 content = (getattr(msg, "content", "") or "").strip()
-                return "{}\n  {}".format(content, stats)
+                return "{}\n  {}".format(
+                    _format_assistant_reply(content),
+                    stats,
+                ), _turn_had_failure(turn_config)
 
             for call in tool_calls:
                 name = call.function.name
@@ -820,13 +1378,32 @@ def _one_turn(
                     result_text = "ERROR: unknown tool '{}'".format(name)
                     _console_emit("  \033[31m✗ {}\033[0m".format(result_text), reserve_status_line=True)
                     messages.append({"role": "tool", "content": result_text})
+                    _flip_turn_config_to_recover(turn_config)
                     continue
                 _console_emit(
-                    "  \033[33m⚡ {}({})\033[0m".format(
-                        name, json.dumps(args)
+                    "  {} \033[33m{}({})\033[0m".format(
+                        _tool_icon_display(name),
+                        name,
+                        _format_tool_args_for_display(args)
                     ),
                     reserve_status_line=True,
                 )
+                pre_dispatch_note = _pre_dispatch_abort_note(name, args)
+                if pre_dispatch_note is not None:
+                    _console_emit(
+                        "  \033[31m⛔ pre-dispatch abort: {}\033[0m".format(
+                            pre_dispatch_note[:200]
+                        ),
+                        reserve_status_line=True,
+                    )
+                    messages.append({
+                        "role": "tool",
+                        "content": "ABORTED: {}".format(pre_dispatch_note),
+                        "tool_name": name,
+                    })
+                    messages.append({"role": "system", "content": pre_dispatch_note})
+                    _flip_turn_config_to_recover(turn_config)
+                    continue
                 tool_initial, tool_transitions = _status_plan_for_tool(
                     name,
                     ticker.current_label(),
@@ -846,12 +1423,30 @@ def _one_turn(
                 if async_job_active and not previous_async_state:
                     ticker.set_phase(_RUNNING_FIJI_STATUS)
                 result_text = _format_tool_result(result)
+                if result_text.startswith("ERROR:"):
+                    _flip_turn_config_to_recover(turn_config)
                 display_text = result_text
                 if len(display_text) > 20480:
                     hidden = len(display_text) - 20480
                     display_text = display_text[:20480] + "\n… [truncated, {} chars hidden]".format(hidden)
                 _console_emit("  \033[90m→ {}\033[0m".format(display_text), reserve_status_line=True)
-                messages.append({"role": "tool", "content": result_text})
+                msg = {'role': 'tool', 'content': result_text, 'tool_name': name}
+                if name == 'capture_image':
+                    _b64 = _encode_capture_for_vision(result_text)
+                    if _b64:
+                        msg['images'] = [_b64]
+                        _prune_older_capture_images(messages)
+                messages.append(msg)
+                for post_note in _post_tool_system_notes(name, args, result_text, turn_state):
+                    messages.append({"role": "system", "content": post_note})
+                    preview_len = 140
+                    preview = post_note[:preview_len] + (
+                        "…" if len(post_note) > preview_len else ""
+                    )
+                    _console_emit(
+                        "  \033[95m↯ post-tool note: {}\033[0m".format(preview),
+                        reserve_status_line=True,
+                    )
                 signature = (name, _canonical_json(args), result_text)
                 if signature == last_tool_signature:
                     identical_tool_repeats += 1
@@ -877,10 +1472,11 @@ def _one_turn(
                         name,
                         _canonical_json(args),
                         elapsed,
-                    )
+                    ), _turn_had_failure(turn_config)
     except _TurnAborted:
+        _mark_turn_failure(turn_config)
         elapsed = time.time() - turn_start
-        return "\033[31m(aborted by user after {:.1f}s)\033[0m".format(elapsed)
+        return "\033[31m(aborted by user after {:.1f}s)\033[0m".format(elapsed), True
     finally:
         ticker.stop()
 
@@ -960,6 +1556,8 @@ def _drain_fiji_events(
             note = formatter(frame)
             if note is None:
                 continue
+            if formatter is _format_macro_failure_note and active_turn is not None:
+                _flip_turn_config_to_recover(active_turn.get("turn_config") or {})
             if active_turn is not None:
                 messages.append({"role": "system", "content": note})
             else:
@@ -977,6 +1575,267 @@ def _phase6_system_note(user_text: str) -> str | None:
         "Before choosing or running a threshold-based segmentation, call "
         "threshold_shootout() and use its montage plus metrics."
     )
+
+
+def _filter_vocab_system_note(user_text: str) -> str | None:
+    """Re-surface the filter-vs-threshold vocabulary when the user mentions filters."""
+    if not isinstance(user_text, str) or not _FILTER_TRIGGER_RE.search(user_text):
+        return None
+    return (
+        "The user mentioned filters. Filter = intensity operation (Gaussian, "
+        "Median, Mean, Unsharp, Convolve, Variance, Bandpass). Threshold = "
+        "binarisation method (Otsu, Li, Default). 'N filters' never means "
+        "'N threshold methods' — do not substitute threshold_shootout."
+    )
+
+
+def _multiseries_note(user_text: str) -> str | None:
+    """Warn about .lif/.czi/.nd2/.lsm multi-series container files."""
+    if not isinstance(user_text, str) or not _MULTISERIES_TRIGGER_RE.search(user_text):
+        return None
+    return (
+        "The user mentioned a .lif / .czi / .nd2 / .lsm file. These bundle many "
+        "series — the macro importer with `series_1=true series_2=true ...` "
+        "SILENTLY opens only series 1. Use list_lif_series(path) to inspect, then "
+        "open_lif_series(path, indices) to open pixels. See "
+        "bioformats-multiseries-reference.md."
+    )
+
+
+def _groovy_jython_note(user_text: str) -> str | None:
+    """Pre-empt common Groovy/Jython hallucinations."""
+    if not isinstance(user_text, str) or not _SCRIPT_LANG_TRIGGER_RE.search(user_text):
+        return None
+    return (
+        "The user asked for Groovy / Jython / JavaScript. These do NOT exist: "
+        "IJ.setAutoThreshold, imp.setDirty, imp.isDirty, ij.plugin.filter.BlurFilter "
+        "/ MeanFilter / MedianFilter / VarianceFilter / UnsharpMaskFilter. "
+        "Delegate UI steps via IJ.runMacro(\"...\"). Set imp.changes = false BEFORE "
+        "imp.close() to silence 'Save changes?'. On ImportError / AttributeError / "
+        "MissingMethod, pivot to run_macro — do not rename-and-retry."
+    )
+
+
+def _hallucinated_filter_cmds_note(user_text: str) -> str | None:
+    """Name the filter commands that don't exist in base Fiji."""
+    if not isinstance(user_text, str) or not _HALLUCINATED_FILTER_TRIGGER_RE.search(user_text):
+        return None
+    return (
+        "User asked for multiple filters. These do NOT exist in base Fiji: "
+        "\"Laplacian\", \"DoG\", \"Difference of Gaussians\", \"Band-pass Filter\" "
+        "(hyphenated). Use Convolve... with a 3x3 kernel for Laplacian; two "
+        "Gaussian Blur... + Image Calculator subtract for DoG; "
+        "\"Bandpass Filter...\" (no hyphen) for bandpass. probe_plugin() any "
+        "filter name you're unsure about BEFORE looping."
+    )
+
+
+def _sample_image_note(user_text: str) -> str | None:
+    """Provide exact literal names for built-in sample images."""
+    if not isinstance(user_text, str):
+        return None
+    if not _SAMPLE_IMAGE_NAME_RE.search(user_text):
+        return None
+    if not _SAMPLE_IMAGE_VERB_RE.search(user_text):
+        return None
+    return (
+        "Sample images load by EXACT literal name. Correct: \"Blobs (25K)\", "
+        "\"Cell Colony (31K)\", \"Clown (14K)\", \"Embryos (42K)\", "
+        "\"Fluorescent Cells (400K)\", \"HeLa Cells (1.3M)\", \"Leaf (36K)\", "
+        "\"M51 Galaxy (177K)\", \"MRI Stack (528K)\", \"T1 Head (2.4M)\", "
+        "\"Boats\", \"Bridge (174K)\". Size guesses like \"Blobs (2K)\" fail."
+    )
+
+
+def _recipe_before_loop_note(user_text: str, is_first_turn: bool) -> str | None:
+    """Nudge toward recipe_search on the first turn of a multi-iteration request."""
+    if not is_first_turn:
+        return None
+    if not isinstance(user_text, str) or not _RECIPE_LOOP_TRIGGER_RE.search(user_text):
+        return None
+    return (
+        "Before hand-rolling a loop over N filters / thresholds / images, call "
+        "recipe_search(\"<task>\"). If a recipe exists, follow it. If not, write "
+        "ONE iteration, run it, verify the count is sane, THEN scale to N — "
+        "never submit the whole loop untested."
+    )
+
+
+def _3d_render_prep_note(user_text: str) -> str | None:
+    """Inject the 3D rendering prep checklist."""
+    if not isinstance(user_text, str) or not _3D_RENDER_TRIGGER_RE.search(user_text):
+        return None
+    return (
+        "User asked for a 3D render / rotation. Checklist: (1) convert to 8-bit "
+        "— 3D Viewer and 3Dscript require it. (2) For 3Dscript, scale XY FIRST "
+        "(output size = input size) and do NOT Z-interpolate (it drops signal "
+        "below the alpha threshold). (3) Isolate objects with a Multiply mask — "
+        "crop alone lets neighbours bleed in."
+    )
+
+
+def _selectimage_anchor_note(user_text: str) -> str | None:
+    """Remind to anchor macros with selectImage when touching the active image."""
+    if not isinstance(user_text, str) or not _ACTIVE_IMAGE_VERB_RE.search(user_text):
+        return None
+    return (
+        "User referenced an active-image operation (Duplicate, setThreshold, "
+        "Convert to Mask, saveAs, getPixel, Measure, Analyze Particles). If more "
+        "than one image is open, the macro MUST start with "
+        "selectImage(\"<exact title>\") or it may land on the wrong image. "
+        "Check windows({}) to see what's open if unsure."
+    )
+
+
+# ---------------------------------------------------------------------------
+# Post-tool-result injection point
+#
+# After every tool call, each injector in _POST_TOOL_INJECTORS is run against
+# the tool name, the args we sent, the stringified result, and a turn-scoped
+# state dict. Each injector returns a note string (or None). Notes are
+# appended to the message history as {"role": "system", ...} BEFORE the next
+# model round runs, giving the agent just-in-time guidance based on what
+# Fiji actually said.
+#
+# To add a new post-tool injector: write a function matching the signature
+# below and append it to _POST_TOOL_INJECTORS. Keep notes 25-60 words,
+# imperative, same tone as the pre-turn injectors above.
+# ---------------------------------------------------------------------------
+
+
+def _normalise_tool_error(result_text: str) -> str | None:
+    """Normalise a tool error string for same-error comparison."""
+    if not isinstance(result_text, str) or not result_text.startswith("ERROR:"):
+        return None
+    first_line = result_text.splitlines()[0] if result_text else ""
+    stripped = re.sub(r"\bline\s+\d+\b", "line <N>", first_line, flags=re.IGNORECASE)
+    stripped = re.sub(r"\s+", " ", stripped).strip().lower()
+    return stripped or None
+
+
+def _stale_error_loop_injector(
+    tool_name: str,
+    args: dict,
+    result_text: str,
+    turn_state: dict,
+) -> str | None:
+    """Fire when two macro/script calls in a row returned the same error."""
+    if tool_name not in {"run_macro", "run_script", "run_macro_async", "job_status"}:
+        return None
+    current = _normalise_tool_error(result_text)
+    if current is None:
+        turn_state["last_tool_error"] = None
+        return None
+    previous = turn_state.get("last_tool_error")
+    turn_state["last_tool_error"] = current
+    if previous is None or previous != current:
+        return None
+    return (
+        "Two tool calls in a row returned the same error. STOP submitting "
+        "variants. Next calls: close_dialogs({}), then get_open_windows({}), "
+        "then get_log({}). If the error's line number doesn't match your last "
+        "macro, a previous dialog is still blocking the queue — the error is "
+        "stale."
+    )
+
+
+def _hallucination_reflector_injector(
+    tool_name: str,
+    args: dict,
+    result_text: str,
+    turn_state: dict,
+) -> str | None:
+    """Fire when the tool result reports an Unrecognized Fiji command."""
+    if not isinstance(result_text, str):
+        return None
+    match = re.search(r'Unrecognized command:\s*"([^"]+)"', result_text)
+    if match is None:
+        return None
+    hallucinated = match.group(1)
+    return (
+        "Last error was: Unrecognized command: \"{name}\". This command is not "
+        "in Fiji. Do NOT retry a tweaked spelling. "
+        "probe_plugin({{\"name\": \"{name}\"}}) to confirm, or grep "
+        ".tmp/commands.raw.txt. If it genuinely doesn't exist, rebuild from "
+        "primitives (DoG = two Gaussians + Image Calculator; Laplacian = "
+        "Convolve with kernel)."
+    ).format(name=hallucinated)
+
+
+def _no_image_reflex_injector(
+    tool_name: str,
+    args: dict,
+    result_text: str,
+    turn_state: dict,
+) -> str | None:
+    """Fire when a macro returned a No Image / No window-with-title error."""
+    if not isinstance(result_text, str):
+        return None
+    if not re.search(r"(?i)no\s+image|no\s+window\s+with\s+the\s+title", result_text):
+        return None
+    return (
+        "A \"No Image\" / \"No window with the title\" error fired. The image "
+        "the macro expected is gone or never existed. Your next call MUST be "
+        "get_open_windows({}) — not another run_macro. Then "
+        "selectImage(\"<exact title from that list>\") before retrying."
+    )
+
+
+# Future post-tool injectors — keep the stub and the sketch so they slot in
+# cleanly when enabled. See docs/ollama/future-injectors.md.
+def _nresults_zero_injector(
+    tool_name: str,
+    args: dict,
+    result_text: str,
+    turn_state: dict,
+) -> str | None:
+    """FUTURE: detect Analyze Particles counts returning zero due to summarize trap."""
+    return None
+
+
+_POST_TOOL_INJECTORS: tuple = (
+    _stale_error_loop_injector,
+    _hallucination_reflector_injector,
+    _no_image_reflex_injector,
+    # _nresults_zero_injector,  # disabled — see docs/ollama/future-injectors.md
+)
+
+
+def _post_tool_system_notes(
+    tool_name: str,
+    args: dict,
+    result_text: str,
+    turn_state: dict,
+) -> list[str]:
+    """Run every active post-tool injector; return the list of notes to inject."""
+    notes: list[str] = []
+    for injector in _POST_TOOL_INJECTORS:
+        try:
+            note = injector(tool_name, args or {}, result_text, turn_state)
+        except Exception:
+            note = None
+        if isinstance(note, str) and note.strip():
+            notes.append(note.strip())
+    return notes
+
+
+# ---------------------------------------------------------------------------
+# Pre-dispatch injection point
+#
+# Called BEFORE a tool call is sent to Fiji. If it returns a non-None string,
+# the tool call is ABORTED, the string is appended as a system message, and
+# the model gets another round to replan. Use sparingly — only for guards
+# that would corrupt data (e.g. bitdepth AND on 16-bit images).
+#
+# No active guards yet; the hook exists so the bitdepth guardian and any
+# future pre-dispatch checks can slot in without touching _one_turn.
+# See docs/ollama/future-injectors.md.
+# ---------------------------------------------------------------------------
+
+
+def _pre_dispatch_abort_note(tool_name: str, args: dict) -> str | None:
+    """Return a note that aborts this tool call, or None to proceed."""
+    return None
 
 
 def _phase9_system_note(user_text: str) -> str | None:
@@ -1003,18 +1862,32 @@ def _turn_worker(
     messages: list,
     tools: list,
     tool_map: dict,
+    turn_config: dict,
+    think_capability_state: dict,
     abort_event: threading.Event,
     result_queue: "queue.Queue[dict]",
 ) -> None:
     """Run one turn in a worker thread and push the result back to the main loop."""
     try:
-        reply = _one_turn(model, messages, tools, tool_map, abort_event=abort_event)
+        reply, had_failure = _one_turn(
+            model,
+            messages,
+            tools,
+            tool_map,
+            turn_config,
+            think_capability_state=think_capability_state,
+            abort_event=abort_event,
+        )
     except Exception as exc:
         result_queue.put(
-            {"status": "error", "error": "ERROR: {}: {}".format(type(exc).__name__, exc)}
+            {
+                "status": "error",
+                "error": "ERROR: {}: {}".format(type(exc).__name__, exc),
+                "had_failure": True,
+            }
         )
         return
-    result_queue.put({"status": "ok", "reply": reply})
+    result_queue.put({"status": "ok", "reply": reply, "had_failure": had_failure})
 
 
 def _input_worker(
@@ -1040,6 +1913,8 @@ def run(
     model: str = DEFAULT_MODEL,
     no_friction_log: bool = False,
     prompt_filename: str = "GEMMA.md",
+    initial_mode_lock: str | None = None,
+    initial_think_lock: bool | None = None,
 ) -> int:
     """Start the interactive chat loop. Returns a shell-style exit code.
 
@@ -1051,6 +1926,8 @@ def run(
         prompt_filename: Name of the system-prompt markdown file to load
             from this package's directory. Use "GEMMA_CLAUDE.md" to run
             the Claude-style variant for A/B comparison.
+        initial_mode_lock: Optional starting lock for the sampling mode.
+        initial_think_lock: Optional starting lock for native thinking mode.
     """
     del no_friction_log  # no-op until friction.py lands in a later phase
 
@@ -1058,6 +1935,9 @@ def run(
     tool_map = _rebuild_tool_map()
     slash_completer = _build_slash_completer()
     ctx_state = {"used": 0, "limit": NUM_CTX}
+    mode_state = {"lock": initial_mode_lock if initial_mode_lock in SAMPLING_PROFILES else None}
+    think_state = {"lock": initial_think_lock if isinstance(initial_think_lock, bool) else None}
+    think_capability_state = {"supported": True, "logged": False}
 
     _console_emit("gemma4_31b_agent — model={} — {} tools — prompt={}".format(
         model, len(tools), prompt_filename
@@ -1088,6 +1968,9 @@ def run(
 
     active_turn: dict | None = None
     exiting = False
+    last_turn_had_failure = False
+    previous_auto_mode: str | None = None
+    previous_banner_text = ""
 
     try:
         while True:
@@ -1097,18 +1980,55 @@ def run(
                 while pending_system_notes:
                     messages.append({"role": "system", "content": pending_system_notes.popleft()})
                 prompt_text = pending_prompts.popleft()
-                phase6_note = _phase6_system_note(prompt_text)
-                if phase6_note is not None:
-                    messages.append({"role": "system", "content": phase6_note})
-                phase9_note = _phase9_system_note(prompt_text)
-                if phase9_note is not None:
-                    messages.append({"role": "system", "content": phase9_note})
+                turn_config = _resolve_turn_config(
+                    prompt_text,
+                    mode_state.get("lock"),
+                    think_state.get("lock"),
+                    last_turn_had_failure,
+                )
+                _log_turn_config(turn_config["mode"], turn_config["thinking"], turn_config["source"])
+                is_first_user_turn = not any(
+                    isinstance(m, dict) and m.get("role") == "user"
+                    for m in messages
+                )
+                pre_turn_notes = [
+                    _phase6_system_note(prompt_text),
+                    _filter_vocab_system_note(prompt_text),
+                    _multiseries_note(prompt_text),
+                    _groovy_jython_note(prompt_text),
+                    _hallucinated_filter_cmds_note(prompt_text),
+                    _sample_image_note(prompt_text),
+                    _recipe_before_loop_note(prompt_text, is_first_user_turn),
+                    _3d_render_prep_note(prompt_text),
+                    _selectimage_anchor_note(prompt_text),
+                    _phase9_system_note(prompt_text),
+                ]
+                for note in pre_turn_notes:
+                    if isinstance(note, str) and note.strip():
+                        messages.append({"role": "system", "content": note.strip()})
+                banner_text = _turn_banner_text(
+                    turn_config,
+                    mode_state,
+                    think_state,
+                    previous_auto_mode,
+                )
+                if banner_text and banner_text != previous_banner_text:
+                    messages.append({"role": "system", "content": banner_text})
                 messages.append({"role": "user", "content": prompt_text})
                 abort_event = threading.Event()
                 result_queue: "queue.Queue[dict]" = queue.Queue(maxsize=1)
                 thread = threading.Thread(
                     target=_turn_worker,
-                    args=(model, messages, tools, tool_map, abort_event, result_queue),
+                    args=(
+                        model,
+                        messages,
+                        tools,
+                        tool_map,
+                        turn_config,
+                        think_capability_state,
+                        abort_event,
+                        result_queue,
+                    ),
                     daemon=True,
                 )
                 active_turn = {
@@ -1116,15 +2036,19 @@ def run(
                     "abort_event": abort_event,
                     "result_queue": result_queue,
                     "prompt": prompt_text,
+                    "turn_config": turn_config,
                 }
+                previous_auto_mode = turn_config["auto_mode"]
+                previous_banner_text = banner_text
                 thread.start()
 
             if active_turn is not None and not active_turn["thread"].is_alive():
                 result = active_turn["result_queue"].get_nowait()
                 if result["status"] == "ok":
-                    _console_emit("gemma> {}\n".format(result["reply"]), reserve_status_line=True)
+                    _console_emit("\033[34mgemma>\033[0m {}\n".format(result["reply"]), reserve_status_line=True)
                 else:
                     _console_emit("{}\n".format(result["error"]), reserve_status_line=True)
+                last_turn_had_failure = bool(result.get("had_failure", False))
                 ctx_state["used"] = _estimate_tokens(messages)
                 active_turn = None
                 if exiting and not pending_prompts:
@@ -1169,7 +2093,27 @@ def run(
                 pending_prompts.clear()
                 pending_system_notes.clear()
                 ctx_state["used"] = 0
+                last_turn_had_failure = False
+                previous_auto_mode = None
+                previous_banner_text = ""
                 _console_emit("(conversation cleared)", reserve_status_line=True)
+                continue
+            if command == "/think":
+                _console_emit(
+                    _handle_think_command(
+                        command_arg,
+                        mode_state,
+                        think_state,
+                        last_turn_had_failure,
+                    ),
+                    reserve_status_line=True,
+                )
+                continue
+            if command == "/mode":
+                _console_emit(
+                    _handle_mode_command(command_arg, mode_state),
+                    reserve_status_line=True,
+                )
                 continue
             if command in {"/ccommands", "/ccommand"}:
                 if not command_arg:

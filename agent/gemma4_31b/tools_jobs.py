@@ -6,6 +6,7 @@ in TCPCommandServer.dispatchCore.
 
 from __future__ import annotations
 
+from . import events
 from . import lint
 from . import safety
 from . import visual_diff
@@ -112,6 +113,11 @@ def job_status(job_id: str) -> dict:
     if state == "completed" and isinstance(tracked, dict):
         safety.audit_log("macro", tracked.get("code", ""), success=True, metadata={"job_id": job_id, "async": True})
         safety.note_execution(True)
+        _job_new = result.get("newImages") if isinstance(result, dict) else None
+        new_images = [str(t) for t in _job_new if t is not None] if isinstance(_job_new, list) else []
+        for title in new_images:
+            if title.strip():
+                events.mark_image_created_by_agent(title)
         before_thumb = tracked.get("before_thumb")
         if isinstance(before_thumb, dict):
             try:
@@ -119,8 +125,6 @@ def job_status(job_id: str) -> dict:
             except Exception:
                 after_thumb = None
             if isinstance(after_thumb, dict) and "error" not in after_thumb:
-                _job_new = result.get("newImages") if isinstance(result, dict) else None
-                new_images = [str(t) for t in _job_new if t is not None] if isinstance(_job_new, list) else []
                 report = visual_diff.diff_report(
                     before_thumb, after_thumb, tracked.get("code", ""), new_images=new_images
                 )
