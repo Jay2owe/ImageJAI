@@ -4,8 +4,10 @@ import com.google.gson.JsonObject;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
@@ -46,6 +48,14 @@ public class EventBus {
     private final CopyOnWriteArrayList<Subscription> subs = new CopyOnWriteArrayList<Subscription>();
     private final ConcurrentHashMap<String, Long> lastPublish = new ConcurrentHashMap<String, Long>();
     private final AtomicLong seqCounter = new AtomicLong(0);
+    // Nestable per-pattern suppression. Publishers check isSuppressed(topic)
+    // before dispatching. Used by handleExecuteMacro to drop image.* events
+    // while a macro is in flight — those events trigger the agent to send
+    // concurrent get_image_info / get_histogram calls whose invokeLater
+    // EDT tasks race against Duplicate's imp.show(), leaving the wrong
+    // window as WindowManager.currentImage when the macro's next line
+    // (setAutoThreshold / Convert to Mask) runs.
+    private final ConcurrentHashMap<String, AtomicInteger> suppressCounts = new ConcurrentHashMap<String, AtomicInteger>();
 
     private EventBus() {}
 
@@ -77,6 +87,7 @@ public class EventBus {
      */
     public void publish(String topic, JsonObject data) {
         if (topic == null) return;
+        if (isSuppressed(topic)) return;
         long now = System.currentTimeMillis();
         Long prev = lastPublish.get(topic);
         if (prev != null && (now - prev) < COALESCE_MS) {
@@ -108,6 +119,41 @@ public class EventBus {
     /** Current subscriber count — used by TCPCommandServer to enforce the 8-subscriber cap. */
     public int subscriberCount() {
         return subs.size();
+    }
+
+    /**
+     * Push a suppression scope for all topics matching {@code pattern} (same
+     * wildcard semantics as {@link #subscribe}). Every {@code pushSuppress}
+     * must be balanced by exactly one {@code popSuppress} — use try/finally.
+     * Counts nest safely across threads.
+     */
+    public void pushSuppress(String pattern) {
+        if (pattern == null) return;
+        AtomicInteger count = suppressCounts.get(pattern);
+        if (count == null) {
+            AtomicInteger created = new AtomicInteger(0);
+            count = suppressCounts.putIfAbsent(pattern, created);
+            if (count == null) count = created;
+        }
+        count.incrementAndGet();
+    }
+
+    /** Balance a prior {@link #pushSuppress} for the same pattern. */
+    public void popSuppress(String pattern) {
+        if (pattern == null) return;
+        AtomicInteger count = suppressCounts.get(pattern);
+        if (count == null) return;
+        int n = count.decrementAndGet();
+        if (n < 0) count.set(0);
+    }
+
+    private boolean isSuppressed(String topic) {
+        if (suppressCounts.isEmpty()) return false;
+        for (Map.Entry<String, AtomicInteger> e : suppressCounts.entrySet()) {
+            if (e.getValue().get() <= 0) continue;
+            if (matches(e.getKey(), topic)) return true;
+        }
+        return false;
     }
 
     /**
