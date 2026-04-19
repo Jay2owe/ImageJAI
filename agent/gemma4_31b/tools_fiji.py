@@ -8,7 +8,6 @@ import base64
 import datetime
 import os
 
-from . import auto_probe
 from . import events
 from . import lint
 from . import safety
@@ -38,6 +37,35 @@ def _error_text(resp: object) -> str:
     if isinstance(result, dict) and isinstance(result.get("error"), str):
         return result["error"]
     return "unknown error"
+
+
+def _attach_post_timeout_state(resp: object) -> object:
+    """When send() timed out, auto-probe Fiji state so the agent has context.
+
+    Without this the agent only sees the plain timeout string and its only
+    recovery is a blind retry (which often re-hits the same stuck dialog).
+    Attach what's open, what got dismissed, and the tail of the log as
+    `post_timeout_state` on the reply. Each sub-call is best-effort — if Fiji
+    is genuinely dead the probes also time out and are skipped.
+    """
+    if not isinstance(resp, dict) or not resp.get("timeout"):
+        return resp
+    state = {}
+    try:
+        state["close_dialogs"] = send("close_dialogs")
+    except Exception:
+        pass
+    try:
+        state["windows"] = send("get_open_windows")
+    except Exception:
+        pass
+    try:
+        state["log_tail"] = send("get_log")
+    except Exception:
+        pass
+    resp = dict(resp)
+    resp["post_timeout_state"] = state
+    return resp
 
 
 def _handle_dialog_aftermath(resp, code):
@@ -145,13 +173,6 @@ def run_macro(code: str) -> dict:
         safety.note_execution(False)
         return {"ok": False, "error": lint_result}
 
-    probe_hint = auto_probe.check_macro(code)
-    if probe_hint is not None:
-        safety.friction_log({"event_type": "auto_probe_reject", "code": code, "error": probe_hint})
-        safety.note_execution(False)
-        return {"ok": False, "error": probe_hint, "type": "auto_probe_reject"}
-    schema_hints = auto_probe.collect_schema_hints(code)
-
     before_thumb = None
     if visual_diff.is_destructive(code):
         try:
@@ -162,6 +183,7 @@ def run_macro(code: str) -> dict:
             before_thumb = candidate
 
     resp = send("execute_macro", code=code)
+    resp = _attach_post_timeout_state(resp)
     resp = _handle_dialog_aftermath(resp, code)
     # Mark any images this macro just created so auto-triage on image.opened
     # events skips them — the agent's intermediate masks should never fire
@@ -185,9 +207,6 @@ def run_macro(code: str) -> dict:
         return resp
     safety.audit_log("macro", code, success=True)
     safety.note_execution(True)
-    if schema_hints and isinstance(resp, dict):
-        resp = dict(resp)
-        resp["plugin_schema"] = schema_hints
 
     if before_thumb is not None:
         try:
@@ -220,7 +239,18 @@ def run_script(code: str, language: str) -> dict:
         code: Script source code.
         language: Script language. Use "groovy" or "jython".
     """
+    lint_hint = lint.lint_script(code, language)
+    if lint_hint:
+        safety.audit_log("script", code, success=False, metadata={"language": language, "lint": True})
+        safety.friction_log({
+            "event": "script_lint_blocked",
+            "language": language,
+            "code": code,
+            "hint": lint_hint,
+        })
+        return {"ok": False, "error": lint_hint}
     resp = send("run_script", code=code, language=language)
+    resp = _attach_post_timeout_state(resp)
     if _response_failed(resp):
         safety.audit_log("script", code, success=False, metadata={"language": language})
         safety.friction_log({

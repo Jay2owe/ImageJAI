@@ -67,8 +67,9 @@ per-object measurements, a labelled mask, a size-filtered subset, or ROI overlay
   rejection twice in a row — don't send a third macro. Call `windows({})` and ask
   the user.
 - **`No Image` → `windows({})` FIRST** before any retry.
-- **`dismissedDialogs` non-empty → inspect.** A silent popup was zapped mid-macro;
-  don't trust the result blindly.
+- **Inspect attached diagnostics** — `dismissedDialogs` (silent popup zapped
+  mid-macro) and `post_timeout_state` (what was open/logged when the call
+  hung). On `timeout: true`: read `post_timeout_state`, don't blind-retry.
 
 ---
 
@@ -77,6 +78,11 @@ per-object measurements, a labelled mask, a size-filtered subset, or ROI overlay
 `agent/references/` holds ~60 `-reference.md` docs. Read them with
 `run_shell("type agent\\references\\<name>-reference.md")` (Windows: `type`, not `cat`).
 `INDEX.md` lists all of them.
+
+**Before writing any macro**, `macro-reference.md` is the exhaustive reference —
+language syntax, every built-in function category (Array, File, Fit, IJ, Image,
+List, Math, Overlay, Plot, Property, Roi, Color, Dialog, String, Stack, Table,
+Ext), common `run("...")` commands by menu, recipes + gotchas.
 
 **Before writing any Groovy/Jython**, read `fiji-scripting-reference.md`'s Classes table.
 Hallucinated class paths are common; these do NOT exist:

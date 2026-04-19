@@ -91,6 +91,18 @@ public class TCPCommandServer {
     // macro.started/macro.completed pair like CommandEngine does.
     private static final java.util.concurrent.atomic.AtomicLong MACRO_ID_SEQ =
             new java.util.concurrent.atomic.AtomicLong(0);
+    // JVM-wide mutex serializing every IJ.runMacro call. ImageJ has a single
+    // global Interpreter / WindowManager; two macros running concurrently
+    // (e.g. client A blocked on a dialog while client B starts a new macro)
+    // corrupt each other's active-image state. Every client thread acquires
+    // this before submitting to the executor and releases after the worker
+    // actually terminates (or the abort timeout elapses).
+    private static final Object MACRO_MUTEX = new Object();
+    // How long we wait for IJ.Macro.abort() + thread-interrupt to actually kill
+    // a running macro before giving up and returning the error response. The
+    // MACRO_MUTEX stays held for this whole window so the next macro cannot
+    // start until the zombie is either dead or demonstrably unkillable.
+    private static final long MACRO_ABORT_WAIT_MS = 1500L;
 
     /**
      * Commands treated as pure readers — eligible for hash dedup via the
@@ -1168,9 +1180,16 @@ public class TCPCommandServer {
         String priorIjError = readIjErrorMessage();
 
         long startTime = System.currentTimeMillis();
+        // Serialize every execute_macro call JVM-wide. ImageJ has a single global
+        // Interpreter / WindowManager — two overlapping macros (one zombied on a
+        // blocking dialog, a second sent by the agent after it received the
+        // server's error) corrupt each other's active-image state. Root cause of
+        // the "orig gets thresholded and every Duplicate inherits" bug.
+        synchronized (MACRO_MUTEX) {
         ExecutorService executor = Executors.newSingleThreadExecutor();
+        Future<String> future = null;
         try {
-            Future<String> future = executor.submit(new java.util.concurrent.Callable<String>() {
+            future = executor.submit(new java.util.concurrent.Callable<String>() {
                 @Override
                 public String call() {
                     return IJ.runMacro(code);
@@ -1196,7 +1215,7 @@ public class TCPCommandServer {
                     }
                     String detected = detectIjMacroError(logLenBefore, priorInterpError, priorIjError, dialogs);
                     if (detected != null) {
-                        future.cancel(true);
+                        abortMacroFuture(future);
                         failureMessage = detected;
                         break;
                     }
@@ -1206,7 +1225,7 @@ public class TCPCommandServer {
                     // instead of waiting the full MACRO_TIMEOUT_MS.
                     String blocking = detectBlockingDialog(dialogs);
                     if (blocking != null) {
-                        future.cancel(true);
+                        abortMacroFuture(future);
                         // Actively dismiss the blocking dialog so it does not
                         // linger on screen and block subsequent macros. The
                         // dismiss runs on the EDT and waits up to 2 s and
@@ -1241,7 +1260,7 @@ public class TCPCommandServer {
                         break;
                     }
                     if ((System.currentTimeMillis() - startTime) > MACRO_TIMEOUT_MS) {
-                        future.cancel(true);
+                        abortMacroFuture(future);
                         failureMessage = "Macro execution timed out after " + MACRO_TIMEOUT_MS + "ms";
                         break;
                     }
@@ -1254,10 +1273,19 @@ public class TCPCommandServer {
             }
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
+            if (future != null && !future.isDone()) abortMacroFuture(future);
+            executor.shutdownNow();
             return errorResponse("Interrupted");
         } finally {
+            // Belt-and-braces: if we broke out of the loop without the worker
+            // actually terminating (e.g. IJ.Macro.abort() failed or the user
+            // had an OpenDialog the dismiss path could not kill), force-kill
+            // now so the next synchronized(MACRO_MUTEX) caller does not start
+            // on top of a live interpreter.
+            if (future != null && !future.isDone()) abortMacroFuture(future);
             executor.shutdownNow();
         }
+        } // end synchronized (MACRO_MUTEX)
 
         long elapsed = System.currentTimeMillis() - startTime;
         if (success) {
@@ -1304,6 +1332,54 @@ public class TCPCommandServer {
         } finally {
             eventBus.popSuppress("image.*");
         }
+    }
+
+    /**
+     * Stop a running IJ.runMacro future for real. {@code Future.cancel(true)}
+     * by itself only interrupts the worker thread, and the ImageJ macro
+     * interpreter silently swallows {@link Thread#interrupted()} — the macro
+     * keeps stepping through the remaining statements against global
+     * WindowManager state while the TCP handler returns an error to the
+     * client. That zombie is what lets a later macro's threshold/mask steps
+     * land on the wrong image.
+     *
+     * Order of operations, mirroring {@code JobRegistry.cancel}: reflectively
+     * invoke {@code ij.Macro.abort()} (the interpreter's cooperative stop
+     * signal), then cancel the Future to interrupt the worker, then poll for
+     * up to {@link #MACRO_ABORT_WAIT_MS} so the MACRO_MUTEX is not released
+     * until the zombie is actually gone.
+     *
+     * Returns {@code true} when the worker terminates within the window,
+     * {@code false} when it is still alive (genuinely unkillable). Callers
+     * currently ignore the boolean but it is logged so future diagnostics can
+     * see unkillable-macro incidents.
+     */
+    private static boolean abortMacroFuture(Future<?> future) {
+        if (future == null) return true;
+        try {
+            Class<?> macroClass = Class.forName("ij.Macro");
+            java.lang.reflect.Method abort = macroClass.getMethod("abort");
+            abort.invoke(null);
+        } catch (Throwable ignore) {
+            // ij.Macro absent or signature changed — fall through to interrupt.
+        }
+        future.cancel(true);
+        long deadline = System.currentTimeMillis() + MACRO_ABORT_WAIT_MS;
+        while (System.currentTimeMillis() < deadline) {
+            if (future.isDone()) return true;
+            try {
+                Thread.sleep(25);
+            } catch (InterruptedException ie) {
+                Thread.currentThread().interrupt();
+                return future.isDone();
+            }
+        }
+        boolean dead = future.isDone();
+        if (!dead) {
+            System.err.println("[ImageJAI-TCP] WARNING: macro did not terminate within "
+                    + MACRO_ABORT_WAIT_MS + "ms of IJ.Macro.abort() — proceeding with zombie interpreter");
+        }
+        return dead;
     }
 
     private JsonArray safeDetectOpenDialogs() {
@@ -1599,33 +1675,96 @@ public class TCPCommandServer {
         final String code = codeElement.getAsString();
 
         JsonObject result = new JsonObject();
+        result.addProperty("language", language);
+
+        ScriptEngineManager manager = new ScriptEngineManager();
+        final ScriptEngine engine = manager.getEngineByName(language);
+
+        if (engine == null) {
+            return errorResponse("ScriptEngine not found for language: " + language
+                    + ". Available: groovy, jython, javascript");
+        }
+
+        // Mirror handleExecuteMacro: run the script on a single-thread executor
+        // and poll for blocking dialogs every 150 ms. Without this, a Groovy
+        // hallucination like IJ.run("setAutoThreshold", ...) opens a command
+        // dialog and pins Fiji until the client socket times out — leaving the
+        // dialog on screen to block every subsequent call.
+        long startTime = System.currentTimeMillis();
+        ExecutorService executor = Executors.newSingleThreadExecutor();
+        Future<Object> future = null;
+        Object scriptResult = null;
+        Throwable scriptError = null;
+        String blockingFailure = null;
+        JsonArray dismissedCaptured = new JsonArray();
+        boolean completed = false;
 
         try {
-            long startTime = System.currentTimeMillis();
+            future = executor.submit(new java.util.concurrent.Callable<Object>() {
+                @Override
+                public Object call() throws ScriptException {
+                    return engine.eval(code);
+                }
+            });
 
-            ScriptEngineManager manager = new ScriptEngineManager();
-            ScriptEngine engine = manager.getEngineByName(language);
-
-            if (engine == null) {
-                return errorResponse("ScriptEngine not found for language: " + language
-                        + ". Available: groovy, jython, javascript");
+            while (true) {
+                try {
+                    scriptResult = future.get(150, TimeUnit.MILLISECONDS);
+                    completed = true;
+                    break;
+                } catch (TimeoutException te) {
+                    JsonArray dialogs = safeDetectOpenDialogs();
+                    String blocking = detectBlockingDialog(dialogs);
+                    if (blocking != null) {
+                        future.cancel(true);
+                        int dismissed = dismissOpenDialogsCapturing(null, dismissedCaptured);
+                        blockingFailure = dismissed > 0
+                                ? blocking + " — the dialog has been auto-dismissed by the server."
+                                : blocking;
+                        break;
+                    }
+                    if ((System.currentTimeMillis() - startTime) > MACRO_TIMEOUT_MS) {
+                        future.cancel(true);
+                        blockingFailure = "Script execution timed out after " + MACRO_TIMEOUT_MS + "ms";
+                        break;
+                    }
+                } catch (ExecutionException ee) {
+                    scriptError = ee.getCause() != null ? ee.getCause() : ee;
+                    break;
+                }
             }
+        } catch (InterruptedException ie) {
+            Thread.currentThread().interrupt();
+            if (future != null && !future.isDone()) future.cancel(true);
+            executor.shutdownNow();
+            return errorResponse("Interrupted");
+        } finally {
+            if (future != null && !future.isDone()) future.cancel(true);
+            executor.shutdownNow();
+        }
 
-            Object scriptResult = engine.eval(code);
-            long elapsed = System.currentTimeMillis() - startTime;
+        long elapsed = System.currentTimeMillis() - startTime;
+        result.addProperty("executionTimeMs", elapsed);
 
+        if (completed) {
             result.addProperty("success", true);
-            result.addProperty("language", language);
             result.addProperty("output", scriptResult != null ? scriptResult.toString() : "");
-            result.addProperty("executionTimeMs", elapsed);
-
-        } catch (ScriptException e) {
+        } else if (blockingFailure != null) {
             result.addProperty("success", false);
-            result.addProperty("error", "Script error: " + e.getMessage());
-            result.addProperty("language", language);
-        } catch (Exception e) {
+            result.addProperty("error", blockingFailure);
+            if (dismissedCaptured.size() > 0) {
+                result.add("dismissedDialogs", dismissedCaptured);
+            }
+        } else if (scriptError instanceof ScriptException) {
             result.addProperty("success", false);
-            result.addProperty("error", "Error: " + e.getMessage());
+            result.addProperty("error", "Script error: " + scriptError.getMessage());
+        } else if (scriptError != null) {
+            String msg = scriptError.getMessage();
+            result.addProperty("success", false);
+            result.addProperty("error", "Error: " + (msg != null ? msg : scriptError.toString()));
+        } else {
+            result.addProperty("success", false);
+            result.addProperty("error", "Script returned without a result");
         }
 
         try {
@@ -3515,6 +3654,32 @@ public class TCPCommandServer {
                                         }
                                         captured.add(entry);
                                     } catch (Throwable ignore) {}
+                                }
+                                // Mirror the probe path: GenericDialog.dispose() does not
+                                // set wasCanceled, so plugins can continue as if defaults
+                                // were accepted unless we flip the flag first.
+                                boolean canceled = false;
+                                try {
+                                    Class<?> genericDialogClass = Class.forName("ij.gui.GenericDialog");
+                                    if (genericDialogClass.isInstance(win)) {
+                                        Class<?> c = win.getClass();
+                                        while (c != null && c != Object.class) {
+                                            try {
+                                                java.lang.reflect.Field f = c.getDeclaredField("wasCanceled");
+                                                f.setAccessible(true);
+                                                f.setBoolean(win, true);
+                                                canceled = true;
+                                                break;
+                                            } catch (NoSuchFieldException nsf) {
+                                                c = c.getSuperclass();
+                                            } catch (Exception ignore) {
+                                                break;
+                                            }
+                                        }
+                                    }
+                                } catch (Exception ignore) {}
+                                if (!canceled && win instanceof Container) {
+                                    clickCancelButton((Container) win);
                                 }
                                 win.setVisible(false);
                                 win.dispose();
