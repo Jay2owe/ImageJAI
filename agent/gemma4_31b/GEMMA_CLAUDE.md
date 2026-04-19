@@ -33,7 +33,7 @@ precise numbers still use `describe_image` / `histogram_summary` / `region_stats
 
 ## Workflow
 
-1. **State.** If `[triage]` fired this turn, skip `get_state`/`get_image_info`.
+1. **State.** `[triage]` for input images (saturation/calibration warnings) — skip `get_state`/`get_image_info`. `[triage] PLUGIN OUTPUT` (titles like `Objects map of X`, `Summary of X`, `Labels`, `Mask of X`, `Skeleton of X`) = the last plugin SUCCEEDED — call `get_results` and stop retrying.
 2. **Probe** unfamiliar plugins. Trust the injected schema over training-data memory.
 3. **Plan** in one short line.
 4. **Act.** `run_macro` — or `run_macro_async` for > 2 s jobs.
@@ -78,6 +78,13 @@ Mean, Unsharp, Convolve, Variance, Bandpass). *Threshold* = binarisation method
 - **Inspect attached diagnostics** — `dismissedDialogs` (silent popup zapped
   mid-macro) and `post_timeout_state` (what was open/logged when the call
   hung). On `timeout: true`: read `post_timeout_state`, don't blind-retry.
+- **Dialog-pause errors may still have produced output.** "Macro paused on
+  modal dialog — auto-dismissed by the server" means the server killed the
+  dialog; earlier macro steps ran to completion. Check the error payload for
+  `newImages` / `resultsTable`, and watch for a `[triage] PLUGIN OUTPUT`
+  banner naming a title like `Objects map of X` or `Summary of X` — that
+  IS the success signal. Verify with `get_results` / `get_state`; do not
+  retry the same macro.
 
 ---
 

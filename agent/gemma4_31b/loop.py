@@ -1487,6 +1487,16 @@ def _format_triage_note(frame: dict) -> str | None:
         return None
     data = frame.get("data") if isinstance(frame.get("data"), dict) else {}
     title = str(data.get("title") or "new image")
+    # Plugin-output titles ("Objects map of X", "Summary of X", "Labels", ...)
+    # are success signals, not input images. Emit a dominant marker even when
+    # the calibration/saturation checklist is quiet, so a dialog-pause error
+    # can't mask the fact that the plugin actually produced output.
+    if events.is_plugin_output(title):
+        return (
+            "PLUGIN OUTPUT: Fiji opened '{}' — a plugin just produced this. "
+            "The last macro's work landed; do NOT retry run_macro. "
+            "Call get_results / get_state to read the result."
+        ).format(title)
     # Skip auto-triage on images the agent's macros just created (Duplicate,
     # Convert to Mask). Triage on a binary mask reports nonsense — "33%
     # saturated / 67% clipped blacks" — that derails the chat.
