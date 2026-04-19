@@ -89,14 +89,42 @@ language syntax, every built-in function category (Array, File, Fit, IJ, Image,
 List, Math, Overlay, Plot, Property, Roi, Color, Dialog, String, Stack, Table,
 Ext), common `run("...")` commands by menu, recipes + gotchas.
 
-**Before writing any Groovy/Jython**, read `fiji-scripting-reference.md`'s Classes table.
-Hallucinated class paths are common; these do NOT exist:
+**Before writing any Groovy/Jython**, read `fiji-scripting-reference.md`'s
+Classes table. Unsure? Use `run_macro` instead — the macro language is auto-probed.
 
-- `ij.plugin.AnalyzeParticles` / `AnalyzeParticlesSettings` → use `ij.plugin.filter.ParticleAnalyzer`.
-- `ij.imageprocessors.*` → use `ij.process.*` (`ByteProcessor`, `ColorProcessor`).
-- `ij.plugin.filter.ThresholdFilter` → use `ij.process.AutoThresholder` or `ImageProcessor.setThreshold()`.
+---
 
-Unsure? Use `run_macro` instead — the macro language is auto-probed.
+## Groovy / Jython
+
+Lint blocks common hallucinated imports and macro-only `IJ.run(...)`; it
+can't catch guessed method names (`setDirty`, `isDirty`) or fake modules
+(`org.setuptools`, `setuptools`).
+
+- **UI steps** — delegate via `IJ.runMacro("<macro>")` instead of
+  hand-rolling `imp.show()` + `IJ.run(imp, ...)` + `imp.close()`. The
+  macro engine already handles window focus, dirty flags, and dialogs.
+- **`Save changes to X?` on `imp.close()`** — set `imp.changes = false`
+  first (same syntax in Jython and Groovy). Not `setDirty`, not
+  `isDirty`, not `IJ.run("Close")`.
+- **`AttributeError` / `NoSuchField` / `ImportError` / `MissingMethod`** —
+  don't rename-and-retry; rewrite the block as `IJ.runMacro(...)` or
+  pivot to `run_macro`.
+
+---
+
+## Python tools (numpy-side, no macro)
+
+Cheap reads that decode pixels Python-side via `get_pixels` — use them for
+measurement/verification without perturbing Fiji state.
+
+- `region_stats(x, y, w, h)` — mean/stddev/min/max on a rectangle.
+- `line_profile(x1, y1, x2, y2)` — 1-D intensity along a line.
+- `histogram_summary` — mean, median, skew, percentiles, shape hint.
+- `quick_object_count(threshold)` — connected-component count at a fixed cutoff.
+- `count_bright_regions` — auto-threshold + count; faster than a shootout when you just need a number.
+- `get_pixels_array(x, y, w, h)` — raw float32 numpy, capped at 4 Mpx.
+
+These are the right tool when you want a number and not a macro side-effect.
 
 ---
 
