@@ -335,6 +335,93 @@ def _rule_doubled_identifier(code, state):
     ).format(token)
 
 
+# --- Groovy / Jython rules ------------------------------------------------
+
+
+def _rule_groovy_bad_filter_imports(code, state):
+    """Block `import ij.plugin.filter.<FakeClass>` for known hallucinations.
+
+    Gemma repeatedly invents filter classes that don't exist, e.g.
+    `ij.plugin.filter.BlurFilter`, `MedianFilter`, `MeanFilter`,
+    `VarianceFilter`, `UnsharpMaskFilter`, `ThresholdFilter`. The real filter
+    classes live either at the top of `ij.plugin.filter` (`ParticleAnalyzer`,
+    `BackgroundSubtracter`, `ConvolveFilter`, `RankFilters`) or in
+    `ij.plugin` (`GaussianBlur`, `UnsharpMask`).
+    """
+    fake = {
+        "BlurFilter", "MedianFilter", "MeanFilter", "VarianceFilter",
+        "UnsharpMaskFilter", "ThresholdFilter",
+    }
+    pattern = r"import\s+ij\.plugin\.filter\.(\w+)\s*;?"
+    hits = [m.group(1) for m in re.finditer(pattern, code) if m.group(1) in fake]
+    if not hits:
+        return None
+    return (
+        "ij.plugin.filter.{0} does not exist. Hallucinated filter classes: {1}. "
+        "Real ones: GaussianBlur (ij.plugin), UnsharpMask (ij.plugin), "
+        "RankFilters (ij.plugin.filter — covers median/mean/variance), "
+        "ParticleAnalyzer, BackgroundSubtracter, ConvolveFilter. "
+        "When in doubt use run_macro — its plugin args are auto-probed."
+    ).format(hits[0], ", ".join(sorted(set(hits))))
+
+
+def _rule_groovy_macro_only_functions(code, state):
+    """Block Groovy that uses macro-only functions as if they were Java APIs.
+
+    `setAutoThreshold`, `setThreshold`, `setOption`, `setBatchMode`,
+    `waitForUser`, `setBkgBlack`, `setBlackBackground` are ImageJ *macro
+    language* functions. They do not exist as `IJ.<name>(...)` methods and
+    `IJ.run("<name>", ...)` cannot dispatch them (the lookup hangs opening a
+    Macro Error / command-recorder dialog). Offer the Java equivalent or a
+    fallback to run_macro so the macro language handles it.
+    """
+    # IJ.run("<macro-fn>", ...) — bad dispatch
+    run_names = {
+        "setAutoThreshold": "call ip.setAutoThreshold(...) via ij.process.AutoThresholder",
+        "setThreshold":     "call ip.setThreshold(lo, hi, ImageProcessor.RED_LUT)",
+        "setOption":        "set the relevant flag on ij.Prefs (e.g. ij.Prefs.blackBackground)",
+        "setBatchMode":     "use ij.macro.Interpreter.batchMode directly",
+        "waitForUser":      "autonomous mode cannot click — remove the call",
+    }
+    for name, fix in run_names.items():
+        if re.search(r'IJ\.run\s*\(\s*["\']' + re.escape(name) + r'["\']', code):
+            return (
+                'IJ.run("{0}", ...) will hang — "{0}" is a macro-language '
+                'function, not a plugin command. From Groovy: {1}. Or pass the '
+                'whole block through run_macro instead.'
+            ).format(name, fix)
+    # Bare IJ.<macro-fn>(...) calls — the methods do not exist on ij.IJ
+    bare_names = {
+        "setBkgBlack":        "use `ij.Prefs.blackBackground = true`",
+        "setBlackBackground": "use `ij.Prefs.blackBackground = true`",
+        "setAutoThreshold":   "call ip.setAutoThreshold(...) on the ImageProcessor",
+        "setThreshold":       "call ip.setThreshold(lo, hi, ImageProcessor.RED_LUT)",
+    }
+    for name, fix in bare_names.items():
+        if re.search(r'\bIJ\.' + re.escape(name) + r'\s*\(', code):
+            return (
+                "IJ.{0}(...) does not exist on ij.IJ. {1} — or pass the block "
+                "through run_macro."
+            ).format(name, fix)
+    return None
+
+
+GROOVY_RULES = [
+    {
+        "id": "groovy_bad_filter_imports",
+        "severity": "block",
+        "description": "Hallucinated ij.plugin.filter.* class imports.",
+        "check": _rule_groovy_bad_filter_imports,
+    },
+    {
+        "id": "groovy_macro_only_functions",
+        "severity": "block",
+        "description": "Macro-only functions used as Groovy Java calls (hangs or errors).",
+        "check": _rule_groovy_macro_only_functions,
+    },
+]
+
+
 # --- rule table -----------------------------------------------------------
 
 
@@ -451,3 +538,27 @@ def lint_macro(code):
         return None
     body = "\n".join("WARNING: " + w for w in warnings)
     return body + "\n(run anyway? yes/no)"
+
+
+def lint_script(code, language):
+    """Lint Groovy / Jython source submitted to run_script.
+
+    Runs only the Groovy-specific rules and only when language == "groovy"
+    (the Jython / JavaScript rule surface is currently empty — Gemma's
+    hallucinations cluster on Groovy imports and IJ.* calls). Returns a
+    repair-hint string when a blocking rule fires, or None on pass. Macro
+    rules are intentionally not applied here: their patterns would misfire on
+    legitimate Groovy syntax.
+    """
+    if not isinstance(code, str) or not code.strip():
+        return None
+    if not isinstance(language, str) or language.lower() != "groovy":
+        return None
+    for rule in GROOVY_RULES:
+        try:
+            hint = rule["check"](code, {})
+        except Exception:
+            continue
+        if hint and rule["severity"] == "block":
+            return hint
+    return None
