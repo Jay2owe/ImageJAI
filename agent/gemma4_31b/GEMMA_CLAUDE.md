@@ -154,6 +154,28 @@ grep it out of `get_log`; the table is the right surface.
 
 ---
 
+## Anchor every image macro with `selectImage`
+
+Any macro that touches the active image — `Duplicate...`, `setThreshold`,
+`Convert to Mask`, `saveAs`, `getPixel`, `getStatistics`, `run("Measure")`,
+`run("Analyze Particles...")` — must begin with `selectImage("<title>");`
+(or `selectWindow("<title>");` for frames like the ROI Manager).
+
+The title comes from the `[triage]` banner, from `windows({})`, or from
+`newImages` in the last `run_macro` response. Anchoring makes the macro:
+
+1. **Fail fast** — if the titled image was closed, ImageJ throws immediately
+   instead of the macro silently running on whatever happens to be active.
+2. **Self-documenting** — the reader knows exactly which image is being
+   processed.
+3. **Disambiguated** — with multiple images open, no ambiguity about which
+   one a threshold or measurement lands on.
+
+Exception: macros that open an image (`open(path)`, `run("Blobs (25K)")`,
+etc.) don't need a preceding `selectImage` because no image is expected yet.
+
+---
+
 ## Using threshold_shootout correctly
 
 `threshold_shootout` is not reconnaissance — it *is* the counting pipeline.
