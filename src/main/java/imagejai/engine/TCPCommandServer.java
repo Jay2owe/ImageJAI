@@ -44,16 +44,21 @@ import java.util.Map;
 import java.util.Properties;
 import java.util.Set;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.LinkedBlockingDeque;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicInteger;
 import javax.script.ScriptEngine;
 import javax.script.ScriptEngineManager;
 import javax.script.ScriptException;
 
 /**
- * TCP server that accepts JSON commands from external clients (Claude CLI,
- * AgentConsole, scripts) and dispatches them to the engine layer.
+ * TCP server that accepts JSON commands from external clients (CLI agents,
+ * scripts) and dispatches them to the engine layer.
  * <p>
  * Protocol: each connection sends one JSON command (UTF-8, newline-terminated)
  * and receives one JSON response back, then the connection is closed.
@@ -1114,10 +1119,14 @@ public class TCPCommandServer {
         }
         final String code = codeElement.getAsString();
 
-        // Call IJ.runMacro directly on this TCP handler thread.
-        // The ImageJ macro interpreter handles its own EDT dispatch internally.
+        // Run IJ.runMacro on a worker thread so the TCP handler can keep polling
+        // for dialogs / timeout and return structured failure feedback instead
+        // of leaving the client blocked until its socket times out.
         JsonObject result = new JsonObject();
         boolean success = false;
+        String failureMessage = null;
+        String macroReturn = null;
+        JsonArray dialogs = null;
 
         // Phase 2: emit macro.started so event subscribers can react.
         long macroId = MACRO_ID_SEQ.incrementAndGet();
@@ -1147,17 +1156,78 @@ public class TCPCommandServer {
         String priorInterpError = readInterpreterErrorMessage();
         String priorIjError = readIjErrorMessage();
 
+        long startTime = System.currentTimeMillis();
+        ExecutorService executor = Executors.newSingleThreadExecutor();
         try {
-            long startTime = System.currentTimeMillis();
-            String macroReturn = IJ.runMacro(code);
-            long elapsed = System.currentTimeMillis() - startTime;
+            Future<String> future = executor.submit(new java.util.concurrent.Callable<String>() {
+                @Override
+                public String call() {
+                    return IJ.runMacro(code);
+                }
+            });
 
-            success = true;
+            while (true) {
+                try {
+                    macroReturn = future.get(150, TimeUnit.MILLISECONDS);
+                    success = true;
+                    break;
+                } catch (TimeoutException e) {
+                    dialogs = safeDetectOpenDialogs();
+                    String detected = detectIjMacroError(logLenBefore, priorInterpError, priorIjError, dialogs);
+                    if (detected != null) {
+                        future.cancel(true);
+                        failureMessage = detected;
+                        break;
+                    }
+                    // Any modal dialog means the macro is blocked waiting for
+                    // interaction — e.g. run("Gaussian Blur...") with no args
+                    // opens the GenericDialog. Surface it now (next poll, ≤150ms)
+                    // instead of waiting the full MACRO_TIMEOUT_MS.
+                    String blocking = detectBlockingDialog(dialogs);
+                    if (blocking != null) {
+                        future.cancel(true);
+                        // Actively dismiss the blocking dialog so it does not
+                        // linger on screen and block subsequent macros. The
+                        // dismiss runs on the EDT and waits up to 2 s.
+                        int dismissed = dismissOpenDialogs(null);
+                        if (dismissed > 0) {
+                            result.addProperty("dialogsAutoDismissed", dismissed);
+                            failureMessage = blocking
+                                    + " — the dialog has been auto-dismissed by the server; "
+                                    + "probe the plugin and re-run with explicit args.";
+                            // Refresh the dialogs snapshot so the outgoing response
+                            // reflects post-dismiss state (usually empty).
+                            dialogs = safeDetectOpenDialogs();
+                        } else {
+                            failureMessage = blocking;
+                        }
+                        break;
+                    }
+                    if ((System.currentTimeMillis() - startTime) > MACRO_TIMEOUT_MS) {
+                        future.cancel(true);
+                        failureMessage = "Macro execution timed out after " + MACRO_TIMEOUT_MS + "ms";
+                        break;
+                    }
+                } catch (ExecutionException e) {
+                    Throwable cause = e.getCause();
+                    String msg = cause != null ? cause.getMessage() : e.getMessage();
+                    failureMessage = "Macro error: " + (msg != null ? msg : "unknown error");
+                    break;
+                }
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return errorResponse("Interrupted");
+        } finally {
+            executor.shutdownNow();
+        }
+
+        long elapsed = System.currentTimeMillis() - startTime;
+        if (success) {
             result.addProperty("success", true);
             result.addProperty("output", macroReturn != null ? macroReturn : "");
             result.addProperty("executionTimeMs", elapsed);
 
-            // Capture state after execution
             try {
                 ImageInfo active = stateInspector.getActiveImageInfo();
                 if (active != null) {
@@ -1169,79 +1239,52 @@ public class TCPCommandServer {
                 if (csv != null && !csv.isEmpty()) {
                     result.addProperty("resultsTable", csv);
                 }
-                // Fire results.changed edge event if the table grew.
                 stateInspector.checkResultsTableChange();
             } catch (Exception ignore) {
                 // State inspection is best-effort
             }
 
-            // Phase 2: macro.completed (success).
-            try {
-                JsonObject doneData = new JsonObject();
-                doneData.addProperty("macro_id", macroId);
-                doneData.addProperty("success", true);
-                doneData.addProperty("executionTimeMs", elapsed);
-                eventBus.publish("macro.completed", doneData);
-            } catch (Throwable ignore) {}
-        } catch (Exception e) {
-            result.addProperty("success", false);
-            result.addProperty("error", "Macro error: " + e.getMessage());
-            // Phase 2: macro.completed (failure).
-            try {
-                JsonObject doneData = new JsonObject();
-                doneData.addProperty("macro_id", macroId);
-                doneData.addProperty("success", false);
-                doneData.addProperty("error", "Macro error: " + e.getMessage());
-                eventBus.publish("macro.completed", doneData);
-            } catch (Throwable ignore) {}
-        }
-
-        // ALWAYS check for dialogs — on success AND failure.
-        // Dialogs (especially errors) are critical for the agent to see.
-        JsonArray dialogs = null;
-        try {
-            dialogs = detectOpenDialogs();
-            if (dialogs.size() > 0) {
-                result.add("dialogs", dialogs);
-            }
-        } catch (Exception ignore) {
-            // Dialog detection is best-effort
-        }
-
-        // B4: post-hoc error detection — only when we *think* we succeeded.
-        // Four conservative signals, any one of which flips success=false:
-        //   1. ij.macro.Interpreter.getErrorMessage() non-empty (interpreter
-        //      caught an error but runMacro still returned).
-        //   2. IJ.getErrorMessage() non-empty (IJ.error() sink outside the
-        //      interpreter).
-        //   3. New log lines starting with "Error in macro", "Error:" or
-        //      "Exception:" (extracted from the tail added by this call).
-        //   4. An open dialog classified as "type":"error" by detectOpenDialogs.
-        // Dialog reuses the already-captured array above (no double scan).
-        JsonElement successEl = result.get("success");
-        boolean currentlySuccess = successEl != null
-                && successEl.isJsonPrimitive()
-                && successEl.getAsJsonPrimitive().isBoolean()
-                && successEl.getAsBoolean();
-        if (currentlySuccess) {
+            dialogs = safeDetectOpenDialogs();
             String detected = detectIjMacroError(logLenBefore, priorInterpError, priorIjError, dialogs);
             if (detected != null) {
-                result.addProperty("success", false);
-                result.addProperty("error", detected);
-                // Emit a late macro.completed(failure) so subscribers
-                // observe the real outcome. The earlier success event is
-                // accepted as noise — failure is the authoritative signal.
-                try {
-                    JsonObject doneData = new JsonObject();
-                    doneData.addProperty("macro_id", macroId);
-                    doneData.addProperty("success", false);
-                    doneData.addProperty("error", detected);
-                    eventBus.publish("macro.completed", doneData);
-                } catch (Throwable ignore) {}
+                success = false;
+                failureMessage = detected;
             }
         }
 
+        if (!success) {
+            result.addProperty("success", false);
+            result.addProperty("error", failureMessage != null ? failureMessage : "Unknown macro error");
+        }
+
+        if (dialogs == null) dialogs = safeDetectOpenDialogs();
+        if (dialogs != null && dialogs.size() > 0) {
+            result.add("dialogs", dialogs);
+        }
+
+        publishTcpMacroCompleted(macroId, success, elapsed, failureMessage);
         return successResponse(result);
+    }
+
+    private JsonArray safeDetectOpenDialogs() {
+        try {
+            return detectOpenDialogs();
+        } catch (Exception ignore) {
+            return null;
+        }
+    }
+
+    private void publishTcpMacroCompleted(long macroId, boolean success, long elapsed, String error) {
+        try {
+            JsonObject doneData = new JsonObject();
+            doneData.addProperty("macro_id", macroId);
+            doneData.addProperty("success", success);
+            doneData.addProperty("executionTimeMs", elapsed);
+            if (!success && error != null) {
+                doneData.addProperty("error", error);
+            }
+            eventBus.publish("macro.completed", doneData);
+        } catch (Throwable ignore) {}
     }
 
     /**
@@ -1340,6 +1383,41 @@ public class TCPCommandServer {
             }
         }
 
+        return null;
+    }
+
+    /**
+     * Detect when a macro is blocked on a modal dialog that isn't classified
+     * as an error. Returns a concise failure message naming the dialog, or
+     * null if no blocking dialog is present. Trips on e.g. {@code
+     * run("Gaussian Blur...")} called without an argument string — ImageJ
+     * opens the GenericDialog and the macro thread waits on OK/Cancel. Error
+     * dialogs are handled by {@link #detectIjMacroError} first, so we skip
+     * {@code type=error} here.
+     */
+    private String detectBlockingDialog(JsonArray dialogs) {
+        if (dialogs == null) return null;
+        for (int i = 0; i < dialogs.size(); i++) {
+            try {
+                JsonElement el = dialogs.get(i);
+                if (el == null || !el.isJsonObject()) continue;
+                JsonObject d = el.getAsJsonObject();
+                JsonElement modalEl = d.get("modal");
+                if (modalEl == null || !modalEl.isJsonPrimitive()
+                        || !modalEl.getAsBoolean()) continue;
+                JsonElement typeEl = d.get("type");
+                if (typeEl != null && typeEl.isJsonPrimitive()
+                        && "error".equals(typeEl.getAsString())) {
+                    continue;
+                }
+                String title = "";
+                JsonElement tEl = d.get("title");
+                if (tEl != null && tEl.isJsonPrimitive()) title = tEl.getAsString();
+                return "Macro paused on modal dialog: "
+                        + (title.isEmpty() ? "(untitled)" : title)
+                        + " — supply parameters via run(name, args) or dismiss via interact_dialog/close_dialogs";
+            } catch (Throwable ignore) {}
+        }
         return null;
     }
 
@@ -1721,6 +1799,9 @@ public class TCPCommandServer {
             rJson.addProperty("meanCircularity", r.meanCircularity);
             rJson.addProperty("coverage", r.coverage);
             rJson.addProperty("summary", r.summary);
+            if (r.thumbnail != null && r.thumbnail.length > 0) {
+                rJson.addProperty("thumbnail", base64Encode(r.thumbnail));
+            }
             resultsArray.add(rJson);
         }
         resultJson.add("results", resultsArray);
@@ -3145,6 +3226,23 @@ public class TCPCommandServer {
                 ? patternElement.getAsString()
                 : null;
 
+        int closed = dismissOpenDialogs(pattern);
+
+        JsonObject result = new JsonObject();
+        result.addProperty("closedCount", closed);
+        return successResponse(result);
+    }
+
+    /**
+     * Dismiss every non-protected modal dialog / transient frame, optionally
+     * filtered by a case-insensitive title substring. Returns the count.
+     *
+     * Skips the main ImageJ window, the AI Assistant panel, and image
+     * windows. Runs on the EDT and waits up to 2 s for completion — so it
+     * can be called from background command threads (including the macro
+     * watchdog inside handleExecuteMacro) without EDT violations.
+     */
+    private int dismissOpenDialogs(final String pattern) {
         final int[] closedCount = new int[1];
         final CountDownLatch latch = new CountDownLatch(1);
 
@@ -3198,9 +3296,7 @@ public class TCPCommandServer {
             Thread.currentThread().interrupt();
         }
 
-        JsonObject result = new JsonObject();
-        result.addProperty("closedCount", closedCount[0]);
-        return successResponse(result);
+        return closedCount[0];
     }
 
     // -----------------------------------------------------------------------
@@ -3426,31 +3522,47 @@ public class TCPCommandServer {
 
     /**
      * Find the label associated with a field component in a GenericDialog.
-     * GenericDialog places fields in Panels alongside their Labels.
-     * For sliders, the label is the component before the slider's parent Panel.
+     * Walks backwards from the field's own position to find the nearest
+     * preceding Label — the original implementation returned the first
+     * Label in the panel, which mislabelled every field after the first
+     * (all of Analyze Particles' numeric, string and choice fields ended
+     * up sharing the label "Size (pixel^2):").
      */
     private String findFieldLabel(java.awt.Component field) {
         java.awt.Container parent = field.getParent();
         if (parent == null) return "";
 
-        // Check siblings in the same Panel for a Label
+        // Same-panel case: locate the field's own index then walk backwards
+        // for the closest preceding Label. Panels created by GenericDialog
+        // usually contain only one Label + one field, but some composite
+        // panels hold more — we want the one directly before this field.
         java.awt.Component[] siblings = parent.getComponents();
-        for (java.awt.Component sibling : siblings) {
-            if (sibling instanceof java.awt.Label) {
-                String text = ((java.awt.Label) sibling).getText();
-                if (text != null && !text.trim().isEmpty()) {
-                    return text.trim();
+        int fieldIdx = -1;
+        for (int i = 0; i < siblings.length; i++) {
+            if (siblings[i] == field) {
+                fieldIdx = i;
+                break;
+            }
+        }
+        if (fieldIdx > 0) {
+            for (int j = fieldIdx - 1; j >= 0; j--) {
+                if (siblings[j] instanceof java.awt.Label) {
+                    String text = ((java.awt.Label) siblings[j]).getText();
+                    if (text != null && !text.trim().isEmpty()) {
+                        return text.trim();
+                    }
                 }
             }
         }
 
-        // For sliders/other: label is a sibling of the parent Panel in the dialog
+        // Sliders / some composite fields sit in their own Panel. Walk the
+        // grandparent backwards for the Label that precedes this Panel,
+        // stopping at the previous Panel boundary.
         java.awt.Container grandparent = parent.getParent();
         if (grandparent != null) {
             java.awt.Component[] comps = grandparent.getComponents();
             for (int i = 0; i < comps.length; i++) {
                 if (comps[i] == parent) {
-                    // Walk backwards to find the nearest preceding Label
                     for (int j = i - 1; j >= 0; j--) {
                         if (comps[j] instanceof java.awt.Label) {
                             String text = ((java.awt.Label) comps[j]).getText();
@@ -3458,7 +3570,6 @@ public class TCPCommandServer {
                                 return text.trim();
                             }
                         }
-                        // Stop at another Panel (belongs to a different field)
                         if (comps[j] instanceof java.awt.Panel) break;
                     }
                 }
@@ -3471,15 +3582,17 @@ public class TCPCommandServer {
     /**
      * Convert a dialog field label to the ImageJ macro argument key.
      * Follows ImageJ Recorder conventions: strip trailing colon,
+     * strip any parenthetical suffix ("Size (pixel^2):" → "size"),
      * lowercase, spaces to underscores.
      */
     private String labelToMacroKey(String label) {
         if (label == null || label.isEmpty()) return "";
         String key = label.trim();
-        // Strip trailing colon or equals
         if (key.endsWith(":")) key = key.substring(0, key.length() - 1).trim();
         if (key.endsWith("=")) key = key.substring(0, key.length() - 1).trim();
-        // Lowercase, spaces to underscores
+        // Strip a trailing "(unit)" qualifier so "Size (pixel^2)" → "size"
+        // and "Radius (pixels)" → "radius" — the macro recorder form.
+        key = key.replaceAll("\\s*\\([^)]*\\)\\s*$", "").trim();
         key = key.toLowerCase().replace(' ', '_');
         return key;
     }
