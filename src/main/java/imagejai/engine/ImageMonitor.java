@@ -182,6 +182,7 @@ public class ImageMonitor {
                         calJson.addProperty("unit", cal.getUnit() == null ? "" : cal.getUnit());
                         data.add("calibration", calJson);
                     }
+                    addImagePath(data, imp);
                 }
                 bus.publish("image.opened", data);
             }
@@ -204,6 +205,7 @@ public class ImageMonitor {
             JsonObject data = new JsonObject();
             data.addProperty("title", activeTitle);
             data.addProperty("reason", "active_changed");
+            if (active != null) addImagePath(data, active);
             bus.publish("image.updated", data);
         }
 
@@ -401,5 +403,15 @@ public class ImageMonitor {
     private int countOpenImages() {
         int[] ids = WindowManager.getIDList();
         return ids != null ? ids.length : 0;
+    }
+
+    private void addImagePath(JsonObject data, ImagePlus imp) {
+        if (data == null || imp == null) return;
+        try {
+            ij.io.FileInfo fi = imp.getOriginalFileInfo();
+            if (fi == null || fi.directory == null || fi.fileName == null) return;
+            data.addProperty("path", fi.directory + fi.fileName);
+        } catch (Throwable ignore) {
+        }
     }
 }

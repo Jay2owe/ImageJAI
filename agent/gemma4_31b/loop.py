@@ -38,6 +38,7 @@ try:
     from prompt_toolkit.formatted_text import ANSI
     from prompt_toolkit.history import FileHistory
     from prompt_toolkit.patch_stdout import patch_stdout
+    from prompt_toolkit.styles import Style
 except ImportError:  # pragma: no cover - optional dependency
     _pt_prompt = None
     get_app_or_none = None
@@ -45,6 +46,7 @@ except ImportError:  # pragma: no cover - optional dependency
     ANSI = None
     FileHistory = None
     patch_stdout = None
+    Style = None
 
 # Import the tool modules so their @tool decorators fire and the
 # REGISTRY list is populated before we read it below.
@@ -67,6 +69,53 @@ NUM_CTX = 131072
 TEMPERATURE = 0.2
 MAX_IDENTICAL_TOOL_REPEATS = 8
 BUNDLED_CCOMMANDS_DIR = Path(__file__).resolve().parent / "ccommands"
+_PROMPT_STYLE = (
+    Style.from_dict(
+        {
+            "bottom-toolbar": "noinherit noreverse bg:default default",
+            "bottom-toolbar.text": "noinherit noreverse bg:default default",
+        }
+    )
+    if Style is not None
+    else None
+)
+_THINKING_STATUS = "Thinking"
+_INSPECTING_STATUS = "Inspecting image"
+_WRITING_STATUS = "Writing macro/script"
+_RUNNING_FIJI_STATUS = "Running in Fiji"
+_THINKING_DELAY_S = 1.0
+_INSPECTING_DELAY_S = 2.0
+_WRITING_DELAY_S = 1.0
+_RUNNING_FIJI_DELAY_S = 4.0
+_INSPECT_TOOLS = frozenset(
+    {
+        "capture_image",
+        "click_dialog_button",
+        "close_dialogs",
+        "count_bright_regions",
+        "describe_image",
+        "get_histogram",
+        "get_image_info",
+        "get_log",
+        "get_metadata",
+        "get_open_windows",
+        "get_pixels_array",
+        "get_results",
+        "get_state",
+        "histogram_summary",
+        "line_profile",
+        "list_dialog_components",
+        "probe_plugin",
+        "quick_object_count",
+        "region_stats",
+        "set_dialog_checkbox",
+        "set_dialog_dropdown",
+        "set_dialog_text",
+        "triage_image",
+    }
+)
+_SCRIPT_TOOLS = frozenset({"run_macro", "run_macro_async", "run_script"})
+_RUN_IN_FIJI_TOOLS = frozenset({"threshold_shootout"})
 _THRESHOLD_TRIGGER_RE = re.compile(
     r"\b(threshold(?:ing)?|segment(?:ation|ing)?|mask(?:ing)?|binary|binar(?:ise|ize|isation|ization))\b",
     re.IGNORECASE,
@@ -117,7 +166,7 @@ _ABORT_HINT = " (Ctrl-C to abort)"
 
 
 def _prompt_status_enabled() -> bool:
-    """True when prompt_toolkit is active and we can reserve a status line."""
+    """True when prompt_toolkit is active and can render live prompt status."""
     return _pt_prompt is not None and ANSI is not None
 
 
@@ -210,7 +259,7 @@ def _set_prompt_status(label: str = "", started_at: float = 0.0) -> None:
 
 
 def _get_prompt_status() -> tuple[str, float]:
-    """Return the current prompt-footer working status."""
+    """Return the current live working status."""
     with _PROMPT_STATUS_LOCK:
         return (
             str(_PROMPT_STATUS.get("label") or ""),
@@ -218,22 +267,110 @@ def _get_prompt_status() -> tuple[str, float]:
         )
 
 
-def _render_prompt_toolbar(ctx_state: dict | None) -> object:
-    """Render the single-line footer under the prompt."""
-    parts: list[str] = []
-    if isinstance(ctx_state, dict):
-        parts.append(
-            "  "
-            + _format_ctx_bar(
-                int(ctx_state.get("used", 0)),
-                int(ctx_state.get("limit", NUM_CTX)),
-            )
+def _rgb_text(text: str, rgb: tuple[int, int, int]) -> str:
+    """Wrap text in a true-color ANSI foreground sequence."""
+    red, green, blue = rgb
+    return "\033[38;2;{};{};{}m{}".format(red, green, blue, text)
+
+
+def _colorize_chars(text: str, colors: tuple[tuple[int, int, int], ...]) -> str:
+    """Apply a per-character palette to one animation frame."""
+    if not text:
+        return ""
+    colored: list[str] = []
+    color_index = 0
+    for char in text:
+        if char == " ":
+            colored.append(char)
+            continue
+        rgb = colors[color_index % len(colors)]
+        colored.append(_rgb_text(char, rgb))
+        color_index += 1
+    return "".join(colored)
+
+
+def _status_animation_frame(label: str, elapsed_s: int) -> str:
+    """Return a one-frame ImageJ-themed activity animation."""
+    frames: tuple[str, ...]
+    if label == _THINKING_STATUS:
+        frames = (
+            "▁▃█▃▁",
+            "▃█▃▁▁",
+            "█▃▁▁▃",
+            "▃▁▁▃█",
+            "▁▁▃█▃",
         )
+        palette = (
+            (78, 110, 255),
+            (76, 191, 255),
+            (76, 242, 187),
+            (181, 247, 92),
+            (255, 209, 102),
+        )
+    elif label == _INSPECTING_STATUS:
+        frames = ("●○○", "○●○", "○○●", "○●○")
+        palette = (
+            (99, 235, 255),
+            (72, 98, 124),
+            (72, 98, 124),
+        )
+    elif label == _WRITING_STATUS:
+        frames = ("[>__]", "[_>_]", "[__>]", "[_>_]")
+        palette = (
+            (84, 104, 120),
+            (77, 232, 123),
+            (56, 166, 106),
+            (56, 166, 106),
+            (84, 104, 120),
+        )
+    elif label == _RUNNING_FIJI_STATUS:
+        frames = ("[▮  ]", "[ ▮ ]", "[  ▮]", "[ ▮ ]")
+        palette = (
+            (79, 96, 112),
+            (120, 245, 167),
+            (120, 245, 167),
+            (120, 245, 167),
+            (79, 96, 112),
+        )
+    else:
+        return ""
+    return _colorize_chars(frames[elapsed_s % len(frames)], palette)
+
+
+def _format_status_line(label: str, elapsed_s: int) -> str:
+    """Render one complete status line with colored animation."""
+    animation = _status_animation_frame(label, elapsed_s)
+    if animation:
+        return "  \033[90m{} {}\033[90m ({}s)\033[0m".format(label, animation, elapsed_s)
+    return "  \033[90m{} ({}s)\033[0m".format(label, elapsed_s)
+
+
+def _prompt_status_text() -> str:
+    """Render the live working status line shown above the prompt."""
     label, started_at = _get_prompt_status()
     if label:
         elapsed = max(0, int(time.time() - started_at))
-        parts.append("  \033[90mworking: {} ({}s)\033[0m".format(label, elapsed))
-    text = "   ".join(parts)
+        return _format_status_line(label, elapsed)
+    return ""
+
+
+def _render_prompt_message(prompt_text: str) -> object:
+    """Render the optional working line plus the main prompt."""
+    status_line = _prompt_status_text()
+    text = "{}\n{}".format(status_line, prompt_text) if status_line else prompt_text
+    if ANSI is None:
+        return text
+    return ANSI(text)
+
+
+def _render_prompt_toolbar(ctx_state: dict | None) -> object:
+    """Render the single-line context footer under the prompt."""
+    text = ""
+    if isinstance(ctx_state, dict):
+        text = "  " + _format_ctx_bar(
+            int(ctx_state.get("used", 0)),
+            int(ctx_state.get("limit", NUM_CTX)),
+        )
     if ANSI is None:
         return text
     return ANSI(text)
@@ -263,53 +400,170 @@ def _run_interruptible(fn, *args, abort_event: threading.Event | None = None, **
     return result["resp"]
 
 
-class _Spinner:
-    """One-second working timer. Uses the prompt footer when available."""
+class _ActivityTicker:
+    """Turn-level activity ticker with coarse status changes."""
 
-    def __init__(self, label: str = "thinking"):
-        self._label = label
+    def __init__(self):
+        self._phase_initial = ""
+        self._phase_transitions: tuple[tuple[float, str], ...] = ()
+        self._phase_started_at = 0.0
+        self._visible_label = ""
+        self._visible_started_at = 0.0
+        self._lock = threading.Lock()
         self._stop = threading.Event()
         self._thread = None
-        self._start_time = 0.0
 
-    def start(self):
-        self._start_time = time.time()
+    def start(self, label: str):
         self._stop.clear()
-        if _prompt_status_enabled():
-            _set_prompt_status(self._label, self._start_time)
-            self._thread = threading.Thread(target=self._tick_prompt, daemon=True)
-            self._thread.start()
-            return
-        self._thread = threading.Thread(target=self._spin, daemon=True)
+        now = time.time()
+        label = _sanitize_status_label(label)
+        with self._lock:
+            self._phase_initial = label
+            self._phase_transitions = ()
+            self._phase_started_at = now
+            self._visible_label = label
+            self._visible_started_at = now if label else 0.0
+        _set_prompt_status(label, now if label else 0.0)
+        self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
+
+    def current_label(self) -> str:
+        """Return the currently visible status label."""
+        with self._lock:
+            return self._visible_label
+
+    def set_phase(
+        self,
+        initial_label: str,
+        transitions: tuple[tuple[float, str], ...] = (),
+    ) -> None:
+        """Set a new phase. Delayed transitions keep quick work from thrashing."""
+        now = time.time()
+        initial_label = _sanitize_status_label(initial_label)
+        clean_transitions = tuple(
+            (max(0.0, float(delay_s)), _sanitize_status_label(label))
+            for delay_s, label in transitions
+            if _sanitize_status_label(label)
+        )
+        update_label = ""
+        update_started = 0.0
+        with self._lock:
+            self._phase_initial = initial_label
+            self._phase_transitions = clean_transitions
+            self._phase_started_at = now
+            if initial_label and initial_label != self._visible_label:
+                self._visible_label = initial_label
+                self._visible_started_at = now
+                update_label = initial_label
+                update_started = now
+        if update_label:
+            _set_prompt_status(update_label, update_started)
+        else:
+            _invalidate_prompt()
 
     def stop(self):
         self._stop.set()
         if self._thread:
             self._thread.join()
             self._thread = None
-        if _prompt_status_enabled():
-            _set_prompt_status()
-            return
-        with _CONSOLE_LOCK:
-            sys.stdout.write("\r\033[K")
-            sys.stdout.flush()
-
-    def _tick_prompt(self):
-        while not self._stop.wait(1.0):
-            _invalidate_prompt()
-
-    def _spin(self):
-        while not self._stop.is_set():
-            elapsed = max(0, int(time.time() - self._start_time))
-            line = "  \033[90mworking: {} ({}s)\033[0m".format(
-                _sanitize_status_label(self._label),
-                elapsed,
-            )
+        _set_prompt_status()
+        if not _prompt_status_enabled():
             with _CONSOLE_LOCK:
-                sys.stdout.write("\r\033[K{}".format(line))
+                sys.stdout.write("\r\033[K")
                 sys.stdout.flush()
+
+    def _run(self):
+        while not self._stop.is_set():
+            now = time.time()
+            line = ""
+            with self._lock:
+                elapsed = max(0.0, now - self._phase_started_at)
+                target_label = self._phase_initial
+                target_started_at = self._phase_started_at if target_label else 0.0
+                for delay_s, label in self._phase_transitions:
+                    if elapsed >= delay_s:
+                        target_label = label
+                        target_started_at = self._phase_started_at + delay_s
+                    else:
+                        break
+                if target_label != self._visible_label:
+                    self._visible_label = target_label
+                    self._visible_started_at = target_started_at
+                    _set_prompt_status(target_label, target_started_at)
+                elif target_label:
+                    elapsed_s = max(0, int(now - self._visible_started_at))
+                    line = _format_status_line(target_label, elapsed_s)
+            if _prompt_status_enabled():
+                _invalidate_prompt()
+            elif line:
+                with _CONSOLE_LOCK:
+                    sys.stdout.write("\r\033[K{}".format(line))
+                    sys.stdout.flush()
+            elif not _prompt_status_enabled():
+                with _CONSOLE_LOCK:
+                    sys.stdout.write("\r\033[K")
+                    sys.stdout.flush()
             self._stop.wait(1.0)
+
+
+def _status_plan_for_model_round(
+    round_n: int,
+    current_label: str,
+    async_job_active: bool,
+) -> tuple[str, tuple[tuple[float, str], ...]]:
+    """Return the coarse status plan for one model call."""
+    if round_n <= 1:
+        return _THINKING_STATUS, ()
+    if async_job_active and current_label in {_WRITING_STATUS, _RUNNING_FIJI_STATUS}:
+        return current_label, ()
+    base = current_label or _THINKING_STATUS
+    if base == _THINKING_STATUS:
+        return _THINKING_STATUS, ()
+    return base, ((_THINKING_DELAY_S, _THINKING_STATUS),)
+
+
+def _status_plan_for_tool(
+    tool_name: str,
+    current_label: str,
+    async_job_active: bool,
+) -> tuple[str, tuple[tuple[float, str], ...]]:
+    """Return the coarse status plan for one tool call."""
+    base = current_label or _THINKING_STATUS
+    if tool_name in _SCRIPT_TOOLS:
+        return base, (
+            (_WRITING_DELAY_S, _WRITING_STATUS),
+            (_RUNNING_FIJI_DELAY_S, _RUNNING_FIJI_STATUS),
+        )
+    if tool_name in _RUN_IN_FIJI_TOOLS:
+        return base, ((_INSPECTING_DELAY_S, _RUNNING_FIJI_STATUS),)
+    if tool_name in _INSPECT_TOOLS:
+        return base, ((_INSPECTING_DELAY_S, _INSPECTING_STATUS),)
+    if tool_name == "job_status" and async_job_active:
+        return base, ((_THINKING_DELAY_S, _RUNNING_FIJI_STATUS),)
+    return base, ()
+
+
+def _update_async_job_state(tool_name: str, result, async_job_active: bool) -> bool:
+    """Track whether a background Fiji macro job is still running."""
+    if tool_name == "run_macro_async":
+        return isinstance(result, str) and bool(result.strip()) and not result.startswith("ERROR:")
+    if tool_name == "job_status":
+        if not isinstance(result, dict):
+            return async_job_active
+        payload = result.get("result") if isinstance(result.get("result"), dict) else result
+        state = str(payload.get("state") or "").strip().lower() if isinstance(payload, dict) else ""
+        if state in {"queued", "running", "started"}:
+            return True
+        if state in {"completed", "failed", "cancelled"}:
+            return False
+        return async_job_active
+    if tool_name == "cancel_job":
+        if not isinstance(result, dict):
+            return async_job_active
+        payload = result.get("result") if isinstance(result.get("result"), dict) else result
+        if isinstance(payload, dict) and payload.get("cancelled") is True:
+            return False
+    return async_job_active
 
 
 def _chat_interruptible(abort_event: threading.Event | None = None, **kwargs):
@@ -479,6 +733,8 @@ def _read_input(prompt_text: str, ctx_state: dict | None = None, completer=None)
     kwargs = {
         "bottom_toolbar": lambda: _render_prompt_toolbar(ctx_state),
         "complete_while_typing": True,
+        "message": lambda: _render_prompt_message(prompt_text),
+        "style": _PROMPT_STYLE,
     }
     if completer is not None:
         kwargs["completer"] = completer
@@ -487,8 +743,8 @@ def _read_input(prompt_text: str, ctx_state: dict | None = None, completer=None)
         kwargs["history"] = FileHistory(str(PROMPT_HISTORY_PATH))
     if patch_stdout is not None:
         with patch_stdout(raw=True):
-            return _pt_prompt(ANSI(prompt_text), **kwargs)
-    return _pt_prompt(ANSI(prompt_text), **kwargs)
+            return _pt_prompt(**kwargs)
+    return _pt_prompt(**kwargs)
 
 
 def _print_help() -> None:
@@ -510,16 +766,23 @@ def _one_turn(
     abort_event: threading.Event | None = None,
 ) -> str:
     """Run one user turn through ollama.chat(), dispatching tools as needed."""
-    spinner = _Spinner("thinking (Ctrl-C to abort)")
+    ticker = _ActivityTicker()
     turn_start = time.time()
     round_n = 0
     last_tool_signature = None
     identical_tool_repeats = 0
+    async_job_active = False
 
+    ticker.start(_THINKING_STATUS)
     try:
         while True:
             round_n += 1
-            spinner.start()
+            model_initial, model_transitions = _status_plan_for_model_round(
+                round_n,
+                ticker.current_label(),
+                async_job_active,
+            )
+            ticker.set_phase(model_initial, model_transitions)
             try:
                 resp = _chat_interruptible(
                     abort_event=abort_event,
@@ -530,7 +793,7 @@ def _one_turn(
                     options={"temperature": TEMPERATURE, "num_ctx": NUM_CTX},
                 )
             finally:
-                spinner.stop()
+                _invalidate_prompt()
 
             if abort_event is not None and abort_event.is_set():
                 raise _TurnAborted()
@@ -543,10 +806,10 @@ def _one_turn(
             if not tool_calls:
                 elapsed = time.time() - turn_start
                 tok_s = eval_tokens / elapsed if elapsed > 0 and eval_tokens else 0
-                stats = "\033[90m({:.1f}s".format(elapsed)
+                stats = "\033[90mWorked for {:.1f}s".format(elapsed)
                 if eval_tokens:
-                    stats += ", {} tok, {:.1f} tok/s".format(eval_tokens, tok_s)
-                stats += ")\033[0m"
+                    stats += " ({} tok, {:.1f} tok/s)".format(eval_tokens, tok_s)
+                stats += "\033[0m"
                 content = (getattr(msg, "content", "") or "").strip()
                 return "{}\n  {}".format(content, stats)
 
@@ -564,8 +827,12 @@ def _one_turn(
                     ),
                     reserve_status_line=True,
                 )
-                tool_spinner = _Spinner("running {} (Ctrl-C to abort)".format(name))
-                tool_spinner.start()
+                tool_initial, tool_transitions = _status_plan_for_tool(
+                    name,
+                    ticker.current_label(),
+                    async_job_active,
+                )
+                ticker.set_phase(tool_initial, tool_transitions)
                 try:
                     result = _run_interruptible(tool_map[name], abort_event=abort_event, **args)
                 except _TurnAborted:
@@ -573,13 +840,17 @@ def _one_turn(
                 except Exception as exc:  # surface to the model, not the user
                     result = "ERROR: {}: {}".format(type(exc).__name__, exc)
                 finally:
-                    tool_spinner.stop()
+                    _invalidate_prompt()
+                previous_async_state = async_job_active
+                async_job_active = _update_async_job_state(name, result, async_job_active)
+                if async_job_active and not previous_async_state:
+                    ticker.set_phase(_RUNNING_FIJI_STATUS)
                 result_text = _format_tool_result(result)
-                flat = result_text.replace("\r", " ").replace("\n", " ")
-                preview = flat[:200]
-                if len(flat) > 200:
-                    preview = "{} … [+{:.1f}KB]".format(preview, (len(flat) - 200) / 1024)
-                _console_emit("  \033[90m→ {}\033[0m".format(preview), reserve_status_line=True)
+                display_text = result_text
+                if len(display_text) > 20480:
+                    hidden = len(display_text) - 20480
+                    display_text = display_text[:20480] + "\n… [truncated, {} chars hidden]".format(hidden)
+                _console_emit("  \033[90m→ {}\033[0m".format(display_text), reserve_status_line=True)
                 messages.append({"role": "tool", "content": result_text})
                 signature = (name, _canonical_json(args), result_text)
                 if signature == last_tool_signature:
@@ -607,14 +878,11 @@ def _one_turn(
                         _canonical_json(args),
                         elapsed,
                     )
-
-            spinner = _Spinner(
-                "round {} (Ctrl-C to abort)".format(round_n + 1)
-            )
     except _TurnAborted:
-        spinner.stop()
         elapsed = time.time() - turn_start
         return "\033[31m(aborted by user after {:.1f}s)\033[0m".format(elapsed)
+    finally:
+        ticker.stop()
 
 
 def _format_triage_note(frame: dict) -> str | None:

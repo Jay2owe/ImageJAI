@@ -110,7 +110,8 @@ public class ExplorationEngine {
      * @return report comparing all methods with a recommendation
      */
     public ExplorationReport exploreThresholds(String[] methods) {
-        if (methods == null || methods.length == 0) {
+        boolean explicitMethods = methods != null && methods.length > 0;
+        if (!explicitMethods) {
             methods = new String[]{"Otsu", "Triangle", "Li", "Huang", "MaxEntropy", "Moments"};
         }
 
@@ -127,7 +128,7 @@ public class ExplorationEngine {
         // Check memory before starting
         MemoryInfo mem = stateInspector.getMemoryInfo();
         int maxVariants = methods.length;
-        if (mem.getFreeMB() < MEMORY_WARNING_THRESHOLD_MB) {
+        if (!explicitMethods && mem.getFreeMB() < MEMORY_WARNING_THRESHOLD_MB) {
             IJ.log("[ExplorationEngine] Low memory (" + mem.getFreeMB()
                     + " MB free). Limiting exploration variants.");
             maxVariants = Math.min(maxVariants, 3);
@@ -465,13 +466,18 @@ public class ExplorationEngine {
 
     /**
      * Measure the coverage of a binary image (fraction of white pixels).
-     * Runs "Measure" on the image and reads Mean value; Mean/255 = coverage.
+     * Reads the image's mean intensity via getStatistics; mean/255 = coverage.
+     *
+     * getStatistics bypasses Set Measurements (so no dependency on prior
+     * column config) and the value is returned through the macro's return
+     * statement — print() writes to the Log, which IJ.runMacro does not
+     * capture.
      */
     private double measureCoverage(String imageTitle) {
         String macro = "selectWindow(\"" + escapeQuotes(imageTitle) + "\");\n"
-                + "run(\"Measure\");\n"
-                + "mean = getResult(\"Mean\", nResults - 1);\n"
-                + "print(mean);";
+                + "run(\"Select None\");\n"
+                + "getStatistics(area, mean);\n"
+                + "return \"\" + mean;";
 
         ExecutionResult result = commandEngine.executeMacro(macro);
         if (!result.isSuccess()) {

@@ -9,8 +9,10 @@ import java.awt.Dialog;
 import java.awt.Window;
 import java.awt.event.ActionEvent;
 import java.awt.event.ActionListener;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
@@ -92,9 +94,10 @@ public class DialogWatcher {
             String title = e.getKey();
             String kind = e.getValue();
             if (!openDialogs.containsKey(title)) {
-                JsonObject data = new JsonObject();
+                JsonObject data = buildDialogData(findDialogByTitle(title), kind);
                 data.addProperty("title", title);
                 data.addProperty("kind", kind);
+                data.addProperty("type", kind);
                 bus.publish("dialog.appeared", data);
             }
         }
@@ -138,6 +141,52 @@ public class DialogWatcher {
         return "info";
     }
 
+    private JsonObject buildDialogData(Dialog dlg, String fallbackKind) {
+        JsonObject data = new JsonObject();
+        if (dlg == null) {
+            data.addProperty("text", "");
+            data.addProperty("modal", false);
+            data.add("buttons", new com.google.gson.JsonArray());
+            if (fallbackKind != null) {
+                data.addProperty("kind", fallbackKind);
+                data.addProperty("type", fallbackKind);
+            }
+            return data;
+        }
+        StringBuilder text = new StringBuilder();
+        List<String> buttons = new ArrayList<String>();
+        try {
+            collectText(dlg, text);
+            collectButtons(dlg, buttons);
+        } catch (Throwable ignore) {
+        }
+        data.addProperty("title", dlg.getTitle() == null ? "" : dlg.getTitle());
+        data.addProperty("text", text.toString().trim());
+        data.addProperty("modal", dlg.isModal());
+        com.google.gson.JsonArray buttonsJson = new com.google.gson.JsonArray();
+        for (String label : buttons) {
+            buttonsJson.add(label);
+        }
+        data.add("buttons", buttonsJson);
+        String kind = fallbackKind != null ? fallbackKind : classifyDialog(dlg);
+        data.addProperty("kind", kind);
+        data.addProperty("type", kind);
+        return data;
+    }
+
+    private Dialog findDialogByTitle(String title) {
+        Window[] windows = Window.getWindows();
+        if (windows == null) return null;
+        for (Window win : windows) {
+            if (!(win instanceof Dialog) || !win.isShowing()) continue;
+            Dialog dlg = (Dialog) win;
+            String dlgTitle = dlg.getTitle();
+            if (dlgTitle == null) dlgTitle = "";
+            if (dlgTitle.equals(title)) return dlg;
+        }
+        return null;
+    }
+
     private void collectText(Container c, StringBuilder out) {
         Component[] kids = c.getComponents();
         if (kids == null) return;
@@ -177,5 +226,22 @@ public class DialogWatcher {
             }
         }
         return false;
+    }
+
+    private void collectButtons(Container c, List<String> out) {
+        Component[] kids = c.getComponents();
+        if (kids == null) return;
+        for (Component comp : kids) {
+            if (comp instanceof javax.swing.JButton) {
+                String t = ((javax.swing.JButton) comp).getText();
+                if (t != null && !t.trim().isEmpty()) out.add(t.trim());
+            } else if (comp instanceof java.awt.Button) {
+                String t = ((java.awt.Button) comp).getLabel();
+                if (t != null && !t.trim().isEmpty()) out.add(t.trim());
+            }
+            if (comp instanceof Container) {
+                collectButtons((Container) comp, out);
+            }
+        }
     }
 }
