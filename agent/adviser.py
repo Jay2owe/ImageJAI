@@ -28,8 +28,8 @@ TMP_DIR = os.path.join(SCRIPT_DIR, ".tmp")
 
 
 def load_commands():
-    """Load the available commands list."""
-    path = os.path.join(TMP_DIR, "commands.txt")
+    """Load the available commands list from the raw scan output."""
+    path = os.path.join(TMP_DIR, "commands.raw.txt")
     if not os.path.exists(path):
         return []
     with open(path) as f:

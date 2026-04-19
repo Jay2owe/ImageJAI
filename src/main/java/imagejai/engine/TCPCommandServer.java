@@ -1288,9 +1288,27 @@ public class TCPCommandServer {
         } // end synchronized (MACRO_MUTEX)
 
         long elapsed = System.currentTimeMillis() - startTime;
+        // Capture any new ImageJ Log lines the macro produced via print() / IJ.log(),
+        // so the agent does not need to follow every run_macro with a get_log call.
+        // Snapshot was taken at logLenBefore (line ~1174). Cap matches the
+        // detectIjMacroError cap (16 KB) to keep replies bounded for chatty macros.
+        String logDelta = null;
+        try {
+            String postLog = IJ.getLog();
+            if (postLog != null && postLog.length() > logLenBefore) {
+                String delta = postLog.substring(logLenBefore);
+                if (delta.length() > 16384) {
+                    delta = delta.substring(delta.length() - 16384);
+                }
+                logDelta = delta;
+            }
+        } catch (Throwable ignore) {}
         if (success) {
             result.addProperty("success", true);
             result.addProperty("output", macroReturn != null ? macroReturn : "");
+            if (logDelta != null) {
+                result.addProperty("logDelta", logDelta);
+            }
             result.addProperty("executionTimeMs", elapsed);
 
             try {
@@ -1320,6 +1338,11 @@ public class TCPCommandServer {
         if (!success) {
             result.addProperty("success", false);
             result.addProperty("error", failureMessage != null ? failureMessage : "Unknown macro error");
+            // Surface any prints the macro emitted before failure so the agent
+            // can see partial progress alongside the error message.
+            if (logDelta != null) {
+                result.addProperty("logDelta", logDelta);
+            }
         }
 
         if (dialogs == null) dialogs = safeDetectOpenDialogs();
