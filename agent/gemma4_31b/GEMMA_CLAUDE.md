@@ -132,6 +132,7 @@ Avoid these by design so you don't waste turns on rejections:
 - `run("Plugin Name...")` with no argument string — opens a dialog and hangs.
 - `waitForUser()` anywhere — freezes the session.
 - `run("Analyze Particles...", "... add ...")` — the keyword is `add_to_manager`, not `add`. Shorthand from training data will be rejected; always use the full flag or `probe_plugin` first.
+- `run("Laplacian")` / `run("Difference of Gaussians")` / `run("DoG")` — **these commands do not exist in base Fiji** and will fail with "Unrecognized command". Use `run("FeatureJ Laplacian", "smoothing=<sigma>")` if FeatureJ is installed, or compose DoG from two Gaussian-blurred copies plus `imageCalculator("Subtract create", "blur1", "blur2")`. Check `run_shell("type .tmp\\commands.txt | findstr /I laplacian")` before assuming a filter name is registered.
 
 ---
 
