@@ -52,6 +52,27 @@ _AGENT_TITLE_TOKENS = frozenset((
     "mean", "laplacian", "unsharp", "variance", "bandpass", "convolve",
 ))
 
+# Image titles that scream "a plugin just produced a labelled/measured output".
+# Why: on a dialog-pause error, the triage banner is Gemma's clearest signal
+# that the plugin actually ran. Without naming the pattern, "Objects map of X"
+# reads as just another image with saturation warnings, so the agent retries.
+_PLUGIN_OUTPUT_RE = re.compile(
+    r"^\s*(?:Objects?\s+map|Summary|Results?|Labels?|Labell?ed|"
+    r"Mask|Outline|Binary|Skeleton|Tagged\s+skeleton|Distance\s+map|"
+    r"Projections?|Surface\s+plot|Voronoi|EDM)\b",
+    re.IGNORECASE,
+)
+
+
+def is_plugin_output(title: str) -> bool:
+    """True when the title matches a plugin-produced output naming pattern."""
+    if not isinstance(title, str):
+        return False
+    stripped = title.strip()
+    if not stripped:
+        return False
+    return bool(_PLUGIN_OUTPUT_RE.match(stripped))
+
 
 def mark_image_created_by_agent(title: str) -> None:
     """Record that an agent macro just created an image with this title."""

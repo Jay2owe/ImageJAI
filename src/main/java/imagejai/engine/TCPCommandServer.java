@@ -1178,6 +1178,21 @@ public class TCPCommandServer {
         } catch (Throwable ignore) {}
         String priorInterpError = readInterpreterErrorMessage();
         String priorIjError = readIjErrorMessage();
+        // Snapshot active title + results-CSV length BEFORE IJ.runMacro so the
+        // failure branch can tell "plugin actually produced output before the
+        // dialog-pause" apart from "dialog-pause on the very first line,
+        // nothing happened". Without this, mirroring the success-path snapshot
+        // on failure would always report stale state as a side effect.
+        String preActiveTitle = null;
+        int preResultsLen = 0;
+        try {
+            ImageInfo preActive = stateInspector.getActiveImageInfo();
+            preActiveTitle = preActive != null ? preActive.getTitle() : null;
+        } catch (Throwable ignore) {}
+        try {
+            String preCsv = stateInspector.getResultsTableCSV();
+            preResultsLen = preCsv != null ? preCsv.length() : 0;
+        } catch (Throwable ignore) {}
 
         long startTime = System.currentTimeMillis();
         // Serialize every execute_macro call JVM-wide. ImageJ has a single global
@@ -1336,8 +1351,45 @@ public class TCPCommandServer {
         }
 
         if (!success) {
+            // Snapshot newImages + resultsTable even on failure. A dialog-pause
+            // aborts mid-macro, but earlier steps (the plugin itself, e.g.
+            // "3D Objects Counter") often ran to completion and produced
+            // output before whatever late step popped a dialog. Without this,
+            // the agent sees only "Macro paused on modal dialog..." and retries
+            // blindly instead of reading the result that already exists.
+            // Only count state that CHANGED during this macro as a side effect;
+            // stale pre-macro state must not soften the error.
+            boolean sideEffectsLanded = false;
+            try {
+                ImageInfo postActive = stateInspector.getActiveImageInfo();
+                String postTitle = postActive != null ? postActive.getTitle() : null;
+                if (postTitle != null && !postTitle.isEmpty()
+                        && !postTitle.equals(preActiveTitle)) {
+                    JsonArray newImages = new JsonArray();
+                    newImages.add(postTitle);
+                    result.add("newImages", newImages);
+                    sideEffectsLanded = true;
+                }
+                String csv = stateInspector.getResultsTableCSV();
+                int postLen = csv != null ? csv.length() : 0;
+                if (csv != null && !csv.isEmpty() && postLen != preResultsLen) {
+                    result.addProperty("resultsTable", csv);
+                    sideEffectsLanded = true;
+                }
+            } catch (Exception ignore) {
+                // State inspection is best-effort on the failure path.
+            }
+            String rawError = failureMessage != null ? failureMessage : "Unknown macro error";
+            // Soften the error prefix when side effects landed AND the failure
+            // was a dialog-pause (not a compile error). Leaves hard failures
+            // like "Unrecognized command" with their original strong wording.
+            if (sideEffectsLanded && rawError.startsWith("Macro paused on modal dialog")) {
+                rawError = "Macro interrupted AFTER producing output "
+                        + "(see newImages / resultsTable — the plugin's work "
+                        + "landed; do NOT retry). Pause was: " + rawError;
+            }
             result.addProperty("success", false);
-            result.addProperty("error", failureMessage != null ? failureMessage : "Unknown macro error");
+            result.addProperty("error", rawError);
             // Surface any prints the macro emitted before failure so the agent
             // can see partial progress alongside the error message.
             if (logDelta != null) {
