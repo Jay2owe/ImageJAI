@@ -1208,9 +1208,19 @@ public class TCPCommandServer {
                             if (dismissedCaptured.size() > 0) {
                                 result.add("dismissedDialogs", dismissedCaptured);
                             }
-                            failureMessage = blocking
-                                    + " — the dialog has been auto-dismissed by the server; "
-                                    + "probe the plugin and re-run with explicit args.";
+                            // Only append the "probe the plugin" suffix for
+                            // plugin-dialog cases. Macro Error popups already
+                            // carry a compile-error-oriented hint inside the
+                            // detectBlockingDialog message; appending the
+                            // "probe the plugin" line there would contradict it.
+                            if (hasMacroErrorDialog(dialogs)) {
+                                failureMessage = blocking
+                                        + " — the dialog has been auto-dismissed by the server.";
+                            } else {
+                                failureMessage = blocking
+                                        + " — the dialog has been auto-dismissed by the server; "
+                                        + "probe the plugin and re-run with explicit args.";
+                            }
                             // Refresh the dialogs snapshot so the outgoing response
                             // reflects post-dismiss state (usually empty).
                             dialogs = safeDetectOpenDialogs();
@@ -1472,14 +1482,16 @@ public class TCPCommandServer {
                 // Branch the remediation hint on dialog kind: a Macro Error
                 // popup is a compile/runtime failure in the macro itself, so
                 // "supply parameters via run(name, args)" is misleading — the
-                // agent needs to inspect the code and the log, not probe a
-                // plugin. Plugin dialogs (Gaussian Blur..., Duplicate..., etc.)
-                // keep the original hint.
+                // agent needs to re-read the macro code, not probe a plugin.
+                // The ImageJ Log window is often empty for compile errors
+                // (detectIjMacroError's Signal 5 already harvested it if any
+                // lines were written), so do not promise content there.
                 if ("Macro Error".equals(title)) {
                     msg.append(" — the macro itself failed to compile or run; "
-                            + "call get_log({}) to read the line number and "
-                            + "message, then fix the macro code (do not probe "
-                            + "a plugin — this is not a missing-args case)");
+                            + "re-read the macro source for syntax/typo/"
+                            + "argument-count bugs (do not probe a plugin — "
+                            + "this is not a missing-args case; the ImageJ "
+                            + "log is usually empty for compile errors)");
                 } else {
                     msg.append(" — supply parameters via run(name, args) or "
                             + "dismiss via interact_dialog/close_dialogs");
