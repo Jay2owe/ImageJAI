@@ -380,6 +380,123 @@ _REPLACE_LITERAL_META = frozenset("().[]")
 _REPLACE_REGEX_INTENT = re.compile(r'\\[sSdDwWbB]|\\\\|[*+?{}|^$]')
 
 
+def _skip_ws_and_comments(code: str, i: int) -> int:
+    """Advance past whitespace and comments without disturbing source spans."""
+    n = len(code)
+    while i < n:
+        if code.startswith("/*", i):
+            end = code.find("*/", i + 2)
+            return n if end == -1 else _skip_ws_and_comments(code, end + 2)
+        if code.startswith("//", i):
+            end = code.find("\n", i + 2)
+            return n if end == -1 else _skip_ws_and_comments(code, end + 1)
+        if code[i].isspace():
+            i += 1
+            continue
+        return i
+    return n
+
+
+def _parse_string_literal(code: str, i: int):
+    """Return (text, content_start, content_end, next_index) for a quoted literal."""
+    if i >= len(code) or code[i] != '"':
+        return None
+    j = i + 1
+    n = len(code)
+    while j < n:
+        ch = code[j]
+        if ch == "\\" and j + 1 < n:
+            j += 2
+            continue
+        if ch == '"':
+            return (code[i + 1:j], i + 1, j, j + 1)
+        j += 1
+    return None
+
+
+def _consume_call_arg(code: str, i: int):
+    """Consume one replace() argument and return ('comma'|'close'|'eof', index)."""
+    n = len(code)
+    depth = 0
+    while i < n:
+        if code.startswith("/*", i):
+            end = code.find("*/", i + 2)
+            return ("eof", n) if end == -1 else _consume_call_arg(code, end + 2)
+        if code.startswith("//", i):
+            end = code.find("\n", i + 2)
+            return ("eof", n) if end == -1 else _consume_call_arg(code, end + 1)
+        ch = code[i]
+        if ch == '"':
+            parsed = _parse_string_literal(code, i)
+            if parsed is None:
+                return ("eof", n)
+            i = parsed[3]
+            continue
+        if ch in "([{":
+            depth += 1
+            i += 1
+            continue
+        if ch in ")]}":
+            if ch == ")" and depth == 0:
+                return ("close", i)
+            if depth > 0:
+                depth -= 1
+            i += 1
+            continue
+        if ch == "," and depth == 0:
+            return ("comma", i)
+        i += 1
+    return ("eof", n)
+
+
+def _iter_replace_target_literals(code: str):
+    """Yield (target_text, content_start, content_end) for replace(..., "target", ...)."""
+    n = len(code)
+    i = 0
+    while i < n:
+        if code.startswith("/*", i):
+            end = code.find("*/", i + 2)
+            if end == -1:
+                return
+            i = end + 2
+            continue
+        if code.startswith("//", i):
+            end = code.find("\n", i + 2)
+            if end == -1:
+                return
+            i = end + 1
+            continue
+        if code[i] == '"':
+            parsed = _parse_string_literal(code, i)
+            if parsed is None:
+                return
+            i = parsed[3]
+            continue
+        if (
+            code.startswith("replace", i)
+            and (i == 0 or not (code[i - 1].isalnum() or code[i - 1] == "_"))
+            and (i + 7 >= n or not (code[i + 7].isalnum() or code[i + 7] == "_"))
+        ):
+            j = _skip_ws_and_comments(code, i + 7)
+            if j < n and code[j] == "(":
+                kind, end = _consume_call_arg(code, j + 1)
+                if kind == "comma":
+                    k = _skip_ws_and_comments(code, end + 1)
+                    parsed = _parse_string_literal(code, k)
+                    if parsed is not None:
+                        target, content_start, content_end, after_string = parsed
+                        k = _skip_ws_and_comments(code, after_string)
+                        if k < n and code[k] == ",":
+                            final_kind, final_end = _consume_call_arg(code, k + 1)
+                            i = final_end + 1 if final_end < n else n
+                            if final_kind == "close":
+                                yield (target, content_start, content_end)
+                            continue
+                i = end + 1 if end < n else n
+                continue
+        i += 1
+
+
 def _rule_replace_unescaped_regex_meta(code, state):
     """Auto-escape replace() target literals that look like literal strings.
 
@@ -400,16 +517,9 @@ def _rule_replace_unescaped_regex_meta(code, state):
     version and attaches a warning — the agent sees the fix without losing a
     turn. Does nothing if nothing needs fixing.
     """
-    clean = _strip_comments(code)
-    # Match replace(<anything>, "<target>", <anything>) — target must be a
-    # quoted literal. Capture full match for later substitution into code.
-    pattern = re.compile(
-        r'replace\s*\(\s*[^,]+?,\s*"((?:[^"\\]|\\.)*)"\s*,'
-    )
-    patched = code
+    replacements = []
     fixed_targets = []
-    for m in pattern.finditer(clean):
-        target = m.group(1)
+    for target, start, end in _iter_replace_target_literals(code):
         if not target:
             continue
         if _REPLACE_REGEX_INTENT.search(target):
@@ -418,13 +528,18 @@ def _rule_replace_unescaped_regex_meta(code, state):
         if not needs_fix:
             continue
         escaped = re.sub(r'([()\[\].])', r'\\\\\1', target)
-        old_literal = '"' + target + '"'
-        new_literal = '"' + escaped + '"'
-        if old_literal in patched:
-            patched = patched.replace(old_literal, new_literal, 1)
-            fixed_targets.append((target, escaped))
+        replacements.append((start, end, escaped))
+        fixed_targets.append((target, escaped))
     if not fixed_targets:
         return None
+    pieces = []
+    last = 0
+    for start, end, escaped in replacements:
+        pieces.append(code[last:start])
+        pieces.append(escaped)
+        last = end
+    pieces.append(code[last:])
+    patched = "".join(pieces)
     detail = "; ".join(
         'replace(..., "{}", ...) -> "{}"'.format(old, new)
         for old, new in fixed_targets
