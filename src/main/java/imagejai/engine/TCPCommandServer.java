@@ -1179,17 +1179,6 @@ public class TCPCommandServer {
         String priorInterpError = readInterpreterErrorMessage();
         String priorIjError = readIjErrorMessage();
 
-        // Prior-error *messages* are now snapshotted, but a Macro Error
-        // *dialog* from the previous failed call can still be sitting on the
-        // AWT event queue. When the new macro completes quickly,
-        // safeDetectOpenDialogs below picks up that stale dialog and
-        // detectIjMacroError attributes its body text to this call — six
-        // consecutive "line 36 / replace(...)" gaslight errors seen in
-        // transcript 2026-04-19-replace-regex-phantom-dialog. Dismissing by
-        // title-substring here is safe: it only targets "Macro Error"
-        // dialogs, never the generic plugin dialogs a running macro needs.
-        dismissOpenDialogs("Macro Error");
-
         // Snapshot active title + results-CSV length BEFORE IJ.runMacro so the
         // failure branch can tell "plugin actually produced output before the
         // dialog-pause" apart from "dialog-pause on the very first line,
@@ -1213,6 +1202,13 @@ public class TCPCommandServer {
         // server's error) corrupt each other's active-image state. Root cause of
         // the "orig gets thresholded and every Duplicate inherits" bug.
         synchronized (MACRO_MUTEX) {
+        // Prior-error *messages* are now snapshotted, but a Macro Error
+        // *dialog* from the previous failed call can still be sitting on the
+        // AWT event queue. Dismiss it only while holding MACRO_MUTEX so a
+        // second request cannot close a live Macro Error dialog that still
+        // belongs to the previous synchronized caller.
+        dismissOpenDialogs("Macro Error");
+
         ExecutorService executor = Executors.newSingleThreadExecutor();
         Future<String> future = null;
         try {
@@ -1312,6 +1308,14 @@ public class TCPCommandServer {
             if (future != null && !future.isDone()) abortMacroFuture(future);
             executor.shutdownNow();
         }
+        if (success) {
+            dialogs = safeDetectOpenDialogs();
+            String detected = detectIjMacroError(logLenBefore, priorInterpError, priorIjError, dialogs);
+            if (detected != null) {
+                success = false;
+                failureMessage = detected;
+            }
+        }
         } // end synchronized (MACRO_MUTEX)
 
         long elapsed = System.currentTimeMillis() - startTime;
@@ -1352,13 +1356,6 @@ public class TCPCommandServer {
                 stateInspector.checkResultsTableChange();
             } catch (Exception ignore) {
                 // State inspection is best-effort
-            }
-
-            dialogs = safeDetectOpenDialogs();
-            String detected = detectIjMacroError(logLenBefore, priorInterpError, priorIjError, dialogs);
-            if (detected != null) {
-                success = false;
-                failureMessage = detected;
             }
         }
 

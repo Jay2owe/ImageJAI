@@ -60,10 +60,15 @@ def run_macro_async(code: str) -> str:
         safety.note_execution(False)
         return "ERROR: {}".format(error)
     lint_result = lint.lint_macro(code)
+    lint_warnings = None
+    if isinstance(lint_result, tuple) and len(lint_result) == 2:
+        code, lint_result = lint_result
     if isinstance(lint_result, str) and not lint_result.startswith("WARNING"):
         safety.friction_log({"event_type": "lint_reject", "code": code, "error": lint_result})
         safety.note_execution(False)
         return "ERROR: {}".format(lint_result)
+    if isinstance(lint_result, str) and lint_result.startswith("WARNING"):
+        lint_warnings = lint_result
     before_thumb = None
     if visual_diff.is_destructive(code):
         try:
@@ -81,6 +86,7 @@ def run_macro_async(code: str) -> str:
                 _ASYNC_TRACK[job_id] = {
                     "code": code,
                     "before_thumb": before_thumb,
+                    "lint_warnings": lint_warnings,
                 }
                 return job_id
         if isinstance(resp.get("error"), str):
@@ -110,6 +116,12 @@ def job_status(job_id: str) -> dict:
 
     state = str(result.get("state") or "")
     tracked = _ASYNC_TRACK.get(job_id)
+    lint_warnings = tracked.get("lint_warnings") if isinstance(tracked, dict) else None
+    if isinstance(lint_warnings, str) and state in {"completed", "failed", "cancelled"}:
+        resp = _prepend_warning_to_response(resp, lint_warnings)
+        if isinstance(resp, dict):
+            resp = dict(resp)
+            resp["lint_warnings"] = lint_warnings
     if state == "completed" and isinstance(tracked, dict):
         safety.audit_log("macro", tracked.get("code", ""), success=True, metadata={"job_id": job_id, "async": True})
         safety.note_execution(True)
