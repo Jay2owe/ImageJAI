@@ -226,6 +226,11 @@ def run_macro(code: str) -> dict:
         safety.note_execution(False)
         return {"ok": False, "error": error}
     lint_result = lint.lint_macro(code)
+    # Auto-fix rules return (patched_code, warnings_str). Swap in the patched
+    # code so Fiji runs the fixed version; keep the warnings string so it
+    # gets attached to the response below, same as a regular WARNING.
+    if isinstance(lint_result, tuple) and len(lint_result) == 2:
+        code, lint_result = lint_result
     if isinstance(lint_result, str) and not lint_result.startswith("WARNING"):
         safety.friction_log({"event_type": "lint_reject", "code": code, "error": lint_result})
         safety.note_execution(False)

@@ -336,13 +336,16 @@ def _rule_hallucinated_run_command(code, state):
 
 
 def _rule_analyze_particles_no_output_flag(code, state):
-    """Warn when Analyze Particles runs with no output flag and nResults is read after.
+    """Block when Analyze Particles runs with no output flag and nResults is read after.
 
     Analyze Particles only populates the Results table when args contain
-    `summarize`, `display`/`display_results`, or `results`. With `add_to_manager`
-    the count comes from roiManager("count") instead. Without any of those, a
-    later read of `nResults` always returns 0 — a trap Gemma chased through
-    seven macros in the filter-shootout transcript.
+    `display`/`display_results` or `results`. With `add_to_manager` the count
+    comes from roiManager("count") instead. `summarize` writes to a separate
+    Summary window — NOT the Results table — so reads of `nResults` or
+    `getResult("Count", …)` return 0 / NaN even when summarize is present.
+    Without any of those, a later read of `nResults` always returns 0 — a trap
+    Gemma chased through seven macros in the filter-shootout transcript and
+    re-hit in the replace-regex-phantom-dialog transcript.
     """
     clean = _strip_comments(code)
     ap = re.search(
@@ -351,7 +354,7 @@ def _rule_analyze_particles_no_output_flag(code, state):
     if not ap:
         return None
     args = ap.group(1).lower()
-    if re.search(r'\b(display|display_results|summarize|results|add_to_manager)\b', args):
+    if re.search(r'\b(display|display_results|results|add_to_manager)\b', args):
         return None
     after = clean[ap.end():]
     nres = re.search(r'\bnResults\b', after)
@@ -368,6 +371,72 @@ def _rule_analyze_particles_no_output_flag(code, state):
         '`summarize`; `summarize` writes to the Summary window, not the '
         'Results table, so nResults STILL stays 0).'
     )
+
+
+# Chars that cause replace() to throw PatternSyntaxException or silently
+# match more than intended when the agent meant a literal match.
+_REPLACE_LITERAL_META = frozenset("().[]")
+# Regex-intent markers — if any are present, assume deliberate regex and skip.
+_REPLACE_REGEX_INTENT = re.compile(r'\\[sSdDwWbB]|\\\\|[*+?{}|^$]')
+
+
+def _rule_replace_unescaped_regex_meta(code, state):
+    """Auto-escape replace() target literals that look like literal strings.
+
+    ImageJ macro's replace(str, target, repl) treats target as a Java regex.
+    Parentheses, brackets, and dots that look like literal characters to the
+    agent throw PatternSyntaxException (unbalanced group / class) or silently
+    match the wrong thing. Gemma burned ~10 turns on:
+
+        replace(part, "Median... (radius=", "")
+        → PatternSyntaxException: Unclosed group near index 18
+
+    Detection: string literal passed as the target arg of replace() that
+    contains one of ( ) [ ] . — without any regex-intent marker
+    (\\s, \\d, \\w, \\b, a literal backslash, or a quantifier like * + ? {}).
+    Intent markers mean "the agent wrote regex on purpose; leave it alone."
+
+    Returns a (warning, patched_code) tuple so lint_macro swaps in the escaped
+    version and attaches a warning — the agent sees the fix without losing a
+    turn. Does nothing if nothing needs fixing.
+    """
+    clean = _strip_comments(code)
+    # Match replace(<anything>, "<target>", <anything>) — target must be a
+    # quoted literal. Capture full match for later substitution into code.
+    pattern = re.compile(
+        r'replace\s*\(\s*[^,]+?,\s*"((?:[^"\\]|\\.)*)"\s*,'
+    )
+    patched = code
+    fixed_targets = []
+    for m in pattern.finditer(clean):
+        target = m.group(1)
+        if not target:
+            continue
+        if _REPLACE_REGEX_INTENT.search(target):
+            continue
+        needs_fix = [c for c in target if c in _REPLACE_LITERAL_META]
+        if not needs_fix:
+            continue
+        escaped = re.sub(r'([()\[\].])', r'\\\\\1', target)
+        old_literal = '"' + target + '"'
+        new_literal = '"' + escaped + '"'
+        if old_literal in patched:
+            patched = patched.replace(old_literal, new_literal, 1)
+            fixed_targets.append((target, escaped))
+    if not fixed_targets:
+        return None
+    detail = "; ".join(
+        'replace(..., "{}", ...) -> "{}"'.format(old, new)
+        for old, new in fixed_targets
+    )
+    warning = (
+        "replace() target is a Java regex — unescaped (, ), [, ], or . cause "
+        "PatternSyntaxException or silent mismatches. Auto-escaped "
+        "{} literal(s): {}. If you actually want regex behaviour, add an "
+        "intent marker (\\s, \\d, \\w, \\b, a quantifier, or an explicit "
+        "backslash) and the rule will skip the target."
+    ).format(len(fixed_targets), detail)
+    return (warning, patched)
 
 
 def _rule_unknown_run_command(code, state):
@@ -702,9 +771,15 @@ RULES = [
     },
     {
         "id": "analyze_particles_no_output_flag",
-        "severity": "warn",
-        "description": "Analyze Particles without summarize/display/add_to_manager leaves nResults at 0.",
+        "severity": "block",
+        "description": "Analyze Particles without display/results/add_to_manager leaves nResults at 0 (summarize writes to the Summary window, not Results).",
         "check": _rule_analyze_particles_no_output_flag,
+    },
+    {
+        "id": "replace_unescaped_regex_meta",
+        "severity": "autofix",
+        "description": "replace() target literals with unescaped ( ) [ ] . — auto-escape unless regex-intent markers present.",
+        "check": _rule_replace_unescaped_regex_meta,
     },
     {
         "id": "unknown_run_command",
@@ -755,29 +830,49 @@ RULES = [
 
 
 def lint_macro(code):
-    """Run every rule on the macro. Return None on pass, else a repair-hint string.
+    """Run every rule on the macro. Return None on pass, else a repair hint.
 
-    A blocking-rule failure returns its hint as-is — callers should surface
-    that hint to the agent as a tool-level error and not send the macro to
-    Fiji. If no blocking rule fires, warning hints are joined into a single
-    block of WARNING: lines, followed by '(run anyway? yes/no)'; callers
-    should prepend this block to the normal tool feedback and still run the
-    macro. Returns None when no rule fires.
+    Return values:
+      * None — all rules passed.
+      * str without "WARNING:" prefix — a block-severity rule fired; callers
+        must surface the hint to the agent and NOT send the macro to Fiji.
+      * str starting with "WARNING:" — only warn-severity rules fired;
+        callers run the macro as-is and prepend the warnings to tool feedback.
+      * (patched_code, warnings_str) — one or more auto-fix rules rewrote the
+        code. Callers send `patched_code` to Fiji and prepend `warnings_str`
+        to tool feedback so the agent sees what was changed.
+
+    Auto-fix rules return a (warning, patched_code) tuple from their check
+    function; downstream rules then run against the patched code so later
+    checks see the fixed version.
     """
     if not isinstance(code, str) or not code.strip():
         return None
     state = _fetch_state()
     warnings = []
+    current_code = code
     for rule in RULES:
         try:
-            hint = rule["check"](code, state)
+            hint = rule["check"](current_code, state)
         except Exception:
             continue
         if not hint:
             continue
+        if (
+            isinstance(hint, tuple)
+            and len(hint) == 2
+            and all(isinstance(h, str) for h in hint)
+        ):
+            warning_msg, patched = hint
+            current_code = patched
+            warnings.append(warning_msg)
+            continue
         if rule["severity"] == "block":
             return hint
         warnings.append(hint)
+    if current_code != code:
+        body = "\n".join("WARNING: " + w for w in warnings)
+        return (current_code, body + "\n(auto-fixed; macro ran with the patched code)")
     if not warnings:
         return None
     body = "\n".join("WARNING: " + w for w in warnings)
