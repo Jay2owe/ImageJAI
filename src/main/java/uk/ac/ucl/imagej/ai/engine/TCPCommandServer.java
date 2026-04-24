@@ -193,7 +193,7 @@ public class TCPCommandServer {
      * Server version string emitted in the {@code hello} handshake response.
      * Bumped by steps that change the reply schema so clients can adapt.
      */
-    static final String SERVER_VERSION = "1.7.4";
+    static final String SERVER_VERSION = "1.7.5";
 
     /**
      * Per-connection capability record negotiated via the {@code hello} handler.
@@ -280,6 +280,14 @@ public class TCPCommandServer {
         boolean patternHints = true;
         SessionStats stats = new SessionStats();
         Set<String> acceptEvents = java.util.Collections.emptySet();
+        // Step 13: session-scoped image provenance graph delta
+        // (docs/tcp_upgrade/13_provenance_graph.md). Default ON for every
+        // agent — the graph is shared across sockets so cost is O(1) per
+        // image and the delta only ships when a mutating call produced new
+        // structure. Clients that don't care about provenance opt out via
+        // capabilities.graph_delta=false. The get_image_graph command is
+        // NOT gated on this flag — it remains queryable on demand.
+        boolean graphDelta = true;
     }
 
     /** Fallback caps applied to any request from a socket that never said hello. */
@@ -339,6 +347,17 @@ public class TCPCommandServer {
      * {@link #handleClient}'s finally block on disconnect.
      */
     private final Map<Socket, AgentCaps> capsBySocket = new ConcurrentHashMap<Socket, AgentCaps>();
+
+    /**
+     * Step 13: session-scoped image provenance DAG shared across all
+     * sockets. Mutating handlers capture a marker at entry, call
+     * {@link ImageGraph#trackMacroChange} at exit, and attach
+     * {@link ImageGraph#deltaSince} to their reply under {@code graphDelta}
+     * when {@code caps.graphDelta} is on. Always queryable via the
+     * {@code get_image_graph} command. Per plan:
+     * docs/tcp_upgrade/13_provenance_graph.md.
+     */
+    final ImageGraph imageGraph = new ImageGraph();
 
     private final int port;
     private final CommandEngine commandEngine;
@@ -1099,6 +1118,8 @@ public class TCPCommandServer {
             return handleGetDisplayState(request, caps);
         } else if ("get_console".equals(command)) {
             return handleGetConsole(request, caps);
+        } else if ("get_image_graph".equals(command)) {
+            return handleGetImageGraph();
         } else {
             return errorResponse("Unknown command: " + command);
         }
@@ -1548,6 +1569,12 @@ public class TCPCommandServer {
         // strict-no-unsolicited-commentary channel can opt out via
         // capabilities.pattern_hints=false in their hello handshake.
         c.patternHints = optBool(caps, "pattern_hints", true);
+        // Step 13: provenance-graph delta on mutating replies defaults ON.
+        // Per plan: docs/tcp_upgrade/13_provenance_graph.md. Every agent
+        // gets the graphDelta piggybacked on execute_macro / run_script /
+        // run_pipeline / interact_dialog replies; clients that do not
+        // consume it opt out with capabilities.graph_delta=false.
+        c.graphDelta = optBool(caps, "graph_delta", true);
         int sockPort = (sock != null) ? sock.getPort() : 0;
         c.agentId = optString(caps, "agent_id", c.agent + "-" + sockPort);
         c.acceptEvents = parseStringSet(caps, "accept_events");
@@ -1636,6 +1663,15 @@ public class TCPCommandServer {
         if (caps != null && caps.patternHints) {
             arr.add(new JsonPrimitive("pattern_hints"));
         }
+        // Step 13: advertise graph_delta so clients can feature-detect the
+        // new top-level graphDelta field on mutating replies, and
+        // get_image_graph unconditionally so clients can feature-detect the
+        // always-available snapshot command. Per plan:
+        // docs/tcp_upgrade/13_provenance_graph.md.
+        if (caps != null && caps.graphDelta) {
+            arr.add(new JsonPrimitive("graph_delta"));
+        }
+        arr.add(new JsonPrimitive("get_image_graph"));
         return arr;
     }
 
@@ -1837,6 +1873,17 @@ public class TCPCommandServer {
         out.addProperty("bufferedStderr", stderrBuffered);
         out.addProperty("installed", ConsoleCapture.isInstalled());
         return successResponse(out);
+    }
+
+    /**
+     * Step 13: return the session-scoped image provenance DAG. Always
+     * available — not gated on caps.graphDelta (which only gates delta
+     * emission on mutating replies). Older history may be truncated once
+     * the graph exceeds {@link ImageGraph#MAX_NODES} nodes (LRU eviction).
+     * Per plan: docs/tcp_upgrade/13_provenance_graph.md.
+     */
+    JsonObject handleGetImageGraph() {
+        return successResponse(imageGraph.snapshot());
     }
 
     /**
@@ -2074,6 +2121,16 @@ public class TCPCommandServer {
         // a connection whose hello never opted in.
         final Set<Window> modalBefore = PhantomDialogDetector.currentModalWindows();
         final boolean phantomAutoDismiss = resolveAutoDismissPhantoms(request, caps);
+
+        // Step 13: snapshot the open-image set and active-image title BEFORE
+        // the macro runs so the post-call diff can register new images as
+        // derived nodes in the provenance graph. Per plan:
+        // docs/tcp_upgrade/13_provenance_graph.md. Captured regardless of
+        // caps.graphDelta — the graph itself is always maintained; the flag
+        // only gates whether the reply carries a graphDelta field.
+        final Set<String> graphTitlesBefore = ImageGraph.captureOpenTitles();
+        final String graphActiveTitleBefore = ImageGraph.captureActiveTitle();
+        final long graphMarkerBefore = imageGraph.currentMarker();
 
         // Gate image.* events while this macro runs. The agent's event
         // subscribers react to image.opened by sending get_image_info /
@@ -2497,6 +2554,23 @@ public class TCPCommandServer {
                         }
                     });
         } catch (Throwable ignore) {}
+        // Step 13: diff the post-macro open-title set against the pre-macro
+        // snapshot and track the resulting nodes/edges in the shared
+        // provenance graph. Attach the produced subgraph as a top-level
+        // graphDelta when caps.graphDelta is on. Runs on both success and
+        // failure paths so partial work (e.g. a plugin that ran to
+        // completion before a dialog-pause) still lands in the graph.
+        try {
+            Set<String> graphTitlesAfter = ImageGraph.captureOpenTitles();
+            imageGraph.trackMacroChange(graphTitlesBefore, graphActiveTitleBefore,
+                    graphTitlesAfter, code, "macro");
+            if (caps != null && caps.graphDelta) {
+                ImageGraph.Delta gDelta = imageGraph.deltaSince(graphMarkerBefore);
+                if (!gDelta.isEmpty()) {
+                    result.add("graphDelta", gDelta.toJson());
+                }
+            }
+        } catch (Throwable ignore) {}
         if (caps != null && caps.pulse) {
             result.addProperty("pulse", PulseBuilder.build());
         }
@@ -2877,6 +2951,14 @@ public class TCPCommandServer {
         final Set<Window> modalBefore = PhantomDialogDetector.currentModalWindows();
         final boolean phantomAutoDismiss = resolveAutoDismissPhantoms(request, caps);
 
+        // Step 13: provenance-graph baseline for run_script. Same contract as
+        // handleExecuteMacro — scripts that create images get the derived
+        // node and edge in the same shape. Per plan:
+        // docs/tcp_upgrade/13_provenance_graph.md.
+        final Set<String> graphTitlesBefore = ImageGraph.captureOpenTitles();
+        final String graphActiveTitleBefore = ImageGraph.captureActiveTitle();
+        final long graphMarkerBefore = imageGraph.currentMarker();
+
         // Mirror handleExecuteMacro: run the script on a single-thread executor
         // and poll for blocking dialogs every 150 ms. Without this, a Groovy
         // hallucination like IJ.run("setAutoThreshold", ...) opens a command
@@ -3030,6 +3112,20 @@ public class TCPCommandServer {
                             result.add("phantomDialog", phantom);
                         }
                     });
+        } catch (Throwable ignore) {}
+        // Step 13: same graphDelta contract as handleExecuteMacro. The
+        // origin tag is "script" so the agent can tell at a glance whether
+        // a derived node came from a macro run or a Groovy/Jython script.
+        try {
+            Set<String> graphTitlesAfter = ImageGraph.captureOpenTitles();
+            imageGraph.trackMacroChange(graphTitlesBefore, graphActiveTitleBefore,
+                    graphTitlesAfter, code, "script");
+            if (caps != null && caps.graphDelta) {
+                ImageGraph.Delta gDelta = imageGraph.deltaSince(graphMarkerBefore);
+                if (!gDelta.isEmpty()) {
+                    result.add("graphDelta", gDelta.toJson());
+                }
+            }
         } catch (Throwable ignore) {}
         if (caps != null && caps.pulse) {
             result.addProperty("pulse", PulseBuilder.build());
@@ -3278,6 +3374,19 @@ public class TCPCommandServer {
         final Set<Window> modalBefore = PhantomDialogDetector.currentModalWindows();
         final boolean phantomAutoDismiss = resolveAutoDismissPhantoms(request, caps);
 
+        // Step 13: provenance-graph baseline for the pipeline. The macro
+        // stored on derived nodes is the concatenated step code so the
+        // graph carries enough provenance to rerun the full chain. Per
+        // plan: docs/tcp_upgrade/13_provenance_graph.md.
+        final Set<String> graphTitlesBefore = ImageGraph.captureOpenTitles();
+        final String graphActiveTitleBefore = ImageGraph.captureActiveTitle();
+        final long graphMarkerBefore = imageGraph.currentMarker();
+        final StringBuilder pipelineMacro = new StringBuilder();
+        for (PipelineBuilder.PipelineStep s : steps) {
+            if (pipelineMacro.length() > 0) pipelineMacro.append('\n');
+            if (s.macroCode != null) pipelineMacro.append(s.macroCode);
+        }
+
         // executePipeline calls commandEngine.executeMacro() which handles EDT
         // dispatch internally, so call directly from TCP handler thread.
         try {
@@ -3320,6 +3429,21 @@ public class TCPCommandServer {
                             resultJsonRef.add("phantomDialog", phantom);
                         }
                     });
+        } catch (Throwable ignore) {}
+        // Step 13: one graphDelta per pipeline (not per step) so a chain of
+        // Duplicate → Blur → Threshold lands as a linear subgraph under a
+        // single reply field. Origin is "pipeline" so downstream agents can
+        // distinguish pipeline-built provenance from ad-hoc macros.
+        try {
+            Set<String> graphTitlesAfter = ImageGraph.captureOpenTitles();
+            imageGraph.trackMacroChange(graphTitlesBefore, graphActiveTitleBefore,
+                    graphTitlesAfter, pipelineMacro.toString(), "pipeline");
+            if (caps != null && caps.graphDelta) {
+                ImageGraph.Delta gDelta = imageGraph.deltaSince(graphMarkerBefore);
+                if (!gDelta.isEmpty()) {
+                    resultJson.add("graphDelta", gDelta.toJson());
+                }
+            }
         } catch (Throwable ignore) {}
         return successResponse(resultJson);
     }
@@ -5497,6 +5621,19 @@ public class TCPCommandServer {
         final String dialogTitle = (dialogElement != null && dialogElement.isJsonPrimitive())
                 ? dialogElement.getAsString() : null;
 
+        // Step 13: provenance-graph baseline. An OK click on a plugin's
+        // GenericDialog typically runs the plugin and produces a new image
+        // (Duplicate OK, Subtract Background OK, ...) — track it with
+        // origin="dialog" so the agent sees the new node came from a GUI
+        // interaction rather than an explicit macro. Per plan:
+        // docs/tcp_upgrade/13_provenance_graph.md.
+        final Set<String> graphTitlesBefore = ImageGraph.captureOpenTitles();
+        final String graphActiveTitleBefore = ImageGraph.captureActiveTitle();
+        final long graphMarkerBefore = imageGraph.currentMarker();
+        final String graphInteractionLabel =
+                "interact_dialog:" + action
+                + (dialogTitle != null ? " dialog=" + dialogTitle : "");
+
         // Target matching
         JsonElement targetElement = request.get("target");
         final String target = (targetElement != null && targetElement.isJsonPrimitive())
@@ -5596,6 +5733,29 @@ public class TCPCommandServer {
                         });
             } catch (Throwable ignore) {}
         }
+        // Step 13: diff the post-interaction open-title set against the
+        // pre-call snapshot and track new images into the shared provenance
+        // graph with origin="dialog". Attach the produced subgraph under
+        // graphDelta on the reply's inner result object, matching the shape
+        // used by handleExecuteMacro / handleRunScript / handleRunPipeline.
+        // Runs on success and error paths — a GenericDialog that ran its
+        // plugin and then reported a validation failure still left work.
+        try {
+            Set<String> graphTitlesAfter = ImageGraph.captureOpenTitles();
+            imageGraph.trackMacroChange(graphTitlesBefore, graphActiveTitleBefore,
+                    graphTitlesAfter, graphInteractionLabel, "dialog");
+            if (reply != null && caps != null && caps.graphDelta) {
+                ImageGraph.Delta gDelta = imageGraph.deltaSince(graphMarkerBefore);
+                if (!gDelta.isEmpty()) {
+                    JsonElement resultEl = reply.get("result");
+                    if (resultEl != null && resultEl.isJsonObject()) {
+                        resultEl.getAsJsonObject().add("graphDelta", gDelta.toJson());
+                    } else {
+                        reply.add("graphDelta", gDelta.toJson());
+                    }
+                }
+            }
+        } catch (Throwable ignore) {}
         return reply;
     }
 
