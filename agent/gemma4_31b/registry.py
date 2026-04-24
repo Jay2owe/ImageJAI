@@ -28,12 +28,16 @@ TIMEOUT_S = 60.0
 # Gemma is text-only (vision=False), has a tight context budget, and has no
 # external hook injecting session state, so pulse=True — later steps will rely
 # on the server-side one-line pulse in lieu of hook feeds.
+# Step 05 (docs/tcp_upgrade/05_state_delta_and_pulse.md): state_delta=True
+# groups diff keys (newImages / resultsTable / logDelta / dismissedDialogs)
+# under a single "stateDelta" sub-object — tighter replies for the 4k budget.
 GEMMA_CAPS = {
     "vision": False,
     "output_format": "json",
     "token_budget": 4000,
     "verbose": False,
     "pulse": True,
+    "state_delta": True,
     "accept_events": ["macro.*", "image.*", "dialog.*"],
 }
 
