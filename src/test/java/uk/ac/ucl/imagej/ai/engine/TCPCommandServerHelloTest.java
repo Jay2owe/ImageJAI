@@ -183,6 +183,47 @@ public class TCPCommandServerHelloTest {
                 enabledContains(enabled, "warnings"));
     }
 
+    /**
+     * Step 10: phantom-dialog reporting is always advertised (the server
+     * scans for phantoms on every mutating call regardless of caps — only
+     * the auto-dismiss action is gated). Plain hello must show
+     * {@code phantom_dialog} in enabled[] but NOT {@code auto_dismiss_phantoms}.
+     */
+    @Test
+    public void helloAlwaysAdvertisesPhantomDialogReporting() {
+        TCPCommandServer server = newServer();
+        JsonObject req = parse("{\"command\":\"hello\",\"agent\":\"tester\"}");
+
+        JsonObject resp = server.handleHello(req, null);
+
+        JsonArray enabled = resp.getAsJsonObject("result").getAsJsonArray("enabled");
+        assertTrue("phantom_dialog reporting always on",
+                enabledContains(enabled, "phantom_dialog"));
+        assertFalse("auto_dismiss_phantoms off by default",
+                enabledContains(enabled, "auto_dismiss_phantoms"));
+    }
+
+    /**
+     * Step 10: Gemma's opt-in path — capabilities.auto_dismiss_phantoms=true
+     * adds {@code auto_dismiss_phantoms} to enabled[] alongside the
+     * always-on {@code phantom_dialog} flag.
+     */
+    @Test
+    public void helloOptsIntoAutoDismissPhantomsWhenRequested() {
+        TCPCommandServer server = newServer();
+        JsonObject req = parse(
+                "{\"command\":\"hello\",\"agent\":\"gemma-31b\","
+              + "\"capabilities\":{\"auto_dismiss_phantoms\":true}}");
+
+        JsonObject resp = server.handleHello(req, null);
+
+        JsonArray enabled = resp.getAsJsonObject("result").getAsJsonArray("enabled");
+        assertTrue("phantom_dialog reporting always on",
+                enabledContains(enabled, "phantom_dialog"));
+        assertTrue("auto_dismiss_phantoms negotiated",
+                enabledContains(enabled, "auto_dismiss_phantoms"));
+    }
+
     private static JsonObject parse(String s) {
         return new JsonParser().parse(s).getAsJsonObject();
     }
