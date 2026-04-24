@@ -448,3 +448,110 @@ def get_metadata() -> dict:
 def get_histogram() -> dict:
     """Return the intensity distribution for the active image."""
     return send("get_histogram")
+
+
+# ---------------------------------------------------------------------------
+# Step 08 (docs/tcp_upgrade/08_gemma_tools_wrapper.md): small-model-friendly
+# wrappers around the step 07 read-only TCP commands. Names and docstrings
+# follow the PA-Tool guidance (arXiv 2510.07248) — Gemma pattern-matches on
+# the tool name AND the full docstring every turn, so both are written to
+# look like things a small model would guess. Keep the names stable;
+# renaming them later breaks Gemma's pattern recognition.
+# ---------------------------------------------------------------------------
+
+
+@tool
+def get_rois() -> dict:
+    """Return the list of ROIs in Fiji's ROI Manager, with names,
+    types, and bounding boxes. Use this to count ROIs or find a
+    specific one by name — DO NOT write a macro that queries
+    roiManager('count') for this. One TCP round-trip instead of two.
+
+    The bounding box is [x, y, width, height] in image pixels. Type
+    is one of: rectangle, polygon, oval, freehand, line, point,
+    polyline, freeline, composite, traced, angle, text.
+
+    When no image is open or the ROI Manager has never been shown,
+    returns {"count": 0, "selectedIndex": -1, "rois": []}. Very
+    large ROI sets are capped at 500 entries server-side and the
+    reply gains {"truncated": true} — if you hit the cap, process
+    ROIs in batches instead of asking for all of them at once.
+
+    Returns:
+        {"count": int,
+         "selectedIndex": int,
+         "rois": [{"index": int, "name": str, "type": str,
+                   "bounds": [x, y, width, height]}],
+         "truncated": bool (optional)}
+    """
+    resp = send("get_roi_state")
+    if not isinstance(resp, dict) or not resp.get("ok"):
+        return {"error": _error_text(resp)}
+    result = resp.get("result")
+    if not isinstance(result, dict):
+        return {"error": "get_roi_state returned no result payload"}
+    return result
+
+
+@tool
+def get_active_layer() -> dict:
+    """Return which channel, slice, and frame is currently displayed
+    in Fiji, plus the image's dimensions, composite mode, display
+    range, and LUT. Call this BEFORE running a channel-specific
+    macro to verify the right layer is active.
+
+    Use this instead of writing a macro like `getSliceNumber()` or
+    `Stack.getPosition()` — it's one TCP round-trip, and it also
+    tells you the LUT name so you know whether the image is grayscale,
+    Fire, Glasbey, etc.
+
+    When no image is open, returns {"activeImage": null} and no
+    other fields. When an image is open, c/z/t are 1-based cursor
+    positions; channels/slices/frames are the total counts.
+
+    Returns:
+        {"activeImage": str | null,
+         "c": int, "z": int, "t": int,
+         "channels": int, "slices": int, "frames": int,
+         "compositeMode": str (optional — composite images only),
+         "activeChannels": str (optional — "111" bit-mask),
+         "displayRange": {"min": float, "max": float},
+         "lut": str | null}
+    """
+    resp = send("get_display_state")
+    if not isinstance(resp, dict) or not resp.get("ok"):
+        return {"error": _error_text(resp)}
+    result = resp.get("result")
+    if not isinstance(result, dict):
+        return {"error": "get_display_state returned no result payload"}
+    return result
+
+
+@tool
+def get_console(tail: int = 2000) -> dict:
+    """Return recent text written to Fiji's stdout and stderr. Use
+    this when a Groovy or Jython script fails — stack traces appear
+    here, NOT in the ImageJ Log window (which is a separate buffer).
+    If run_script returns a bare error and the Log window is empty,
+    call this BEFORE retrying.
+
+    The `tail` argument controls how many bytes to return from the
+    end of each stream (default 2000, max around 60000). Pass -1 to
+    return the full buffered contents. When the buffer has more
+    bytes than you asked for, {"truncated": true} is set.
+
+    Returns:
+        {"stdout": str, "stderr": str, "combined": str,
+         "truncated": bool}
+
+    Args:
+        tail: Number of bytes to return from the end of each
+              stream. Default 2000. Use -1 for the full buffer.
+    """
+    resp = send("get_console", tail=int(tail))
+    if not isinstance(resp, dict) or not resp.get("ok"):
+        return {"error": _error_text(resp)}
+    result = resp.get("result")
+    if not isinstance(result, dict):
+        return {"error": "get_console returned no result payload"}
+    return result
