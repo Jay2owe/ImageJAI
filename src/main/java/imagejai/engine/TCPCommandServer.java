@@ -221,6 +221,12 @@ public class TCPCommandServer {
         // results-writing flag + nResults==0) costs near zero tokens and
         // shortcuts a loop Gemma hits on every call. Opt-out only.
         boolean warnings = true;
+        // Step 09: histogramDelta on pixel-mutating macros
+        // (docs/tcp_upgrade/09_histogram_delta.md). On-by-default — the
+        // 32-bin before/after shape gives text-only agents (Gemma et al.) a
+        // vision-free proxy for "did this macro change the pixels". Clients
+        // that do their own image inspection can opt out.
+        boolean histogram = true;
         Set<String> acceptEvents = java.util.Collections.emptySet();
     }
 
@@ -1279,6 +1285,9 @@ public class TCPCommandServer {
         // Step 06: warnings default on for every agent. Gemma benefits most
         // from the nResults trap; Claude / Codex tolerate the extra field.
         c.warnings = optBool(caps, "warnings", true);
+        // Step 09: histogram delta defaults ON. Agents with an independent
+        // image-inspection path can opt out via capabilities.histogram=false.
+        c.histogram = optBool(caps, "histogram", true);
         int sockPort = (sock != null) ? sock.getPort() : 0;
         c.agentId = optString(caps, "agent_id", c.agent + "-" + sockPort);
         c.acceptEvents = parseStringSet(caps, "accept_events");
@@ -1332,6 +1341,11 @@ public class TCPCommandServer {
         // top-level warnings[] array on success/failure replies.
         if (caps != null && caps.warnings) {
             arr.add(new JsonPrimitive("warnings"));
+        }
+        // Step 09: surface histogram_delta so clients can feature-detect the
+        // new top-level histogramDelta field on mutating replies.
+        if (caps != null && caps.histogram) {
+            arr.add(new JsonPrimitive("histogram_delta"));
         }
         // Step 07: the three Gemma-tools read-only commands are always on once
         // the server is up (no cap gate) so clients can feature-detect them
@@ -1822,6 +1836,18 @@ public class TCPCommandServer {
             preResultsLen = preCsv != null ? preCsv.length() : 0;
         } catch (Throwable ignore) {}
 
+        // Step 09: snapshot the active image's intensity distribution BEFORE
+        // the macro runs so we can diff it against the post-macro snapshot.
+        // Per plan: docs/tcp_upgrade/09_histogram_delta.md. The snapshot is
+        // best-effort — a null / too-large active image surfaces as a skip
+        // envelope (too-large) or a dropped field (no image) at the end.
+        HistogramDelta.Snapshot histBefore = null;
+        if (caps != null && caps.histogram) {
+            try {
+                histBefore = HistogramDelta.snapshot(WindowManager.getCurrentImage());
+            } catch (Throwable ignore) {}
+        }
+
         long startTime = System.currentTimeMillis();
         // Serialize every execute_macro call JVM-wide. ImageJ has a single global
         // Interpreter / WindowManager — two overlapping macros (one zombied on a
@@ -2124,6 +2150,23 @@ public class TCPCommandServer {
         // "stateDelta" or as legacy flat keys, depending on caps. Must run
         // before the pulse/return so the reply order stays stable.
         delta.applyTo(result, caps);
+        // Step 09: snapshot the post-macro histogram and attach the delta as
+        // a top-level "histogramDelta" — NOT nested under stateDelta — so an
+        // agent can branch on pixel changes separately from structural state
+        // changes. Fires on every pixel-mutating macro regardless of success
+        // so even a dialog-paused failure produces a useful diff for the work
+        // that landed before the pause. Per plan:
+        // docs/tcp_upgrade/09_histogram_delta.md.
+        if (caps != null && caps.histogram) {
+            HistogramDelta.Snapshot histAfter = null;
+            try {
+                histAfter = HistogramDelta.snapshot(WindowManager.getCurrentImage());
+            } catch (Throwable ignore) {}
+            JsonObject histJson = HistogramDelta.compute(histBefore, histAfter);
+            if (histJson != null) {
+                result.add("histogramDelta", histJson);
+            }
+        }
         if (caps != null && caps.pulse) {
             result.addProperty("pulse", PulseBuilder.build());
         }
@@ -2488,6 +2531,16 @@ public class TCPCommandServer {
                     + ". Available: groovy, jython, javascript");
         }
 
+        // Step 09: histogram snapshot before the script runs. Same contract
+        // as handleExecuteMacro — on-by-default, skipped for huge images,
+        // dropped entirely when no active image exists.
+        HistogramDelta.Snapshot histBefore = null;
+        if (caps != null && caps.histogram) {
+            try {
+                histBefore = HistogramDelta.snapshot(WindowManager.getCurrentImage());
+            } catch (Throwable ignore) {}
+        }
+
         // Mirror handleExecuteMacro: run the script on a single-thread executor
         // and poll for blocking dialogs every 150 ms. Without this, a Groovy
         // hallucination like IJ.run("setAutoThreshold", ...) opens a command
@@ -2620,6 +2673,17 @@ public class TCPCommandServer {
         // handleExecuteMacro so clients can treat execute_macro and run_script
         // replies interchangeably.
         delta.applyTo(result, caps);
+        // Step 09: same histogramDelta contract as handleExecuteMacro.
+        if (caps != null && caps.histogram) {
+            HistogramDelta.Snapshot histAfter = null;
+            try {
+                histAfter = HistogramDelta.snapshot(WindowManager.getCurrentImage());
+            } catch (Throwable ignore) {}
+            JsonObject histJson = HistogramDelta.compute(histBefore, histAfter);
+            if (histJson != null) {
+                result.add("histogramDelta", histJson);
+            }
+        }
         if (caps != null && caps.pulse) {
             result.addProperty("pulse", PulseBuilder.build());
         }
