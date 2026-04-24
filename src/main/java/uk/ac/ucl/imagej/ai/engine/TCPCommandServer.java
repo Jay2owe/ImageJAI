@@ -288,6 +288,17 @@ public class TCPCommandServer {
         // capabilities.graph_delta=false. The get_image_graph command is
         // NOT gated on this flag — it remains queryable on demand.
         boolean graphDelta = true;
+        // Step 14: federated mistake ledger
+        // (docs/tcp_upgrade/14_federated_ledger.md). Default ON for every
+        // agent — the ledger is pure-IO, the auto-attach block on
+        // handleExecuteMacro failures costs one fingerprint hash + a
+        // bounded map lookup, and the suggested[] payload (top 3 matches)
+        // adds at most a few hundred tokens on the failure path. The two
+        // explicit commands (ledger_lookup / ledger_confirm) remain
+        // callable regardless of this flag; caps.ledger gates only the
+        // auto-attach behaviour so agents that manage their own lookup
+        // path can opt out via capabilities.ledger=false.
+        boolean ledger = true;
     }
 
     /** Fallback caps applied to any request from a socket that never said hello. */
@@ -358,6 +369,18 @@ public class TCPCommandServer {
      * docs/tcp_upgrade/13_provenance_graph.md.
      */
     final ImageGraph imageGraph = new ImageGraph();
+
+    /**
+     * Step 14: federated mistake ledger
+     * (docs/tcp_upgrade/14_federated_ledger.md). Persistent on-disk store at
+     * {@code ~/.imagejai/ledger.json} of known-good fixes keyed by error
+     * fingerprint. Populated by {@code ledger_confirm} calls from any agent,
+     * queried via {@code ledger_lookup}, and auto-attached to
+     * {@code execute_macro} error replies' {@code suggested[]} when
+     * {@code caps.ledger} is on. Field is package-private so tests can
+     * replace it via {@link #setLedgerStore(LedgerStore)}.
+     */
+    LedgerStore ledgerStore = LedgerStore.openDefault();
 
     private final int port;
     private final CommandEngine commandEngine;
@@ -1120,6 +1143,10 @@ public class TCPCommandServer {
             return handleGetConsole(request, caps);
         } else if ("get_image_graph".equals(command)) {
             return handleGetImageGraph();
+        } else if ("ledger_lookup".equals(command)) {
+            return handleLedgerLookup(request);
+        } else if ("ledger_confirm".equals(command)) {
+            return handleLedgerConfirm(request, caps);
         } else {
             return errorResponse("Unknown command: " + command);
         }
@@ -1575,6 +1602,11 @@ public class TCPCommandServer {
         // run_pipeline / interact_dialog replies; clients that do not
         // consume it opt out with capabilities.graph_delta=false.
         c.graphDelta = optBool(caps, "graph_delta", true);
+        // Step 14: ledger auto-attach default ON for every agent. The two
+        // explicit commands (ledger_lookup / ledger_confirm) remain
+        // callable even when the cap is false — the flag gates only the
+        // implicit enrichment of error replies' suggested[] list.
+        c.ledger = optBool(caps, "ledger", true);
         int sockPort = (sock != null) ? sock.getPort() : 0;
         c.agentId = optString(caps, "agent_id", c.agent + "-" + sockPort);
         c.acceptEvents = parseStringSet(caps, "accept_events");
@@ -1672,6 +1704,15 @@ public class TCPCommandServer {
             arr.add(new JsonPrimitive("graph_delta"));
         }
         arr.add(new JsonPrimitive("get_image_graph"));
+        // Step 14: advertise "ledger" when auto-attach is on, and surface
+        // the two explicit commands unconditionally so clients can
+        // feature-detect them even when they've opted out of auto-attach.
+        // Per plan: docs/tcp_upgrade/14_federated_ledger.md.
+        if (caps != null && caps.ledger) {
+            arr.add(new JsonPrimitive("ledger"));
+        }
+        arr.add(new JsonPrimitive("ledger_lookup"));
+        arr.add(new JsonPrimitive("ledger_confirm"));
         return arr;
     }
 
@@ -1884,6 +1925,89 @@ public class TCPCommandServer {
      */
     JsonObject handleGetImageGraph() {
         return successResponse(imageGraph.snapshot());
+    }
+
+    // -----------------------------------------------------------------------
+    // Step 14: federated ledger commands.
+    // Per plan: docs/tcp_upgrade/14_federated_ledger.md
+    // -----------------------------------------------------------------------
+
+    /**
+     * Step 14: visible for tests — swap the server's {@link LedgerStore} for
+     * one that writes to a caller-owned temp directory so the unit tests
+     * never touch the user's home folder. Thread-safe: the ledger is
+     * only ever read via {@link #ledgerStore}, so replacing the reference
+     * is atomic for all subsequent dispatches.
+     */
+    void setLedgerStore(LedgerStore store) {
+        if (store != null) this.ledgerStore = store;
+    }
+
+    /**
+     * {@code ledger_lookup}: query the federated mistake ledger for known-good
+     * fixes for an error. Accepts {@code error_code}, {@code error_fragment},
+     * and {@code macro_prefix} (any may be empty); returns the top matches
+     * sorted by confidence × timesSeen. Works regardless of the
+     * {@code caps.ledger} flag — the flag only gates implicit auto-attach.
+     */
+    JsonObject handleLedgerLookup(JsonObject request) {
+        String errorCode     = optString(request, "error_code", "");
+        String errorFragment = optString(request, "error_fragment", "");
+        String macroPrefix   = optString(request, "macro_prefix", "");
+        int max              = optInt(request, "max", 5);
+        if (max < 1) max = 1;
+        if (max > 20) max = 20;
+
+        List<LedgerStore.Entry> hits = ledgerStore.lookup(
+                errorCode, errorFragment, macroPrefix, max);
+
+        JsonObject result = new JsonObject();
+        result.addProperty("fingerprint",
+                LedgerStore.fingerprint(errorCode, errorFragment, macroPrefix));
+        JsonArray arr = new JsonArray();
+        for (LedgerStore.Entry e : hits) {
+            arr.add(LedgerStore.toSuggestedJson(e));
+        }
+        result.add("matches", arr);
+        result.addProperty("ledgerSize", ledgerStore.size());
+        return successResponse(result);
+    }
+
+    /**
+     * {@code ledger_confirm}: record whether a fix worked. Updates counters
+     * and {@code confirmedBy} on an existing entry, or creates a new one from
+     * the supplied context. {@code caps.agentId} feeds the
+     * {@code confirmedBy} set automatically when the caller did not pass an
+     * explicit {@code agent_id}.
+     */
+    JsonObject handleLedgerConfirm(JsonObject request, AgentCaps caps) {
+        String fingerprint = optString(request, "fingerprint", "");
+        String errorCode   = optString(request, "error_code", "");
+        String errorFrag   = optString(request, "error_fragment", "");
+        String macroPrefix = optString(request, "macro_prefix", "");
+        String fix         = optString(request, "fix", "");
+        String example     = optString(request, "example_macro", "");
+        boolean worked     = optBool(request, "worked", true);
+
+        String agentId = optString(request, "agent_id",
+                caps != null && caps.agentId != null ? caps.agentId : "");
+
+        LedgerStore.Entry entry = ledgerStore.confirm(
+                fingerprint, errorCode, errorFrag, macroPrefix,
+                fix, example, agentId, worked);
+
+        JsonObject result = new JsonObject();
+        result.addProperty("fingerprint", entry.fingerprint);
+        result.addProperty("timesSeen", entry.timesSeen);
+        result.addProperty("confirmationsTrue", entry.confirmationsTrue);
+        result.addProperty("confirmationsFalse", entry.confirmationsFalse);
+        result.addProperty("confidence", LedgerStore.confidenceOf(entry));
+        JsonArray by = new JsonArray();
+        for (String a : entry.confirmedBy) by.add(a);
+        result.add("confirmedBy", by);
+        result.addProperty("ledgerSize", ledgerStore.size());
+        result.addProperty("memoryOnly", ledgerStore.isMemoryOnly());
+        return successResponse(result);
     }
 
     /**
@@ -2458,6 +2582,25 @@ public class TCPCommandServer {
             }
             ErrorReply err = ErrorReply.classifyMacroError(rawError, sideEffectsLanded);
             if (sideEffectsObj.size() > 0) err.sideEffects(sideEffectsObj);
+            // Step 14: auto-attach top ledger matches so the agent sees the
+            // known fix on the same round-trip. Gated on caps.ledger — the
+            // two explicit ledger commands still work when this is off.
+            // suggested[] is only serialised by ErrorReply when
+            // caps.structuredErrors is on, so legacy clients (plain-string
+            // error) pay zero tokens for this enrichment.
+            if (caps != null && caps.ledger && caps.structuredErrors) {
+                try {
+                    List<LedgerStore.Entry> hits = ledgerStore.lookup(
+                            err.code(), rawError, code, 3);
+                    for (LedgerStore.Entry e : hits) {
+                        err.addSuggested(LedgerStore.toSuggestedJson(e));
+                    }
+                } catch (Throwable ignore) {
+                    // Ledger IO is best-effort on the error path — a broken
+                    // ledger file must never convert a macro error into a
+                    // harder-to-diagnose server 500.
+                }
+            }
             result.addProperty("success", false);
             result.add("error", err.buildJsonElement(caps));
             // Surface any prints the macro emitted before failure so the agent

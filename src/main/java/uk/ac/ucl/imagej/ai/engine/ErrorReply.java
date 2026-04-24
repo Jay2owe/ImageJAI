@@ -68,6 +68,9 @@ final class ErrorReply {
 
     String message() { return message; }
 
+    /** Step 14: getter used by the ledger auto-attach on the macro-error path. */
+    String code() { return code; }
+
     /**
      * Build the JSON form this reply should take for the given caps. If
      * {@code caps} is {@code null} or {@code caps.structuredErrors} is
