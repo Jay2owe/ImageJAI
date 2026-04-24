@@ -21,6 +21,10 @@ Usage:
     python ij.py histogram
     python ij.py windows
     python ij.py metadata
+    python ij.py rois                  # ROI Manager contents (step 07/08)
+    python ij.py display               # active C/Z/T, LUT, display range
+    python ij.py console               # recent Fiji stdout/stderr (Groovy traces)
+    python ij.py console --tail 5000   # longer console window
     python ij.py probe "Gaussian Blur..."
     python ij.py friction              # recent failures
     python ij.py friction patterns     # recurring failure patterns
@@ -962,6 +966,41 @@ def main():
 
         elif cmd == "metadata":
             print(json.dumps(get_metadata(), indent=2))
+
+        elif cmd == "rois":
+            # Step 08: thin wrapper over the step 07 get_roi_state command.
+            print(json.dumps(imagej_command({"command": "get_roi_state"}),
+                             indent=2))
+
+        elif cmd == "display":
+            # Step 08: active C/Z/T, composite mode, display range, LUT.
+            print(json.dumps(imagej_command({"command": "get_display_state"}),
+                             indent=2))
+
+        elif cmd == "console":
+            # Step 08: tail of Fiji's buffered stdout/stderr. Groovy /
+            # Jython stack traces land here, NOT in the ImageJ Log window.
+            tail = 2000
+            args = sys.argv[2:]
+            i = 0
+            while i < len(args):
+                if args[i] == "--tail" and i + 1 < len(args):
+                    try:
+                        tail = int(args[i + 1])
+                    except ValueError:
+                        pass
+                    i += 2
+                elif args[i].startswith("--tail="):
+                    try:
+                        tail = int(args[i].split("=", 1)[1])
+                    except ValueError:
+                        pass
+                    i += 1
+                else:
+                    i += 1
+            print(json.dumps(
+                imagej_command({"command": "get_console", "tail": tail}),
+                indent=2))
 
         elif cmd == "3d":
             # Sub-commands: status, add, list, snapshot, close
