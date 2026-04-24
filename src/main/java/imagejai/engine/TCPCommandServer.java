@@ -8,13 +8,18 @@ import com.google.gson.JsonNull;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import com.google.gson.JsonPrimitive;
+import ij.CompositeImage;
 import ij.IJ;
 import ij.ImagePlus;
 import ij.WindowManager;
 import ij.gui.ImageWindow;
+import ij.gui.Roi;
 import ij.measure.Calibration;
 import ij.measure.ResultsTable;
+import ij.plugin.frame.RoiManager;
+import ij.process.ImageProcessor;
 import ij.process.ImageStatistics;
+import ij.process.LUT;
 import imagejai.config.Constants;
 import imagejai.ui.ChatPanelController;
 
@@ -35,6 +40,7 @@ import java.awt.Component;
 import java.awt.Container;
 import java.awt.Dialog;
 import java.awt.Frame;
+import java.awt.Rectangle;
 import java.awt.Window;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -155,7 +161,11 @@ public class TCPCommandServer {
             "job_status",
             "job_list",
             "list_reactive_rules",
-            "reactive_stats"
+            "reactive_stats",
+            // Step 07: Gemma-tools read-only commands.
+            "get_roi_state",
+            "get_display_state",
+            "get_console"
     ));
 
     /**
@@ -325,6 +335,17 @@ public class TCPCommandServer {
         this.listener = listener;
         running = true;
 
+        // Step 07: install System.out / System.err tees into bounded ring
+        // buffers so the new get_console command can surface Groovy /
+        // Jython stack traces that IJ.getLog() never sees. Idempotent — a
+        // second start() while still running is a no-op here. Per plan:
+        // docs/tcp_upgrade/07_gemma_tools_server.md.
+        try {
+            ConsoleCapture.install();
+        } catch (Throwable t) {
+            System.err.println("[ImageJAI-TCP] Console capture install failed: " + t.getMessage());
+        }
+
         // Phase 8: start the reactive rules engine alongside the socket so
         // rules fire from the moment the plugin is up, regardless of whether
         // any TCP client ever connects.
@@ -371,6 +392,14 @@ public class TCPCommandServer {
             } catch (Exception e) {
                 System.err.println("[ImageJAI-TCP] Error closing server socket: " + e.getMessage());
             }
+        }
+        // Step 07: restore the original System.out / System.err so a
+        // subsequent plugin reload doesn't stack tees on top of the previous
+        // ones. Safe to call even if install() never ran.
+        try {
+            ConsoleCapture.uninstall();
+        } catch (Exception e) {
+            System.err.println("[ImageJAI-TCP] Error restoring console streams: " + e.getMessage());
         }
         if (listener != null) {
             listener.onServerStopped();
@@ -918,6 +947,12 @@ public class TCPCommandServer {
             return handleReactiveToggle(request, false);
         } else if ("reactive_reload".equals(command)) {
             return handleReactiveReload();
+        } else if ("get_roi_state".equals(command)) {
+            return handleGetRoiState(request, caps);
+        } else if ("get_display_state".equals(command)) {
+            return handleGetDisplayState(request, caps);
+        } else if ("get_console".equals(command)) {
+            return handleGetConsole(request, caps);
         } else {
             return errorResponse("Unknown command: " + command);
         }
@@ -1298,6 +1333,12 @@ public class TCPCommandServer {
         if (caps != null && caps.warnings) {
             arr.add(new JsonPrimitive("warnings"));
         }
+        // Step 07: the three Gemma-tools read-only commands are always on once
+        // the server is up (no cap gate) so clients can feature-detect them
+        // by name. Per plan: docs/tcp_upgrade/07_gemma_tools_server.md.
+        arr.add(new JsonPrimitive("get_roi_state"));
+        arr.add(new JsonPrimitive("get_display_state"));
+        arr.add(new JsonPrimitive("get_console"));
         return arr;
     }
 
@@ -1336,6 +1377,264 @@ public class TCPCommandServer {
             }
         }
         return result;
+    }
+
+    // -----------------------------------------------------------------------
+    // Step 07: Gemma-tools read-only commands.
+    // Per plan: docs/tcp_upgrade/07_gemma_tools_server.md
+    // -----------------------------------------------------------------------
+
+    /** Max ROI entries inlined in a single reply before truncating. */
+    private static final int MAX_ROI_ENTRIES = 500;
+
+    /** Default tail window for {@code get_console}, in bytes. */
+    private static final int GET_CONSOLE_DEFAULT_TAIL = 2000;
+
+    /**
+     * {@code get_roi_state} — expose RoiManager contents directly so agents
+     * stop writing macros to introspect ROI state. Returns {@code count:0,
+     * rois:[]} when no RoiManager is open.
+     */
+    JsonObject handleGetRoiState(JsonObject request, AgentCaps caps) {
+        RoiManager rm = RoiManager.getInstance();
+        JsonObject out = new JsonObject();
+        if (rm == null) {
+            out.addProperty("count", 0);
+            out.addProperty("selectedIndex", -1);
+            out.add("rois", new JsonArray());
+            return successResponse(out);
+        }
+        int count = rm.getCount();
+        out.addProperty("count", count);
+        out.addProperty("selectedIndex", rm.getSelectedIndex());
+        Roi[] rois;
+        try {
+            rois = rm.getRoisAsArray();
+        } catch (Exception e) {
+            rois = new Roi[0];
+        }
+        JsonArray arr = new JsonArray();
+        int limit = Math.min(rois.length, MAX_ROI_ENTRIES);
+        for (int i = 0; i < limit; i++) {
+            Roi roi = rois[i];
+            if (roi == null) continue;
+            JsonObject r = new JsonObject();
+            r.addProperty("index", i);
+            String name;
+            try {
+                name = rm.getName(i);
+            } catch (Exception e) {
+                name = roi.getName();
+            }
+            if (name != null) r.addProperty("name", name);
+            r.addProperty("type", roiTypeName(roi));
+            Rectangle b = roi.getBounds();
+            JsonArray bounds = new JsonArray();
+            if (b != null) {
+                bounds.add(new JsonPrimitive(b.x));
+                bounds.add(new JsonPrimitive(b.y));
+                bounds.add(new JsonPrimitive(b.width));
+                bounds.add(new JsonPrimitive(b.height));
+            }
+            r.add("bounds", bounds);
+            arr.add(r);
+        }
+        out.add("rois", arr);
+        if (rois.length > MAX_ROI_ENTRIES) {
+            out.addProperty("truncated", true);
+        }
+        return successResponse(out);
+    }
+
+    /**
+     * {@code get_display_state} — expose channel/slice/frame cursor, composite
+     * mode, active-channel mask, display range and LUT so agents don't have
+     * to guess or write macros to read them. Returns
+     * {@code {"activeImage": null}} when no image is open.
+     */
+    JsonObject handleGetDisplayState(JsonObject request, AgentCaps caps) {
+        ImagePlus imp = WindowManager.getCurrentImage();
+        JsonObject out = new JsonObject();
+        if (imp == null) {
+            out.add("activeImage", JsonNull.INSTANCE);
+            return successResponse(out);
+        }
+        out.addProperty("activeImage", imp.getTitle());
+        out.addProperty("c", imp.getC());
+        out.addProperty("z", imp.getZ());
+        out.addProperty("t", imp.getT());
+        out.addProperty("channels", imp.getNChannels());
+        out.addProperty("slices", imp.getNSlices());
+        out.addProperty("frames", imp.getNFrames());
+        if (imp instanceof CompositeImage) {
+            CompositeImage ci = (CompositeImage) imp;
+            out.addProperty("compositeMode", compositeModeName(ci.getMode()));
+            try {
+                // IJ's CompositeImage.getActiveChannels() returns boolean[].
+                // Serialise as the "111" bit-mask string documented in the
+                // plan so clients can read it without decoding an array.
+                out.addProperty("activeChannels",
+                        activeChannelsMask(ci.getActiveChannels()));
+            } catch (Exception ignore) {
+                // older IJ versions may not expose this — skip silently
+            }
+        }
+        JsonObject dr = new JsonObject();
+        dr.addProperty("min", imp.getDisplayRangeMin());
+        dr.addProperty("max", imp.getDisplayRangeMax());
+        out.add("displayRange", dr);
+        LUT lut = null;
+        ImageProcessor ip = imp.getProcessor();
+        if (ip != null) {
+            try { lut = ip.getLut(); } catch (Exception ignore) { /* fall through */ }
+        }
+        if (lut != null) {
+            out.addProperty("lut", lutNameOrHeuristic(lut));
+        } else {
+            out.add("lut", JsonNull.INSTANCE);
+        }
+        return successResponse(out);
+    }
+
+    /**
+     * {@code get_console} — return the tail of buffered {@code System.out} /
+     * {@code System.err}, so agents see Groovy / Jython stack traces that
+     * never reach the ImageJ Log window. Requires {@link ConsoleCapture} to
+     * have been installed at server start; returns empty strings if not.
+     */
+    JsonObject handleGetConsole(JsonObject request, AgentCaps caps) {
+        int tail = (request != null && request.has("tail"))
+                ? request.get("tail").getAsInt() : GET_CONSOLE_DEFAULT_TAIL;
+        String stdout = ConsoleCapture.tailStdout(tail);
+        String stderr = ConsoleCapture.tailStderr(tail);
+        JsonObject out = new JsonObject();
+        out.addProperty("stdout", stdout);
+        out.addProperty("stderr", stderr);
+        out.addProperty("combined", combineConsoleStreams(stdout, stderr));
+        long stdoutBuffered = ConsoleCapture.stdoutSize();
+        long stderrBuffered = ConsoleCapture.stderrSize();
+        boolean truncated = tail >= 0
+                && (stdoutBuffered > tail || stderrBuffered > tail);
+        out.addProperty("truncated", truncated);
+        out.addProperty("bufferedStdout", stdoutBuffered);
+        out.addProperty("bufferedStderr", stderrBuffered);
+        out.addProperty("installed", ConsoleCapture.isInstalled());
+        return successResponse(out);
+    }
+
+    /**
+     * Name for {@link Roi#getType()}. Kept in the server rather than pulled
+     * from Roi because Roi only exposes integer constants; a readable string
+     * is what agents actually want to see.
+     */
+    private static String roiTypeName(Roi roi) {
+        if (roi == null) return "unknown";
+        switch (roi.getType()) {
+            case Roi.RECTANGLE: return "rectangle";
+            case Roi.OVAL: return "oval";
+            case Roi.POLYGON: return "polygon";
+            case Roi.FREEROI: return "freehand";
+            case Roi.TRACED_ROI: return "traced";
+            case Roi.LINE: return "line";
+            case Roi.POLYLINE: return "polyline";
+            case Roi.FREELINE: return "freeline";
+            case Roi.ANGLE: return "angle";
+            case Roi.COMPOSITE: return "composite";
+            case Roi.POINT: return "point";
+            default: return "unknown";
+        }
+    }
+
+    /**
+     * Render {@link CompositeImage#getActiveChannels()} as a string bit-mask
+     * like {@code "111"} where position {@code i} is {@code '1'} if channel
+     * {@code i+1} is currently active. Matches the shape documented in the
+     * Step 07 plan.
+     */
+    private static String activeChannelsMask(boolean[] active) {
+        if (active == null || active.length == 0) return "";
+        StringBuilder sb = new StringBuilder(active.length);
+        for (int i = 0; i < active.length; i++) {
+            sb.append(active[i] ? '1' : '0');
+        }
+        return sb.toString();
+    }
+
+    /** Map {@link CompositeImage#getMode()} int to a readable mode name. */
+    private static String compositeModeName(int mode) {
+        switch (mode) {
+            case CompositeImage.COMPOSITE: return "composite";
+            case CompositeImage.COLOR: return "color";
+            case CompositeImage.GRAYSCALE: return "grayscale";
+            default: return "unknown";
+        }
+    }
+
+    /**
+     * LUT naming heuristic. IJ's {@link LUT} doesn't reliably carry its source
+     * name, so for the common built-ins we match byte signature; anything
+     * else is labelled {@code "custom"} rather than guessing wrong.
+     */
+    static String lutNameOrHeuristic(LUT lut) {
+        if (lut == null) return "custom";
+        try {
+            java.lang.reflect.Method m = lut.getClass().getMethod("getName");
+            Object name = m.invoke(lut);
+            if (name instanceof String) {
+                String s = (String) name;
+                if (!s.isEmpty()) return s;
+            }
+        } catch (Exception ignore) {
+            // fall through to byte heuristic
+        }
+        byte[] r = new byte[256];
+        byte[] g = new byte[256];
+        byte[] b = new byte[256];
+        try {
+            lut.getReds(r);
+            lut.getGreens(g);
+            lut.getBlues(b);
+        } catch (Exception e) {
+            return "custom";
+        }
+        if (isIdentityRamp(r) && isIdentityRamp(g) && isIdentityRamp(b)) return "Grays";
+        if (isIdentityRamp(r) && isZeroChannel(g) && isZeroChannel(b)) return "Red";
+        if (isZeroChannel(r) && isIdentityRamp(g) && isZeroChannel(b)) return "Green";
+        if (isZeroChannel(r) && isZeroChannel(g) && isIdentityRamp(b)) return "Blue";
+        return "custom";
+    }
+
+    private static boolean isIdentityRamp(byte[] ch) {
+        for (int i = 0; i < 256; i++) {
+            if ((ch[i] & 0xff) != i) return false;
+        }
+        return true;
+    }
+
+    private static boolean isZeroChannel(byte[] ch) {
+        for (int i = 0; i < 256; i++) {
+            if (ch[i] != 0) return false;
+        }
+        return true;
+    }
+
+    /**
+     * Interleave stdout and stderr into a single stream for agents that don't
+     * care which channel a line came from. The stream-ordered concatenation
+     * is a best-effort ordering aid — precise interleaving is impossible
+     * without per-byte timestamps, so we label each block.
+     */
+    private static String combineConsoleStreams(String stdout, String stderr) {
+        boolean hasOut = stdout != null && !stdout.isEmpty();
+        boolean hasErr = stderr != null && !stderr.isEmpty();
+        if (!hasOut && !hasErr) return "";
+        if (hasOut && !hasErr) return stdout;
+        if (!hasOut && hasErr) return stderr;
+        StringBuilder sb = new StringBuilder(stdout.length() + stderr.length() + 32);
+        sb.append(stdout);
+        if (!stdout.endsWith("\n")) sb.append('\n');
+        sb.append(stderr);
+        return sb.toString();
     }
 
     private JsonObject handleGetProgress() {
