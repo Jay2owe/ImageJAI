@@ -151,6 +151,38 @@ public class TCPCommandServerHelloTest {
                 enabledContains(enabled, "structured_errors"));
     }
 
+    /**
+     * Step 06: {@code warnings} defaults on for every client that says hello,
+     * including the bare no-capabilities form. Keeping it on-by-default is
+     * what makes small-model loops cheap to catch.
+     */
+    @Test
+    public void helloDefaultsEnableWarnings() {
+        TCPCommandServer server = newServer();
+        JsonObject req = parse("{\"command\":\"hello\",\"agent\":\"tester\"}");
+
+        JsonObject resp = server.handleHello(req, null);
+
+        JsonArray enabled = resp.getAsJsonObject("result").getAsJsonArray("enabled");
+        assertTrue("warnings on by default",
+                enabledContains(enabled, "warnings"));
+    }
+
+    /** Step 06: explicit opt-out keeps warnings out of enabled[]. */
+    @Test
+    public void helloCanOptOutOfWarnings() {
+        TCPCommandServer server = newServer();
+        JsonObject req = parse(
+                "{\"command\":\"hello\",\"agent\":\"tester\","
+              + "\"capabilities\":{\"warnings\":false}}");
+
+        JsonObject resp = server.handleHello(req, null);
+
+        JsonArray enabled = resp.getAsJsonObject("result").getAsJsonArray("enabled");
+        assertFalse("warnings explicitly disabled",
+                enabledContains(enabled, "warnings"));
+    }
+
     private static JsonObject parse(String s) {
         return new JsonParser().parse(s).getAsJsonObject();
     }

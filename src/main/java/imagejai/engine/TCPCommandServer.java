@@ -13,6 +13,7 @@ import ij.ImagePlus;
 import ij.WindowManager;
 import ij.gui.ImageWindow;
 import ij.measure.Calibration;
+import ij.measure.ResultsTable;
 import ij.process.ImageStatistics;
 import imagejai.config.Constants;
 import imagejai.ui.ChatPanelController;
@@ -204,6 +205,12 @@ public class TCPCommandServer {
         // server-side before burning a macro-execution cycle. Clients can opt
         // out if they ship their own registry check.
         boolean fuzzyMatch = true;
+        // Step 06: post-execution macro-analyser warnings
+        // (docs/tcp_upgrade/06_nresults_trap.md). On-by-default for every
+        // agent — the single rule shipped here (Analyze Particles + no
+        // results-writing flag + nResults==0) costs near zero tokens and
+        // shortcuts a loop Gemma hits on every call. Opt-out only.
+        boolean warnings = true;
         Set<String> acceptEvents = java.util.Collections.emptySet();
     }
 
@@ -1234,6 +1241,9 @@ public class TCPCommandServer {
         c.structuredErrors = optBool(caps, "structured_errors", false);
         c.canonicalMacro = optBool(caps, "canonical_macro", true);
         c.fuzzyMatch = optBool(caps, "fuzzy_match", true);
+        // Step 06: warnings default on for every agent. Gemma benefits most
+        // from the nResults trap; Claude / Codex tolerate the extra field.
+        c.warnings = optBool(caps, "warnings", true);
         int sockPort = (sock != null) ? sock.getPort() : 0;
         c.agentId = optString(caps, "agent_id", c.agent + "-" + sockPort);
         c.acceptEvents = parseStringSet(caps, "accept_events");
@@ -1282,6 +1292,11 @@ public class TCPCommandServer {
         }
         if (caps != null && caps.pulse) {
             arr.add(new JsonPrimitive("pulse"));
+        }
+        // Step 06: advertise warnings so clients can detect the new
+        // top-level warnings[] array on success/failure replies.
+        if (caps != null && caps.warnings) {
+            arr.add(new JsonPrimitive("warnings"));
         }
         return arr;
     }
@@ -1784,6 +1799,26 @@ public class TCPCommandServer {
             if (ranCode != null && !ranCode.isEmpty()
                     && (RecorderCapture.differs(code, ranCode) || !success)) {
                 result.addProperty("ranCode", ranCode);
+            }
+        }
+        // Step 06: run the macro analyser against the canonical code +
+        // post-execution state. Uses codeToRun (post-fuzzy-correction) so the
+        // regex sees the same command name ImageJ ran. Warnings surface as a
+        // top-level array — NOT inside stateDelta — so agents can branch on
+        // "run succeeded AND no actionable bug" without re-parsing the diff.
+        // Per plan: docs/tcp_upgrade/06_nresults_trap.md.
+        if (caps != null && caps.warnings) {
+            int nResultsAfter = 0;
+            try {
+                ResultsTable rt = ResultsTable.getResultsTable();
+                nResultsAfter = (rt == null) ? 0 : rt.getCounter();
+            } catch (Throwable ignore) {}
+            List<MacroAnalyser.Warning> warnings = MacroAnalyser.analyse(
+                    codeToRun, new MacroAnalyser.PostExec(nResultsAfter));
+            if (!warnings.isEmpty()) {
+                JsonArray warr = new JsonArray();
+                for (MacroAnalyser.Warning w : warnings) warr.add(w.toJson());
+                result.add("warnings", warr);
             }
         }
         // Step 05: serialise the collected diffs now — either grouped under
