@@ -44,8 +44,11 @@ public class TCPCommandServerHelloTest {
         assertNotNull(result.get("session_id"));
         assertTrue(result.has("enabled"));
         assertTrue(result.get("enabled").isJsonArray());
-        // Step 01 emits no opt-in caps yet; the shape is the contract.
-        assertEquals(0, result.getAsJsonArray("enabled").size());
+        // Step 03 contract: canonical_macro defaults on, so every hello that
+        // doesn't explicitly disable it will see it in enabled[].
+        JsonArray enabled = result.getAsJsonArray("enabled");
+        assertTrue("canonical_macro on by default",
+                enabledContains(enabled, "canonical_macro"));
         assertTrue(result.get("server_time_ms").getAsLong() > 0L);
     }
 
@@ -61,10 +64,12 @@ public class TCPCommandServerHelloTest {
         JsonObject result = resp.getAsJsonObject("result");
         assertEquals(TCPCommandServer.SERVER_VERSION,
                 result.get("server_version").getAsString());
-        // enabled array present and empty — clients rely on the field existing.
+        // enabled array always present; canonical_macro is enabled by default
+        // (step 03) so size is never zero post-hello.
         JsonArray enabled = result.getAsJsonArray("enabled");
         assertNotNull(enabled);
-        assertEquals(0, enabled.size());
+        assertTrue("canonical_macro enabled by default",
+                enabledContains(enabled, "canonical_macro"));
     }
 
     /** A partial capabilities block fills in defaults for missing fields. */
@@ -108,11 +113,52 @@ public class TCPCommandServerHelloTest {
         // still succeed. Guard against a regression to a strict-mode throw.
         assertTrue("hello should tolerate a missing 'agent' field",
                 resp.get("ok").getAsBoolean());
-        assertFalse("enabled[] must stay an array",
-                resp.getAsJsonObject("result").getAsJsonArray("enabled").size() > 0);
+        assertTrue("enabled[] must stay a JsonArray",
+                resp.getAsJsonObject("result").get("enabled").isJsonArray());
+    }
+
+    /** Explicitly opting out of canonical_macro keeps it out of enabled[]. */
+    @Test
+    public void helloCanOptOutOfCanonicalMacro() {
+        TCPCommandServer server = newServer();
+        JsonObject req = parse(
+                "{\"command\":\"hello\",\"agent\":\"tester\","
+              + "\"capabilities\":{\"canonical_macro\":false}}");
+
+        JsonObject resp = server.handleHello(req, null);
+
+        assertTrue(resp.get("ok").getAsBoolean());
+        JsonArray enabled = resp.getAsJsonObject("result")
+                .getAsJsonArray("enabled");
+        assertFalse("canonical_macro explicitly disabled",
+                enabledContains(enabled, "canonical_macro"));
+    }
+
+    /** Opting into structured_errors surfaces it in enabled[]. */
+    @Test
+    public void helloSurfacesStructuredErrorsWhenEnabled() {
+        TCPCommandServer server = newServer();
+        JsonObject req = parse(
+                "{\"command\":\"hello\",\"agent\":\"tester\","
+              + "\"capabilities\":{\"structured_errors\":true}}");
+
+        JsonObject resp = server.handleHello(req, null);
+
+        assertTrue(resp.get("ok").getAsBoolean());
+        JsonArray enabled = resp.getAsJsonObject("result")
+                .getAsJsonArray("enabled");
+        assertTrue("structured_errors negotiated",
+                enabledContains(enabled, "structured_errors"));
     }
 
     private static JsonObject parse(String s) {
         return new JsonParser().parse(s).getAsJsonObject();
+    }
+
+    private static boolean enabledContains(JsonArray arr, String name) {
+        for (int i = 0; i < arr.size(); i++) {
+            if (name.equals(arr.get(i).getAsString())) return true;
+        }
+        return false;
     }
 }
