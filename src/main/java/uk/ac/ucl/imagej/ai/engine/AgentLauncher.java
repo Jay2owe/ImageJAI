@@ -12,8 +12,21 @@ import java.util.Map;
 /**
  * Detects and launches external AI CLI agents (Claude Code, Aider, etc.)
  * in a terminal window with the agent workspace as working directory.
+ *
+ * <p>Launch contract (stage 02 of embedded-agent-widget): callers use
+ * {@link #launch(AgentInfo, Mode)}, which returns an {@link AgentSession}
+ * handle. The legacy {@link #launchAgent(AgentInfo)} boolean return is
+ * preserved as a deprecated delegate while call sites migrate.
  */
 public class AgentLauncher {
+
+    /** How an agent should be launched. */
+    public enum Mode {
+        /** Detached external terminal — today's default. */
+        EXTERNAL,
+        /** Embedded PTY inside the plugin frame — landed in stage 05. */
+        EMBEDDED
+    }
 
     /**
      * Represents a detected CLI agent.
@@ -104,66 +117,96 @@ public class AgentLauncher {
     }
 
     /**
-     * Launch an agent in a new terminal window.
+     * Launch an agent in the requested mode. Returns a live session handle,
+     * or {@code null} if the spawn failed.
      *
-     * @param agent the agent to launch
-     * @return true if launch was successful
+     * <p>{@link Mode#EMBEDDED} will start working once the terminal primitive
+     * lands (stage 05); until then it throws {@link UnsupportedOperationException}.
      */
-    public boolean launchAgent(AgentInfo agent) {
+    public AgentSession launch(AgentInfo agent, Mode mode) {
+        if (mode == Mode.EMBEDDED) {
+            throw new UnsupportedOperationException(
+                    "Embedded mode is not yet implemented (stage 05 of embedded-agent-widget).");
+        }
+
         try {
-            // Sync context files for non-Claude agents before launching
             syncContextFiles();
 
-            // Build the full command with context flags
-            String fullCommand = agent.command;
-            if (agent.contextFlags != null && !agent.contextFlags.isEmpty()) {
-                fullCommand = agent.command + " " + agent.contextFlags;
-            }
-
-            String os = System.getProperty("os.name", "").toLowerCase();
-            List<String> cmd = new ArrayList<String>();
-
-            if (os.contains("win")) {
-                // Windows: use cmd /c start to open a new terminal
-                cmd.add("cmd.exe");
-                cmd.add("/c");
-                cmd.add("start");
-                cmd.add("\"" + agent.name + "\"");  // window title
-                cmd.add("cmd.exe");
-                cmd.add("/k");
-                cmd.add(fullCommand);
-            } else if (os.contains("mac")) {
-                // macOS: use osascript to open Terminal
-                String script = "tell application \"Terminal\" to do script "
-                        + "\"cd '" + agentWorkspace + "' && " + fullCommand + "\"";
-                cmd.add("osascript");
-                cmd.add("-e");
-                cmd.add(script);
-            } else {
-                // Linux: try common terminal emulators
-                String terminal = findLinuxTerminal();
-                if (terminal != null) {
-                    cmd.add(terminal);
-                    cmd.add("-e");
-                    cmd.add("bash -c 'cd \"" + agentWorkspace + "\" && " + fullCommand + "; bash'");
-                } else {
-                    IJ.log("[AgentLauncher] No terminal emulator found");
-                    return false;
-                }
-            }
-
-            ProcessBuilder pb = new ProcessBuilder(cmd);
-            pb.directory(new File(agentWorkspace));
-            pb.environment().put("IMAGEJAI_TCP_PORT", String.valueOf(tcpPort));
+            AgentLaunchSpec spec = buildExternalLaunchSpec(agent);
+            ProcessBuilder pb = new ProcessBuilder(spec.agentCommand);
+            pb.directory(spec.workingDir);
+            pb.environment().putAll(spec.env);
             pb.start();
 
             IJ.log("[AgentLauncher] Launched: " + agent.name + " (" + agent.command + ")");
-            return true;
-
+            return new ExternalAgentSession(agent, true);
         } catch (IOException e) {
             IJ.log("[AgentLauncher] Failed to launch " + agent.name + ": " + e.getMessage());
-            return false;
+            return null;
+        } catch (UnsupportedOperationException uoe) {
+            IJ.log("[AgentLauncher] " + uoe.getMessage());
+            return null;
         }
+    }
+
+    /**
+     * Build the OS-specific command list that opens a new detached terminal
+     * and runs the agent inside it. Kept distinct from embedded-launch spec
+     * construction so the two paths share the same {@link AgentLaunchSpec}
+     * shape without cross-contaminating shell quoting.
+     */
+    private AgentLaunchSpec buildExternalLaunchSpec(AgentInfo agent) {
+        String fullCommand = agent.command;
+        if (agent.contextFlags != null && !agent.contextFlags.isEmpty()) {
+            fullCommand = agent.command + " " + agent.contextFlags;
+        }
+
+        String os = System.getProperty("os.name", "").toLowerCase();
+        List<String> cmd = new ArrayList<String>();
+
+        if (os.contains("win")) {
+            cmd.add("cmd.exe");
+            cmd.add("/c");
+            cmd.add("start");
+            cmd.add("\"" + agent.name + "\"");
+            cmd.add("cmd.exe");
+            cmd.add("/k");
+            cmd.add(fullCommand);
+        } else if (os.contains("mac")) {
+            String script = "tell application \"Terminal\" to do script "
+                    + "\"cd '" + agentWorkspace + "' && " + fullCommand + "\"";
+            cmd.add("osascript");
+            cmd.add("-e");
+            cmd.add(script);
+        } else {
+            String terminal = findLinuxTerminal();
+            if (terminal == null) {
+                throw new UnsupportedOperationException(
+                        "No terminal emulator found (gnome-terminal / konsole / xterm / ...).");
+            }
+            cmd.add(terminal);
+            cmd.add("-e");
+            cmd.add("bash -c 'cd \"" + agentWorkspace + "\" && " + fullCommand + "; bash'");
+        }
+
+        Map<String, String> env = new LinkedHashMap<>();
+        env.put("IMAGEJAI_TCP_PORT", String.valueOf(tcpPort));
+
+        return new AgentLaunchSpec(agent, cmd, new File(agentWorkspace), env);
+    }
+
+    /**
+     * Launch an agent in a new terminal window.
+     *
+     * @deprecated since stage 02 — use {@link #launch(AgentInfo, Mode)} which
+     *     returns a session handle. Kept only for source compatibility; this
+     *     overload will be removed once all call sites migrate.
+     * @param agent the agent to launch
+     * @return true if launch was successful
+     */
+    @Deprecated
+    public boolean launchAgent(AgentInfo agent) {
+        return launch(agent, Mode.EXTERNAL) != null;
     }
 
     /**

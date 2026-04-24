@@ -64,6 +64,17 @@ public class Settings {
     public boolean tcpServerEnabled = false;  // Off by default
     public int tcpPort = Constants.DEFAULT_TCP_PORT;
 
+    /**
+     * Stage 03 (embedded-agent-widget): when true, AgentLauncher launches the
+     * agent's terminal UI inside the plugin frame (requires stage 05+). When
+     * false, today's detached cmd.exe /c start behaviour is preserved.
+     *
+     * <p>Default is false for migrated installs so existing users don't see a
+     * silent UX change. The checkbox to flip it lives in SettingsDialog (added
+     * in stage 06 together with the terminal card that uses it).
+     */
+    public boolean agentEmbeddedTerminal = false;
+
     // Transient
     private transient Path configPath;
 
