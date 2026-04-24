@@ -35,9 +35,17 @@ public class FrictionLog {
         public final String argsSummary;
         public final String error;
         public final String normalisedError;
+        /**
+         * Step 12: id of the agent that produced this failure. Empty string
+         * when the row was written before step 12 shipped or when the caller
+         * never negotiated a {@code hello} handshake. Per plan:
+         * docs/tcp_upgrade/12_per_agent_telemetry.md.
+         */
+        public final String agentId;
 
-        FailureEntry(long ts, String command, String argsSummary, String error) {
+        FailureEntry(long ts, String agentId, String command, String argsSummary, String error) {
             this.ts = ts;
+            this.agentId = agentId == null ? "" : agentId;
             this.command = command;
             this.argsSummary = argsSummary;
             this.error = error;
@@ -66,13 +74,30 @@ public class FrictionLog {
 
     private final Deque<FailureEntry> entries = new ArrayDeque<FailureEntry>();
 
-    public synchronized void record(String command, String argsSummary, String error) {
+    /**
+     * Step 12: primary write path. Records a failure tagged with the agent id
+     * from the caller's {@link TCPCommandServer.AgentCaps}. Per plan:
+     * docs/tcp_upgrade/12_per_agent_telemetry.md.
+     */
+    public synchronized void record(String agentId, String command, String argsSummary, String error) {
+        if (agentId == null) agentId = "";
         if (command == null) command = "";
         if (error == null) error = "";
         if (argsSummary == null) argsSummary = "";
-        FailureEntry e = new FailureEntry(System.currentTimeMillis(), command, argsSummary, error);
+        FailureEntry e = new FailureEntry(System.currentTimeMillis(), agentId, command, argsSummary, error);
         if (entries.size() >= CAPACITY) entries.removeFirst();
         entries.addLast(e);
+    }
+
+    /**
+     * Back-compat overload: rows written without an agent id land with an
+     * empty string in {@link FailureEntry#agentId}. Kept so nested dispatches
+     * (batch / run / intent) that never negotiated {@code hello} can still
+     * record friction. New call sites should pass {@code caps.agentId}
+     * via the four-arg overload.
+     */
+    public synchronized void record(String command, String argsSummary, String error) {
+        record("", command, argsSummary, error);
     }
 
     /** Most recent entries first (descending timestamp). */

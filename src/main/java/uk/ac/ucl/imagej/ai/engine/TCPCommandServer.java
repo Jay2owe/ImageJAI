@@ -269,6 +269,16 @@ public class TCPCommandServer {
         // participates in dedup (the dispatcher bails on dedup when sock is
         // null, which is the only path that reaches DEFAULT_CAPS).
         ResponseDedupCache dedupCache = new ResponseDedupCache();
+        // Step 12: per-socket session stats + pattern-detector hints
+        // (docs/tcp_upgrade/12_per_agent_telemetry.md). Tracks a rolling
+        // 50-entry command history, per-rule throttles, and a set of
+        // probe_command-seen plugin names; consulted by PatternDetector to
+        // surface {"code": "PATTERN_DETECTED", ...} hints when an agent
+        // repeats a known-bad behaviour. Default ON for every agent — hints
+        // are short, actionable, 5-minute throttled, and opt-out via
+        // capabilities.pattern_hints=false.
+        boolean patternHints = true;
+        SessionStats stats = new SessionStats();
         Set<String> acceptEvents = java.util.Collections.emptySet();
     }
 
@@ -912,19 +922,81 @@ public class TCPCommandServer {
             response = applyReadonlyDedup(request, response);
         }
 
+        AgentCaps caps = (sock != null)
+                ? capsBySocket.getOrDefault(sock, DEFAULT_CAPS)
+                : DEFAULT_CAPS;
+
         // Phase 6: record failures to the friction log. Counts both transport-level
         // failures (ok:false) and operation-level failures (ok:true but
         // result.success:false — macros / scripts can fail inside a successful
         // protocol response).
         if (response != null) {
             try {
-                recordFrictionIfFailure(command, request, response);
+                recordFrictionIfFailure(command, request, response, caps);
             } catch (Exception ignore) {
                 // friction logging is best-effort
             }
         }
 
+        // Step 12: pattern detection + session-stats bookkeeping. Record
+        // the command into the rolling history first, then run the detector
+        // so a 4th close_dialogs call sees all four entries. Hints ride the
+        // top-level {@code hints[]} array when caps.pattern_hints is on and
+        // the response is not a dedup short-circuit (no room for hints on
+        // {"unchanged":true} bodies). Best-effort — never fail the request.
+        if (response != null
+                && !dedupShortCircuited
+                && caps != null
+                && caps.stats != null
+                && sock != null
+                && !"hello".equals(command)) {
+            try {
+                attachPatternHints(command, request, response, caps);
+            } catch (Exception ignore) {
+                // pattern hints are best-effort telemetry
+            }
+        }
+
         return response;
+    }
+
+    /**
+     * Step 12: record this command into the session's rolling history, then
+     * consult {@link PatternDetector} for any rule fires and, if the caller
+     * opted in, append them to a top-level {@code hints[]} array. Per plan:
+     * docs/tcp_upgrade/12_per_agent_telemetry.md.
+     */
+    private void attachPatternHints(String command, JsonObject request,
+                                    JsonObject response, AgentCaps caps) {
+        SessionStats stats = caps.stats;
+        long now = System.currentTimeMillis();
+        String canonicalArgs = ResponseDedupCache.canonicalArgs(request);
+        String errorCode = extractErrorCode(response);
+
+        // Track probe_command results so probe_before_run_missed can suppress
+        // the hint once the agent has already probed the plugin.
+        if ("probe_command".equals(command) && request != null) {
+            JsonElement nameEl = request.get("name");
+            if (nameEl == null) nameEl = request.get("command");
+            if (nameEl != null && nameEl.isJsonPrimitive()) {
+                stats.noteProbed(nameEl.getAsString());
+            }
+        }
+
+        stats.record(command, canonicalArgs, now, errorCode);
+
+        if (!caps.patternHints) return;
+        List<PatternDetector.Hint> hints = PatternDetector.check(stats, now);
+        if (hints.isEmpty()) return;
+        JsonArray arr;
+        JsonElement existing = response.get("hints");
+        if (existing != null && existing.isJsonArray()) {
+            arr = existing.getAsJsonArray();
+        } else {
+            arr = new JsonArray();
+            response.add("hints", arr);
+        }
+        for (PatternDetector.Hint h : hints) arr.add(h.toJson());
     }
 
     private JsonObject dispatchCore(String command, JsonObject request, Socket sock) {
@@ -1281,7 +1353,7 @@ public class TCPCommandServer {
         return dst;
     }
 
-    private void recordFrictionIfFailure(String command, JsonObject request, JsonObject response) {
+    private void recordFrictionIfFailure(String command, JsonObject request, JsonObject response, AgentCaps caps) {
         // Never log meta-queries about friction; that would self-reference and churn.
         if ("get_friction_log".equals(command)
                 || "get_friction_patterns".equals(command)
@@ -1289,17 +1361,72 @@ public class TCPCommandServer {
             return;
         }
 
+        String error = extractErrorString(response);
+        if (error == null) return;
+        String agentId = (caps != null && caps.agentId != null) ? caps.agentId : "";
+        frictionLog.record(agentId, command, summariseArgs(request), error);
+    }
+
+    /**
+     * Step 12: derive an error signature from a response. Returns the plain
+     * error string for legacy replies and the {@code error.code} for
+     * structured-error replies. Null when the response is a success or carries
+     * no parseable error field.
+     */
+    private static String extractErrorString(JsonObject response) {
+        if (response == null) return null;
         JsonElement okEl = response.get("ok");
         boolean transportOk = okEl != null && okEl.isJsonPrimitive() && okEl.getAsBoolean();
-
-        String error = null;
         if (!transportOk) {
             JsonElement errEl = response.get("error");
-            error = (errEl != null && errEl.isJsonPrimitive()) ? errEl.getAsString() : "unknown error";
+            if (errEl != null && errEl.isJsonPrimitive()) return errEl.getAsString();
+            if (errEl != null && errEl.isJsonObject()) {
+                JsonObject errObj = errEl.getAsJsonObject();
+                JsonElement msg = errObj.get("message");
+                if (msg != null && msg.isJsonPrimitive()) return msg.getAsString();
+                JsonElement code = errObj.get("code");
+                if (code != null && code.isJsonPrimitive()) return code.getAsString();
+            }
+            return "unknown error";
+        }
+        JsonElement resultEl = response.get("result");
+        if (resultEl != null && resultEl.isJsonObject()) {
+            JsonObject r = resultEl.getAsJsonObject();
+            JsonElement successEl = r.get("success");
+            if (successEl != null
+                    && successEl.isJsonPrimitive()
+                    && successEl.getAsJsonPrimitive().isBoolean()
+                    && !successEl.getAsBoolean()) {
+                JsonElement errEl = r.get("error");
+                if (errEl != null && errEl.isJsonPrimitive()) return errEl.getAsString();
+                if (errEl != null && errEl.isJsonObject()) {
+                    JsonObject errObj = errEl.getAsJsonObject();
+                    JsonElement msg = errObj.get("message");
+                    if (msg != null && msg.isJsonPrimitive()) return msg.getAsString();
+                    JsonElement code = errObj.get("code");
+                    if (code != null && code.isJsonPrimitive()) return code.getAsString();
+                }
+                return "operation failed";
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Step 12: stable error-code signature for pattern detection. Prefers the
+     * structured {@code error.code} field when present (step 02), falls back
+     * to the FrictionLog-style normalised error string for legacy replies.
+     * Null on success.
+     */
+    private static String extractErrorCode(JsonObject response) {
+        if (response == null) return null;
+        JsonElement okEl = response.get("ok");
+        boolean transportOk = okEl != null && okEl.isJsonPrimitive() && okEl.getAsBoolean();
+        JsonObject errObj = null;
+        if (!transportOk) {
+            JsonElement errEl = response.get("error");
+            if (errEl != null && errEl.isJsonObject()) errObj = errEl.getAsJsonObject();
         } else {
-            // Inspect result for nested success:false (macros/scripts can fail
-            // inside a transport-ok response). Guard against non-boolean
-            // primitives — Gson's getAsBoolean() happily parses strings.
             JsonElement resultEl = response.get("result");
             if (resultEl != null && resultEl.isJsonObject()) {
                 JsonObject r = resultEl.getAsJsonObject();
@@ -1309,14 +1436,19 @@ public class TCPCommandServer {
                         && successEl.getAsJsonPrimitive().isBoolean()
                         && !successEl.getAsBoolean()) {
                     JsonElement errEl = r.get("error");
-                    error = (errEl != null && errEl.isJsonPrimitive())
-                            ? errEl.getAsString() : "operation failed";
+                    if (errEl != null && errEl.isJsonObject()) errObj = errEl.getAsJsonObject();
                 }
             }
         }
-
-        if (error == null) return;
-        frictionLog.record(command, summariseArgs(request), error);
+        if (errObj != null) {
+            JsonElement codeEl = errObj.get("code");
+            if (codeEl != null && codeEl.isJsonPrimitive()) return codeEl.getAsString();
+        }
+        // Legacy: normalise the raw error string so two identical failures
+        // with different paths / ids still match for repeat-error detection.
+        String raw = extractErrorString(response);
+        if (raw == null) return null;
+        return FrictionLog.normaliseError(raw);
     }
 
     private String summariseArgs(JsonObject request) {
@@ -1412,6 +1544,10 @@ public class TCPCommandServer {
         // verbatim for logging / provenance). Per-call {"force": true} bypasses
         // the cache without flipping this flag.
         c.dedup = optBool(caps, "dedup", true);
+        // Step 12: pattern-detection hints default ON. Agents that want a
+        // strict-no-unsolicited-commentary channel can opt out via
+        // capabilities.pattern_hints=false in their hello handshake.
+        c.patternHints = optBool(caps, "pattern_hints", true);
         int sockPort = (sock != null) ? sock.getPort() : 0;
         c.agentId = optString(caps, "agent_id", c.agent + "-" + sockPort);
         c.acceptEvents = parseStringSet(caps, "accept_events");
@@ -1493,6 +1629,12 @@ public class TCPCommandServer {
         // on read-only polls. Per plan: docs/tcp_upgrade/11_dedup_response.md.
         if (caps != null && caps.dedup) {
             arr.add(new JsonPrimitive("response_dedup"));
+        }
+        // Step 12: advertise pattern_hints so clients can feature-detect the
+        // new top-level hints[] array carrying PATTERN_DETECTED entries. Per
+        // plan: docs/tcp_upgrade/12_per_agent_telemetry.md.
+        if (caps != null && caps.patternHints) {
+            arr.add(new JsonPrimitive("pattern_hints"));
         }
         return arr;
     }
@@ -3590,6 +3732,9 @@ public class TCPCommandServer {
             o.addProperty("args", e.argsSummary);
             o.addProperty("error", e.error);
             o.addProperty("normalised", e.normalisedError);
+            // Step 12: tag each row with the agent id the caller negotiated via
+            // hello. Empty string for pre-step-12 rows or nested dispatches.
+            o.addProperty("agent_id", e.agentId == null ? "" : e.agentId);
             arr.add(o);
         }
 
