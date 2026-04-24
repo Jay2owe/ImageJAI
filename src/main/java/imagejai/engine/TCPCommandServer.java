@@ -43,6 +43,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Properties;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
@@ -78,8 +79,34 @@ public class TCPCommandServer {
 
     private static final Gson GSON = new GsonBuilder().create();
     private static final Charset UTF8 = Charset.forName("UTF-8");
-    private static final long MACRO_TIMEOUT_MS = 30000;
-    private static final long PIPELINE_TIMEOUT_MS = 60000;
+    // 10-minute synchronous-macro ceiling. Long enough for batch 3D Object
+    // Counter runs on dense masks without blocking the TCP thread forever.
+    // Callers can override per-request with `"timeout_ms": N` (pass 0 or a
+    // negative value to disable the timeout entirely — the server will wait
+    // until the macro finishes, the dialog-dismiss path fires, or the
+    // connection is closed).
+    private static final long MACRO_TIMEOUT_MS = 600_000;
+    private static final long PIPELINE_TIMEOUT_MS = 600_000;
+
+    /**
+     * Resolve the per-request timeout override, falling back to the default.
+     * A value ≤ 0 means "no timeout" — the caller wants to wait forever.
+     */
+    private static long resolveTimeoutMs(JsonObject request, long defaultMs) {
+        if (request == null) return defaultMs;
+        JsonElement el = request.get("timeout_ms");
+        if (el == null || !el.isJsonPrimitive()) return defaultMs;
+        try {
+            return el.getAsLong();
+        } catch (Exception e) {
+            return defaultMs;
+        }
+    }
+
+    /** Has this request opted out of the watchdog? */
+    private static boolean timeoutDisabled(long timeoutMs) {
+        return timeoutMs <= 0L;
+    }
 
     // Phase 2: event-bus subscription caps.
     private static final int MAX_SUBSCRIBERS = 8;
@@ -129,6 +156,40 @@ public class TCPCommandServer {
             "list_reactive_rules",
             "reactive_stats"
     ));
+
+    /**
+     * Server version string emitted in the {@code hello} handshake response.
+     * Bumped by steps that change the reply schema so clients can adapt.
+     */
+    static final String SERVER_VERSION = "1.7.3";
+
+    /**
+     * Per-connection capability record negotiated via the {@code hello} handler.
+     * Clients that never call {@code hello} fall back to {@link #DEFAULT_CAPS}
+     * so today's reply shape is preserved. Fields are package-private because
+     * future-step handlers ({@code 02-07}) in this package read them directly.
+     */
+    static final class AgentCaps {
+        String agent = "unknown";
+        String agentId = null;
+        boolean vision = false;
+        String outputFormat = "json";
+        int tokenBudget = Integer.MAX_VALUE;
+        boolean verbose = false;
+        boolean pulse = false;
+        boolean safeMode = false;
+        Set<String> acceptEvents = java.util.Collections.emptySet();
+    }
+
+    /** Fallback caps applied to any request from a socket that never said hello. */
+    static final AgentCaps DEFAULT_CAPS = new AgentCaps();
+
+    /**
+     * Caps keyed by the connection that negotiated them. Populated by
+     * {@link #handleHello}, read by {@link #dispatch}, cleared in
+     * {@link #handleClient}'s finally block on disconnect.
+     */
+    private final Map<Socket, AgentCaps> capsBySocket = new ConcurrentHashMap<Socket, AgentCaps>();
 
     private final int port;
     private final CommandEngine commandEngine;
@@ -366,7 +427,7 @@ public class TCPCommandServer {
             }
 
             // Parse and dispatch
-            JsonObject response = dispatch(trimmed);
+            JsonObject response = dispatch(trimmed, socket);
             writer.println(GSON.toJson(response));
 
         } catch (Exception e) {
@@ -379,6 +440,10 @@ public class TCPCommandServer {
                 }
             }
         } finally {
+            // Drop this connection's caps first so a later socket cannot
+            // accidentally inherit stale state (ConcurrentHashMap keys are
+            // identity-based, but belt-and-braces keeps the map small).
+            capsBySocket.remove(socket);
             try {
                 if (reader != null) reader.close();
             } catch (Exception ignored) {}
@@ -609,21 +674,32 @@ public class TCPCommandServer {
     // Command dispatch
     // -----------------------------------------------------------------------
 
-    private JsonObject dispatch(String jsonStr) {
+    private JsonObject dispatch(String jsonStr, Socket sock) {
         JsonObject request;
         try {
             request = new JsonParser().parse(jsonStr).getAsJsonObject();
         } catch (Exception e) {
             return errorResponse("Invalid JSON: " + e.getMessage());
         }
-        return dispatch(request);
+        return dispatch(request, sock);
+    }
+
+    /**
+     * Internal overload for nested dispatches (batch, run, intent) that have no
+     * client socket of their own. Falls back to {@link #DEFAULT_CAPS} behaviour.
+     */
+    private JsonObject dispatch(JsonObject request) {
+        return dispatch(request, null);
     }
 
     /**
      * Dispatch a parsed request. Post-processing adds hash dedup for readonly
      * commands and records friction on failure responses.
+     *
+     * @param sock originating client socket, or {@code null} for nested calls
+     *             from {@code batch} / {@code run} / {@code intent}.
      */
-    private JsonObject dispatch(JsonObject request) {
+    private JsonObject dispatch(JsonObject request, Socket sock) {
         JsonElement cmdElement = request.get("command");
         if (cmdElement == null || !cmdElement.isJsonPrimitive()) {
             return errorResponse("Missing 'command' field");
@@ -634,7 +710,7 @@ public class TCPCommandServer {
             listener.onCommandReceived(command);
         }
 
-        JsonObject response = dispatchCore(command, request);
+        JsonObject response = dispatchCore(command, request, sock);
 
         // Phase 7: surface a handler-attached gui_action piggyback into the
         // outer response. Handlers may set result.gui_action = {...}; this
@@ -667,11 +743,20 @@ public class TCPCommandServer {
         return response;
     }
 
-    private JsonObject dispatchCore(String command, JsonObject request) {
-        if ("ping".equals(command)) {
+    private JsonObject dispatchCore(String command, JsonObject request, Socket sock) {
+        // Look up caps once per request so handlers below can shape responses
+        // without re-reading the map. Nested dispatches (batch, run, intent)
+        // pass sock == null and land on DEFAULT_CAPS.
+        AgentCaps caps = (sock != null)
+                ? capsBySocket.getOrDefault(sock, DEFAULT_CAPS)
+                : DEFAULT_CAPS;
+
+        if ("hello".equals(command)) {
+            return handleHello(request, sock);
+        } else if ("ping".equals(command)) {
             return handlePing();
         } else if ("execute_macro".equals(command)) {
-            return handleExecuteMacro(request);
+            return handleExecuteMacro(request, caps);
         } else if ("get_state".equals(command)) {
             return handleGetState();
         } else if ("get_image_info".equals(command)) {
@@ -1046,6 +1131,96 @@ public class TCPCommandServer {
         return successResponse(new JsonPrimitive("pong"));
     }
 
+    /**
+     * Handshake: record this connection's capabilities and return the server
+     * version plus the subset of features it will emit for this client. Missing
+     * fields in the request fall back to backwards-compatible defaults so a
+     * bare {@code {"command": "hello"}} still negotiates cleanly.
+     */
+    JsonObject handleHello(JsonObject request, Socket sock) {
+        AgentCaps c = new AgentCaps();
+        c.agent = optString(request, "agent", "unknown");
+        JsonObject caps = (request.has("capabilities")
+                && request.get("capabilities").isJsonObject())
+                ? request.getAsJsonObject("capabilities")
+                : new JsonObject();
+        c.vision       = optBool(caps, "vision", false);
+        c.outputFormat = optString(caps, "output_format", "json");
+        c.tokenBudget  = optInt(caps, "token_budget", Integer.MAX_VALUE);
+        c.verbose      = optBool(caps, "verbose", false);
+        c.pulse        = optBool(caps, "pulse", false);
+        c.safeMode     = optBool(caps, "safe_mode", false);
+        int sockPort = (sock != null) ? sock.getPort() : 0;
+        c.agentId = optString(caps, "agent_id", c.agent + "-" + sockPort);
+        c.acceptEvents = parseStringSet(caps, "accept_events");
+        if (sock != null) {
+            capsBySocket.put(sock, c);
+        }
+
+        JsonObject result = new JsonObject();
+        result.addProperty("server_version", SERVER_VERSION);
+        result.addProperty("session_id", sessionIdFor(sock));
+        result.add("enabled", enabledCapsFor(c));
+        result.addProperty("server_time_ms", System.currentTimeMillis());
+        return successResponse(result);
+    }
+
+    /** Stable-ish session tag for this connection. Port + millis suffix is
+     *  enough to tell two concurrent sessions apart in logs without needing
+     *  a full UUID generator. */
+    private String sessionIdFor(Socket sock) {
+        int sockPort = (sock != null) ? sock.getPort() : 0;
+        return "s-" + Integer.toHexString(sockPort) + "-"
+                + Long.toHexString(System.currentTimeMillis() & 0xffffL);
+    }
+
+    /**
+     * Capability names the server will actually emit on replies to this
+     * connection. Step 01 returns an empty array — later steps (structured
+     * errors, canonical macro echo, fuzzy match, state delta, pulse) will add
+     * their own names once their reply-shape opt-ins land.
+     */
+    private JsonArray enabledCapsFor(AgentCaps caps) {
+        return new JsonArray();
+    }
+
+    // ---- Small JSON option helpers used by the hello handler. ----
+
+    private static String optString(JsonObject obj, String key, String defaultValue) {
+        if (obj == null) return defaultValue;
+        JsonElement el = obj.get(key);
+        if (el == null || !el.isJsonPrimitive()) return defaultValue;
+        try { return el.getAsString(); } catch (Exception e) { return defaultValue; }
+    }
+
+    private static boolean optBool(JsonObject obj, String key, boolean defaultValue) {
+        if (obj == null) return defaultValue;
+        JsonElement el = obj.get(key);
+        if (el == null || !el.isJsonPrimitive()) return defaultValue;
+        try { return el.getAsBoolean(); } catch (Exception e) { return defaultValue; }
+    }
+
+    private static int optInt(JsonObject obj, String key, int defaultValue) {
+        if (obj == null) return defaultValue;
+        JsonElement el = obj.get(key);
+        if (el == null || !el.isJsonPrimitive()) return defaultValue;
+        try { return el.getAsInt(); } catch (Exception e) { return defaultValue; }
+    }
+
+    private static Set<String> parseStringSet(JsonObject obj, String key) {
+        Set<String> result = new HashSet<String>();
+        if (obj == null) return result;
+        JsonElement el = obj.get(key);
+        if (el == null || !el.isJsonArray()) return result;
+        for (JsonElement item : el.getAsJsonArray()) {
+            if (item != null && item.isJsonPrimitive()) {
+                try { result.add(item.getAsString()); }
+                catch (Exception ignore) {}
+            }
+        }
+        return result;
+    }
+
     private JsonObject handleGetProgress() {
         final JsonObject result = new JsonObject();
         final CountDownLatch latch = new CountDownLatch(1);
@@ -1124,12 +1299,16 @@ public class TCPCommandServer {
         return successResponse(result);
     }
 
-    private JsonObject handleExecuteMacro(JsonObject request) {
+    private JsonObject handleExecuteMacro(JsonObject request, AgentCaps caps) {
+        // Step 01: caps is plumbed in so later steps (02 structured errors,
+        // 03 canonical macro echo, 05 pulse / stateDelta) can shape the reply
+        // per agent without another signature sweep.
         JsonElement codeElement = request.get("code");
         if (codeElement == null || !codeElement.isJsonPrimitive()) {
             return errorResponse("Missing 'code' field for execute_macro");
         }
         final String code = codeElement.getAsString();
+        final long macroTimeoutMs = resolveTimeoutMs(request, MACRO_TIMEOUT_MS);
 
         // Gate image.* events while this macro runs. The agent's event
         // subscribers react to image.opened by sending get_image_info /
@@ -1282,9 +1461,10 @@ public class TCPCommandServer {
                         }
                         break;
                     }
-                    if ((System.currentTimeMillis() - startTime) > MACRO_TIMEOUT_MS) {
+                    if (!timeoutDisabled(macroTimeoutMs)
+                            && (System.currentTimeMillis() - startTime) > macroTimeoutMs) {
                         abortMacroFuture(future);
-                        failureMessage = "Macro execution timed out after " + MACRO_TIMEOUT_MS + "ms";
+                        failureMessage = "Macro execution timed out after " + macroTimeoutMs + "ms";
                         break;
                     }
                 } catch (ExecutionException e) {
@@ -1412,6 +1592,15 @@ public class TCPCommandServer {
         }
 
         publishTcpMacroCompleted(macroId, success, elapsed, failureMessage);
+        // Stage 04 (embedded-agent-widget): silently capture into the in-
+        // process session journal so the user can re-run via the rail
+        // panel (stage 11). Zero-token for the agent — nothing on the
+        // wire, no event stream changes, no new response fields.
+        try {
+            String source = request.has("source") ? request.get("source").getAsString() : "tcp";
+            SessionCodeJournal.INSTANCE.record("ijm", code, source,
+                    macroId, startTime, elapsed, success, failureMessage);
+        } catch (Throwable ignore) {}
         return successResponse(result);
         } finally {
             eventBus.popSuppress("image.*");
@@ -1757,6 +1946,7 @@ public class TCPCommandServer {
             return errorResponse("Missing 'code' field for run_script");
         }
         final String code = codeElement.getAsString();
+        final long scriptTimeoutMs = resolveTimeoutMs(request, MACRO_TIMEOUT_MS);
 
         JsonObject result = new JsonObject();
         result.addProperty("language", language);
@@ -1807,9 +1997,10 @@ public class TCPCommandServer {
                                 : blocking;
                         break;
                     }
-                    if ((System.currentTimeMillis() - startTime) > MACRO_TIMEOUT_MS) {
+                    if (!timeoutDisabled(scriptTimeoutMs)
+                            && (System.currentTimeMillis() - startTime) > scriptTimeoutMs) {
                         future.cancel(true);
-                        blockingFailure = "Script execution timed out after " + MACRO_TIMEOUT_MS + "ms";
+                        blockingFailure = "Script execution timed out after " + scriptTimeoutMs + "ms";
                         break;
                     }
                 } catch (ExecutionException ee) {
@@ -1858,6 +2049,19 @@ public class TCPCommandServer {
             }
         } catch (Exception ignore) {
         }
+
+        // Stage 04 (embedded-agent-widget): silent capture into the session
+        // journal, same as handleExecuteMacro. Scripts get the real language
+        // ("groovy" / "jython" / …) so the journal file extension is accurate.
+        try {
+            String source = request.has("source") ? request.get("source").getAsString() : "tcp";
+            boolean scriptSuccess = completed && blockingFailure == null && scriptError == null;
+            String scriptFailure = blockingFailure != null
+                    ? blockingFailure
+                    : (scriptError != null ? String.valueOf(scriptError.getMessage()) : null);
+            SessionCodeJournal.INSTANCE.record(language, code, source,
+                    0L, startTime, elapsed, scriptSuccess, scriptFailure);
+        } catch (Throwable ignore) {}
 
         return successResponse(result);
     }
@@ -2642,7 +2846,9 @@ public class TCPCommandServer {
         JsonObject macroReq = new JsonObject();
         macroReq.addProperty("command", "execute_macro");
         macroReq.addProperty("code", resolved.macro);
-        JsonObject execResp = handleExecuteMacro(macroReq);
+        // intent currently has no originating socket, so caps fall back to
+        // DEFAULT_CAPS. If a future step routes caps through intent, swap here.
+        JsonObject execResp = handleExecuteMacro(macroReq, DEFAULT_CAPS);
 
         JsonObject mappedTo = new JsonObject();
         mappedTo.addProperty("pattern", resolved.mapping.patternSrc);
