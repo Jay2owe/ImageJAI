@@ -50,6 +50,7 @@ Usage:
     python ij.py reactive disable <name>
     python ij.py reactive reload
     python ij.py reactive stats
+    python ij.py capabilities           # send hello, show server-enabled features
     python ij.py raw '{"command": "ping"}'
 
 Can also be imported:
@@ -70,6 +71,23 @@ try:
 except ValueError:
     PORT = 7746
 TIMEOUT = 60
+
+# Step 01 (docs/tcp_upgrade): capabilities Claude's ij.py declares on first
+# contact. Claude Code hooks already inject per-turn session state, so pulse
+# is disabled here — a server-side pulse would duplicate what the hook feeds.
+_HELLO_CAPS = {
+    "vision": True,
+    "output_format": "markdown",
+    "token_budget": 20000,
+    "verbose": True,
+    "pulse": False,
+    "accept_events": ["macro.*", "image.*", "dialog.*"],
+}
+# Cache of the last hello response so `ij.py capabilities` can show the
+# server's enabled features without re-hitting the socket. Best-effort: a
+# failed hello leaves this at None and every command still runs unchanged.
+_HELLO_RESULT = None
+_HELLO_SENT = False
 
 # Phase 1: commands eligible for hash-based dedup. Server echoes a "hash"
 # field; we persist (hash, payload) per command and attach if_none_match on
@@ -214,6 +232,42 @@ def _flush_cache():
 # Flush on interpreter exit so long-running imports persist too.
 import atexit as _atexit
 _atexit.register(_flush_cache)
+
+
+def hello(host=HOST, port=PORT, timeout=10):
+    """Send the step 01 handshake. Records caps on the server side and
+    returns {server_version, session_id, enabled[], server_time_ms}.
+    On any failure returns the error response — callers can fall through
+    to the legacy no-handshake path without changing behaviour."""
+    global _HELLO_RESULT, _HELLO_SENT
+    req = {"command": "hello", "agent": "claude-code",
+           "capabilities": _HELLO_CAPS}
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.settimeout(timeout)
+        try:
+            s.connect((host, port))
+            s.sendall((json.dumps(req) + "\n").encode("utf-8"))
+            data = b""
+            while True:
+                chunk = s.recv(65536)
+                if not chunk:
+                    break
+                data += chunk
+                if data.endswith(b"\n"):
+                    break
+            resp = json.loads(data.decode("utf-8"))
+        finally:
+            try:
+                s.close()
+            except Exception:
+                pass
+    except (socket.error, OSError, ValueError) as e:
+        return {"ok": False, "error": "hello failed: {}".format(e)}
+    _HELLO_SENT = True
+    if isinstance(resp, dict) and resp.get("ok"):
+        _HELLO_RESULT = resp.get("result")
+    return resp
 
 
 def _check_dialogs_fallback(host=HOST, port=PORT):
@@ -1420,6 +1474,13 @@ def main():
             # Bare choice on stdout for shell consumers; full payload to stderr.
             sys.stderr.write(json.dumps(result) + "\n")
             print(choice)
+
+        elif cmd == "capabilities" or cmd == "hello":
+            # Step 01 (docs/tcp_upgrade/01_hello_handshake.md): run the
+            # handshake and print what the server says it will emit for this
+            # client. Calling this is optional — the server falls back to the
+            # legacy reply shape for any client that never says hello.
+            print(json.dumps(hello(), indent=2))
 
         elif cmd == "raw":
             if len(sys.argv) < 3:

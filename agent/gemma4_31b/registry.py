@@ -24,6 +24,19 @@ except ValueError:
     PORT = 7746
 TIMEOUT_S = 60.0
 
+# Step 01 (docs/tcp_upgrade/01_hello_handshake.md): Gemma's handshake caps.
+# Gemma is text-only (vision=False), has a tight context budget, and has no
+# external hook injecting session state, so pulse=True — later steps will rely
+# on the server-side one-line pulse in lieu of hook feeds.
+GEMMA_CAPS = {
+    "vision": False,
+    "output_format": "json",
+    "token_budget": 4000,
+    "verbose": False,
+    "pulse": True,
+    "accept_events": ["macro.*", "image.*", "dialog.*"],
+}
+
 REGISTRY: list = []
 
 
@@ -106,3 +119,12 @@ def send(command: str, **payload) -> dict:
         return json.loads(raw)
     except ValueError as exc:
         return {"ok": False, "error": "invalid JSON reply: {}".format(exc), "raw": raw[:500]}
+
+
+def hello() -> dict:
+    """Send the step 01 handshake on a fresh socket and return the server
+    response. Records Gemma's capabilities (see GEMMA_CAPS) so later-step
+    handlers on the server side can shape their replies for a small-context,
+    vision-free model. On any failure returns the error dict and the caller
+    can fall through to the legacy no-handshake path."""
+    return send("hello", agent="gemma-31b", capabilities=GEMMA_CAPS)
