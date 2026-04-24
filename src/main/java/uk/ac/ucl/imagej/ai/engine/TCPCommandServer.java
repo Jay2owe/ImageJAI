@@ -183,6 +183,12 @@ public class TCPCommandServer {
         // that never say hello keep receiving plain error strings; the server
         // emits the object form only when this flag has been negotiated.
         boolean structuredErrors = false;
+        // Step 03: canonical macro echo (docs/tcp_upgrade/03_canonical_macro_echo.md).
+        // On-by-default for clients that said hello. The server echoes the IJ
+        // Recorder's canonical macro form only when it differs from what the
+        // client submitted or when the macro failed, so the common case costs
+        // zero additional tokens.
+        boolean canonicalMacro = true;
         Set<String> acceptEvents = java.util.Collections.emptySet();
     }
 
@@ -1156,6 +1162,7 @@ public class TCPCommandServer {
         c.pulse        = optBool(caps, "pulse", false);
         c.safeMode     = optBool(caps, "safe_mode", false);
         c.structuredErrors = optBool(caps, "structured_errors", false);
+        c.canonicalMacro = optBool(caps, "canonical_macro", true);
         int sockPort = (sock != null) ? sock.getPort() : 0;
         c.agentId = optString(caps, "agent_id", c.agent + "-" + sockPort);
         c.acceptEvents = parseStringSet(caps, "accept_events");
@@ -1190,6 +1197,9 @@ public class TCPCommandServer {
         JsonArray arr = new JsonArray();
         if (caps != null && caps.structuredErrors) {
             arr.add(new JsonPrimitive("structured_errors"));
+        }
+        if (caps != null && caps.canonicalMacro) {
+            arr.add(new JsonPrimitive("canonical_macro"));
         }
         return arr;
     }
@@ -1330,6 +1340,13 @@ public class TCPCommandServer {
         // Suppressing image.* removes the trigger entirely. macro.* and
         // dialog.* still flow so the agent's progress / error paths work.
         eventBus.pushSuppress("image.*");
+        // Step 03: start capturing the IJ Recorder's canonical macro text so
+        // we can echo it back when it differs from what the agent submitted
+        // (docs/tcp_upgrade/03_canonical_macro_echo.md). null = no capture
+        // (caps opted out, or Recorder unavailable in this JVM).
+        final RecorderCapture recorderCapture = (caps != null && caps.canonicalMacro)
+                ? RecorderCapture.begin()
+                : null;
         try {
         // Run IJ.runMacro on a worker thread so the TCP handler can keep polling
         // for dialogs / timeout and return structured failure feedback instead
@@ -1631,8 +1648,21 @@ public class TCPCommandServer {
         } catch (Throwable t) {
             IJ.log("[ImageJAI-Journal] record failed: " + t);
         }
+        // Step 03: echo the IJ Recorder's canonical macro when it differs from
+        // what the agent sent, or whenever the macro failed. Absent otherwise,
+        // so the common case pays zero extra tokens.
+        if (recorderCapture != null) {
+            String ranCode = recorderCapture.getDelta();
+            if (ranCode != null && !ranCode.isEmpty()
+                    && (RecorderCapture.differs(code, ranCode) || !success)) {
+                result.addProperty("ranCode", ranCode);
+            }
+        }
         return successResponse(result);
         } finally {
+            if (recorderCapture != null) {
+                try { recorderCapture.close(); } catch (Throwable ignore) {}
+            }
             eventBus.popSuppress("image.*");
         }
     }
