@@ -224,6 +224,37 @@ public class TCPCommandServerHelloTest {
                 enabledContains(enabled, "auto_dismiss_phantoms"));
     }
 
+    /**
+     * Step 11: response_dedup defaults ON for every client that says hello.
+     * Per plan: docs/tcp_upgrade/11_dedup_response.md.
+     */
+    @Test
+    public void helloDefaultsEnableResponseDedup() {
+        TCPCommandServer server = newServer();
+        JsonObject req = parse("{\"command\":\"hello\",\"agent\":\"tester\"}");
+
+        JsonObject resp = server.handleHello(req, null);
+
+        JsonArray enabled = resp.getAsJsonObject("result").getAsJsonArray("enabled");
+        assertTrue("response_dedup on by default",
+                enabledContains(enabled, "response_dedup"));
+    }
+
+    /** Step 11: explicit opt-out keeps response_dedup out of enabled[]. */
+    @Test
+    public void helloCanOptOutOfResponseDedup() {
+        TCPCommandServer server = newServer();
+        JsonObject req = parse(
+                "{\"command\":\"hello\",\"agent\":\"tester\","
+              + "\"capabilities\":{\"dedup\":false}}");
+
+        JsonObject resp = server.handleHello(req, null);
+
+        JsonArray enabled = resp.getAsJsonObject("result").getAsJsonArray("enabled");
+        assertFalse("response_dedup explicitly disabled",
+                enabledContains(enabled, "response_dedup"));
+    }
+
     private static JsonObject parse(String s) {
         return new JsonParser().parse(s).getAsJsonObject();
     }

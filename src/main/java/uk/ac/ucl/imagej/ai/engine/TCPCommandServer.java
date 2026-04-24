@@ -169,6 +169,27 @@ public class TCPCommandServer {
     ));
 
     /**
+     * Step 11 (docs/tcp_upgrade/11_dedup_response.md): read-only commands
+     * eligible for the automatic per-socket response-dedup short-circuit.
+     * Strict subset of {@link #READONLY_COMMANDS} — only the ones the plan
+     * names explicitly. Admin/observability readers ({@code get_friction_log},
+     * {@code job_list} etc.) stay excluded because a repeat fetch of those
+     * often means "tell me what changed" and dedup would defeat the intent.
+     */
+    private static final Set<String> DEDUP_COMMANDS = new HashSet<String>(Arrays.asList(
+            "get_state",
+            "get_image_info",
+            "get_results_table",
+            "get_log",
+            "get_histogram",
+            "get_open_windows",
+            "get_metadata",
+            "get_dialogs",
+            "get_roi_state",
+            "get_display_state"
+    ));
+
+    /**
      * Server version string emitted in the {@code hello} handshake response.
      * Bumped by steps that change the reply schema so clients can adapt.
      */
@@ -235,6 +256,19 @@ public class TCPCommandServer {
         // loops spiral on invisible modal dialogs and the safe-button
         // allow-list keeps dismissal from making decisions for the user.
         boolean autoDismissPhantoms = false;
+        // Step 11: per-socket response dedup cache for read-only queries
+        // (docs/tcp_upgrade/11_dedup_response.md). When an agent polls the
+        // same command within the window and gets a byte-identical body,
+        // the server short-circuits to {"unchanged": true, ...}. Default ON
+        // for every agent; opt-out via capabilities.dedup=false. Per-call
+        // override: {"force": true} always returns the fresh body.
+        boolean dedup = true;
+        // Backing cache for Step 11 — per-socket state keyed on
+        // (command, canonicalArgs). Initialised eagerly so handlers don't
+        // need to null-check; DEFAULT_CAPS is a shared sentinel and never
+        // participates in dedup (the dispatcher bails on dedup when sock is
+        // null, which is the only path that reaches DEFAULT_CAPS).
+        ResponseDedupCache dedupCache = new ResponseDedupCache();
         Set<String> acceptEvents = java.util.Collections.emptySet();
     }
 
@@ -846,9 +880,35 @@ public class TCPCommandServer {
             promoteGuiActionPiggyback(response);
         }
 
+        // Step 11: automatic per-socket response dedup for read-only polls.
+        // Runs BEFORE the legacy if_none_match hash layer so that if the body
+        // hasn't changed since this socket last fetched it, we short-circuit
+        // with {"ok":true,"unchanged":true,"since":ts,"ageMs":N} and skip
+        // the hash-attach path entirely. Per plan: docs/tcp_upgrade/11_dedup_response.md.
+        boolean dedupShortCircuited = false;
+        if (response != null
+                && sock != null
+                && DEDUP_COMMANDS.contains(command)) {
+            AgentCaps caps = capsBySocket.getOrDefault(sock, DEFAULT_CAPS);
+            if (caps != null
+                    && caps.dedup
+                    && caps.dedupCache != null
+                    && !optBool(request, "force", false)) {
+                JsonObject deduped = applyResponseDedup(command, request, response, caps);
+                if (deduped != response) {
+                    dedupShortCircuited = true;
+                }
+                response = deduped;
+            }
+        }
+
         // Phase 1: readonly fast-path — hash successful readonly results and
         // short-circuit repeat callers that supply a matching if_none_match.
-        if (response != null && READONLY_COMMANDS.contains(command)) {
+        // Skipped when Step 11 already returned a short-form envelope (no
+        // {@code result} field to hash).
+        if (response != null
+                && !dedupShortCircuited
+                && READONLY_COMMANDS.contains(command)) {
             response = applyReadonlyDedup(request, response);
         }
 
@@ -1103,6 +1163,52 @@ public class TCPCommandServer {
     ));
 
     /**
+     * Step 11 (docs/tcp_upgrade/11_dedup_response.md): check the per-socket
+     * dedup cache for this (command, args) key. If the response body hashes
+     * to the same value as the last fetch within the 10-second window, the
+     * cache returns a short-form body which we wrap in a standard
+     * {@code {"ok": true, ...}} envelope so dispatching code sees the normal
+     * reply shape. Otherwise the cache stores the fresh hash and we return
+     * the original response unchanged for downstream processing.
+     *
+     * <p>Only called on transport-successful replies — error bodies are never
+     * deduped (a repeat error may carry a different underlying cause and the
+     * fresh message matters).
+     */
+    private JsonObject applyResponseDedup(
+            String command, JsonObject request, JsonObject response, AgentCaps caps) {
+        if (response == null) return null;
+        JsonElement okEl = response.get("ok");
+        if (okEl == null || !okEl.isJsonPrimitive() || !okEl.getAsBoolean()) {
+            return response;
+        }
+        // Strip volatile keys (usedMB, freeMB, percent, ...) before hashing so
+        // a fresh memory reading on an otherwise-identical get_state doesn't
+        // bust the cache. Reuses HASH_EXCLUDED_KEYS and the canonicalise()
+        // helper already trusted by the if_none_match layer.
+        JsonObject hashInput = new JsonObject();
+        hashInput.addProperty("command", command);
+        JsonElement resultEl = response.get("result");
+        if (resultEl != null) {
+            hashInput.add("result", canonicalise(resultEl));
+        }
+        String args = ResponseDedupCache.canonicalArgs(request);
+        java.util.Optional<JsonObject> dedup =
+                caps.dedupCache.checkOrStore(command, args, hashInput);
+        if (!dedup.isPresent()) {
+            return response;
+        }
+        JsonObject envelope = new JsonObject();
+        envelope.addProperty("ok", true);
+        JsonObject body = dedup.get();
+        envelope.addProperty("unchanged", body.get("unchanged").getAsBoolean());
+        envelope.addProperty("since", body.get("since").getAsLong());
+        envelope.addProperty("ageMs", body.get("ageMs").getAsLong());
+        envelope.addProperty("command", command);
+        return envelope;
+    }
+
+    /**
      * For readonly responses: compute an MD5 hash over the canonical JSON of
      * the {@code result} field and either (a) return the full payload plus
      * {@code hash}, or (b) if the caller's {@code if_none_match} matches,
@@ -1301,6 +1407,11 @@ public class TCPCommandServer {
         // Clients that want safe auto-clear (Gemma) opt in explicitly via
         // capabilities.auto_dismiss_phantoms=true in their hello handshake.
         c.autoDismissPhantoms = optBool(caps, "auto_dismiss_phantoms", false);
+        // Step 11: response dedup defaults ON. Opt-out via capabilities.dedup=false
+        // for clients that drive their own caching (or that must see every reply
+        // verbatim for logging / provenance). Per-call {"force": true} bypasses
+        // the cache without flipping this flag.
+        c.dedup = optBool(caps, "dedup", true);
         int sockPort = (sock != null) ? sock.getPort() : 0;
         c.agentId = optString(caps, "agent_id", c.agent + "-" + sockPort);
         c.acceptEvents = parseStringSet(caps, "accept_events");
@@ -1377,6 +1488,12 @@ public class TCPCommandServer {
         arr.add(new JsonPrimitive("get_roi_state"));
         arr.add(new JsonPrimitive("get_display_state"));
         arr.add(new JsonPrimitive("get_console"));
+        // Step 11: advertise response_dedup so clients can feature-detect the
+        // new {"unchanged": true, "since": ts, "ageMs": N} short-form reply
+        // on read-only polls. Per plan: docs/tcp_upgrade/11_dedup_response.md.
+        if (caps != null && caps.dedup) {
+            arr.add(new JsonPrimitive("response_dedup"));
+        }
         return arr;
     }
 
