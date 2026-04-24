@@ -227,6 +227,14 @@ public class TCPCommandServer {
         // vision-free proxy for "did this macro change the pixels". Clients
         // that do their own image inspection can opt out.
         boolean histogram = true;
+        // Step 10: phantom-dialog auto-dismiss opt-in
+        // (docs/tcp_upgrade/10_phantom_dialog_detector.md). Reporting is
+        // ALWAYS on (phantom dialogs surface under "phantomDialog" whenever
+        // they are detected); this flag gates only the auto-click action.
+        // Default OFF for every agent — Gemma explicitly opts in because its
+        // loops spiral on invisible modal dialogs and the safe-button
+        // allow-list keeps dismissal from making decisions for the user.
+        boolean autoDismissPhantoms = false;
         Set<String> acceptEvents = java.util.Collections.emptySet();
     }
 
@@ -916,7 +924,7 @@ public class TCPCommandServer {
         } else if ("run_script".equals(command)) {
             return handleRunScript(request, caps);
         } else if ("interact_dialog".equals(command)) {
-            return handleInteractDialog(request);
+            return handleInteractDialog(request, caps);
         } else if ("get_progress".equals(command)) {
             return handleGetProgress();
         } else if ("get_friction_log".equals(command)) {
@@ -1288,6 +1296,11 @@ public class TCPCommandServer {
         // Step 09: histogram delta defaults ON. Agents with an independent
         // image-inspection path can opt out via capabilities.histogram=false.
         c.histogram = optBool(caps, "histogram", true);
+        // Step 10: phantom-dialog auto-dismiss defaults OFF. Reporting is
+        // always active (ungated); the flag gates only the auto-click action.
+        // Clients that want safe auto-clear (Gemma) opt in explicitly via
+        // capabilities.auto_dismiss_phantoms=true in their hello handshake.
+        c.autoDismissPhantoms = optBool(caps, "auto_dismiss_phantoms", false);
         int sockPort = (sock != null) ? sock.getPort() : 0;
         c.agentId = optString(caps, "agent_id", c.agent + "-" + sockPort);
         c.acceptEvents = parseStringSet(caps, "accept_events");
@@ -1347,6 +1360,17 @@ public class TCPCommandServer {
         if (caps != null && caps.histogram) {
             arr.add(new JsonPrimitive("histogram_delta"));
         }
+        // Step 10: phantom-dialog detection reporting is always on (it costs
+        // one AWT scan per mutating handler and only attaches a field when a
+        // new modal is on screen). Surface "phantom_dialog" unconditionally
+        // so agents can feature-detect the new phantomDialog reply key; add
+        // "auto_dismiss_phantoms" only when the caller explicitly opted in —
+        // the agent needs to know whether the server WILL click a safe
+        // button, not just whether it WILL report phantoms.
+        arr.add(new JsonPrimitive("phantom_dialog"));
+        if (caps != null && caps.autoDismissPhantoms) {
+            arr.add(new JsonPrimitive("auto_dismiss_phantoms"));
+        }
         // Step 07: the three Gemma-tools read-only commands are always on once
         // the server is up (no cap gate) so clients can feature-detect them
         // by name. Per plan: docs/tcp_upgrade/07_gemma_tools_server.md.
@@ -1377,6 +1401,26 @@ public class TCPCommandServer {
         JsonElement el = obj.get(key);
         if (el == null || !el.isJsonPrimitive()) return defaultValue;
         try { return el.getAsInt(); } catch (Exception e) { return defaultValue; }
+    }
+
+    /**
+     * Step 10: resolve the effective {@code autoDismissPhantoms} flag for a
+     * single mutating-command call. Per-call overrides on the request (JSON
+     * field {@code "autoDismissPhantoms"}) beat the connection-scoped
+     * capability; the connection flag is the fallback when the request does
+     * not mention the key at all. Keeps the gate narrow — detection always
+     * runs, only the click action is opt-in.
+     */
+    private static boolean resolveAutoDismissPhantoms(JsonObject request, AgentCaps caps) {
+        boolean base = caps != null && caps.autoDismissPhantoms;
+        if (request != null && request.has("autoDismissPhantoms")) {
+            JsonElement el = request.get("autoDismissPhantoms");
+            if (el != null && el.isJsonPrimitive()) {
+                try { return el.getAsBoolean(); }
+                catch (Exception ignore) { return base; }
+            }
+        }
+        return base;
     }
 
     private static Set<String> parseStringSet(JsonObject obj, String key) {
@@ -1760,6 +1804,17 @@ public class TCPCommandServer {
         final String codeToRun = (validation != null && validation.hasCorrections())
                 ? validation.patchedCode
                 : code;
+
+        // Step 10: snapshot the set of modal dialogs on screen BEFORE the
+        // macro runs. Any new modal that is still present after the call
+        // returns is reported as a phantom dialog (and optionally
+        // auto-dismissed when the agent opted in). Per plan:
+        // docs/tcp_upgrade/10_phantom_dialog_detector.md. Resolve the
+        // dismiss flag up-front so the per-call {@code autoDismissPhantoms}
+        // override on the request has a chance to toggle behaviour even for
+        // a connection whose hello never opted in.
+        final Set<Window> modalBefore = PhantomDialogDetector.currentModalWindows();
+        final boolean phantomAutoDismiss = resolveAutoDismissPhantoms(request, caps);
 
         // Gate image.* events while this macro runs. The agent's event
         // subscribers react to image.opened by sending get_image_info /
@@ -2167,6 +2222,22 @@ public class TCPCommandServer {
                 result.add("histogramDelta", histJson);
             }
         }
+        // Step 10: post-macro phantom-dialog check. Reporting is always on —
+        // gating only kicks in for the auto-dismiss action via
+        // resolveAutoDismissPhantoms. A macro that already tripped the
+        // blocking-dialog auto-dismiss branch above usually has nothing left
+        // to report here (dialog already cleared), which is correct: the
+        // phantomDialog key surfaces only silent modals the handler did not
+        // already notice. Per plan: docs/tcp_upgrade/10_phantom_dialog_detector.md.
+        try {
+            PhantomDialogDetector.detect(modalBefore, phantomAutoDismiss)
+                    .ifPresent(new java.util.function.Consumer<JsonObject>() {
+                        @Override
+                        public void accept(JsonObject phantom) {
+                            result.add("phantomDialog", phantom);
+                        }
+                    });
+        } catch (Throwable ignore) {}
         if (caps != null && caps.pulse) {
             result.addProperty("pulse", PulseBuilder.build());
         }
@@ -2541,6 +2612,12 @@ public class TCPCommandServer {
             } catch (Throwable ignore) {}
         }
 
+        // Step 10: phantom-dialog baseline snapshot for run_script. Same
+        // before/after contract as handleExecuteMacro so scripts that open a
+        // silent GenericDialog are surfaced the same way macros are.
+        final Set<Window> modalBefore = PhantomDialogDetector.currentModalWindows();
+        final boolean phantomAutoDismiss = resolveAutoDismissPhantoms(request, caps);
+
         // Mirror handleExecuteMacro: run the script on a single-thread executor
         // and poll for blocking dialogs every 150 ms. Without this, a Groovy
         // hallucination like IJ.run("setAutoThreshold", ...) opens a command
@@ -2684,6 +2761,17 @@ public class TCPCommandServer {
                 result.add("histogramDelta", histJson);
             }
         }
+        // Step 10: post-script phantom-dialog check, same contract as
+        // handleExecuteMacro so run_script's reply shape stays interchangeable.
+        try {
+            PhantomDialogDetector.detect(modalBefore, phantomAutoDismiss)
+                    .ifPresent(new java.util.function.Consumer<JsonObject>() {
+                        @Override
+                        public void accept(JsonObject phantom) {
+                            result.add("phantomDialog", phantom);
+                        }
+                    });
+        } catch (Throwable ignore) {}
         if (caps != null && caps.pulse) {
             result.addProperty("pulse", PulseBuilder.build());
         }
@@ -2924,6 +3012,13 @@ public class TCPCommandServer {
 
         PipelineBuilder.Pipeline pipeline = new PipelineBuilder.Pipeline("TCP Pipeline", steps);
 
+        // Step 10: phantom-dialog baseline for the pipeline as a whole. One
+        // phantomDialog report covers the whole run — not per step — because
+        // a typical pipeline failure spirals from a single silent modal and
+        // per-step reports would multiply the same signal by N.
+        final Set<Window> modalBefore = PhantomDialogDetector.currentModalWindows();
+        final boolean phantomAutoDismiss = resolveAutoDismissPhantoms(request, caps);
+
         // executePipeline calls commandEngine.executeMacro() which handles EDT
         // dispatch internally, so call directly from TCP handler thread.
         try {
@@ -2954,6 +3049,19 @@ public class TCPCommandServer {
             resultJson.add("autocorrected",
                     PluginNameValidator.buildAutocorrectedArray(allCorrections));
         }
+        // Step 10: post-pipeline phantom-dialog check — one reply-level report
+        // for the whole pipeline, so a silent modal opened by any step is
+        // surfaced alongside the per-step status array.
+        final JsonObject resultJsonRef = resultJson;
+        try {
+            PhantomDialogDetector.detect(modalBefore, phantomAutoDismiss)
+                    .ifPresent(new java.util.function.Consumer<JsonObject>() {
+                        @Override
+                        public void accept(JsonObject phantom) {
+                            resultJsonRef.add("phantomDialog", phantom);
+                        }
+                    });
+        } catch (Throwable ignore) {}
         return successResponse(resultJson);
     }
 
@@ -5107,12 +5215,20 @@ public class TCPCommandServer {
      * "index" selects the Nth component of that type (0-based).
      * Both "target" and "index" can be used together for disambiguation.
      */
-    private JsonObject handleInteractDialog(JsonObject request) {
+    private JsonObject handleInteractDialog(JsonObject request, AgentCaps caps) {
         JsonElement actionElement = request.get("action");
         if (actionElement == null || !actionElement.isJsonPrimitive()) {
             return errorResponse("Missing 'action' field for interact_dialog");
         }
         final String action = actionElement.getAsString();
+
+        // Step 10: snapshot modal dialogs BEFORE interacting. interact_dialog
+        // drives existing dialogs (click_button / set_text / …); if the
+        // action opens a new modal (a confirmation prompt, say) the detector
+        // surfaces it under phantomDialog alongside whatever the action
+        // itself returned. Per plan: docs/tcp_upgrade/10_phantom_dialog_detector.md.
+        final Set<Window> modalBefore = PhantomDialogDetector.currentModalWindows();
+        final boolean phantomAutoDismiss = resolveAutoDismissPhantoms(request, caps);
 
         // Find the target dialog
         JsonElement dialogElement = request.get("dialog");
@@ -5201,7 +5317,24 @@ public class TCPCommandServer {
             return errorResponse("Interrupted");
         }
 
-        return (JsonObject) holder[0];
+        JsonObject reply = (JsonObject) holder[0];
+        // Step 10: attach phantomDialog to the interact_dialog reply if the
+        // action opened a new modal. The detector runs regardless of whether
+        // the interaction itself succeeded — a silent confirmation dialog on
+        // a failed click is still a deadlock worth surfacing.
+        if (reply != null) {
+            try {
+                final JsonObject replyRef = reply;
+                PhantomDialogDetector.detect(modalBefore, phantomAutoDismiss)
+                        .ifPresent(new java.util.function.Consumer<JsonObject>() {
+                            @Override
+                            public void accept(JsonObject phantom) {
+                                replyRef.add("phantomDialog", phantom);
+                            }
+                        });
+            } catch (Throwable ignore) {}
+        }
+        return reply;
     }
 
     /**
