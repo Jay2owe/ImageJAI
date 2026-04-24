@@ -23,12 +23,20 @@
         <package-name>imagejai</package-name>
         <license.licenseName>bsd_2</license.licenseName>
         <license.copyrightOwners>Jamie</license.copyrightOwners>
-        <!-- Java 8 for Fiji compatibility -->
-        <maven.compiler.source>1.8</maven.compiler.source>
-        <maven.compiler.target>1.8</maven.compiler.target>
-        <scijava.jvm.build.version>[1.8.0,1.9.0)</scijava.jvm.build.version>
+        <!-- Java 11 target: required by pty4j / JediTerm (stage 05).
+             Fiji ships a JRE 21+ so runtime is fine; build JDK stays at 25.
+             NB: pom-scijava sets maven.compiler.release=8 in its BOM, and
+             `release` trumps `source`/`target` — override it here explicitly. -->
+        <maven.compiler.source>11</maven.compiler.source>
+        <maven.compiler.target>11</maven.compiler.target>
+        <maven.compiler.release>11</maven.compiler.release>
+        <scijava.jvm.build.version>[11,)</scijava.jvm.build.version>
         <!-- Override scijava's enforcer to allow building with newer JDKs -->
         <enforcer.skip>true</enforcer.skip>
+        <!-- Kotlin stdlib version is pinned in stage 05 (when JediTerm/pty4j deps
+             land). Pinning it here without those deps breaks artifact resolution:
+             Kotlin 2.x retired kotlin-stdlib-common, but pom-scijava's BOM still
+             references it. Leave at SciJava default until 05. -->
     </properties>
 
     <repositories>
@@ -77,8 +85,8 @@
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-compiler-plugin</artifactId>
                 <configuration>
-                    <source>1.8</source>
-                    <target>1.8</target>
+                    <source>11</source>
+                    <target>11</target>
                 </configuration>
             </plugin>
             <!-- Generate SciJava plugin annotation index -->

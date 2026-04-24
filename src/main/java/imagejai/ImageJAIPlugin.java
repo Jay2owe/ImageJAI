@@ -15,6 +15,8 @@ import imagejai.engine.PipelineBuilder;
 import imagejai.engine.StateInspector;
 import imagejai.engine.TCPCommandServer;
 import imagejai.ui.ChatPanel;
+import imagejai.ui.ChatPanelController;
+import imagejai.ui.ChatSurface;
 import imagejai.ui.SettingsDialog;
 
 import javax.swing.*;
@@ -84,7 +86,17 @@ public class ImageJAIPlugin implements Command {
 
         // Start TCP command server if enabled
         if (settings.tcpServerEnabled) {
-            startTcpServer(settings, chatPanel);
+            // Stage 03 (embedded-agent-widget): pick the first free port in the
+            // 7746..7750 window so two Fiji instances don't crash on a clash.
+            // The chosen port is written back to settings.tcpPort so rail-
+            // hotline buttons and any spawned agent env read the right value.
+            int chosen = findFreeTcpPort(settings.tcpPort);
+            if (chosen != settings.tcpPort) {
+                IJ.log("[ImageJAI-TCP] :" + settings.tcpPort
+                        + " busy; falling back to :" + chosen);
+                settings.tcpPort = chosen;
+            }
+            startTcpServer(settings, chatPanel, chatPanel);
         }
 
         // Phase 2: start the event-bus publishers so dialog / image / memory
@@ -206,10 +218,28 @@ public class ImageJAIPlugin implements Command {
     }
 
     /**
+     * Find the first free TCP port in the [preferred, preferred+4] window.
+     * Returns the preferred port if it's free, else the first free in the
+     * window, else the preferred port (caller will see the bind failure).
+     */
+    private static int findFreeTcpPort(int preferred) {
+        for (int p = preferred; p <= preferred + 4; p++) {
+            try (java.net.ServerSocket probe = new java.net.ServerSocket(p)) {
+                probe.setReuseAddress(true);
+                return p;
+            } catch (java.io.IOException ignore) {
+                // port busy — try next
+            }
+        }
+        return preferred;
+    }
+
+    /**
      * Create and start the TCP command server with a listener that
      * reports status and activity to the chat panel.
      */
-    private static void startTcpServer(Settings settings, final ChatPanel panel) {
+    private static void startTcpServer(Settings settings, final ChatSurface panel,
+                                       ChatPanelController controller) {
         CommandEngine engine = new CommandEngine();
         StateInspector inspector = new StateInspector();
         PipelineBuilder pipeline = new PipelineBuilder(engine);
@@ -220,7 +250,12 @@ public class ImageJAIPlugin implements Command {
         // gui_action commands can drive inline previews, toasts, ROI flashes,
         // markdown, and confirms. Safe even if the panel isn't visible — the
         // dispatcher's controller methods log+no-op in that case.
-        tcpServer.setChatPanelController(panel);
+        // Stage 02: ChatSurface handles display updates; ChatPanelController
+        // handles GUI actions. Keep both dependencies as interfaces so stage
+        // 06 can split the concrete panel without a cast here.
+        if (controller != null) {
+            tcpServer.setChatPanelController(controller);
+        }
         tcpServer.start(new TCPCommandServer.ServerListener() {
             @Override
             public void onServerStarted(int port) {

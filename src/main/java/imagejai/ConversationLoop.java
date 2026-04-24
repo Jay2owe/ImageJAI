@@ -15,6 +15,7 @@ import imagejai.llm.LLMBackend;
 import imagejai.llm.LLMResponse;
 import imagejai.llm.Message;
 import imagejai.ui.ChatPanel;
+import imagejai.ui.ChatSurface;
 
 import javax.swing.SwingUtilities;
 import java.util.ArrayList;
@@ -42,7 +43,10 @@ public class ConversationLoop implements ChatPanel.ChatListener {
             + "|does this look|what type|examine|inspect|view|visible|appear|observe)\\b",
             Pattern.CASE_INSENSITIVE);
 
-    private final ChatPanel chatPanel;
+    // Widened to ChatSurface in stage 02 so ConversationLoop does not depend on
+    // the concrete ChatPanel type. The ChatListener import stays because it is
+    // a nested interface on ChatPanel — that's a separate, tolerable coupling.
+    private final ChatSurface chatPanel;
     private final Settings settings;
     private LLMBackend backend;
     private final CommandEngine commandEngine;
@@ -53,7 +57,7 @@ public class ConversationLoop implements ChatPanel.ChatListener {
     private final List<Message> history;
     private PipelineBuilder.Pipeline lastPipeline;
 
-    public ConversationLoop(ChatPanel chatPanel, Settings settings) {
+    public ConversationLoop(ChatSurface chatPanel, Settings settings) {
         this.chatPanel = chatPanel;
         this.settings = settings;
         this.commandEngine = new CommandEngine();
@@ -699,10 +703,10 @@ public class ConversationLoop implements ChatPanel.ChatListener {
     }
 
     /**
-     * Base64-encode a byte array. Uses javax.xml.bind on Java 8.
+     * Base64-encode a byte array.
      */
     private static String base64Encode(byte[] data) {
-        return javax.xml.bind.DatatypeConverter.printBase64Binary(data);
+        return java.util.Base64.getEncoder().encodeToString(data);
     }
 
     /**

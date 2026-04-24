@@ -29,7 +29,7 @@ import java.util.regex.Pattern;
  * drive inline previews, toasts, markdown, ROI highlights, focus, and confirm
  * prompts via TCP.
  */
-public class ChatPanel extends JPanel implements ChatPanelController {
+public class ChatPanel extends JPanel implements ChatPanelController, ChatSurface {
 
     /**
      * Callback interface for when the user sends a message.
@@ -943,8 +943,12 @@ public class ChatPanel extends JPanel implements ChatPanelController {
                 item.addActionListener(new ActionListener() {
                     @Override
                     public void actionPerformed(ActionEvent e) {
-                        boolean ok = agentLauncher.launchAgent(agent);
-                        if (ok) {
+                        // Stage 02: use the session-returning API. For now the
+                        // handle is discarded; stage 06 will keep it so card
+                        // flip / shutdown can interrogate liveness.
+                        imagejai.engine.AgentSession session =
+                                agentLauncher.launch(agent, AgentLauncher.Mode.EXTERNAL);
+                        if (session != null) {
                             appendMessage("assistant", "Launched " + agent.name
                                     + " in: " + agentLauncher.getAgentWorkspace());
                         } else {
