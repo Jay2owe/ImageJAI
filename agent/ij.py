@@ -75,12 +75,15 @@ TIMEOUT = 60
 # Step 01 (docs/tcp_upgrade): capabilities Claude's ij.py declares on first
 # contact. Claude Code hooks already inject per-turn session state, so pulse
 # is disabled here — a server-side pulse would duplicate what the hook feeds.
+# Step 05: state_delta=True keeps the grouped reply shape (diff fields nested
+# under "stateDelta") for Claude — the hook consumes the nested form.
 _HELLO_CAPS = {
     "vision": True,
     "output_format": "markdown",
     "token_budget": 20000,
     "verbose": True,
     "pulse": False,
+    "state_delta": True,
     "accept_events": ["macro.*", "image.*", "dialog.*"],
 }
 # Cache of the last hello response so `ij.py capabilities` can show the

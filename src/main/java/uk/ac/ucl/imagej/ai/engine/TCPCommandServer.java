@@ -161,7 +161,7 @@ public class TCPCommandServer {
      * Server version string emitted in the {@code hello} handshake response.
      * Bumped by steps that change the reply schema so clients can adapt.
      */
-    static final String SERVER_VERSION = "1.7.3";
+    static final String SERVER_VERSION = "1.7.4";
 
     /**
      * Per-connection capability record negotiated via the {@code hello} handler.
@@ -176,7 +176,16 @@ public class TCPCommandServer {
         String outputFormat = "json";
         int tokenBudget = Integer.MAX_VALUE;
         boolean verbose = false;
-        boolean pulse = false;
+        // Step 05: pulse defaults ON (docs/tcp_upgrade/05_state_delta_and_pulse.md).
+        // Most agents benefit from the one-line state readout on every reply;
+        // Claude Code's wrapper opts out because its SessionStart hook already
+        // injects per-turn session state and duplication would waste context.
+        boolean pulse = true;
+        // Step 05: state_delta defaults ON. When enabled the server groups the
+        // existing scattered diff keys (newImages, resultsTable, logDelta,
+        // dismissedDialogs) into a single "stateDelta" sub-object. Clients
+        // that set state_delta=false in hello keep the legacy flat shape.
+        boolean stateDelta = true;
         boolean safeMode = false;
         // Step 02: opt-in to typed error objects
         // (docs/tcp_upgrade/02_structured_errors.md). Off-by-default so clients
@@ -200,6 +209,54 @@ public class TCPCommandServer {
 
     /** Fallback caps applied to any request from a socket that never said hello. */
     static final AgentCaps DEFAULT_CAPS = new AgentCaps();
+
+    /**
+     * Step 05: bookkeeping struct for post-command diffs. Collects the diff
+     * keys a mutating handler (execute_macro, run_script) used to emit
+     * individually (newImages, resultsTable, logDelta, dismissedDialogs) and
+     * serialises them as a single {@code stateDelta} sub-object when
+     * {@code caps.stateDelta} is on, or as top-level flat keys for legacy
+     * clients. Per plan: docs/tcp_upgrade/05_state_delta_and_pulse.md.
+     */
+    static final class StateDelta {
+        JsonArray newImages;
+        String resultsTable;
+        String logDelta;
+        JsonArray dismissedDialogs;
+
+        boolean isEmpty() {
+            return newImages == null && resultsTable == null
+                    && logDelta == null && dismissedDialogs == null;
+        }
+
+        /** Serialise collected fields into a fresh {@link JsonObject}. */
+        JsonObject toJsonObject() {
+            JsonObject obj = new JsonObject();
+            if (newImages != null) obj.add("newImages", newImages);
+            if (resultsTable != null) obj.addProperty("resultsTable", resultsTable);
+            if (logDelta != null) obj.addProperty("logDelta", logDelta);
+            if (dismissedDialogs != null) obj.add("dismissedDialogs", dismissedDialogs);
+            return obj;
+        }
+
+        /**
+         * Attach collected diffs to {@code result} in the shape {@code caps}
+         * dictates: nested under {@code stateDelta} when grouping is on,
+         * flat top-level keys otherwise. No-op when nothing was collected.
+         */
+        void applyTo(JsonObject result, AgentCaps caps) {
+            if (isEmpty()) return;
+            boolean grouped = caps != null && caps.stateDelta;
+            if (grouped) {
+                result.add("stateDelta", toJsonObject());
+            } else {
+                if (newImages != null) result.add("newImages", newImages);
+                if (resultsTable != null) result.addProperty("resultsTable", resultsTable);
+                if (logDelta != null) result.addProperty("logDelta", logDelta);
+                if (dismissedDialogs != null) result.add("dismissedDialogs", dismissedDialogs);
+            }
+        }
+    }
 
     /**
      * Caps keyed by the connection that negotiated them. Populated by
@@ -1167,7 +1224,12 @@ public class TCPCommandServer {
         c.outputFormat = optString(caps, "output_format", "json");
         c.tokenBudget  = optInt(caps, "token_budget", Integer.MAX_VALUE);
         c.verbose      = optBool(caps, "verbose", false);
-        c.pulse        = optBool(caps, "pulse", false);
+        // Step 05: pulse / state_delta default ON for clients that said hello
+        // (docs/tcp_upgrade/05_state_delta_and_pulse.md). The Claude Code
+        // wrapper sets pulse=false explicitly because its SessionStart hook
+        // already injects the state a pulse string would carry.
+        c.pulse        = optBool(caps, "pulse", true);
+        c.stateDelta   = optBool(caps, "state_delta", true);
         c.safeMode     = optBool(caps, "safe_mode", false);
         c.structuredErrors = optBool(caps, "structured_errors", false);
         c.canonicalMacro = optBool(caps, "canonical_macro", true);
@@ -1212,6 +1274,14 @@ public class TCPCommandServer {
         }
         if (caps != null && caps.fuzzyMatch) {
             arr.add(new JsonPrimitive("fuzzy_match"));
+        }
+        // Step 05: surface state_delta / pulse so clients can detect the
+        // new reply shape before relying on it.
+        if (caps != null && caps.stateDelta) {
+            arr.add(new JsonPrimitive("state_delta"));
+        }
+        if (caps != null && caps.pulse) {
+            arr.add(new JsonPrimitive("pulse"));
         }
         return arr;
     }
@@ -1385,6 +1455,10 @@ public class TCPCommandServer {
         // for dialogs / timeout and return structured failure feedback instead
         // of leaving the client blocked until its socket times out.
         JsonObject result = new JsonObject();
+        // Step 05: collect diff fields into a single struct so the final
+        // serialise step can pick between the grouped "stateDelta" sub-object
+        // and the legacy flat top-level keys based on caps.stateDelta.
+        final StateDelta delta = new StateDelta();
         boolean success = false;
         String failureMessage = null;
         String macroReturn = null;
@@ -1501,7 +1575,10 @@ public class TCPCommandServer {
                         if (dismissed > 0) {
                             result.addProperty("dialogsAutoDismissed", dismissed);
                             if (dismissedCaptured.size() > 0) {
-                                result.add("dismissedDialogs", dismissedCaptured);
+                                // Step 05: route through the StateDelta struct so the
+                                // grouped shape is honoured. dialogsAutoDismissed (int
+                                // count) stays top-level — it's a signal, not a diff.
+                                delta.dismissedDialogs = dismissedCaptured;
                             }
                             // Only append the "probe the plugin" suffix for
                             // plugin-dialog cases. Macro Error popups already
@@ -1570,18 +1647,20 @@ public class TCPCommandServer {
         try {
             String postLog = IJ.getLog();
             if (postLog != null && postLog.length() > logLenBefore) {
-                String delta = postLog.substring(logLenBefore);
-                if (delta.length() > 16384) {
-                    delta = delta.substring(delta.length() - 16384);
+                String logSlice = postLog.substring(logLenBefore);
+                if (logSlice.length() > 16384) {
+                    logSlice = logSlice.substring(logSlice.length() - 16384);
                 }
-                logDelta = delta;
+                logDelta = logSlice;
             }
         } catch (Throwable ignore) {}
         if (success) {
             result.addProperty("success", true);
             result.addProperty("output", macroReturn != null ? macroReturn : "");
+            // Step 05: logDelta flows through the StateDelta struct so it can
+            // be nested under "stateDelta" when caps.stateDelta is on.
             if (logDelta != null) {
-                result.addProperty("logDelta", logDelta);
+                delta.logDelta = logDelta;
             }
             result.addProperty("executionTimeMs", elapsed);
             // Step 04: surface any fuzzy corrections applied before the macro
@@ -1596,11 +1675,11 @@ public class TCPCommandServer {
                 if (active != null) {
                     JsonArray newImages = new JsonArray();
                     newImages.add(active.getTitle());
-                    result.add("newImages", newImages);
+                    delta.newImages = newImages;
                 }
                 String csv = stateInspector.getResultsTableCSV();
                 if (csv != null && !csv.isEmpty()) {
-                    result.addProperty("resultsTable", csv);
+                    delta.resultsTable = csv;
                 }
                 stateInspector.checkResultsTableChange();
             } catch (Exception ignore) {
@@ -1630,7 +1709,12 @@ public class TCPCommandServer {
                         && !postTitle.equals(preActiveTitle)) {
                     JsonArray newImages = new JsonArray();
                     newImages.add(postTitle);
-                    result.add("newImages", newImages);
+                    // Step 05: failure-path newImages routes through the delta
+                    // struct so the grouped shape stays consistent with the
+                    // success path. sideEffectsObj keeps its own copy — that
+                    // lives inside the structured error payload (step 02) and
+                    // is a separate contract from the top-level diff shape.
+                    delta.newImages = newImages;
                     JsonArray newImagesCopy = new JsonArray();
                     newImagesCopy.add(postTitle);
                     sideEffectsObj.add("newImages", newImagesCopy);
@@ -1639,7 +1723,7 @@ public class TCPCommandServer {
                 String csv = stateInspector.getResultsTableCSV();
                 int postLen = csv != null ? csv.length() : 0;
                 if (csv != null && !csv.isEmpty() && postLen != preResultsLen) {
-                    result.addProperty("resultsTable", csv);
+                    delta.resultsTable = csv;
                     sideEffectsObj.addProperty("resultsChanged", true);
                     sideEffectsLanded = true;
                 }
@@ -1668,8 +1752,10 @@ public class TCPCommandServer {
             // Surface any prints the macro emitted before failure so the agent
             // can see partial progress alongside the error message. Also kept
             // at top-level for legacy clients — sideEffects is structured-only.
+            // Step 05: top-level logDelta rides through the StateDelta struct
+            // so caps.stateDelta can group it alongside newImages/resultsTable.
             if (logDelta != null) {
-                result.addProperty("logDelta", logDelta);
+                delta.logDelta = logDelta;
             }
         }
 
@@ -1699,6 +1785,13 @@ public class TCPCommandServer {
                     && (RecorderCapture.differs(code, ranCode) || !success)) {
                 result.addProperty("ranCode", ranCode);
             }
+        }
+        // Step 05: serialise the collected diffs now — either grouped under
+        // "stateDelta" or as legacy flat keys, depending on caps. Must run
+        // before the pulse/return so the reply order stays stable.
+        delta.applyTo(result, caps);
+        if (caps != null && caps.pulse) {
+            result.addProperty("pulse", PulseBuilder.build());
         }
         return successResponse(result);
         } finally {
@@ -2123,6 +2216,9 @@ public class TCPCommandServer {
         long elapsed = System.currentTimeMillis() - startTime;
         result.addProperty("executionTimeMs", elapsed);
 
+        // Step 05: collect diff fields into a struct so the final serialise
+        // step can nest them under "stateDelta" or keep the legacy flat keys.
+        final StateDelta delta = new StateDelta();
         if (completed) {
             result.addProperty("success", true);
             result.addProperty("output", scriptResult != null ? scriptResult.toString() : "");
@@ -2132,7 +2228,7 @@ public class TCPCommandServer {
             result.add("error",
                     ErrorReply.classifyMacroError(blockingFailure, false).buildJsonElement(caps));
             if (dismissedCaptured.size() > 0) {
-                result.add("dismissedDialogs", dismissedCaptured);
+                delta.dismissedDialogs = dismissedCaptured;
             }
         } else if (scriptError instanceof ScriptException) {
             // ScriptException is the parser/compiler failure path — surface it
@@ -2186,6 +2282,13 @@ public class TCPCommandServer {
             IJ.log("[ImageJAI-Journal] record failed: " + t);
         }
 
+        // Step 05: attach collected diffs and pulse. Same shape contract as
+        // handleExecuteMacro so clients can treat execute_macro and run_script
+        // replies interchangeably.
+        delta.applyTo(result, caps);
+        if (caps != null && caps.pulse) {
+            result.addProperty("pulse", PulseBuilder.build());
+        }
         return successResponse(result);
     }
 
