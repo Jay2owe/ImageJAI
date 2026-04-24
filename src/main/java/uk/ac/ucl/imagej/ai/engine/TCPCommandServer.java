@@ -189,6 +189,12 @@ public class TCPCommandServer {
         // client submitted or when the macro failed, so the common case costs
         // zero additional tokens.
         boolean canonicalMacro = true;
+        // Step 04: fuzzy plugin-name validation
+        // (docs/tcp_upgrade/04_fuzzy_plugin_registry.md). On-by-default for
+        // clients that said hello so hallucinated plugin names are caught
+        // server-side before burning a macro-execution cycle. Clients can opt
+        // out if they ship their own registry check.
+        boolean fuzzyMatch = true;
         Set<String> acceptEvents = java.util.Collections.emptySet();
     }
 
@@ -777,7 +783,7 @@ public class TCPCommandServer {
         } else if ("capture_image".equals(command)) {
             return handleCaptureImage(request);
         } else if ("run_pipeline".equals(command)) {
-            return handleRunPipeline(request);
+            return handleRunPipeline(request, caps);
         } else if ("explore_thresholds".equals(command)) {
             return handleExploreThresholds(request);
         } else if ("get_state_context".equals(command)) {
@@ -806,6 +812,8 @@ public class TCPCommandServer {
             return handleCloseDialogs(request);
         } else if ("probe_command".equals(command)) {
             return handleProbeCommand(request);
+        } else if ("list_commands".equals(command)) {
+            return handleListCommands(request);
         } else if ("run_script".equals(command)) {
             return handleRunScript(request, caps);
         } else if ("interact_dialog".equals(command)) {
@@ -1163,6 +1171,7 @@ public class TCPCommandServer {
         c.safeMode     = optBool(caps, "safe_mode", false);
         c.structuredErrors = optBool(caps, "structured_errors", false);
         c.canonicalMacro = optBool(caps, "canonical_macro", true);
+        c.fuzzyMatch = optBool(caps, "fuzzy_match", true);
         int sockPort = (sock != null) ? sock.getPort() : 0;
         c.agentId = optString(caps, "agent_id", c.agent + "-" + sockPort);
         c.acceptEvents = parseStringSet(caps, "accept_events");
@@ -1200,6 +1209,9 @@ public class TCPCommandServer {
         }
         if (caps != null && caps.canonicalMacro) {
             arr.add(new JsonPrimitive("canonical_macro"));
+        }
+        if (caps != null && caps.fuzzyMatch) {
+            arr.add(new JsonPrimitive("fuzzy_match"));
         }
         return arr;
     }
@@ -1330,6 +1342,27 @@ public class TCPCommandServer {
         final String code = codeElement.getAsString();
         final long macroTimeoutMs = resolveTimeoutMs(request, MACRO_TIMEOUT_MS);
 
+        // Step 04: fuzzy plugin-name validation. Gate on caps.fuzzyMatch so
+        // clients that opted out (or never said hello — DEFAULT_CAPS has the
+        // field at its default, true) still get the backwards-compatible
+        // path. Rejection short-circuits: no macro runs, the reply carries
+        // PLUGIN_NOT_FOUND with top-3 suggestions. Corrections patch the
+        // macro in place and surface an autocorrected[] array below.
+        final PluginNameValidator.Result validation =
+                (caps != null && caps.fuzzyMatch)
+                        ? PluginNameValidator.validate(code)
+                        : null;
+        if (validation != null && validation.hasRejections()) {
+            JsonObject rej = new JsonObject();
+            rej.addProperty("success", false);
+            ErrorReply err = PluginNameValidator.buildPluginNotFoundError(validation.rejections);
+            rej.add("error", err.buildJsonElement(caps));
+            return successResponse(rej);
+        }
+        final String codeToRun = (validation != null && validation.hasCorrections())
+                ? validation.patchedCode
+                : code;
+
         // Gate image.* events while this macro runs. The agent's event
         // subscribers react to image.opened by sending get_image_info /
         // get_histogram — those wrap work in SwingUtilities.invokeLater
@@ -1421,7 +1454,10 @@ public class TCPCommandServer {
             future = executor.submit(new java.util.concurrent.Callable<String>() {
                 @Override
                 public String call() {
-                    return IJ.runMacro(code);
+                    // Step 04: codeToRun is the fuzzy-validated macro — either
+                    // the original (no corrections) or a patched string with
+                    // run("name") spellings replaced by canonical names.
+                    return IJ.runMacro(codeToRun);
                 }
             });
 
@@ -1548,6 +1584,12 @@ public class TCPCommandServer {
                 result.addProperty("logDelta", logDelta);
             }
             result.addProperty("executionTimeMs", elapsed);
+            // Step 04: surface any fuzzy corrections applied before the macro
+            // ran so the agent can learn the canonical spelling.
+            if (validation != null && validation.hasCorrections()) {
+                result.add("autocorrected",
+                        PluginNameValidator.buildAutocorrectedArray(validation.corrections));
+            }
 
             try {
                 ImageInfo active = stateInspector.getActiveImageInfo();
@@ -2338,7 +2380,7 @@ public class TCPCommandServer {
         return successResponse((JsonObject) holder[0]);
     }
 
-    private JsonObject handleRunPipeline(JsonObject request) {
+    private JsonObject handleRunPipeline(JsonObject request, AgentCaps caps) {
         JsonElement stepsElement = request.get("steps");
         if (stepsElement == null || !stepsElement.isJsonArray()) {
             return errorResponse("Missing 'steps' array for run_pipeline");
@@ -2346,10 +2388,32 @@ public class TCPCommandServer {
 
         JsonArray stepsArray = stepsElement.getAsJsonArray();
         final List<PipelineBuilder.PipelineStep> steps = new ArrayList<PipelineBuilder.PipelineStep>();
+        // Step 04: mirror handleExecuteMacro's pre-validation for each step's
+        // macro code. Any rejection short-circuits the whole pipeline; a
+        // per-step correction patches the step's code before it reaches
+        // PipelineBuilder. The first rejection drives the error reply so a
+        // single bad run("name") in step 3 doesn't silently run steps 1-2.
+        List<PluginNameValidator.Correction> allCorrections =
+                new ArrayList<PluginNameValidator.Correction>();
         for (int i = 0; i < stepsArray.size(); i++) {
             JsonObject stepObj = stepsArray.get(i).getAsJsonObject();
             String desc = stepObj.has("description") ? stepObj.get("description").getAsString() : "Step " + (i + 1);
             String code = stepObj.has("code") ? stepObj.get("code").getAsString() : "";
+            if (caps != null && caps.fuzzyMatch) {
+                PluginNameValidator.Result v = PluginNameValidator.validate(code);
+                if (v.hasRejections()) {
+                    JsonObject rej = new JsonObject();
+                    rej.addProperty("success", false);
+                    ErrorReply err = PluginNameValidator.buildPluginNotFoundError(v.rejections);
+                    rej.add("error", err.buildJsonElement(caps));
+                    rej.addProperty("failedStep", i + 1);
+                    return successResponse(rej);
+                }
+                if (v.hasCorrections()) {
+                    code = v.patchedCode;
+                    allCorrections.addAll(v.corrections);
+                }
+            }
             steps.add(new PipelineBuilder.PipelineStep(i + 1, desc, code));
         }
 
@@ -2383,6 +2447,12 @@ public class TCPCommandServer {
             stepsResult.add(stepJson);
         }
         resultJson.add("steps", stepsResult);
+        // Step 04: if any step had fuzzy corrections applied, surface them at
+        // the pipeline level so the agent learns the canonical spellings.
+        if (!allCorrections.isEmpty()) {
+            resultJson.add("autocorrected",
+                    PluginNameValidator.buildAutocorrectedArray(allCorrections));
+        }
         return successResponse(resultJson);
     }
 
@@ -4093,6 +4163,52 @@ public class TCPCommandServer {
         // Collapse any run of whitespace (including embedded newlines) to a
         // single space so the captured body fits on one line.
         return raw.replaceAll("\\s+", " ").trim();
+    }
+
+    // -----------------------------------------------------------------------
+    // Step 04: list_commands — canonical plugin/menu-command list
+    // -----------------------------------------------------------------------
+
+    /**
+     * Return every command ImageJ knows about (name → optional class path).
+     * Sourced from the {@link MenuCommandRegistry} snapshot populated at server
+     * start, so zero-latency and stable per session. Clients pass
+     * {@code include_classes=true} to get {@code [{name, class}, ...]} objects
+     * instead of the default names-only array.
+     * <p>
+     * Introduced by {@code docs/tcp_upgrade/04_fuzzy_plugin_registry.md} —
+     * replaces the legacy client-side {@code scan_plugins.py} scraper.
+     */
+    private JsonObject handleListCommands(JsonObject request) {
+        boolean includeClasses = false;
+        if (request != null && request.has("include_classes")) {
+            JsonElement el = request.get("include_classes");
+            if (el != null && el.isJsonPrimitive()) {
+                try { includeClasses = el.getAsBoolean(); } catch (Exception ignore) {}
+            }
+        }
+
+        MenuCommandRegistry reg = MenuCommandRegistry.get();
+        List<String> names = reg.allCommands();
+
+        JsonObject result = new JsonObject();
+        result.addProperty("count", names.size());
+        JsonArray arr = new JsonArray();
+        if (includeClasses) {
+            for (String name : names) {
+                JsonObject entry = new JsonObject();
+                entry.addProperty("name", name);
+                String cls = reg.classFor(name);
+                entry.addProperty("class", cls != null ? cls : "");
+                arr.add(entry);
+            }
+        } else {
+            for (String name : names) {
+                arr.add(new JsonPrimitive(name));
+            }
+        }
+        result.add("commands", arr);
+        return successResponse(result);
     }
 
     // -----------------------------------------------------------------------
