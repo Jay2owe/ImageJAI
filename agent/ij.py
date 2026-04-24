@@ -270,6 +270,79 @@ def hello(host=HOST, port=PORT, timeout=10):
     return resp
 
 
+# ---------------------------------------------------------------------------
+# Structured-error normalisation (docs/tcp_upgrade/02_structured_errors.md)
+# ---------------------------------------------------------------------------
+
+def normalize_error(err):
+    """Return a dict with a uniform error shape regardless of input.
+
+    The TCP server emits either:
+      - a plain string (legacy; for clients that never said hello), or
+      - a typed object {code, category, retry_safe, message, recovery_hint,
+        suggested, sideEffects} (for clients that negotiated
+        structured_errors via hello).
+
+    Agent code that wants to branch on retry_safe / category shouldn't have
+    to care which shape arrived. Passing either form through this helper
+    yields the object shape; legacy strings are labelled with code 'LEGACY'
+    and a conservative retry_safe=True so agents can still choose to retry.
+
+    Examples:
+        >>> normalize_error("No image open")
+        {'code': 'LEGACY', 'category': 'runtime', 'retry_safe': True,
+         'message': 'No image open'}
+        >>> normalize_error({'code': 'IMAGE_NOT_OPEN', 'category': 'state',
+        ...                  'retry_safe': True, 'message': 'No image open'})
+        {'code': 'IMAGE_NOT_OPEN', 'category': 'state', 'retry_safe': True,
+         'message': 'No image open'}
+        >>> normalize_error(None)
+        {'code': 'UNKNOWN', 'category': 'runtime', 'retry_safe': False,
+         'message': ''}
+    """
+    if isinstance(err, dict):
+        out = dict(err)
+        out.setdefault("code", "UNKNOWN")
+        out.setdefault("category", "runtime")
+        out.setdefault("retry_safe", False)
+        out.setdefault("message", "")
+        return out
+    if isinstance(err, str):
+        return {
+            "code": "LEGACY",
+            "category": "runtime",
+            "retry_safe": True,
+            "message": err,
+        }
+    return {
+        "code": "UNKNOWN",
+        "category": "runtime",
+        "retry_safe": False,
+        "message": "",
+    }
+
+
+def extract_error(resp):
+    """Pull the error payload out of a TCP response in any shape.
+
+    Errors can live at:
+      - resp['error']              (top-level, on ok==false responses)
+      - resp['result']['error']    (nested, on macro/script failures where
+                                    ok==true but result.success==false)
+
+    Returns the normalised error dict (per ``normalize_error``), or None if
+    the response doesn't carry an error.
+    """
+    if not isinstance(resp, dict):
+        return None
+    if "error" in resp and resp["error"] is not None:
+        return normalize_error(resp["error"])
+    result = resp.get("result")
+    if isinstance(result, dict) and result.get("error") is not None:
+        return normalize_error(result["error"])
+    return None
+
+
 def _check_dialogs_fallback(host=HOST, port=PORT):
     """Emergency dialog check after a timeout. Uses a short timeout."""
     try:

@@ -178,6 +178,11 @@ public class TCPCommandServer {
         boolean verbose = false;
         boolean pulse = false;
         boolean safeMode = false;
+        // Step 02: opt-in to typed error objects
+        // (docs/tcp_upgrade/02_structured_errors.md). Off-by-default so clients
+        // that never say hello keep receiving plain error strings; the server
+        // emits the object form only when this flag has been negotiated.
+        boolean structuredErrors = false;
         Set<String> acceptEvents = java.util.Collections.emptySet();
     }
 
@@ -796,7 +801,7 @@ public class TCPCommandServer {
         } else if ("probe_command".equals(command)) {
             return handleProbeCommand(request);
         } else if ("run_script".equals(command)) {
-            return handleRunScript(request);
+            return handleRunScript(request, caps);
         } else if ("interact_dialog".equals(command)) {
             return handleInteractDialog(request);
         } else if ("get_progress".equals(command)) {
@@ -1150,6 +1155,7 @@ public class TCPCommandServer {
         c.verbose      = optBool(caps, "verbose", false);
         c.pulse        = optBool(caps, "pulse", false);
         c.safeMode     = optBool(caps, "safe_mode", false);
+        c.structuredErrors = optBool(caps, "structured_errors", false);
         int sockPort = (sock != null) ? sock.getPort() : 0;
         c.agentId = optString(caps, "agent_id", c.agent + "-" + sockPort);
         c.acceptEvents = parseStringSet(caps, "accept_events");
@@ -1176,12 +1182,16 @@ public class TCPCommandServer {
 
     /**
      * Capability names the server will actually emit on replies to this
-     * connection. Step 01 returns an empty array — later steps (structured
-     * errors, canonical macro echo, fuzzy match, state delta, pulse) will add
-     * their own names once their reply-shape opt-ins land.
+     * connection. Step 02 adds {@code "structured_errors"}; later steps
+     * (canonical macro echo, fuzzy match, state delta, pulse) will add their
+     * own names once their reply-shape opt-ins land.
      */
     private JsonArray enabledCapsFor(AgentCaps caps) {
-        return new JsonArray();
+        JsonArray arr = new JsonArray();
+        if (caps != null && caps.structuredErrors) {
+            arr.add(new JsonPrimitive("structured_errors"));
+        }
+        return arr;
     }
 
     // ---- Small JSON option helpers used by the hello handler. ----
@@ -1549,6 +1559,11 @@ public class TCPCommandServer {
             // Only count state that CHANGED during this macro as a side effect;
             // stale pre-macro state must not soften the error.
             boolean sideEffectsLanded = false;
+            // Step 02: build a sideEffects object in parallel so the structured
+            // error carries the same bookkeeping. For legacy (string) replies
+            // we still add newImages/resultsTable at the top level; the object
+            // is only attached when caps.structuredErrors is on.
+            JsonObject sideEffectsObj = new JsonObject();
             try {
                 ImageInfo postActive = stateInspector.getActiveImageInfo();
                 String postTitle = postActive != null ? postActive.getTitle() : null;
@@ -1557,12 +1572,16 @@ public class TCPCommandServer {
                     JsonArray newImages = new JsonArray();
                     newImages.add(postTitle);
                     result.add("newImages", newImages);
+                    JsonArray newImagesCopy = new JsonArray();
+                    newImagesCopy.add(postTitle);
+                    sideEffectsObj.add("newImages", newImagesCopy);
                     sideEffectsLanded = true;
                 }
                 String csv = stateInspector.getResultsTableCSV();
                 int postLen = csv != null ? csv.length() : 0;
                 if (csv != null && !csv.isEmpty() && postLen != preResultsLen) {
                     result.addProperty("resultsTable", csv);
+                    sideEffectsObj.addProperty("resultsChanged", true);
                     sideEffectsLanded = true;
                 }
             } catch (Exception ignore) {
@@ -1577,10 +1596,19 @@ public class TCPCommandServer {
                         + "(see newImages / resultsTable — the plugin's work "
                         + "landed; do NOT retry). Pause was: " + rawError;
             }
+            // Step 02: emit a typed error when caps.structuredErrors is on;
+            // fall back to the legacy plain-string shape otherwise. Both paths
+            // carry the same raw message.
+            if (logDelta != null) {
+                sideEffectsObj.addProperty("logDelta", logDelta);
+            }
+            ErrorReply err = ErrorReply.classifyMacroError(rawError, sideEffectsLanded);
+            if (sideEffectsObj.size() > 0) err.sideEffects(sideEffectsObj);
             result.addProperty("success", false);
-            result.addProperty("error", rawError);
+            result.add("error", err.buildJsonElement(caps));
             // Surface any prints the macro emitted before failure so the agent
-            // can see partial progress alongside the error message.
+            // can see partial progress alongside the error message. Also kept
+            // at top-level for legacy clients — sideEffects is structured-only.
             if (logDelta != null) {
                 result.addProperty("logDelta", logDelta);
             }
@@ -1600,7 +1628,9 @@ public class TCPCommandServer {
             String source = request.has("source") ? request.get("source").getAsString() : "tcp";
             SessionCodeJournal.INSTANCE.record("ijm", code, source,
                     macroId, startTime, elapsed, success, failureMessage);
-        } catch (Throwable ignore) {}
+        } catch (Throwable t) {
+            IJ.log("[ImageJAI-Journal] record failed: " + t);
+        }
         return successResponse(result);
         } finally {
             eventBus.popSuppress("image.*");
@@ -1935,7 +1965,7 @@ public class TCPCommandServer {
         return null;
     }
 
-    private JsonObject handleRunScript(JsonObject request) {
+    private JsonObject handleRunScript(JsonObject request, AgentCaps caps) {
         JsonElement langElement = request.get("language");
         String language = langElement != null && langElement.isJsonPrimitive()
                 ? langElement.getAsString()
@@ -2026,20 +2056,39 @@ public class TCPCommandServer {
             result.addProperty("output", scriptResult != null ? scriptResult.toString() : "");
         } else if (blockingFailure != null) {
             result.addProperty("success", false);
-            result.addProperty("error", blockingFailure);
+            // Script blocked on a dialog: classify the same way execute_macro does.
+            result.add("error",
+                    ErrorReply.classifyMacroError(blockingFailure, false).buildJsonElement(caps));
             if (dismissedCaptured.size() > 0) {
                 result.add("dismissedDialogs", dismissedCaptured);
             }
         } else if (scriptError instanceof ScriptException) {
+            // ScriptException is the parser/compiler failure path — surface it
+            // as a compile error so the agent knows a retry of the same source
+            // cannot succeed.
             result.addProperty("success", false);
-            result.addProperty("error", "Script error: " + scriptError.getMessage());
+            String msg = "Script error: " + scriptError.getMessage();
+            result.add("error", new ErrorReply()
+                    .code(ErrorReply.CODE_MACRO_COMPILE_ERROR)
+                    .category(ErrorReply.CAT_COMPILE)
+                    .retrySafe(false)
+                    .message(msg)
+                    .recoveryHint("Fix the script syntax before retrying.")
+                    .buildJsonElement(caps));
         } else if (scriptError != null) {
             String msg = scriptError.getMessage();
             result.addProperty("success", false);
-            result.addProperty("error", "Error: " + (msg != null ? msg : scriptError.toString()));
+            String text = "Error: " + (msg != null ? msg : scriptError.toString());
+            result.add("error",
+                    ErrorReply.classifyMacroError(text, false).buildJsonElement(caps));
         } else {
             result.addProperty("success", false);
-            result.addProperty("error", "Script returned without a result");
+            result.add("error", new ErrorReply()
+                    .code(ErrorReply.CODE_MACRO_RUNTIME_ERROR)
+                    .category(ErrorReply.CAT_RUNTIME)
+                    .retrySafe(false)
+                    .message("Script returned without a result")
+                    .buildJsonElement(caps));
         }
 
         try {
@@ -2061,7 +2110,9 @@ public class TCPCommandServer {
                     : (scriptError != null ? String.valueOf(scriptError.getMessage()) : null);
             SessionCodeJournal.INSTANCE.record(language, code, source,
                     0L, startTime, elapsed, scriptSuccess, scriptFailure);
-        } catch (Throwable ignore) {}
+        } catch (Throwable t) {
+            IJ.log("[ImageJAI-Journal] record failed: " + t);
+        }
 
         return successResponse(result);
     }
