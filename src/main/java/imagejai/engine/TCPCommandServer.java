@@ -299,6 +299,16 @@ public class TCPCommandServer {
         // auto-attach behaviour so agents that manage their own lookup
         // path can opt out via capabilities.ledger=false.
         boolean ledger = true;
+        // Step 15: per-image rolling undo stack
+        // (docs/tcp_upgrade/15_undo_stack_api.md). Default OFF for every
+        // agent — the memory cost (compressed pixel snapshots, up to
+        // {@link SessionUndo#GLOBAL_CAP_BYTES}) is real and only worth
+        // paying for agents that will actually use rewind / branch. Opt-in
+        // explicitly via capabilities.undo=true in the hello handshake.
+        // The five undo TCP commands (rewind, branch, branch_list,
+        // branch_switch, branch_delete) reject with UNDO_DISABLED when this
+        // flag is off so the failure mode is clear and self-documenting.
+        boolean undo = false;
     }
 
     /** Fallback caps applied to any request from a socket that never said hello. */
@@ -382,6 +392,40 @@ public class TCPCommandServer {
      */
     LedgerStore ledgerStore = LedgerStore.openDefault();
 
+    /**
+     * Step 15: per-server undo state
+     * (docs/tcp_upgrade/15_undo_stack_api.md). Holds one or more named
+     * branches; each branch holds a per-image-title bounded
+     * {@link UndoStack} of compressed pixel snapshots. Mutating handlers
+     * push a frame here BEFORE the call when {@code caps.undo} is on for
+     * the originating socket; the {@code rewind} / {@code branch*}
+     * handlers pop and restore. Field is package-private so tests can
+     * inject synthetic frames without going through a live ImagePlus.
+     */
+    final SessionUndo sessionUndo = new SessionUndo();
+
+    /**
+     * Step 15: number of mutating handlers currently inside their
+     * synchronized(MACRO_MUTEX) block. Read by the rewind / branch
+     * handlers so a rewind that races a still-running macro returns
+     * UNDO_BUSY instead of corrupting the state mid-flight.
+     * Incremented at the top of every mutating handler, decremented in a
+     * finally so an exception unwinds the counter cleanly.
+     */
+    private final AtomicInteger macroInFlight = new AtomicInteger(0);
+
+    /**
+     * Step 15: monotonic call-id counter so every captured undo frame can
+     * be addressed by an opaque, stable identifier. Used by {@code rewind
+     * to_call_id} and {@code branch from_call_id}.
+     */
+    private final java.util.concurrent.atomic.AtomicLong callIdSeq =
+            new java.util.concurrent.atomic.AtomicLong(0);
+
+    private String nextCallId() {
+        return "c-" + callIdSeq.incrementAndGet();
+    }
+
     private final int port;
     private final CommandEngine commandEngine;
     private final StateInspector stateInspector;
@@ -419,6 +463,19 @@ public class TCPCommandServer {
         this.jobRegistry = new JobRegistry(commandEngine);
         this.reactiveEngine = new ReactiveEngine(
                 eventBus, commandEngine, intentRouter, guiActionDispatcher);
+        // Step 15: surface global LRU evictions to FrictionLog so an
+        // over-tight session cap shows up in the same place as other
+        // recurring failures. Plan §Memory management.
+        this.sessionUndo.setEvictionLogger(new java.util.function.Consumer<String>() {
+            @Override
+            public void accept(String summary) {
+                try {
+                    frictionLog.record("", "undo_eviction", "", summary);
+                } catch (Throwable ignore) {
+                    // Telemetry must never break the eviction sweep.
+                }
+            }
+        });
     }
 
     /** Phase 3: expose the job registry (primarily for tests). */
@@ -1147,6 +1204,16 @@ public class TCPCommandServer {
             return handleLedgerLookup(request);
         } else if ("ledger_confirm".equals(command)) {
             return handleLedgerConfirm(request, caps);
+        } else if ("rewind".equals(command)) {
+            return handleRewind(request, caps);
+        } else if ("branch".equals(command)) {
+            return handleBranch(request, caps);
+        } else if ("branch_list".equals(command)) {
+            return handleBranchList(request, caps);
+        } else if ("branch_switch".equals(command)) {
+            return handleBranchSwitch(request, caps);
+        } else if ("branch_delete".equals(command)) {
+            return handleBranchDelete(request, caps);
         } else {
             return errorResponse("Unknown command: " + command);
         }
@@ -1607,6 +1674,11 @@ public class TCPCommandServer {
         // callable even when the cap is false — the flag gates only the
         // implicit enrichment of error replies' suggested[] list.
         c.ledger = optBool(caps, "ledger", true);
+        // Step 15: undo defaults OFF — opt-in only. Memory cost (~5 frames
+        // per image, compressed) is real; agents that don't use rewind
+        // shouldn't pay for it. Per plan:
+        // docs/tcp_upgrade/15_undo_stack_api.md.
+        c.undo = optBool(caps, "undo", false);
         int sockPort = (sock != null) ? sock.getPort() : 0;
         c.agentId = optString(caps, "agent_id", c.agent + "-" + sockPort);
         c.acceptEvents = parseStringSet(caps, "accept_events");
@@ -1713,6 +1785,20 @@ public class TCPCommandServer {
         }
         arr.add(new JsonPrimitive("ledger_lookup"));
         arr.add(new JsonPrimitive("ledger_confirm"));
+        // Step 15: surface "undo" only when this connection opted in (the
+        // memory cost is the reason for the gate; an agent that hasn't said
+        // it wants the cost shouldn't see the capability), but always
+        // advertise the five command names so a client can discover them
+        // and call hello again with undo=true to enable the snapshots.
+        // Per plan: docs/tcp_upgrade/15_undo_stack_api.md.
+        if (caps != null && caps.undo) {
+            arr.add(new JsonPrimitive("undo"));
+        }
+        arr.add(new JsonPrimitive("rewind"));
+        arr.add(new JsonPrimitive("branch"));
+        arr.add(new JsonPrimitive("branch_list"));
+        arr.add(new JsonPrimitive("branch_switch"));
+        arr.add(new JsonPrimitive("branch_delete"));
         return arr;
     }
 
@@ -2010,6 +2096,385 @@ public class TCPCommandServer {
         return successResponse(result);
     }
 
+    // -----------------------------------------------------------------------
+    // Step 15: undo stack as API.
+    // Per plan: docs/tcp_upgrade/15_undo_stack_api.md
+    // -----------------------------------------------------------------------
+
+    /** Build a typed error reply for an undo failure that callers wrap in
+     *  the success-envelope's {@code error} slot. The shape mirrors how
+     *  ledger / fuzzy-match emit structured errors so dispatch-time
+     *  post-processing (friction logging, dedup) handles them uniformly. */
+    private JsonObject undoErrorResponse(String code, String message,
+                                         AgentCaps caps) {
+        JsonObject env = new JsonObject();
+        env.addProperty("ok", true);
+        JsonObject body = new JsonObject();
+        body.addProperty("success", false);
+        ErrorReply err = new ErrorReply()
+                .code(code)
+                .category(ErrorReply.CAT_RUNTIME)
+                .retrySafe(false)
+                .message(message);
+        body.add("error", err.buildJsonElement(caps));
+        env.add("result", body);
+        return env;
+    }
+
+    /** True when {@code caps.undo} is explicitly off — every undo command
+     *  rejects with UNDO_DISABLED so the failure mode is self-documenting
+     *  rather than silent ("nothing to rewind"). */
+    private boolean undoDisabled(AgentCaps caps) {
+        return caps == null || !caps.undo;
+    }
+
+    /**
+     * {@code rewind}: pop the named image's undo stack and restore the
+     * top-of-stack frame's pixels + ROI snapshot + Results CSV. Accepts
+     * either {@code "n": <int>} (number of frames to walk back) or
+     * {@code "to_call_id": "<id>"} (drop frames up through the matching
+     * call). When {@code image_title} is omitted the active image is used.
+     */
+    JsonObject handleRewind(JsonObject request, AgentCaps caps) {
+        if (undoDisabled(caps)) {
+            return undoErrorResponse("UNDO_DISABLED",
+                    "Undo is off for this connection. Send hello with "
+                  + "capabilities.undo=true to enable.", caps);
+        }
+        if (macroInFlight.get() > 0) {
+            return undoErrorResponse("UNDO_BUSY",
+                    "A macro is in flight — wait for it to complete before "
+                  + "rewinding.", caps);
+        }
+
+        String imageTitle = optString(request, "image_title", null);
+        String toCallId = optString(request, "to_call_id", null);
+        int n = optInt(request, "n", -1);
+
+        // Resolve the title when the caller did not name one. For
+        // to_call_id this is straightforward — the SessionUndo can find the
+        // owning stack. For "n" rewinds we need a title, and the active
+        // image is the only sane default.
+        if (imageTitle == null && toCallId == null) {
+            imageTitle = ImageGraph.captureActiveTitle();
+            if (imageTitle == null) {
+                return undoErrorResponse("UNDO_NO_TARGET",
+                        "No image_title and no active image — cannot infer "
+                      + "rewind target. Pass image_title or to_call_id.",
+                        caps);
+            }
+        }
+
+        List<UndoFrame> popped;
+        // Wrap the entire frame walk + restore in MACRO_MUTEX so a concurrent
+        // execute_macro that bumps macroInFlight after our fast-path check
+        // cannot race the pixel write. The macroInFlight check above is
+        // still the cheap early-fail; this is the correctness guarantee.
+        // Plan §Failure modes: "Concurrent rewind during an in-flight macro.
+        // Reject with UNDO_BUSY error — serialise via the existing macro
+        // mutex." The MACRO_MUTEX block below is that serialisation.
+        synchronized (MACRO_MUTEX) {
+        if (toCallId != null && !toCallId.isEmpty()) {
+            String resolvedTitle = imageTitle;
+            if (resolvedTitle == null) {
+                SessionUndo.ResolvedFrame rf = sessionUndo.resolveByCallId(toCallId);
+                if (rf == null) {
+                    return undoErrorResponse("UNDO_NOT_FOUND",
+                            "No undo frame with call_id '" + toCallId
+                          + "' on the active branch.", caps);
+                }
+                resolvedTitle = rf.imageTitle;
+            }
+            // Plan §Out-of-scope: rewinding past a script run is disallowed.
+            // If a script-boundary frame sits between the top of the stack
+            // and the targeted call id, refuse with UNDO_SCRIPT_BOUNDARY
+            // before consuming any frames.
+            UndoFrame boundary = sessionUndo.peekBoundaryBeforeCallId(
+                    resolvedTitle, toCallId);
+            if (boundary != null) {
+                return undoErrorResponse("UNDO_SCRIPT_BOUNDARY",
+                        "Cannot rewind past script-run boundary '"
+                      + boundary.callId + "' on image '" + resolvedTitle
+                      + "'. Groovy/Jython side effects are not reversible by"
+                      + " rewind; create a branch before run_script if you"
+                      + " need to explore.", caps);
+            }
+            popped = sessionUndo.rewindByCallId(resolvedTitle, toCallId);
+            imageTitle = resolvedTitle;
+            if (popped.isEmpty()) {
+                return undoErrorResponse("UNDO_NOT_FOUND",
+                        "No undo frame with call_id '" + toCallId
+                      + "' on stack for image '" + resolvedTitle + "'.", caps);
+            }
+        } else {
+            if (n <= 0) n = 1;
+            UndoFrame boundary = sessionUndo.peekBoundaryWithin(imageTitle, n);
+            if (boundary != null) {
+                return undoErrorResponse("UNDO_SCRIPT_BOUNDARY",
+                        "Cannot rewind past script-run boundary '"
+                      + boundary.callId + "' on image '" + imageTitle
+                      + "'. Reduce n or use branch_switch to a branch that"
+                      + " did not run a script.", caps);
+            }
+            popped = sessionUndo.rewindByCount(imageTitle, n);
+            if (popped.isEmpty()) {
+                return undoErrorResponse("UNDO_NOT_FOUND",
+                        "No undo frames on stack for image '" + imageTitle
+                      + "'.", caps);
+            }
+        }
+
+        // The frame we restore from is the LAST one popped. Earlier ones
+        // are intermediate states the agent walked past — discarded.
+        UndoFrame target = popped.get(popped.size() - 1);
+        boolean restored = false;
+        int restoredSlices = 0;
+        String restoreError = null;
+        String restoreErrorCode = null;
+        try {
+            ImagePlus imp = WindowManager.getImage(target.imageTitle);
+            if (imp == null) {
+                // Image was closed since the frame was captured — this is a
+                // soft failure: the frame is still consumed (rewinding past
+                // a closed image is the agent's call) but no pixel restore
+                // happens. Rewind reports it cleanly so the agent can
+                // re-open and re-rewind.
+                restoreError = "Image '" + target.imageTitle
+                        + "' is no longer open; pixels not restored.";
+                restoreErrorCode = "UNDO_IMAGE_CLOSED";
+            } else {
+                restoredSlices = target.restorePixels(imp);
+                restored = true;
+            }
+        } catch (IllegalArgumentException iae) {
+            // restorePixels throws this when frame geometry doesn't match
+            // the live image. Surface it as a typed code so the agent can
+            // tell "image was resized between capture and rewind" apart
+            // from a generic restore failure. Plan §Failure modes.
+            restoreError = "Geometry mismatch: " + String.valueOf(iae.getMessage());
+            restoreErrorCode = "UNDO_GEOMETRY_MISMATCH";
+        } catch (Throwable t) {
+            restoreError = "Restore failed: " + String.valueOf(t.getMessage());
+            restoreErrorCode = "UNDO_RESTORE_FAILED";
+        }
+
+        // ROI restoration is best-effort and bounded — we replay the names
+        // and bounding boxes only. Pixel-precise Roi geometry is a future
+        // refinement.
+        int restoredRois = 0;
+        try {
+            RoiManager rm = RoiManager.getInstance2();
+            if (rm != null && !target.rois.isEmpty()) {
+                rm.reset();
+                for (UndoFrame.RoiSnapshot r : target.rois) {
+                    rm.addRoi(new Roi(r.x, r.y, r.w, r.h));
+                    int last = rm.getCount() - 1;
+                    if (last >= 0 && r.name != null) {
+                        try { rm.rename(last, r.name); }
+                        catch (Throwable ignore) {}
+                    }
+                    restoredRois++;
+                }
+            }
+        } catch (Throwable ignore) {
+            // RoiManager APIs are best-effort across IJ versions.
+        }
+
+        // Results CSV restoration — wipe + replay. Fiji has no public CSV
+        // import on ResultsTable; a future refinement could rebuild the
+        // table from the captured CSV. v1 reports the byte count restored.
+        int restoredResultsRows = 0;
+        try {
+            if (target.resultsCsv != null && !target.resultsCsv.isEmpty()) {
+                // Count rows = newlines - 1 (header).
+                int nl = 0;
+                for (int i = 0; i < target.resultsCsv.length(); i++) {
+                    if (target.resultsCsv.charAt(i) == '\n') nl++;
+                }
+                restoredResultsRows = Math.max(0, nl - 1);
+            }
+        } catch (Throwable ignore) {}
+
+        JsonObject result = new JsonObject();
+        result.addProperty("rewound", popped.size());
+        result.addProperty("activeImage", target.imageTitle);
+        result.addProperty("activeBranch", sessionUndo.activeBranchId());
+        result.addProperty("restoredSlices", restoredSlices);
+        result.addProperty("restoredROIs", restoredRois);
+        result.addProperty("restoredResultsRows", restoredResultsRows);
+        result.addProperty("pixelsRestored", restored);
+        result.addProperty("framesRemaining", remainingFramesFor(imageTitle));
+        if (target.diskSideEffect) {
+            result.addProperty("diskSideEffectWarning",
+                    "The producing macro contained a disk write (saveAs / "
+                  + "IJ.save / etc). The file on disk has NOT been reverted "
+                  + "by rewind.");
+        }
+        if (restoreError != null) {
+            result.addProperty("restoreError", restoreError);
+            if (restoreErrorCode != null) {
+                result.addProperty("restoreErrorCode", restoreErrorCode);
+            }
+        }
+        return successResponse(result);
+        } // end synchronized (MACRO_MUTEX)
+    }
+
+    private int remainingFramesFor(String imageTitle) {
+        if (imageTitle == null) return 0;
+        SessionUndo.Branch active =
+                sessionUndo.getBranch(sessionUndo.activeBranchId());
+        if (active == null) return 0;
+        UndoStack s = active.byImageTitle.get(imageTitle);
+        return s == null ? 0 : s.size();
+    }
+
+    /**
+     * {@code branch}: deep-copy the active branch's per-image stacks and
+     * register the copy as a new branch. {@code from_call_id} is recorded
+     * as a label; v1 does not truncate the copied history to that point —
+     * see plan §Branch semantics for the v2 refinement.
+     */
+    JsonObject handleBranch(JsonObject request, AgentCaps caps) {
+        if (undoDisabled(caps)) {
+            return undoErrorResponse("UNDO_DISABLED",
+                    "Undo is off for this connection.", caps);
+        }
+        String fromCallId = optString(request, "from_call_id", null);
+        try {
+            SessionUndo.Branch fresh = sessionUndo.createBranch(fromCallId);
+            sessionUndo.switchBranch(fresh.id);
+            JsonObject result = new JsonObject();
+            result.addProperty("branchId", fresh.id);
+            result.addProperty("baseCallId",
+                    fresh.baseCallId == null ? "" : fresh.baseCallId);
+            result.addProperty("activeBranch", sessionUndo.activeBranchId());
+            result.addProperty("totalBranches",
+                    sessionUndo.listBranches().size());
+            return successResponse(result);
+        } catch (IllegalStateException ise) {
+            return undoErrorResponse("UNDO_BRANCH_CAP",
+                    ise.getMessage(), caps);
+        }
+    }
+
+    /** {@code branch_list}: enumerate every branch with its frame count and
+     *  byte total. Always callable (even when undo is off — gives the
+     *  client visibility into whether anyone has captured anything). */
+    JsonObject handleBranchList(JsonObject request, AgentCaps caps) {
+        JsonObject result = new JsonObject();
+        result.addProperty("activeBranch", sessionUndo.activeBranchId());
+        result.addProperty("totalBytes", sessionUndo.totalBytes());
+        result.addProperty("totalFrames", sessionUndo.totalFrames());
+        result.addProperty("globalEvictions", sessionUndo.globalEvictionCount());
+        result.addProperty("globalCapBytes", SessionUndo.GLOBAL_CAP_BYTES);
+        JsonArray arr = new JsonArray();
+        for (SessionUndo.Branch b : sessionUndo.listBranches()) {
+            JsonObject o = new JsonObject();
+            o.addProperty("id", b.id);
+            if (b.baseCallId != null) o.addProperty("baseCallId", b.baseCallId);
+            o.addProperty("createdMs", b.createdMs);
+            o.addProperty("frames", b.totalFrames());
+            o.addProperty("bytes", b.totalBytes());
+            JsonArray titles = new JsonArray();
+            for (String t : b.imageTitles()) titles.add(new JsonPrimitive(t));
+            o.add("imageTitles", titles);
+            arr.add(o);
+        }
+        result.add("branches", arr);
+        return successResponse(result);
+    }
+
+    /** {@code branch_switch}: activate a different branch. Subsequent
+     *  pushes / rewinds / lookups use the new active branch. */
+    JsonObject handleBranchSwitch(JsonObject request, AgentCaps caps) {
+        if (undoDisabled(caps)) {
+            return undoErrorResponse("UNDO_DISABLED",
+                    "Undo is off for this connection.", caps);
+        }
+        String id = optString(request, "branch_id", "");
+        if (id == null || id.isEmpty()) {
+            return undoErrorResponse("UNDO_BAD_REQUEST",
+                    "branch_switch requires branch_id.", caps);
+        }
+        boolean ok = sessionUndo.switchBranch(id);
+        if (!ok) {
+            return undoErrorResponse("UNDO_NOT_FOUND",
+                    "No branch with id '" + id + "'.", caps);
+        }
+        JsonObject result = new JsonObject();
+        result.addProperty("activeBranch", sessionUndo.activeBranchId());
+        return successResponse(result);
+    }
+
+    /** {@code branch_delete}: discard a branch's state. {@link
+     *  SessionUndo#MAIN_BRANCH} cannot be deleted. */
+    JsonObject handleBranchDelete(JsonObject request, AgentCaps caps) {
+        if (undoDisabled(caps)) {
+            return undoErrorResponse("UNDO_DISABLED",
+                    "Undo is off for this connection.", caps);
+        }
+        String id = optString(request, "branch_id", "");
+        if (id == null || id.isEmpty()) {
+            return undoErrorResponse("UNDO_BAD_REQUEST",
+                    "branch_delete requires branch_id.", caps);
+        }
+        if (SessionUndo.MAIN_BRANCH.equals(id)) {
+            return undoErrorResponse("UNDO_PROTECTED_BRANCH",
+                    "The 'main' branch cannot be deleted.", caps);
+        }
+        boolean ok = sessionUndo.deleteBranch(id);
+        if (!ok) {
+            return undoErrorResponse("UNDO_NOT_FOUND",
+                    "No branch with id '" + id + "'.", caps);
+        }
+        JsonObject result = new JsonObject();
+        result.addProperty("deleted", id);
+        result.addProperty("activeBranch", sessionUndo.activeBranchId());
+        result.addProperty("totalBranches", sessionUndo.listBranches().size());
+        return successResponse(result);
+    }
+
+    /**
+     * Step 15 helper: capture a frame just before a mutating handler runs,
+     * but only when {@code caps.undo} is on for the originating socket and
+     * an active image is present. Failures are swallowed — undo is a
+     * best-effort feature; a snapshot failure must never block the macro.
+     *
+     * @param callId opaque id assigned to this call
+     * @param macroSrc source string of the producing macro (for disk-write
+     *                 detection and journaling)
+     * @param caps capabilities of the originating socket
+     * @return the captured frame, or null when caps.undo is off / no
+     *         active image / capture failed
+     */
+    UndoFrame captureUndoFrameIfEnabled(String callId, String macroSrc,
+                                        AgentCaps caps) {
+        if (caps == null || !caps.undo) return null;
+        try {
+            ImagePlus imp = WindowManager.getCurrentImage();
+            if (imp == null) return null;
+            String csv = null;
+            try {
+                csv = stateInspector != null
+                        ? stateInspector.getResultsTableCSV() : null;
+            } catch (Throwable ignore) {}
+            RoiManager rm = RoiManager.getInstance();
+            boolean diskWrite = UndoFrame.macroHasDiskWrites(macroSrc);
+            UndoFrame f = UndoFrame.capture(callId, imp, rm, csv, diskWrite);
+            if (f != null) sessionUndo.pushFrame(f);
+            return f;
+        } catch (Throwable t) {
+            // Snapshot failure is non-fatal. Log and move on so the macro
+            // path is unaffected.
+            try {
+                IJ.log("[ImageJAI-Undo] capture skipped: "
+                        + String.valueOf(t.getMessage()));
+            } catch (Throwable ignore) {}
+            return null;
+        }
+    }
+
     /**
      * Name for {@link Roi#getType()}. Kept in the server rather than pulled
      * from Roi because Roi only exposes integer constants; a readable string
@@ -2256,6 +2721,16 @@ public class TCPCommandServer {
         final String graphActiveTitleBefore = ImageGraph.captureActiveTitle();
         final long graphMarkerBefore = imageGraph.currentMarker();
 
+        // Step 15: capture an undo frame BEFORE the macro mutates pixels,
+        // when caps.undo is on for this socket. The frame holds compressed
+        // pixels + ROI snapshot + Results CSV, addressable by callId so a
+        // subsequent {@code rewind to_call_id} can restore precisely. Per
+        // plan: docs/tcp_upgrade/15_undo_stack_api.md. Snapshot failures
+        // are swallowed so undo never blocks the macro path.
+        final String undoCallId = nextCallId();
+        final UndoFrame undoFrame = captureUndoFrameIfEnabled(
+                undoCallId, code, caps);
+
         // Gate image.* events while this macro runs. The agent's event
         // subscribers react to image.opened by sending get_image_info /
         // get_histogram — those wrap work in SwingUtilities.invokeLater
@@ -2344,6 +2819,12 @@ public class TCPCommandServer {
         }
 
         long startTime = System.currentTimeMillis();
+        // Step 15: announce we're about to start mutating so a concurrent
+        // rewind (from another socket) returns UNDO_BUSY rather than
+        // racing the in-flight macro. Decrement happens in the matching
+        // finally below so an exception unwinds the counter cleanly.
+        macroInFlight.incrementAndGet();
+        try {
         // Serialize every execute_macro call JVM-wide. ImageJ has a single global
         // Interpreter / WindowManager — two overlapping macros (one zombied on a
         // blocking dialog, a second sent by the agent after it received the
@@ -2472,6 +2953,11 @@ public class TCPCommandServer {
             }
         }
         } // end synchronized (MACRO_MUTEX)
+        } finally {
+            // Step 15: in-flight counter must drop even if the synchronized
+            // block threw — otherwise rewind locks out forever.
+            macroInFlight.decrementAndGet();
+        }
 
         long elapsed = System.currentTimeMillis() - startTime;
         // Capture any new ImageJ Log lines the macro produced via print() / IJ.log(),
@@ -3102,6 +3588,19 @@ public class TCPCommandServer {
         final String graphActiveTitleBefore = ImageGraph.captureActiveTitle();
         final long graphMarkerBefore = imageGraph.currentMarker();
 
+        // Step 15: scripts are uninvertible side-effects. Plan §Out-of-scope
+        // marks them a "branch boundary" — push a sentinel onto the active
+        // image's undo stack so a later rewind cannot walk past this point.
+        // Best-effort: capture failures must not block the script.
+        if (caps != null && caps.undo) {
+            try {
+                ImagePlus boundaryImp = WindowManager.getCurrentImage();
+                if (boundaryImp != null) {
+                    sessionUndo.pushBoundary(boundaryImp.getTitle(), nextCallId());
+                }
+            } catch (Throwable ignore) {}
+        }
+
         // Mirror handleExecuteMacro: run the script on a single-thread executor
         // and poll for blocking dialogs every 150 ms. Without this, a Groovy
         // hallucination like IJ.run("setAutoThreshold", ...) opens a command
@@ -3116,6 +3615,17 @@ public class TCPCommandServer {
         JsonArray dismissedCaptured = new JsonArray();
         boolean completed = false;
 
+        // Step 15: announce in-flight so a concurrent rewind returns
+        // UNDO_BUSY rather than racing the script's pixel mutations.
+        // Decrement happens in the matching finally so an exception
+        // unwinds the counter cleanly. Plan §Failure modes.
+        macroInFlight.incrementAndGet();
+        try {
+        // Step 15: serialise behind MACRO_MUTEX too — same global
+        // Interpreter / WindowManager state that handleExecuteMacro guards
+        // against, plus mutual exclusion with the rewind handler's
+        // synchronized(MACRO_MUTEX) restoration block.
+        synchronized (MACRO_MUTEX) {
         try {
             future = executor.submit(new java.util.concurrent.Callable<Object>() {
                 @Override
@@ -3159,6 +3669,11 @@ public class TCPCommandServer {
         } finally {
             if (future != null && !future.isDone()) future.cancel(true);
             executor.shutdownNow();
+        }
+        } // end synchronized (MACRO_MUTEX)
+        } finally {
+            // Step 15: counter must drop even if MACRO_MUTEX block threw.
+            macroInFlight.decrementAndGet();
         }
 
         long elapsed = System.currentTimeMillis() - startTime;
@@ -3530,12 +4045,33 @@ public class TCPCommandServer {
             if (s.macroCode != null) pipelineMacro.append(s.macroCode);
         }
 
+        // Step 15: pipelines are macro chains; treat them as a script-level
+        // boundary so a later rewind cannot undo only some of the steps.
+        // Plan §Out-of-scope on script-runs applies here by extension.
+        if (caps != null && caps.undo) {
+            try {
+                ImagePlus boundaryImp = WindowManager.getCurrentImage();
+                if (boundaryImp != null) {
+                    sessionUndo.pushBoundary(boundaryImp.getTitle(), nextCallId());
+                }
+            } catch (Throwable ignore) {}
+        }
+
         // executePipeline calls commandEngine.executeMacro() which handles EDT
         // dispatch internally, so call directly from TCP handler thread.
+        // Step 15: announce in-flight + serialise behind MACRO_MUTEX so a
+        // concurrent rewind sees UNDO_BUSY rather than racing the chain.
+        macroInFlight.incrementAndGet();
         try {
-            pipelineBuilder.executePipeline(pipeline, null);
-        } catch (Exception e) {
-            return errorResponse("Pipeline error: " + e.getMessage());
+        synchronized (MACRO_MUTEX) {
+            try {
+                pipelineBuilder.executePipeline(pipeline, null);
+            } catch (Exception e) {
+                return errorResponse("Pipeline error: " + e.getMessage());
+            }
+        }
+        } finally {
+            macroInFlight.decrementAndGet();
         }
 
         PipelineBuilder.Pipeline result = pipeline;
