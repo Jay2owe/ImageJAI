@@ -4,6 +4,7 @@ import ij.CompositeImage;
 import ij.IJ;
 import ij.ImagePlus;
 import ij.WindowManager;
+import ij.gui.ImageWindow;
 import ij.gui.Roi;
 import ij.io.FileSaver;
 import ij.measure.Calibration;
@@ -203,6 +204,43 @@ class PreviousSliceIntent extends AbstractControlIntent {
         int prev = Math.max(1, imp.getZ() - 1);
         imp.setZ(prev);
         return AssistantReply.withMacro("Active slice: " + prev + " of " + imp.getNSlices() + ".", "Stack.setSlice(" + prev + ");");
+    }
+}
+
+class NextOpenImageIntent extends AbstractControlIntent {
+    public String id() { return "image.next_open_image"; }
+    public String description() { return "Switch to the next open image"; }
+
+    protected boolean requiresImage() {
+        return false;
+    }
+
+    protected AssistantReply executeChecked(Map<String, String> slots, FijiBridge fiji, ImagePlus imp) {
+        int[] ids = WindowManager.getIDList();
+        if (ids == null || ids.length == 0) {
+            return AssistantReply.text("No images are open.");
+        }
+        ImagePlus current = WindowManager.getCurrentImage();
+        int currentId = current == null ? Integer.MIN_VALUE : current.getID();
+        int nextIndex = 0;
+        for (int i = 0; i < ids.length; i++) {
+            if (ids[i] == currentId) {
+                nextIndex = (i + 1) % ids.length;
+                break;
+            }
+        }
+        ImagePlus target = WindowManager.getImage(ids[nextIndex]);
+        if (target == null) {
+            return AssistantReply.text("No images are open.");
+        }
+        ImageWindow window = target.getWindow();
+        if (window != null) {
+            WindowManager.setCurrentWindow(window);
+        } else {
+            WindowManager.setTempCurrentImage(target);
+        }
+        return AssistantReply.withMacro("Active image: " + target.getTitle() + ".",
+                "selectImage(\"" + macroQuote(target.getTitle()) + "\");");
     }
 }
 

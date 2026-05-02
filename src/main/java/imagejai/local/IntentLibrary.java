@@ -56,6 +56,7 @@ public class IntentLibrary {
         for (Intent intent : AnalysisIntentFactory.createAll()) {
             register(intent);
         }
+        addPhrase("the next image", "image.next_open_image");
         addSlashAliases();
         addPhrase("help", "slash.help");
     }

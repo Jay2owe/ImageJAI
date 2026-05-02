@@ -37,6 +37,7 @@ public final class ControlIntentFactory {
         intents.add(new SaveAsJpegIntent());
         intents.add(new NextSliceIntent());
         intents.add(new PreviousSliceIntent());
+        intents.add(new NextOpenImageIntent());
         intents.add(new SwitchChannelIntent());
         intents.add(new JumpSliceIntent());
         intents.add(new JumpFrameIntent());

@@ -16,7 +16,7 @@ abstract class AbstractControlIntent implements Intent {
 
     @Override
     public AssistantReply execute(Map<String, String> slots, FijiBridge fiji) {
-        ImagePlus imp = fiji.requireOpenImage();
+        ImagePlus imp = fiji == null ? null : fiji.requireOpenImage();
         if (imp == null && requiresImage()) {
             return AssistantReply.text(NO_IMAGE);
         }

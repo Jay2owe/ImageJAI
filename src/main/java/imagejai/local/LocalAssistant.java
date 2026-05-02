@@ -1,5 +1,6 @@
 package imagejai.local;
 
+import ij.plugin.frame.RoiManager;
 import imagejai.config.Settings;
 import imagejai.engine.CommandEngine;
 import imagejai.engine.FrictionLog;
@@ -25,6 +26,8 @@ public class LocalAssistant {
     private final SlashCommandRegistry slashCommands;
     private final ChatHistoryController chatHistory;
     private final Settings settings;
+    private final ConversationContext ctx;
+    private final PronounResolver pronouns;
     private Optional<PendingTurn> pending = Optional.empty();
 
     public LocalAssistant() {
@@ -91,6 +94,17 @@ public class LocalAssistant {
                           ChatHistoryController chatHistory,
                           SlashCommandRegistry slashCommands,
                           Settings settings) {
+        this(library, matcher, fiji, frictionLog, intentRouter, chatHistory,
+                slashCommands, settings, new ConversationContext(), new PronounResolver());
+    }
+
+    public LocalAssistant(IntentLibrary library, IntentMatcher matcher, FijiBridge fiji,
+                          FrictionLog frictionLog, IntentRouter intentRouter,
+                          ChatHistoryController chatHistory,
+                          SlashCommandRegistry slashCommands,
+                          Settings settings,
+                          ConversationContext ctx,
+                          PronounResolver pronouns) {
         this.library = library;
         this.matcher = matcher;
         this.fiji = fiji;
@@ -99,6 +113,8 @@ public class LocalAssistant {
         this.chatHistory = chatHistory;
         this.slashCommands = slashCommands == null ? new SlashCommandRegistry() : slashCommands;
         this.settings = settings == null ? new Settings() : settings;
+        this.ctx = ctx == null ? new ConversationContext() : ctx;
+        this.pronouns = pronouns == null ? new PronounResolver() : pronouns;
     }
 
     public AssistantReply handle(String input) {
@@ -110,17 +126,26 @@ public class LocalAssistant {
                 return resolved.get();
             }
         }
+        if (!SlashCommandRegistry.isSlashInput(input)) {
+            Optional<PronounResolver.Rewrite> rewrite = pronouns.resolve(input, ctx);
+            if (rewrite.isPresent()) {
+                Intent target = library.byId(rewrite.get().intentId());
+                if (target != null) {
+                    return executeOrPrompt(target, rewrite.get().slots());
+                }
+            }
+        }
         // Slash commands are dispatched before phrasebook lookup so a literal
         // /name command always wins over any built-in phrasebook alias.
         if (SlashCommandRegistry.isSlashInput(input)) {
             return slashCommands.dispatchSlash(input, fiji, library, intentRouter,
-                    chatHistory, this::clearPending);
+                    chatHistory, this::clearConversation);
         }
         Optional<IntentMatcher.MatchedIntent> matched = matcher.match(input);
         if (matched.isPresent()) {
             IntentMatcher.MatchedIntent match = matched.get();
             AssistantReply slashAlias = slashCommands.dispatchIntent(match.intentId(), input,
-                    fiji, library, intentRouter, chatHistory, this::clearPending);
+                    fiji, library, intentRouter, chatHistory, this::clearConversation);
             if (slashAlias != null) {
                 return slashAlias;
             }
@@ -160,12 +185,21 @@ public class LocalAssistant {
         pending = Optional.empty();
     }
 
+    public void clearConversation() {
+        pending = Optional.empty();
+        ctx.clear();
+    }
+
     Optional<PendingTurn> pendingTurnForTest() {
         return pending;
     }
 
     void parkPendingForTest(PendingTurn pendingTurn) {
         pending = Optional.ofNullable(pendingTurn);
+    }
+
+    ConversationContext conversationContextForTest() {
+        return ctx;
     }
 
     Optional<AssistantReply> tryResolveForTest(PendingTurn pendingTurn, String input) {
@@ -233,7 +267,43 @@ public class LocalAssistant {
                     first.defaultValue()));
             return AssistantReply.text(question);
         }
-        return intent.execute(slots, fiji);
+        AssistantReply reply = intent.execute(slots, fiji);
+        if (shouldRecordIntentRun(reply)) {
+            ctx.recordIntentRun(intent.id(), slots);
+            recordSelectedRoi();
+        }
+        return reply;
+    }
+
+    private boolean shouldRecordIntentRun(AssistantReply reply) {
+        if (reply == null) {
+            return false;
+        }
+        String text = reply.text() == null ? "" : reply.text().trim().toLowerCase(java.util.Locale.ROOT);
+        if ("no image is open.".equals(text) || "no images are open.".equals(text)) {
+            return false;
+        }
+        if (text.startsWith("could not ") || text.startsWith("cannot ")
+                || text.endsWith(" is empty.") || text.contains(" cancelled.")
+                || text.startsWith("tell me ") || text.startsWith("add ")
+                || text.startsWith("draw ")) {
+            return false;
+        }
+        return true;
+    }
+
+    private void recordSelectedRoi() {
+        if (fiji == null) {
+            return;
+        }
+        try {
+            RoiManager rm = fiji.currentRoiManager();
+            if (rm != null && rm.getSelectedIndex() >= 0) {
+                ctx.recordRoiSelection(rm.getSelectedIndex());
+            }
+        } catch (RuntimeException ignored) {
+            // ROI context is best-effort; intent success should not depend on it.
+        }
     }
 
     private static List<SlotSpec> computeMissing(List<SlotSpec> required,
