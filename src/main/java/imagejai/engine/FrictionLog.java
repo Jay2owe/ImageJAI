@@ -9,14 +9,16 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * In-memory ring buffer of recent TCP command failures.
+ * In-memory ring buffer of recent TCP command failures, optionally mirrored to
+ * an append-only {@link FrictionLogJournal}.
  *
  * <p>A confused agent can query {@code get_friction_log} / {@code get_friction_patterns}
  * to ask the plugin "what have I been failing at?". Patterns are groupings of
  * (command, normalised-error) with count greater or equal to {@link #PATTERN_THRESHOLD}
  * within the last {@link #WINDOW_MS} ms.
  *
- * <p>Thread-safe. In-memory only — never persisted to disk.
+ * <p>Thread-safe. TCP reads use the in-memory ring buffer only; the journal is
+ * for cross-session analysis.
  */
 public class FrictionLog {
 
@@ -73,6 +75,11 @@ public class FrictionLog {
     }
 
     private final Deque<FailureEntry> entries = new ArrayDeque<FailureEntry>();
+    private FrictionLogJournal journal;
+
+    public synchronized void setJournal(FrictionLogJournal journal) {
+        this.journal = journal;
+    }
 
     /**
      * Step 12: primary write path. Records a failure tagged with the agent id
@@ -87,6 +94,7 @@ public class FrictionLog {
         FailureEntry e = new FailureEntry(System.currentTimeMillis(), agentId, command, argsSummary, error);
         if (entries.size() >= CAPACITY) entries.removeFirst();
         entries.addLast(e);
+        if (journal != null) journal.append(e);
     }
 
     /**
@@ -159,6 +167,8 @@ public class FrictionLog {
     }
 
     public synchronized void clear() {
+        // Disk history is an audit log for /improve and is intentionally not
+        // truncated by the TCP clear command, which only resets the live ring.
         entries.clear();
     }
 

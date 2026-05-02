@@ -432,6 +432,7 @@ public class TCPCommandServer {
     private final PipelineBuilder pipelineBuilder;
     private final ExplorationEngine explorationEngine;
     private final FrictionLog frictionLog = new FrictionLog();
+    private final FrictionLogJournal frictionLogJournal = new FrictionLogJournal();
     private final IntentRouter intentRouter = new IntentRouter();
     private final JobRegistry jobRegistry;
     // Phase 8: reactive rules engine. Subscribes to the bus, fires rule
@@ -460,6 +461,7 @@ public class TCPCommandServer {
         this.stateInspector = stateInspector;
         this.pipelineBuilder = pipelineBuilder;
         this.explorationEngine = explorationEngine;
+        this.frictionLog.setJournal(frictionLogJournal);
         this.jobRegistry = new JobRegistry(commandEngine);
         this.reactiveEngine = new ReactiveEngine(
                 eventBus, commandEngine, intentRouter, guiActionDispatcher);
@@ -542,6 +544,11 @@ public class TCPCommandServer {
             jobRegistry.shutdown();
         } catch (Exception e) {
             System.err.println("[ImageJAI-TCP] Error shutting down job registry: " + e.getMessage());
+        }
+        try {
+            frictionLogJournal.close();
+        } catch (Exception e) {
+            System.err.println("[ImageJAI-TCP] Error closing friction journal: " + e.getMessage());
         }
         if (serverSocket != null && !serverSocket.isClosed()) {
             try {
