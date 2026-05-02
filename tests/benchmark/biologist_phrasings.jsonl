@@ -20,3 +20,61 @@
 {"phrase":"measure intensity","expected_intent_id":"measurement.intensity"}
 {"phrase":"list rois","expected_intent_id":"roi.list"}
 {"phrase":"show results table","expected_intent_id":"results.show"}
+{"phrase":"what's the bit depth","expected_intent_id":"image.bit_depth"}
+{"phrase":"how many slices","expected_intent_id":"image.slice_count"}
+{"phrase":"how many frames","expected_intent_id":"image.frame_count"}
+{"phrase":"what channel am i on","expected_intent_id":"image.active_channel"}
+{"phrase":"current slice","expected_intent_id":"image.active_slice"}
+{"phrase":"current frame","expected_intent_id":"image.active_frame"}
+{"phrase":"image title","expected_intent_id":"image.title"}
+{"phrase":"where is this file saved","expected_intent_id":"image.file_path"}
+{"phrase":"mean brightness","expected_intent_id":"image.intensity_stats"}
+{"phrase":"is anything saturated","expected_intent_id":"image.saturation_check"}
+{"phrase":"close this image","expected_intent_id":"image.close_active"}
+{"phrase":"close all but active","expected_intent_id":"image.close_others"}
+{"phrase":"save as tiff","expected_intent_id":"image.save_tiff"}
+{"phrase":"export png","expected_intent_id":"image.save_png"}
+{"phrase":"save as jpeg","expected_intent_id":"image.save_jpeg"}
+{"phrase":"next slice","expected_intent_id":"image.next_slice"}
+{"phrase":"previous slice","expected_intent_id":"image.previous_slice"}
+{"phrase":"switch to channel 2","expected_intent_id":"image.switch_channel"}
+{"phrase":"go to slice 10","expected_intent_id":"image.jump_slice"}
+{"phrase":"go to frame 3","expected_intent_id":"image.jump_frame"}
+{"phrase":"merge channels","expected_intent_id":"image.merge_channels"}
+{"phrase":"split channels","expected_intent_id":"image.split_channels"}
+{"phrase":"z project max","expected_intent_id":"image.z_project_max"}
+{"phrase":"z project mean","expected_intent_id":"image.z_project_mean"}
+{"phrase":"z project sum","expected_intent_id":"image.z_project_sum"}
+{"phrase":"z project sd","expected_intent_id":"image.z_project_sd"}
+{"phrase":"make substack slices 5-20","expected_intent_id":"image.make_substack"}
+{"phrase":"crop to selection","expected_intent_id":"image.crop_to_selection"}
+{"phrase":"scale image by 2","expected_intent_id":"image.scale_by_factor"}
+{"phrase":"invert image","expected_intent_id":"image.invert_pixels"}
+{"phrase":"invert lut","expected_intent_id":"image.invert_lut"}
+{"phrase":"convert to 8 bit","expected_intent_id":"image.convert_8bit"}
+{"phrase":"convert to 16 bit","expected_intent_id":"image.convert_16bit"}
+{"phrase":"convert to 32 bit","expected_intent_id":"image.convert_32bit"}
+{"phrase":"convert to rgb","expected_intent_id":"image.convert_rgb"}
+{"phrase":"convert to composite","expected_intent_id":"image.convert_composite"}
+{"phrase":"set scale 100 px equals 10 um","expected_intent_id":"image.set_scale"}
+{"phrase":"count rois","expected_intent_id":"roi.count"}
+{"phrase":"clear roi manager","expected_intent_id":"roi.clear"}
+{"phrase":"save rois","expected_intent_id":"roi.save"}
+{"phrase":"save results csv","expected_intent_id":"results.save_csv"}
+{"phrase":"auto contrast","expected_intent_id":"display.auto_contrast"}
+{"phrase":"reset display","expected_intent_id":"display.reset"}
+{"phrase":"fit window","expected_intent_id":"display.fit_window"}
+{"phrase":"zoom to 100 percent","expected_intent_id":"display.zoom"}
+{"phrase":"what plugins do i have","expected_intent_id":"diagnostics.plugins"}
+{"phrase":"open macro recorder","expected_intent_id":"diagnostics.open_recorder"}
+{"phrase":"open roi manager","expected_intent_id":"diagnostics.open_roi_manager"}
+{"phrase":"open channels tool","expected_intent_id":"diagnostics.open_channels_tool"}
+{"phrase":"show log","expected_intent_id":"diagnostics.show_log"}
+{"phrase":"show console","expected_intent_id":"diagnostics.show_console"}
+{"phrase":"any open dialogs","expected_intent_id":"diagnostics.open_dialogs"}
+{"phrase":"memory used","expected_intent_id":"diagnostics.memory"}
+{"phrase":"garbage collect","expected_intent_id":"diagnostics.garbage_collect"}
+{"phrase":"what can you do","expected_intent_id":"builtin.capabilities"}
+{"phrase":"commands","expected_intent_id":"builtin.commands"}
+{"phrase":"which agent am i using","expected_intent_id":"builtin.current_agent"}
+{"phrase":"version","expected_intent_id":"builtin.version"}

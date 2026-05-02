@@ -6,6 +6,7 @@ import imagejai.engine.FuzzyMatcher;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -42,14 +43,14 @@ public class IntentMatcher {
         if (intentId != null) {
             return Optional.of(new MatchedIntent(
                     intentId,
-                    Collections.<String, String>emptyMap()));
+                    extractSlots(intentId, input)));
         }
         List<RankedPhrase> ranked = topK(input, 1);
         if (!ranked.isEmpty()
                 && ranked.get(0).score() >= settings.getLocalAssistantFuzzyThreshold()) {
             return Optional.of(new MatchedIntent(
                     ranked.get(0).intentId(),
-                    Collections.<String, String>emptyMap()));
+                    extractSlots(ranked.get(0).intentId(), input)));
         }
         return Optional.empty();
     }
@@ -127,6 +128,76 @@ public class IntentMatcher {
             sb.append(parts[i]);
         }
         return sb.toString();
+    }
+
+    private static Map<String, String> extractSlots(String intentId, String input) {
+        Map<String, String> slots = new HashMap<String, String>();
+        String raw = input == null ? "" : input;
+        String key = normalise(raw);
+        if ("image.switch_channel".equals(intentId)) {
+            putFirstInt(slots, "channel", key);
+        } else if ("image.jump_slice".equals(intentId)) {
+            putFirstInt(slots, "slice", key);
+        } else if ("image.jump_frame".equals(intentId)) {
+            putFirstInt(slots, "frame", key);
+        } else if ("image.scale_by_factor".equals(intentId)) {
+            if (key.contains("half")) {
+                slots.put("factor", "0.5");
+            } else if (key.contains("double")) {
+                slots.put("factor", "2");
+            } else {
+                putFirstDouble(slots, "factor", key);
+            }
+        } else if ("display.zoom".equals(intentId)) {
+            putFirstDouble(slots, "percent", key);
+        } else if ("image.set_scale".equals(intentId)) {
+            extractScaleSlots(slots, key);
+        } else if ("image.make_substack".equals(intentId)) {
+            extractSubstackSlots(slots, key);
+        }
+        return slots;
+    }
+
+    private static void putFirstInt(Map<String, String> slots, String name, String key) {
+        java.util.regex.Matcher matcher = Pattern.compile("\\b(\\d+)\\b").matcher(key);
+        if (matcher.find()) {
+            slots.put(name, matcher.group(1));
+        }
+    }
+
+    private static void putFirstDouble(Map<String, String> slots, String name, String key) {
+        java.util.regex.Matcher matcher = Pattern.compile("\\b(\\d+(?:\\.\\d+)?)\\b").matcher(key);
+        if (matcher.find()) {
+            slots.put(name, matcher.group(1));
+        }
+    }
+
+    private static void extractScaleSlots(Map<String, String> slots, String key) {
+        java.util.regex.Matcher matcher = Pattern.compile(
+                "(\\d+(?:\\.\\d+)?)\\s*(?:px|pixel|pixels)\\s*(?:equals|equal|is|to)?\\s*(\\d+(?:\\.\\d+)?)\\s*([a-z]+)")
+                .matcher(key);
+        if (matcher.find()) {
+            slots.put("pixels", matcher.group(1));
+            slots.put("distance", matcher.group(2));
+            slots.put("unit", matcher.group(3));
+        }
+    }
+
+    private static void extractSubstackSlots(Map<String, String> slots, String key) {
+        putRangeSlot(slots, key, "channels", "(?:channels|channel|c)");
+        putRangeSlot(slots, key, "slices", "(?:slices|slice|z)");
+        putRangeSlot(slots, key, "frames", "(?:frames|frame|time|t)");
+    }
+
+    private static void putRangeSlot(Map<String, String> slots, String key,
+                                     String slot, String labelPattern) {
+        java.util.regex.Matcher matcher = Pattern.compile(labelPattern
+                + "\\s+(\\d+)\\s*(?:to|through|-)?\\s*(\\d+)?").matcher(key);
+        if (matcher.find()) {
+            String start = matcher.group(1);
+            String end = matcher.group(2);
+            slots.put(slot, end == null ? start : start + "-" + end);
+        }
     }
 
     public static class MatchedIntent {
