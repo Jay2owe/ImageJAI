@@ -2,6 +2,7 @@ package imagejai.config;
 
 import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
+import imagejai.engine.AgentLauncher;
 
 import java.io.*;
 import java.nio.charset.StandardCharsets;
@@ -63,6 +64,8 @@ public class Settings {
     public int maxHistory = Constants.MAX_CONVERSATION_HISTORY;
     public boolean tcpServerEnabled = false;  // Off by default
     public int tcpPort = Constants.DEFAULT_TCP_PORT;
+
+    public String selectedAgentName = AgentLauncher.LOCAL_ASSISTANT_NAME;
 
     /**
      * Stage 03 (embedded-agent-widget): when true, AgentLauncher launches the
@@ -147,6 +150,19 @@ public class Settings {
         }
         if (!configs.isEmpty()) return configs.get(0);
         return null;
+    }
+
+    public String getSelectedAgentName() {
+        return selectedAgentName == null || selectedAgentName.trim().isEmpty()
+                ? AgentLauncher.LOCAL_ASSISTANT_NAME
+                : selectedAgentName;
+    }
+
+    public void setSelectedAgentName(String name) {
+        selectedAgentName = name == null || name.trim().isEmpty()
+                ? AgentLauncher.LOCAL_ASSISTANT_NAME
+                : name;
+        save();
     }
 
     /**

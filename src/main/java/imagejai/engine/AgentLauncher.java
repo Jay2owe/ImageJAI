@@ -20,6 +20,8 @@ import java.util.Map;
  */
 public class AgentLauncher {
 
+    public static final String LOCAL_ASSISTANT_NAME = "Local Assistant";
+
     /** How an agent should be launched. */
     public enum Mode {
         /** Detached external terminal — today's default. */
