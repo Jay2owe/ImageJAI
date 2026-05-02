@@ -98,6 +98,15 @@
             <scope>compile</scope>
         </dependency>
 
+        <!-- SnakeYAML for ProviderRegistry (Phase D). SafeConstructor only —
+             see risk #16 in docs/multi_provider/07_implementation_plan.md §4. -->
+        <dependency>
+            <groupId>org.yaml</groupId>
+            <artifactId>snakeyaml</artifactId>
+            <version>2.2</version>
+            <scope>compile</scope>
+        </dependency>
+
         <!-- Test -->
         <dependency>
             <groupId>junit</groupId>
@@ -118,6 +127,7 @@
                     <include>proxy.py</include>
                     <include>litellm.config.yaml</include>
                     <include>requirements.txt</include>
+                    <include>models.yaml</include>
                 </includes>
             </resource>
         </resources>

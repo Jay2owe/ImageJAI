@@ -107,6 +107,24 @@ public class Settings {
      */
     public boolean persistScrollback = false;
 
+    // === Multi-provider (Phase D) =====================================
+    // Per docs/multi_provider/05_ui_design.md §9.4. Coexist with the v1
+    // selectedAgentName above and v2's localAssistantDisambiguationMargin.
+    // The new picker is gated by useMultiProviderPicker; existing users keep
+    // today's flat agent dropdown until tier safety (Phase H) ships.
+    public String selectedProvider;       // canonical hyphenated, e.g. "anthropic"
+    public String selectedModelId;        // e.g. "claude-sonnet-4-6"
+    public String defaultProvider;        // re-launch-last fallback
+    public String defaultModelId;
+    public int    refreshIntervalHours = 24;
+    public boolean refreshOnStartup     = true;
+    public boolean confirmPaidModels    = true;
+    public boolean warnUncuratedModels  = true;
+    public boolean budgetCeilingEnabled = false;
+    public double  budgetCeilingUsd     = 1.00;
+    public boolean showCurrencyFootnote = true;
+    public boolean useMultiProviderPicker = false;
+
     // Transient
     private transient Path configPath;
 

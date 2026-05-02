@@ -1,0 +1,188 @@
+# ImageJAI unified model registry — single source of truth for both the
+# Java ProviderRegistry (cascading dropdown) and Python agent/contexts/loader.py
+# (per-model context overlays, Phase F).
+#
+# Schema reference: docs/multi_provider/02_curation_strategy.md §1.
+# Tier vocabulary: free | free-with-limits | paid | requires-subscription
+# Reliability vocabulary: high | medium | low
+# Provider keys must match the canonical hyphenated set in agent/providers/router.py.
+#
+# Each consumer ignores fields it does not recognise. Display fields
+# (display_name/description/tier/pinned/vision_capable) are read by Java;
+# context-loader fields (harness/family/context_size/tool_call_reliability)
+# are read by the Python loader landed in Phase F.
+#
+# This is the Phase D seed list (~12 entries, enough to exercise the
+# dropdown end-to-end). Phase G replaces it with the full curated catalogue.
+
+models:
+  # ---------------- Anthropic (paid — placeholder until Phase H tier safety) ---
+  - provider: anthropic
+    model_id: claude-opus-4-7
+    display_name: Claude Opus 4.7
+    description: >
+      Anthropic's strongest model for long Fiji sessions. Best at multi-step
+      tool calls and writing reliable ImageJ macros.
+    tier: paid
+    context_window: 1000000
+    vision_capable: true
+    tool_call_reliability: high
+    last_verified: 2026-05-01
+    pinned: true
+    curated: true
+
+  - provider: anthropic
+    model_id: claude-sonnet-4-6
+    display_name: Claude Sonnet 4.6
+    description: >
+      Balanced Claude for typical analysis sessions. Strong tool reliability
+      at a fraction of Opus pricing.
+    tier: paid
+    context_window: 1000000
+    vision_capable: true
+    tool_call_reliability: high
+    last_verified: 2026-05-01
+    pinned: false
+    curated: true
+
+  - provider: anthropic
+    model_id: claude-haiku-4-5
+    display_name: Claude Haiku 4.5
+    description: >
+      Fastest, cheapest Claude. Good for short turns and quick iteration.
+    tier: paid
+    context_window: 200000
+    vision_capable: true
+    tool_call_reliability: high
+    last_verified: 2026-05-01
+    pinned: false
+    curated: true
+
+  # ---------------- Gemini (free with limits) ---------------------------------
+  - provider: gemini
+    model_id: gemini-2.5-pro
+    display_name: Gemini 2.5 Pro
+    description: >
+      Google's strongest free-tier model. Generous context window, vision
+      capable, but tight per-day rate limits.
+    tier: free-with-limits
+    context_window: 2000000
+    vision_capable: true
+    tool_call_reliability: high
+    last_verified: 2026-05-01
+    pinned: false
+    curated: true
+
+  - provider: gemini
+    model_id: gemini-2.5-flash
+    display_name: Gemini 2.5 Flash
+    description: >
+      Fast Gemini variant with vision. Good default for image-aware analysis
+      when Ollama Cloud is rate-limited.
+    tier: free-with-limits
+    context_window: 1000000
+    vision_capable: true
+    tool_call_reliability: high
+    last_verified: 2026-05-01
+    pinned: false
+    curated: true
+
+  - provider: gemini
+    model_id: gemini-2.5-flash-lite
+    display_name: Gemini 2.5 Flash Lite
+    description: >
+      Lightweight Gemini for short prompts. Higher daily quota than Pro/Flash.
+    tier: free
+    context_window: 1000000
+    vision_capable: true
+    tool_call_reliability: medium
+    last_verified: 2026-05-01
+    pinned: false
+    curated: true
+
+  # ---------------- Groq (free with limits) -----------------------------------
+  - provider: groq
+    model_id: llama-3.3-70b-versatile
+    display_name: Llama 3.3 70B Versatile
+    description: >
+      High-quality Llama on Groq's fast inference. Free tier; 1,000 requests
+      per day cap means a busy session may run out.
+    tier: free-with-limits
+    context_window: 128000
+    vision_capable: false
+    tool_call_reliability: high
+    last_verified: 2026-05-01
+    pinned: false
+    curated: true
+
+  - provider: groq
+    model_id: llama-3.1-8b-instant
+    display_name: Llama 3.1 8B Instant
+    description: >
+      Smaller, faster Llama on Groq. Generous free quota — fine for several
+      sessions a day.
+    tier: free
+    context_window: 128000
+    vision_capable: false
+    tool_call_reliability: medium
+    last_verified: 2026-05-01
+    pinned: false
+    curated: true
+
+  # ---------------- Ollama (local, always free) -------------------------------
+  - provider: ollama
+    model_id: llama3.2:3b
+    display_name: Llama 3.2 3B
+    description: >
+      Runs on your computer through Ollama. No API key, no quota — speed
+      depends on your GPU/CPU. Good fallback when offline.
+    tier: free
+    context_window: 128000
+    vision_capable: false
+    tool_call_reliability: medium
+    last_verified: 2026-05-01
+    pinned: false
+    curated: true
+
+  - provider: ollama
+    model_id: qwen2.5-coder:7b
+    display_name: Qwen 2.5 Coder 7B
+    description: >
+      Local code-focused Qwen. Better at ImageJ macro syntax than general
+      chat models in the same size class.
+    tier: free
+    context_window: 128000
+    vision_capable: false
+    tool_call_reliability: medium
+    last_verified: 2026-05-01
+    pinned: false
+    curated: true
+
+  # ---------------- Ollama Cloud (free with limits) ---------------------------
+  - provider: ollama-cloud
+    model_id: gemma4:31b-cloud
+    display_name: Gemma 4 31B (cloud)
+    description: >
+      Free vision-capable model — looks at screenshots and microscopy panels.
+      Light rate limits on the free Ollama account.
+    tier: free-with-limits
+    context_window: 128000
+    vision_capable: true
+    tool_call_reliability: medium
+    last_verified: 2026-05-01
+    pinned: true
+    curated: true
+
+  - provider: ollama-cloud
+    model_id: qwen3-coder:480b-cloud
+    display_name: Qwen3 Coder 480B (cloud)
+    description: >
+      Very large code model accessible through Ollama Cloud. Strong at macro
+      generation; opaque rate caps on the free tier.
+    tier: free-with-limits
+    context_window: 128000
+    vision_capable: false
+    tool_call_reliability: medium
+    last_verified: 2026-05-01
+    pinned: false
+    curated: true

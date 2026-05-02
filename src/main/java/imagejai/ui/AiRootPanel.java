@@ -6,6 +6,12 @@ import imagejai.config.Settings;
 import imagejai.engine.AgentLauncher;
 import imagejai.engine.AgentSession;
 import imagejai.engine.EmbeddedAgentSession;
+import imagejai.engine.picker.AgentLaunchOrchestrator;
+import imagejai.engine.picker.ModelEntry;
+import imagejai.engine.picker.NativeAgentLauncher;
+import imagejai.engine.picker.ProviderRegistry;
+import imagejai.engine.picker.ProxyAgentLauncher;
+import imagejai.ui.picker.ModelPickerButton;
 
 import javax.swing.JButton;
 import javax.swing.JComboBox;
@@ -61,6 +67,9 @@ public class AiRootPanel extends JPanel implements ChatSurface {
     private AgentLauncher agentLauncher;
     private JComboBox<Settings.ModelConfig> profileSwitcher;
     private JComboBox<String> agentSelector;
+    private ModelPickerButton modelPicker;
+    private ProviderRegistry providerRegistry;
+    private AgentLaunchOrchestrator launchOrchestrator;
     private JButton agentBtn;
     private JFrame frame;
     private String currentCard = CARD_CHAT;
@@ -123,6 +132,8 @@ public class AiRootPanel extends JPanel implements ChatSurface {
         if (launcher != null) {
             terminalView.setWorkspace(new File(launcher.getAgentWorkspace()));
         }
+        launchOrchestrator = new AgentLaunchOrchestrator(
+                launcher, new NativeAgentLauncher(), new ProxyAgentLauncher());
         refreshAgentSelectorAsync();
     }
 
@@ -221,7 +232,43 @@ public class AiRootPanel extends JPanel implements ChatSurface {
                 }
             }
         });
-        leftPanel.add(agentSelector);
+
+        providerRegistry = ProviderRegistry.loadBundled();
+        modelPicker = new ModelPickerButton(providerRegistry, settings);
+        modelPicker.setPreferredSize(new Dimension(220, 22));
+        modelPicker.setFont(new Font(Font.SANS_SERIF, Font.PLAIN, 11));
+        modelPicker.setSelectionListener(new ModelPickerButton.SelectionListener() {
+            @Override
+            public void onSelectionChanged(ModelEntry entry) {
+                settings.selectedAgentName = entry.providerId() + ":" + entry.modelId();
+                settings.save();
+                chatView.refreshInputState();
+                updateLaunchButtonState();
+            }
+
+            @Override
+            public void onLaunchRequested(ModelEntry entry) {
+                launchModelAsync(entry);
+            }
+        });
+        modelPicker.setSettingsLink(new ModelPickerButton.SettingsLink() {
+            @Override
+            public void openMultiProviderSettings() {
+                openSettings();
+            }
+        });
+        modelPicker.setInstallerLink(new ModelPickerButton.InstallerLink() {
+            @Override
+            public void openInstallerForProvider(String providerId) {
+                openSettings();
+            }
+        });
+
+        if (settings.useMultiProviderPicker) {
+            leftPanel.add(modelPicker);
+        } else {
+            leftPanel.add(agentSelector);
+        }
 
         javax.swing.JLabel profileLabel = new javax.swing.JLabel("Profile:");
         profileLabel.setForeground(TEXT_MUTED);
@@ -254,11 +301,18 @@ public class AiRootPanel extends JPanel implements ChatSurface {
         JPanel buttons = new JPanel(new FlowLayout(FlowLayout.RIGHT, 2, 0));
         buttons.setOpaque(false);
 
-        agentBtn = createHeaderButton("\u25B6", "Launch selected external agent");
+        String agentBtnTooltip = settings.useMultiProviderPicker
+                ? "Re-run the last launched model"
+                : "Launch selected external agent";
+        agentBtn = createHeaderButton("\u25B6", agentBtnTooltip);
         agentBtn.addActionListener(new ActionListener() {
             @Override
             public void actionPerformed(ActionEvent e) {
-                launchSelectedAgentAsync();
+                if (settings.useMultiProviderPicker) {
+                    relaunchLastModel();
+                } else {
+                    launchSelectedAgentAsync();
+                }
             }
         });
         updateLaunchButtonState();
@@ -374,6 +428,18 @@ public class AiRootPanel extends JPanel implements ChatSurface {
         if (agentBtn == null) {
             return;
         }
+        if (settings.useMultiProviderPicker) {
+            ModelEntry entry = providerRegistry == null
+                    ? null
+                    : providerRegistry.lookup(
+                            settings.selectedProvider, settings.selectedModelId);
+            boolean enabled = entry != null;
+            agentBtn.setEnabled(enabled);
+            agentBtn.setToolTipText(enabled
+                    ? "Re-run " + entry.displayName()
+                    : "Pick a model from the dropdown first.");
+            return;
+        }
         String selected = settings.getSelectedAgentName();
         AgentLauncher.AgentInfo agent = findDetectedAgent(selected);
         boolean externalSelected = agentLauncher != null && agent != null;
@@ -408,6 +474,67 @@ public class AiRootPanel extends JPanel implements ChatSurface {
             return;
         }
         launchAgentAsync(agent);
+    }
+
+    private void relaunchLastModel() {
+        if (providerRegistry == null || launchOrchestrator == null) {
+            return;
+        }
+        String prov = settings.selectedProvider;
+        String mid  = settings.selectedModelId;
+        if (prov == null || mid == null) {
+            modelPicker.showPopup();
+            return;
+        }
+        ModelEntry entry = providerRegistry.lookup(prov, mid);
+        if (entry == null) {
+            modelPicker.showPopup();
+            return;
+        }
+        launchModelAsync(entry);
+    }
+
+    private void launchModelAsync(final ModelEntry entry) {
+        if (entry == null || launchOrchestrator == null) {
+            return;
+        }
+        final AgentLaunchOrchestrator.Transport transport =
+                AgentLaunchOrchestrator.transportFor(entry);
+        if (transport != AgentLaunchOrchestrator.Transport.CLI) {
+            chatView.appendMessage("assistant",
+                    "The " + entry.providerId() + " transport will land in a later "
+                    + "phase of the multi-provider rollout — for now this picker "
+                    + "row is informational.");
+            return;
+        }
+        final AgentLauncher.Mode mode = settings.agentEmbeddedTerminal
+                ? AgentLauncher.Mode.EMBEDDED
+                : AgentLauncher.Mode.EXTERNAL;
+        chatView.appendMessage("assistant", "Launching " + entry.displayName() + "...");
+        new SwingWorker<AgentSession, Void>() {
+            @Override
+            protected AgentSession doInBackground() {
+                return launchOrchestrator.launch(entry, mode);
+            }
+
+            @Override
+            protected void done() {
+                try {
+                    AgentSession session = get();
+                    if (session == null) {
+                        chatView.appendMessage("assistant",
+                                "Failed to launch " + entry.displayName()
+                                        + " — see ImageJ Log.");
+                        return;
+                    }
+                    handleLaunchedSession(session.info(), mode, session);
+                } catch (Exception ex) {
+                    chatView.appendMessage("assistant",
+                            "Failed to launch " + entry.displayName()
+                                    + ": " + ex.getMessage());
+                }
+            }
+        }.execute();
     }
 
     private void launchAgentAsync(final AgentLauncher.AgentInfo agent) {
