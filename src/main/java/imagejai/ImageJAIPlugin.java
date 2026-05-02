@@ -6,16 +6,15 @@ import org.scijava.plugin.Plugin;
 import imagejai.config.Constants;
 import imagejai.config.Settings;
 import imagejai.engine.AgentLauncher;
-import imagejai.engine.AgentSession;
 import imagejai.engine.CommandEngine;
 import imagejai.engine.DialogWatcher;
-import imagejai.engine.EmbeddedAgentSession;
 import imagejai.engine.EventBus;
 import imagejai.engine.ExplorationEngine;
 import imagejai.engine.ImageMonitor;
 import imagejai.engine.PipelineBuilder;
 import imagejai.engine.StateInspector;
 import imagejai.engine.TCPCommandServer;
+import imagejai.ui.AiRootPanel;
 import imagejai.ui.ChatPanel;
 import imagejai.ui.ChatPanelController;
 import imagejai.ui.ChatSurface;
@@ -27,7 +26,6 @@ import java.awt.event.WindowAdapter;
 import java.awt.event.WindowEvent;
 import java.io.IOException;
 import java.io.InputStream;
-import java.util.List;
 
 /**
  * Main entry point for the ImageJ AI Assistant plugin.
@@ -37,12 +35,14 @@ import java.util.List;
 public class ImageJAIPlugin implements Command {
 
     private static JFrame chatFrame;
+    private static AiRootPanel rootPanel;
     private static ChatPanel chatPanel;
     private static ConversationLoop conversationLoop;
     private static TCPCommandServer tcpServer;
     private static ImageMonitor imageMonitor;
     private static DialogWatcher dialogWatcher;
     private static boolean terminalFontsRegistered;
+    private static boolean shutdownHookRegistered;
 
     @Override
     public void run() {
@@ -75,21 +75,22 @@ public class ImageJAIPlugin implements Command {
             settings.save();
         }
 
-        // Create chat panel and wire conversation loop
-        chatPanel = new ChatPanel(settings);
+        // Create root panel and wire conversation loop
+        rootPanel = new AiRootPanel(settings);
+        chatPanel = new ChatPanel(rootPanel.chatView());
         
         if (settings.hasApiKey()) {
-            conversationLoop = new ConversationLoop(chatPanel, settings);
-            chatPanel.addChatListener(conversationLoop);
+            conversationLoop = new ConversationLoop(rootPanel, settings);
+            rootPanel.addChatListener(conversationLoop);
         } else {
-            chatPanel.appendMessage("assistant", "AI Assistant is running in TCP-only mode. " +
+            rootPanel.appendMessage("assistant", "AI Assistant is running in TCP-only mode. " +
                     "To use chat features, please configure an API key in Settings.");
         }
 
         // Set up agent launcher — find the agent workspace directory
         String agentWorkspace = findAgentWorkspace();
         if (agentWorkspace != null) {
-            chatPanel.setAgentLauncher(new AgentLauncher(agentWorkspace, settings.tcpPort));
+            rootPanel.setAgentLauncher(new AgentLauncher(agentWorkspace, settings.tcpPort));
         }
 
         // Start TCP command server if enabled
@@ -104,7 +105,7 @@ public class ImageJAIPlugin implements Command {
                         + " busy; falling back to :" + chosen);
                 settings.tcpPort = chosen;
             }
-            startTcpServer(settings, chatPanel, chatPanel);
+            startTcpServer(settings, rootPanel, rootPanel.chatController());
         }
 
         // Phase 2: start the event-bus publishers so dialog / image / memory
@@ -114,9 +115,11 @@ public class ImageJAIPlugin implements Command {
 
         chatFrame = new JFrame(Constants.PLUGIN_NAME + " v" + Constants.VERSION);
         chatFrame.setDefaultCloseOperation(JFrame.DISPOSE_ON_CLOSE);
-        chatFrame.getContentPane().add(chatPanel);
+        chatFrame.getContentPane().add(rootPanel);
         chatFrame.setSize(420, 600);
         chatFrame.setMinimumSize(new Dimension(350, 400));
+        rootPanel.setFrame(chatFrame);
+        registerAgentShutdownHook();
 
         // Clean up resources on close
         chatFrame.addWindowListener(new WindowAdapter() {
@@ -136,7 +139,11 @@ public class ImageJAIPlugin implements Command {
                     dialogWatcher.stop();
                     dialogWatcher = null;
                 }
+                if (rootPanel != null) {
+                    rootPanel.shutdownSessions();
+                }
                 // Null out static references so they can be GC'd
+                rootPanel = null;
                 chatPanel = null;
                 chatFrame = null;
                 conversationLoop = null;
@@ -152,85 +159,6 @@ public class ImageJAIPlugin implements Command {
         }
 
         chatFrame.setVisible(true);
-    }
-
-    @Plugin(type = Command.class, menuPath = "Plugins>AI Assistant>Terminal Smoke Test")
-    public static class TerminalSmokeTest implements Command {
-        @Override
-        public void run() {
-            if (!SwingUtilities.isEventDispatchThread()) {
-                SwingUtilities.invokeLater(this::run);
-                return;
-            }
-
-            registerBundledTerminalFonts();
-
-            Settings settings = Settings.load();
-            String agentWorkspace = findAgentWorkspace();
-            if (agentWorkspace == null) {
-                JOptionPane.showMessageDialog(null,
-                        "Could not find the ImageJAI agent workspace.",
-                        "ImageJAI Terminal Smoke Test",
-                        JOptionPane.ERROR_MESSAGE);
-                return;
-            }
-
-            AgentLauncher launcher = new AgentLauncher(agentWorkspace, settings.tcpPort);
-            AgentLauncher.AgentInfo gemma = findSmokeTestAgent(launcher.detectAgents());
-            if (gemma == null) {
-                JOptionPane.showMessageDialog(null,
-                        "Gemma CLI was not found on PATH. Install gemma4_31b_agent before running the smoke test.",
-                        "ImageJAI Terminal Smoke Test",
-                        JOptionPane.ERROR_MESSAGE);
-                return;
-            }
-
-            AgentSession launched = launcher.launch(gemma, AgentLauncher.Mode.EMBEDDED);
-            if (!(launched instanceof EmbeddedAgentSession)) {
-                JOptionPane.showMessageDialog(null,
-                        "Embedded terminal launch failed. Check the ImageJ log for details.",
-                        "ImageJAI Terminal Smoke Test",
-                        JOptionPane.ERROR_MESSAGE);
-                return;
-            }
-
-            final EmbeddedAgentSession session = (EmbeddedAgentSession) launched;
-            final JFrame frame = new JFrame("ImageJAI Terminal Smoke Test - " + gemma.name);
-            frame.setDefaultCloseOperation(JFrame.DISPOSE_ON_CLOSE);
-            frame.getContentPane().add(session.component(), BorderLayout.CENTER);
-            frame.setSize(980, 680);
-            frame.setMinimumSize(new Dimension(760, 420));
-            frame.addWindowListener(new WindowAdapter() {
-                @Override
-                public void windowClosed(WindowEvent e) {
-                    session.destroy();
-                }
-            });
-
-            Frame ijFrame = IJ.getInstance();
-            if (ijFrame != null) {
-                Rectangle bounds = ijFrame.getBounds();
-                frame.setLocation(bounds.x + bounds.width + 10, bounds.y);
-            }
-
-            frame.setVisible(true);
-            session.component().requestFocusInWindow();
-            IJ.log("[ImageJAI-Term] Opened terminal smoke-test frame for " + gemma.name);
-        }
-
-        private static AgentLauncher.AgentInfo findSmokeTestAgent(List<AgentLauncher.AgentInfo> agents) {
-            for (AgentLauncher.AgentInfo agent : agents) {
-                if ("Gemma 4 31B (Claude-style)".equals(agent.name)) {
-                    return agent;
-                }
-            }
-            for (AgentLauncher.AgentInfo agent : agents) {
-                if ("Gemma 4 31B".equals(agent.name)) {
-                    return agent;
-                }
-            }
-            return null;
-        }
     }
 
     static synchronized void registerBundledTerminalFonts() {
@@ -259,6 +187,22 @@ public class ImageJAIPlugin implements Command {
         }
     }
 
+    private static synchronized void registerAgentShutdownHook() {
+        if (shutdownHookRegistered) {
+            return;
+        }
+        Runtime.getRuntime().addShutdownHook(new Thread(new Runnable() {
+            @Override
+            public void run() {
+                AiRootPanel panel = rootPanel;
+                if (panel != null) {
+                    panel.shutdownSessions();
+                }
+            }
+        }, "ImageJAI-agent-shutdown-hook"));
+        shutdownHookRegistered = true;
+    }
+
     /**
      * Get the active ChatPanel instance (for use by conversation loop in Phase 2).
      *
@@ -266,6 +210,15 @@ public class ImageJAIPlugin implements Command {
      */
     public static ChatPanel getChatPanel() {
         return chatPanel;
+    }
+
+    /**
+     * Get the active root panel.
+     *
+     * @return the current AiRootPanel, or null if the window is not open
+     */
+    public static AiRootPanel getRootPanel() {
+        return rootPanel;
     }
 
     /**
