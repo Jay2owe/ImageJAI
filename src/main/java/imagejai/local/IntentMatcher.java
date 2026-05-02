@@ -1,6 +1,12 @@
 package imagejai.local;
 
+import imagejai.config.Settings;
+import imagejai.engine.FuzzyMatcher;
+
+import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.Collections;
+import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
@@ -13,15 +19,22 @@ public class IntentMatcher {
 
     private static final Pattern PUNCT = Pattern.compile("[^a-z0-9 ]");
     private static final Pattern WS = Pattern.compile("\\s+");
+    private static final double SUGGESTION_FLOOR = 0.70;
 
     private final IntentLibrary library;
+    private final Settings settings;
 
     public IntentMatcher() {
-        this(IntentLibrary.load());
+        this(IntentLibrary.load(), new Settings());
     }
 
     public IntentMatcher(IntentLibrary library) {
+        this(library, new Settings());
+    }
+
+    public IntentMatcher(IntentLibrary library, Settings settings) {
         this.library = library == null ? IntentLibrary.load() : library;
+        this.settings = settings == null ? new Settings() : settings;
     }
 
     public Optional<MatchedIntent> match(String input) {
@@ -31,7 +44,54 @@ public class IntentMatcher {
                     intentId,
                     Collections.<String, String>emptyMap()));
         }
+        List<RankedPhrase> ranked = topK(input, 1);
+        if (!ranked.isEmpty()
+                && ranked.get(0).score() >= settings.getLocalAssistantFuzzyThreshold()) {
+            return Optional.of(new MatchedIntent(
+                    ranked.get(0).intentId(),
+                    Collections.<String, String>emptyMap()));
+        }
         return Optional.empty();
+    }
+
+    public List<RankedPhrase> topK(String input, int k) {
+        if (k <= 0) {
+            return Collections.emptyList();
+        }
+        String key = normalise(input);
+        if (key.length() == 0) {
+            return Collections.emptyList();
+        }
+
+        List<RankedPhrase> ranked = new ArrayList<RankedPhrase>();
+        Map<String, String> phraseToIntent = library.phraseToIntentId();
+        String sortedKey = sortTokens(key);
+        for (String phrase : library.allPhrases()) {
+            String intentId = phraseToIntent.get(phrase);
+            double score = similarity(key, sortedKey, phrase);
+            ranked.add(new RankedPhrase(phrase, intentId, score));
+        }
+
+        Collections.sort(ranked, new Comparator<RankedPhrase>() {
+            @Override
+            public int compare(RankedPhrase a, RankedPhrase b) {
+                int byScore = Double.compare(b.score(), a.score());
+                if (byScore != 0) {
+                    return byScore;
+                }
+                int byLength = Integer.compare(a.phrase().length(), b.phrase().length());
+                if (byLength != 0) {
+                    return byLength;
+                }
+                return a.phrase().compareTo(b.phrase());
+            }
+        });
+
+        if (ranked.isEmpty() || ranked.get(0).score() < SUGGESTION_FLOOR) {
+            return Collections.emptyList();
+        }
+        int limit = Math.min(k, ranked.size());
+        return Collections.unmodifiableList(new ArrayList<RankedPhrase>(ranked.subList(0, limit)));
     }
 
     public static String normalise(String input) {
@@ -41,6 +101,32 @@ public class IntentMatcher {
         String s = input.toLowerCase(Locale.ROOT);
         s = PUNCT.matcher(s).replaceAll(" ");
         return WS.matcher(s).replaceAll(" ").trim();
+    }
+
+    private static double similarity(String key, String sortedKey, String phrase) {
+        double direct = FuzzyMatcher.jaroWinkler(key, phrase);
+        String sortedPhrase = sortTokens(phrase);
+        if (sortedKey.equals(key) && sortedPhrase.equals(phrase)) {
+            return direct;
+        }
+        return Math.max(direct, FuzzyMatcher.jaroWinkler(sortedKey, sortedPhrase));
+    }
+
+    private static String sortTokens(String input) {
+        String normalised = normalise(input);
+        if (normalised.length() == 0) {
+            return "";
+        }
+        String[] parts = normalised.split(" ");
+        java.util.Arrays.sort(parts);
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < parts.length; i++) {
+            if (i > 0) {
+                sb.append(' ');
+            }
+            sb.append(parts[i]);
+        }
+        return sb.toString();
     }
 
     public static class MatchedIntent {

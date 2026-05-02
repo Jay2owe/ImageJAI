@@ -66,6 +66,7 @@ public class Settings {
     public int tcpPort = Constants.DEFAULT_TCP_PORT;
 
     public String selectedAgentName = AgentLauncher.LOCAL_ASSISTANT_NAME;
+    public double localAssistantFuzzyThreshold = 0.90;
 
     /**
      * Stage 03 (embedded-agent-widget): when true, AgentLauncher launches the
@@ -162,6 +163,22 @@ public class Settings {
         selectedAgentName = name == null || name.trim().isEmpty()
                 ? AgentLauncher.LOCAL_ASSISTANT_NAME
                 : name;
+        save();
+    }
+
+    public double getLocalAssistantFuzzyThreshold() {
+        if (localAssistantFuzzyThreshold <= 0.0 || localAssistantFuzzyThreshold > 1.0) {
+            return 0.90;
+        }
+        return localAssistantFuzzyThreshold;
+    }
+
+    public void setLocalAssistantFuzzyThreshold(double threshold) {
+        if (threshold <= 0.0) {
+            localAssistantFuzzyThreshold = 0.90;
+        } else {
+            localAssistantFuzzyThreshold = Math.min(1.0, threshold);
+        }
         save();
     }
 

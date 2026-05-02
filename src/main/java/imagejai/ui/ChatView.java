@@ -9,10 +9,14 @@ import ij.gui.Roi;
 import imagejai.config.Settings;
 import imagejai.engine.AgentLauncher;
 import imagejai.local.AssistantReply;
+import imagejai.local.AutocompleteChipRow;
 import imagejai.local.LocalAssistant;
+import imagejai.local.RankedPhrase;
 
 import javax.swing.*;
 import javax.swing.border.EmptyBorder;
+import javax.swing.event.DocumentEvent;
+import javax.swing.event.DocumentListener;
 import javax.swing.text.html.HTMLDocument;
 import java.awt.*;
 import java.awt.event.*;
@@ -54,6 +58,8 @@ public class ChatView extends JPanel implements ChatPanelController, ChatSurface
     private JScrollPane scrollPane;
     private JTextArea inputArea;
     private JButton sendBtn;
+    private AutocompleteChipRow chipRow;
+    private Timer autocompleteTimer;
     private JLabel statusLabel;
     private JLabel thinkingLabel;
     private Timer thinkingTimer;
@@ -66,7 +72,7 @@ public class ChatView extends JPanel implements ChatPanelController, ChatSurface
 
     public ChatView(Settings settings) {
         this.settings = settings;
-        this.localAssistant = new LocalAssistant();
+        this.localAssistant = new LocalAssistant(settings);
         setLayout(new BorderLayout(0, 4));
         setBorder(new EmptyBorder(0, 0, 0, 0));
         setBackground(BG_MAIN);
@@ -113,6 +119,7 @@ public class ChatView extends JPanel implements ChatPanelController, ChatSurface
         inputStack.setOpaque(false);
         inputStack.add(confirmHost, BorderLayout.NORTH);
         inputStack.add(inputPanel, BorderLayout.CENTER);
+        inputStack.add(chipRow, BorderLayout.SOUTH);
         southPanel.add(inputStack, BorderLayout.CENTER);
 
         // Thinking indicator
@@ -181,6 +188,7 @@ public class ChatView extends JPanel implements ChatPanelController, ChatSurface
         if (active != null) {
             statusLabel.setText(active.provider + " / " + active.model);
         }
+        updateAutocompleteChipsNow();
     }
 
     /**
@@ -288,6 +296,8 @@ public class ChatView extends JPanel implements ChatPanelController, ChatSurface
                 sendBtn.setEnabled(inputEnabled);
                 if (inputEnabled) {
                     inputArea.requestFocusInWindow();
+                } else {
+                    clearAutocompleteChips();
                 }
             }
         });
@@ -677,12 +687,17 @@ public class ChatView extends JPanel implements ChatPanelController, ChatSurface
         inputArea.setLineWrap(true);
         inputArea.setWrapStyleWord(true);
         inputArea.setBorder(new EmptyBorder(6, 8, 6, 8));
+        inputArea.setFocusTraversalKeysEnabled(false);
 
         // Enter sends, Shift+Enter inserts newline
         inputArea.addKeyListener(new KeyAdapter() {
             @Override
             public void keyPressed(KeyEvent e) {
-                if (e.getKeyCode() == KeyEvent.VK_ENTER) {
+                if (e.getKeyCode() == KeyEvent.VK_TAB) {
+                    if (isLocalAssistantSelected() && chipRow != null && chipRow.acceptFirst()) {
+                        e.consume();
+                    }
+                } else if (e.getKeyCode() == KeyEvent.VK_ENTER) {
                     if (e.isShiftDown()) {
                         // Allow default behavior (insert newline)
                     } else {
@@ -690,6 +705,16 @@ public class ChatView extends JPanel implements ChatPanelController, ChatSurface
                         sendMessage();
                     }
                 }
+            }
+        });
+        installAutocompleteListener();
+
+        chipRow = new AutocompleteChipRow(new Consumer<String>() {
+            @Override
+            public void accept(String phrase) {
+                inputArea.setText(phrase);
+                inputArea.requestFocusInWindow();
+                inputArea.setCaretPosition(inputArea.getDocument().getLength());
             }
         });
 
@@ -721,6 +746,62 @@ public class ChatView extends JPanel implements ChatPanelController, ChatSurface
         return panel;
     }
 
+    private void installAutocompleteListener() {
+        autocompleteTimer = new Timer(100, new ActionListener() {
+            @Override
+            public void actionPerformed(ActionEvent e) {
+                updateAutocompleteChipsNow();
+            }
+        });
+        autocompleteTimer.setRepeats(false);
+        inputArea.getDocument().addDocumentListener(new DocumentListener() {
+            @Override
+            public void insertUpdate(DocumentEvent e) {
+                scheduleAutocompleteUpdate();
+            }
+
+            @Override
+            public void removeUpdate(DocumentEvent e) {
+                scheduleAutocompleteUpdate();
+            }
+
+            @Override
+            public void changedUpdate(DocumentEvent e) {
+                scheduleAutocompleteUpdate();
+            }
+        });
+    }
+
+    private void scheduleAutocompleteUpdate() {
+        if (autocompleteTimer == null) {
+            return;
+        }
+        autocompleteTimer.restart();
+    }
+
+    private void updateAutocompleteChipsNow() {
+        if (chipRow == null || inputArea == null) {
+            return;
+        }
+        if (!isLocalAssistantSelected() || !inputArea.isEnabled()) {
+            clearAutocompleteChips();
+            return;
+        }
+        String text = inputArea.getText();
+        if (text == null || text.trim().length() == 0) {
+            clearAutocompleteChips();
+            return;
+        }
+        List<RankedPhrase> chips = localAssistant.topK(text, 3);
+        chipRow.setCandidates(chips);
+    }
+
+    private void clearAutocompleteChips() {
+        if (chipRow != null) {
+            chipRow.setCandidates(new ArrayList<RankedPhrase>());
+        }
+    }
+
     private void sendMessage() {
         boolean localAssistantSelected = isLocalAssistantSelected();
         if (!localAssistantSelected && !settings.hasApiKey()) return;
@@ -728,6 +809,7 @@ public class ChatView extends JPanel implements ChatPanelController, ChatSurface
         String text = inputArea.getText().trim();
         if (text.isEmpty()) return;
         inputArea.setText("");
+        clearAutocompleteChips();
 
         appendMessage("user", text);
 

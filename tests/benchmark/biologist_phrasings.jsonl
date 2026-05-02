@@ -8,6 +8,8 @@
 {"phrase":"show pixel size","expected_intent_id":"image.pixel_size"}
 {"phrase":"image calibration","expected_intent_id":"image.pixel_size"}
 {"phrase":"pixel dimensions","expected_intent_id":"image.pixel_size"}
+{"phrase":"pixle siz","expected_intent_id":"image.pixel_size"}
+{"phrase":"size pixel","expected_intent_id":"image.pixel_size"}
 {"phrase":"image dimensions","expected_intent_id":"image.dimensions"}
 {"phrase":"bit depth","expected_intent_id":"image.bit_depth"}
 {"phrase":"how many channels","expected_intent_id":"image.channel_count"}

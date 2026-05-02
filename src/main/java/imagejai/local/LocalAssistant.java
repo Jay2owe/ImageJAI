@@ -1,8 +1,10 @@
 package imagejai.local;
 
+import imagejai.config.Settings;
 import imagejai.engine.CommandEngine;
 import imagejai.engine.FrictionLog;
 
+import java.util.List;
 import java.util.Optional;
 
 /**
@@ -19,8 +21,17 @@ public class LocalAssistant {
         this(IntentLibrary.load(), new FijiBridge(new CommandEngine()), new FrictionLog());
     }
 
+    public LocalAssistant(Settings settings) {
+        this(IntentLibrary.load(), new FijiBridge(new CommandEngine()), new FrictionLog(), settings);
+    }
+
     public LocalAssistant(IntentLibrary library, FijiBridge fiji, FrictionLog frictionLog) {
         this(library, new IntentMatcher(library), fiji, frictionLog);
+    }
+
+    public LocalAssistant(IntentLibrary library, FijiBridge fiji, FrictionLog frictionLog,
+                          Settings settings) {
+        this(library, new IntentMatcher(library, settings), fiji, frictionLog);
     }
 
     public LocalAssistant(IntentLibrary library, IntentMatcher matcher, FijiBridge fiji) {
@@ -47,5 +58,9 @@ public class LocalAssistant {
         frictionLog.record("local_assistant", input, "miss");
         return AssistantReply.text("I don't recognise \"" + input
                 + "\". Type 'help' to see what I can do.");
+    }
+
+    public List<RankedPhrase> topK(String input, int k) {
+        return matcher.topK(input, k);
     }
 }

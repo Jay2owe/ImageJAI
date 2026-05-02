@@ -16,7 +16,7 @@ package imagejai.engine;
  * auto-correct; 0.85..0.95 or ambiguous = suggest only; &lt;0.85 =
  * low-confidence suggest.
  */
-final class FuzzyMatcher {
+public final class FuzzyMatcher {
 
     private FuzzyMatcher() {}
 
@@ -25,7 +25,7 @@ final class FuzzyMatcher {
      * Comparison is case-insensitive (both strings are lowered internally).
      * Returns 1.0 for identical, 0.0 for no match.
      */
-    static double jaroWinkler(String a, String b) {
+    public static double jaroWinkler(String a, String b) {
         if (a == null || b == null) return 0.0;
         String s1 = a.toLowerCase();
         String s2 = b.toLowerCase();
