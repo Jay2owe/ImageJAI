@@ -75,6 +75,13 @@ public class Settings {
      */
     public boolean agentEmbeddedTerminal = false;
 
+    /**
+     * Optional terminal-output audit log. Default stays false because terminal
+     * scrollback may include pasted API keys, tokens, or paths the user did not
+     * intend to persist.
+     */
+    public boolean persistScrollback = false;
+
     // Transient
     private transient Path configPath;
 

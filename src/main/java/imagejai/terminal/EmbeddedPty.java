@@ -1,6 +1,9 @@
 package imagejai.terminal;
 
 import com.jediterm.terminal.TtyConnector;
+import com.jediterm.terminal.TerminalColor;
+import com.jediterm.terminal.TextStyle;
+import com.jediterm.terminal.emulator.ColorPalette;
 import com.jediterm.terminal.model.SelectionUtil;
 import com.jediterm.terminal.model.TerminalSelection;
 import com.jediterm.terminal.model.hyperlinks.HyperlinkFilter;
@@ -13,6 +16,7 @@ import com.jediterm.terminal.ui.settings.DefaultSettingsProvider;
 import com.pty4j.PtyProcess;
 import com.pty4j.PtyProcessBuilder;
 import ij.IJ;
+import ij.Prefs;
 import imagejai.engine.AgentLaunchSpec;
 
 import javax.swing.JComponent;
@@ -38,10 +42,15 @@ import java.util.regex.Pattern;
 public final class EmbeddedPty {
     private static final int INITIAL_COLUMNS = 120;
     private static final int INITIAL_ROWS = 32;
+    private static final String PREF_FONT_SIZE = "ai.assistant.terminal.fontsize";
+    private static final int MIN_FONT_SIZE = 8;
+    private static final int MAX_FONT_SIZE = 28;
+    private static final int DEFAULT_FONT_SIZE = 14;
 
     private final PtyProcess process;
     private final ImageJAITtyConnector connector;
     private final JediTermWidget widget;
+    private final ImageJAITermSettingsProvider settingsProvider;
 
     public EmbeddedPty(AgentLaunchSpec spec) throws IOException {
         configurePtyNativeFolder();
@@ -55,7 +64,8 @@ public final class EmbeddedPty {
 
         process = builder.start();
         connector = new ImageJAITtyConnector(process);
-        widget = new JediTermWidget(INITIAL_COLUMNS, INITIAL_ROWS, new ImageJAITermSettingsProvider());
+        settingsProvider = new ImageJAITermSettingsProvider();
+        widget = new JediTermWidget(INITIAL_COLUMNS, INITIAL_ROWS, settingsProvider);
         widget.setTtyConnector(connector);
         installUrlHyperlinks(widget);
         installKeyBindings(widget);
@@ -149,9 +159,47 @@ public final class EmbeddedPty {
                         }
                     }
                     e.consume();
+                } else if (e.getKeyCode() == KeyEvent.VK_EQUALS
+                        || e.getKeyCode() == KeyEvent.VK_PLUS
+                        || e.getKeyCode() == KeyEvent.VK_ADD) {
+                    changeFontSize(panel, 1);
+                    e.consume();
+                } else if (e.getKeyCode() == KeyEvent.VK_MINUS
+                        || e.getKeyCode() == KeyEvent.VK_SUBTRACT) {
+                    changeFontSize(panel, -1);
+                    e.consume();
                 }
             }
         });
+    }
+
+    private void changeFontSize(TerminalPanel panel, int delta) {
+        int next = clamp(Math.round(settingsProvider.getTerminalFontSize()) + delta);
+        if (next == Math.round(settingsProvider.getTerminalFontSize())) {
+            return;
+        }
+        settingsProvider.setTerminalFontSize(next);
+        Prefs.set(PREF_FONT_SIZE, next);
+        reinitFont(panel);
+        IJ.log("[ImageJAI-Term] Terminal font size set to " + next + " pt");
+    }
+
+    private static int clamp(int value) {
+        return Math.max(MIN_FONT_SIZE, Math.min(MAX_FONT_SIZE, value));
+    }
+
+    private static void reinitFont(TerminalPanel panel) {
+        try {
+            java.lang.reflect.Method method =
+                    TerminalPanel.class.getDeclaredMethod("reinitFontAndResize");
+            method.setAccessible(true);
+            method.invoke(panel);
+        } catch (ReflectiveOperationException e) {
+            IJ.log("[ImageJAI-Term] Could not apply terminal font size live: "
+                    + e.getMessage());
+            panel.revalidate();
+            panel.repaint();
+        }
     }
 
     private static String selectedText(TerminalPanel panel) {
@@ -222,9 +270,20 @@ public final class EmbeddedPty {
     }
 
     private static final class ImageJAITermSettingsProvider extends DefaultSettingsProvider {
+        private static final int BG_MAIN = 0x1e1e23;
+        private static final int BG_MESSAGES = 0x19191e;
+        private static final int BG_INPUT = 0x282830;
+        private static final int BORDER = 0x3c3c46;
+        private static final int ACCENT = 0x00c8ff;
+        private static final int TEXT = 0xe6e6e6;
+        private static final int TEXT_MUTED = 0x787882;
+        private static final ColorPalette CHAT_PALETTE = new ChatAlignedColorPalette();
+        private float fontSize = clamp((int) Math.round(Prefs.get(PREF_FONT_SIZE, DEFAULT_FONT_SIZE)));
+
         @Override
         public java.awt.Font getTerminalFont() {
-            java.awt.Font font = new java.awt.Font("JetBrains Mono", java.awt.Font.PLAIN, 14);
+            java.awt.Font font = new java.awt.Font("JetBrains Mono", java.awt.Font.PLAIN,
+                    Math.round(fontSize));
             if ("JetBrains Mono".equals(font.getFamily())) {
                 return font;
             }
@@ -233,7 +292,46 @@ public final class EmbeddedPty {
 
         @Override
         public float getTerminalFontSize() {
-            return 14.0f;
+            return fontSize;
+        }
+
+        void setTerminalFontSize(float fontSize) {
+            this.fontSize = clamp(Math.round(fontSize));
+        }
+
+        @Override
+        public ColorPalette getTerminalColorPalette() {
+            return CHAT_PALETTE;
+        }
+
+        @Override
+        public TerminalColor getDefaultForeground() {
+            return rgb(TEXT);
+        }
+
+        @Override
+        public TerminalColor getDefaultBackground() {
+            return rgb(BG_MAIN);
+        }
+
+        @Override
+        public TextStyle getDefaultStyle() {
+            return new TextStyle(getDefaultForeground(), getDefaultBackground());
+        }
+
+        @Override
+        public TextStyle getSelectionColor() {
+            return new TextStyle(rgb(BG_MAIN), rgb(ACCENT));
+        }
+
+        @Override
+        public TextStyle getFoundPatternColor() {
+            return new TextStyle(rgb(TEXT), rgb(BORDER));
+        }
+
+        @Override
+        public TextStyle getHyperlinkColor() {
+            return new TextStyle(rgb(ACCENT), rgb(BG_MAIN));
         }
 
         @Override
@@ -244,6 +342,61 @@ public final class EmbeddedPty {
         @Override
         public boolean scrollToBottomOnTyping() {
             return true;
+        }
+
+        private static TerminalColor rgb(int hex) {
+            return TerminalColor.rgb((hex >> 16) & 0xff, (hex >> 8) & 0xff, hex & 0xff);
+        }
+
+        private static final class ChatAlignedColorPalette extends ColorPalette {
+            private static final com.jediterm.core.Color[] COLORS = colors(
+                    BG_MAIN,      // black -> ChatPanel BG_MAIN
+                    0xaa2828,     // red
+                    0x7fc97f,     // green
+                    0xb48200,     // yellow / amber
+                    0x3266a8,     // blue
+                    0x9a70c9,     // magenta
+                    ACCENT,       // cyan / accent
+                    TEXT,         // white / foreground
+                    BG_INPUT,     // bright black -> input surface
+                    0xd14f4f,
+                    0xa8d8a8,
+                    0xd6a933,
+                    0x5694d8,
+                    0xb58be0,
+                    ACCENT,
+                    0xffffff);
+
+            @Override
+            protected com.jediterm.core.Color getForegroundByColorIndex(int index) {
+                return colorAt(index);
+            }
+
+            @Override
+            protected com.jediterm.core.Color getBackgroundByColorIndex(int index) {
+                if (index == 0) {
+                    return new com.jediterm.core.Color(BG_MAIN);
+                }
+                if (index == 8) {
+                    return new com.jediterm.core.Color(BG_MESSAGES);
+                }
+                return colorAt(index);
+            }
+
+            private static com.jediterm.core.Color colorAt(int index) {
+                if (index < 0) {
+                    return new com.jediterm.core.Color(TEXT_MUTED);
+                }
+                return COLORS[index % COLORS.length];
+            }
+
+            private static com.jediterm.core.Color[] colors(int... values) {
+                com.jediterm.core.Color[] out = new com.jediterm.core.Color[values.length];
+                for (int i = 0; i < values.length; i++) {
+                    out[i] = new com.jediterm.core.Color(values[i]);
+                }
+                return out;
+            }
         }
     }
 }

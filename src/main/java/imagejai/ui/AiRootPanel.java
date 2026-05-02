@@ -1,6 +1,7 @@
 package imagejai.ui;
 
 import ij.IJ;
+import ij.Prefs;
 import imagejai.config.Settings;
 import imagejai.engine.AgentLauncher;
 import imagejai.engine.AgentSession;
@@ -31,6 +32,8 @@ import java.awt.Window;
 import java.awt.CardLayout;
 import java.awt.event.ActionEvent;
 import java.awt.event.ActionListener;
+import java.awt.event.ComponentAdapter;
+import java.awt.event.ComponentEvent;
 import java.io.File;
 import java.util.ArrayList;
 import java.util.List;
@@ -43,6 +46,7 @@ public class AiRootPanel extends JPanel implements ChatSurface {
     private static final String CARD_CHAT = "chat";
     private static final String CARD_TERMINAL = "terminal";
 
+    private static final String PREF_WINDOW_SIZE_PREFIX = "ai.assistant.window.size.";
     private static final Dimension CHAT_SIZE = new Dimension(420, 600);
     private static final Dimension TERMINAL_SIZE = new Dimension(900, 700);
 
@@ -61,6 +65,7 @@ public class AiRootPanel extends JPanel implements ChatSurface {
     private JComboBox<Settings.ModelConfig> profileSwitcher;
     private JFrame frame;
     private String currentCard = CARD_CHAT;
+    private boolean applyingFrameSize;
 
     public AiRootPanel(Settings settings) {
         super(new BorderLayout(0, 6));
@@ -90,6 +95,14 @@ public class AiRootPanel extends JPanel implements ChatSurface {
 
     public void setFrame(JFrame frame) {
         this.frame = frame;
+        if (frame != null) {
+            frame.addComponentListener(new ComponentAdapter() {
+                @Override
+                public void componentResized(ComponentEvent e) {
+                    rememberFrameSize();
+                }
+            });
+        }
         applyFrameSize();
     }
 
@@ -418,6 +431,7 @@ public class AiRootPanel extends JPanel implements ChatSurface {
                     return;
                 }
                 timer.stop();
+                session.persistScrollbackIfEnabled();
                 synchronized (liveSessions) {
                     liveSessions.remove(session);
                 }
@@ -500,8 +514,49 @@ public class AiRootPanel extends JPanel implements ChatSurface {
         if (frame == null) {
             return;
         }
-        frame.setSize(CARD_TERMINAL.equals(currentCard) ? TERMINAL_SIZE : CHAT_SIZE);
+        applyingFrameSize = true;
+        frame.setSize(savedSizeFor(currentCard));
+        applyingFrameSize = false;
         frame.revalidate();
+    }
+
+    private void rememberFrameSize() {
+        if (frame == null || applyingFrameSize) {
+            return;
+        }
+        Dimension size = frame.getSize();
+        if (size == null || size.width <= 0 || size.height <= 0) {
+            return;
+        }
+        // Stored as "WxH" strings so ij.Prefs keeps chat and terminal sizes portable.
+        Prefs.set(PREF_WINDOW_SIZE_PREFIX + currentCard, size.width + "x" + size.height);
+    }
+
+    private Dimension savedSizeFor(String card) {
+        Dimension fallback = CARD_TERMINAL.equals(card) ? TERMINAL_SIZE : CHAT_SIZE;
+        String value = Prefs.get(PREF_WINDOW_SIZE_PREFIX + card,
+                fallback.width + "x" + fallback.height);
+        return parseSize(value, fallback);
+    }
+
+    private static Dimension parseSize(String value, Dimension fallback) {
+        if (value == null) {
+            return fallback;
+        }
+        String[] parts = value.trim().toLowerCase().split("x", 2);
+        if (parts.length != 2) {
+            return fallback;
+        }
+        try {
+            int width = Integer.parseInt(parts[0].trim());
+            int height = Integer.parseInt(parts[1].trim());
+            if (width < 240 || height < 240) {
+                return fallback;
+            }
+            return new Dimension(width, height);
+        } catch (NumberFormatException e) {
+            return fallback;
+        }
     }
 
     private void openSettings() {
