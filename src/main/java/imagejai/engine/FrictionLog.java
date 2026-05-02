@@ -81,6 +81,10 @@ public class FrictionLog {
         this.journal = journal;
     }
 
+    public synchronized FrictionLogJournal journal() {
+        return journal;
+    }
+
     /**
      * Step 12: primary write path. Records a failure tagged with the agent id
      * from the caller's {@link TCPCommandServer.AgentCaps}. Per plan:

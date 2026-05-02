@@ -1,10 +1,12 @@
 package imagejai.local;
 
 import imagejai.engine.IntentRouter;
+import imagejai.engine.FrictionLog;
 import imagejai.local.slash.ClearSlashCommand;
 import imagejai.local.slash.CloseSlashCommand;
 import imagejai.local.slash.ForgetSlashCommand;
 import imagejai.local.slash.HelpSlashCommand;
+import imagejai.local.slash.ImproveSlashCommand;
 import imagejai.local.slash.InfoSlashCommand;
 import imagejai.local.slash.IntentsSlashCommand;
 import imagejai.local.slash.MacrosSlashCommand;
@@ -15,6 +17,7 @@ import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.Locale;
 import java.util.Map;
+import java.util.function.Consumer;
 
 /**
  * Dispatch table for Local Assistant slash commands.
@@ -32,6 +35,7 @@ public class SlashCommandRegistry {
         register(new TeachSlashCommand());
         register(new IntentsSlashCommand());
         register(new ForgetSlashCommand());
+        register(new ImproveSlashCommand());
     }
 
     public void register(SlashCommand command) {
@@ -50,6 +54,15 @@ public class SlashCommandRegistry {
     public AssistantReply dispatchSlash(String input, FijiBridge fiji, IntentLibrary library,
                                         IntentRouter router, ChatHistoryController chatHistory,
                                         Runnable clearPending) {
+        return dispatchSlash(input, fiji, library, router, chatHistory, clearPending,
+                null, null, null);
+    }
+
+    public AssistantReply dispatchSlash(String input, FijiBridge fiji, IntentLibrary library,
+                                        IntentRouter router, ChatHistoryController chatHistory,
+                                        Runnable clearPending, IntentMatcher matcher,
+                                        FrictionLog frictionLog,
+                                        Consumer<ImproveSession> improveSessionStarter) {
         Parsed parsed = parse(input);
         if (parsed == null) {
             return null;
@@ -59,7 +72,7 @@ public class SlashCommandRegistry {
             return AssistantReply.text("Unknown command: /" + parsed.name + ". Type /help.");
         }
         return command.execute(new SlashCommandContext(parsed.args, fiji, library, router,
-                chatHistory, clearPending));
+                chatHistory, clearPending, matcher, frictionLog, improveSessionStarter));
     }
 
     public AssistantReply dispatchIntent(String intentId, String input, FijiBridge fiji,
@@ -72,13 +85,23 @@ public class SlashCommandRegistry {
                                          IntentLibrary library, IntentRouter router,
                                          ChatHistoryController chatHistory,
                                          Runnable clearPending) {
+        return dispatchIntent(intentId, input, fiji, library, router, chatHistory,
+                clearPending, null, null, null);
+    }
+
+    public AssistantReply dispatchIntent(String intentId, String input, FijiBridge fiji,
+                                         IntentLibrary library, IntentRouter router,
+                                         ChatHistoryController chatHistory,
+                                         Runnable clearPending, IntentMatcher matcher,
+                                         FrictionLog frictionLog,
+                                         Consumer<ImproveSession> improveSessionStarter) {
         SlashCommand command = byIntentId.get(intentId);
         if (command == null) {
             return null;
         }
         String args = input == null ? "" : input.trim();
         return command.execute(new SlashCommandContext(args, fiji, library, router,
-                chatHistory, clearPending));
+                chatHistory, clearPending, matcher, frictionLog, improveSessionStarter));
     }
 
     public Collection<SlashCommand> commands() {

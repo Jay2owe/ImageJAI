@@ -29,6 +29,7 @@ public class LocalAssistant {
     private final ConversationContext ctx;
     private final PronounResolver pronouns;
     private Optional<PendingTurn> pending = Optional.empty();
+    private Optional<ImproveSession> improveSession = Optional.empty();
 
     public LocalAssistant() {
         this(new Settings());
@@ -118,6 +119,18 @@ public class LocalAssistant {
     }
 
     public AssistantReply handle(String input) {
+        if (improveSession.isPresent()) {
+            if ("/clear".equalsIgnoreCase(input == null ? "" : input.trim())) {
+                improveSession = Optional.empty();
+            } else {
+                ImproveSession session = improveSession.get();
+                AssistantReply reply = session.handle(input);
+                if (session.isDone()) {
+                    improveSession = Optional.empty();
+                }
+                return reply;
+            }
+        }
         if (pending.isPresent()) {
             PendingTurn pendingTurn = pending.get();
             pending = Optional.empty();
@@ -139,13 +152,15 @@ public class LocalAssistant {
         // /name command always wins over any built-in phrasebook alias.
         if (SlashCommandRegistry.isSlashInput(input)) {
             return slashCommands.dispatchSlash(input, fiji, library, intentRouter,
-                    chatHistory, this::clearConversation);
+                    chatHistory, this::clearConversation, matcher, frictionLog,
+                    this::parkImproveSession);
         }
         Optional<IntentMatcher.MatchedIntent> matched = matcher.match(input);
         if (matched.isPresent()) {
             IntentMatcher.MatchedIntent match = matched.get();
             AssistantReply slashAlias = slashCommands.dispatchIntent(match.intentId(), input,
-                    fiji, library, intentRouter, chatHistory, this::clearConversation);
+                    fiji, library, intentRouter, chatHistory, this::clearConversation,
+                    matcher, frictionLog, this::parkImproveSession);
             if (slashAlias != null) {
                 return slashAlias;
             }
@@ -183,15 +198,25 @@ public class LocalAssistant {
 
     public void clearPending() {
         pending = Optional.empty();
+        improveSession = Optional.empty();
     }
 
     public void clearConversation() {
         pending = Optional.empty();
+        improveSession = Optional.empty();
         ctx.clear();
+    }
+
+    public void parkImproveSession(ImproveSession session) {
+        improveSession = Optional.ofNullable(session);
     }
 
     Optional<PendingTurn> pendingTurnForTest() {
         return pending;
+    }
+
+    Optional<ImproveSession> improveSessionForTest() {
+        return improveSession;
     }
 
     void parkPendingForTest(PendingTurn pendingTurn) {
