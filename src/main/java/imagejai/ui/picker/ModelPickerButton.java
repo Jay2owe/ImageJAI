@@ -89,6 +89,7 @@ public class ModelPickerButton extends JButton {
     private SettingsLink settingsLink;
     private InstallerLink installerLink;
     private RefreshTask refreshTask;
+    private ProviderTierGate tierGate;
 
     private final JPopupMenu popup = new JPopupMenu();
     private JLabel headerStatusLabel;
@@ -117,6 +118,19 @@ public class ModelPickerButton extends JButton {
 
     public void setInstallerLink(InstallerLink link) {
         this.installerLink = link;
+    }
+
+    /**
+     * Inject the tier-safety gate that fires the first-use dialogs before
+     * launch (Phase H). When null, launches proceed unguarded — used by the
+     * legacy unit tests written before Phase H.
+     */
+    public void setTierGate(ProviderTierGate gate) {
+        this.tierGate = gate;
+    }
+
+    public ProviderTierGate tierGate() {
+        return tierGate;
     }
 
     public void setRefreshTask(RefreshTask refreshTask) {
@@ -369,6 +383,19 @@ public class ModelPickerButton extends JButton {
     private void handleLaunch(ModelEntry entry) {
         if (entry == null) {
             return;
+        }
+        if (tierGate != null) {
+            java.awt.Frame owner = (java.awt.Frame) javax.swing.SwingUtilities
+                    .getAncestorOfClass(java.awt.Frame.class, this);
+            ProviderTierGate.Decision decision = tierGate.check(owner, entry);
+            if (decision == ProviderTierGate.Decision.CANCEL_PICK_FREE
+                    || decision == ProviderTierGate.Decision.CANCEL_PICK_CURATED) {
+                // Re-open the popup so the user can pick again. The current
+                // build does not yet carry a "filtered" popup variant — Phase H
+                // surfaces the affordance, Phase I will add the filter chip.
+                showPopup();
+                return;
+            }
         }
         if (settings != null) {
             settings.selectedProvider = entry.providerId();

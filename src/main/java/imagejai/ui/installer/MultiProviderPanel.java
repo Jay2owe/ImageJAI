@@ -1,5 +1,6 @@
 package imagejai.ui.installer;
 
+import imagejai.config.Settings;
 import imagejai.engine.picker.ModelEntry;
 import imagejai.engine.picker.ProviderEntry;
 import imagejai.engine.picker.ProviderRegistry;
@@ -114,6 +115,7 @@ public class MultiProviderPanel extends JPanel {
     private final Map<String, ProviderCard> cards = new LinkedHashMap<String, ProviderCard>();
     private final JPanel cardStack;
     private final JScrollPane scroll;
+    private TierSafetyPanel tierSafetyPanel;
 
     /** Test seam — lets fixtures replace the wizard implementations. */
     public interface WizardFactory {
@@ -121,12 +123,25 @@ public class MultiProviderPanel extends JPanel {
     }
 
     public MultiProviderPanel(ProviderRegistry registry, ProviderCredentials credentials) {
-        this(registry, credentials, defaultFactory(registry, credentials));
+        this(registry, credentials, defaultFactory(registry, credentials), null);
+    }
+
+    public MultiProviderPanel(ProviderRegistry registry,
+                              ProviderCredentials credentials,
+                              Settings settings) {
+        this(registry, credentials, defaultFactory(registry, credentials), settings);
     }
 
     public MultiProviderPanel(ProviderRegistry registry,
                               ProviderCredentials credentials,
                               WizardFactory wizardFactory) {
+        this(registry, credentials, wizardFactory, null);
+    }
+
+    public MultiProviderPanel(ProviderRegistry registry,
+                              ProviderCredentials credentials,
+                              WizardFactory wizardFactory,
+                              Settings settings) {
         super(new BorderLayout());
         this.registry = registry == null ? ProviderRegistry.empty() : registry;
         this.credentials = credentials;
@@ -135,6 +150,11 @@ public class MultiProviderPanel extends JPanel {
 
         cardStack = new JPanel();
         cardStack.setLayout(new BoxLayout(cardStack, BoxLayout.Y_AXIS));
+        if (settings != null) {
+            tierSafetyPanel = new TierSafetyPanel(settings);
+            cardStack.add(tierSafetyPanel);
+            cardStack.add(javax.swing.Box.createVerticalStrut(10));
+        }
         for (String key : CARD_ORDER) {
             ProviderCard card = buildCard(key);
             cards.put(key, card);
@@ -145,6 +165,11 @@ public class MultiProviderPanel extends JPanel {
         scroll.setBorder(null);
         scroll.getVerticalScrollBar().setUnitIncrement(16);
         add(scroll, BorderLayout.CENTER);
+    }
+
+    /** Tier-safety section — null when constructed without a Settings instance (test seam). */
+    public TierSafetyPanel tierSafetyPanel() {
+        return tierSafetyPanel;
     }
 
     /** Names of every provider currently shown as a card. */

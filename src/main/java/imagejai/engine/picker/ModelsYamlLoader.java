@@ -94,6 +94,22 @@ public final class ModelsYamlLoader {
             if (!known.contains(providerKey)) {
                 continue;
             }
+            // Phase H: fold optional top-level `pricing` and `pricing_changes`
+            // blocks into the same map ModelEntry surfaces as nativeFeatures so
+            // MainNotificationCheck has somewhere to read them. This avoids
+            // bloating the ModelEntry constructor surface for fields used by
+            // exactly one downstream consumer (06 §7).
+            Map<String, Object> features = new LinkedHashMap<String, Object>(
+                    nativeFeaturesValue(row.get("native_features")));
+            Object pricing = row.get("pricing");
+            if (pricing instanceof Map) {
+                features.put("pricing", pricing);
+            }
+            Object pricingChanges = row.get("pricing_changes");
+            if (pricingChanges instanceof List) {
+                features.put("pricing_changes", pricingChanges);
+            }
+
             ModelEntry entry = new ModelEntry(
                     providerKey,
                     modelId.trim(),
@@ -109,7 +125,7 @@ public final class ModelsYamlLoader {
                     dateValue(row.get("last_verified")),
                     dateValue(row.get("deprecated_since")),
                     stringValue(row.get("replacement")),
-                    nativeFeaturesValue(row.get("native_features")));
+                    features);
             out.add(entry);
         }
         return out;

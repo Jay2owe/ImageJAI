@@ -123,7 +123,14 @@ public class Settings {
     public boolean budgetCeilingEnabled = false;
     public double  budgetCeilingUsd     = 1.00;
     public boolean showCurrencyFootnote = true;
-    public boolean useMultiProviderPicker = false;
+    // Phase H flips the default to true (v4 milestone). Existing users with an
+    // explicit useMultiProviderPicker=false in their settings.json keep the
+    // old picker until they opt in via the Multi-Provider settings tab.
+    public boolean useMultiProviderPicker = true;
+    /** Per-machine dismissed-banner ids — written by Phase H's TierChangeBanner. */
+    public java.util.Set<String> dismissedTierChangeBanners = new java.util.LinkedHashSet<>();
+    /** Set after the first run where useMultiProviderPicker default flipped to true. */
+    public boolean multiProviderFlipNoticeShown = false;
 
     /**
      * Per-provider cached error from the most recent {@code /models} probe —

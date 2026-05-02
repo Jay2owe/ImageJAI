@@ -11,7 +11,11 @@ import imagejai.engine.picker.ModelEntry;
 import imagejai.engine.picker.NativeAgentLauncher;
 import imagejai.engine.picker.ProviderRegistry;
 import imagejai.engine.picker.ProxyAgentLauncher;
+import imagejai.engine.usage.UsageTracker;
+import imagejai.ui.picker.MainNotificationCheck;
 import imagejai.ui.picker.ModelPickerButton;
+import imagejai.ui.picker.ProviderTierGate;
+import imagejai.ui.picker.TierChangeBanner;
 
 import javax.swing.JButton;
 import javax.swing.JComboBox;
@@ -70,6 +74,9 @@ public class AiRootPanel extends JPanel implements ChatSurface {
     private ModelPickerButton modelPicker;
     private ProviderRegistry providerRegistry;
     private AgentLaunchOrchestrator launchOrchestrator;
+    private ProviderTierGate tierGate;
+    private UsageTracker usageTracker;
+    private TierChangeBanner tierChangeBanner;
     private JButton agentBtn;
     private JFrame frame;
     private String currentCard = CARD_CHAT;
@@ -97,9 +104,27 @@ public class AiRootPanel extends JPanel implements ChatSurface {
         cards.add(chatView, CARD_CHAT);
         cards.add(terminalView, CARD_TERMINAL);
 
-        add(createHeader(), BorderLayout.NORTH);
+        // Top stack: header + tier-change banner (06 §7.4). Banner sits below
+        // the header so it pushes the chat/terminal down without blocking the
+        // play button when many notifications stack.
+        JPanel top = new JPanel(new BorderLayout(0, 4));
+        top.setOpaque(false);
+        top.add(createHeader(), BorderLayout.NORTH);
+        tierChangeBanner = new TierChangeBanner();
+        tierChangeBanner.setDismissListener(n -> {
+            if (settings.dismissedTierChangeBanners == null) {
+                settings.dismissedTierChangeBanners = new java.util.LinkedHashSet<>();
+            }
+            settings.dismissedTierChangeBanners.add(n.key);
+            settings.save();
+        });
+        top.add(tierChangeBanner, BorderLayout.CENTER);
+
+        add(top, BorderLayout.NORTH);
         add(cards, BorderLayout.CENTER);
         showChatCard();
+        runFirstRunFlipNoticeIfNeeded();
+        runStartupTierChangeCheck();
     }
 
     public void setFrame(JFrame frame) {
@@ -234,7 +259,10 @@ public class AiRootPanel extends JPanel implements ChatSurface {
         });
 
         providerRegistry = ProviderRegistry.loadBundled();
+        usageTracker = UsageTracker.load();
+        tierGate = new ProviderTierGate(settings);
         modelPicker = new ModelPickerButton(providerRegistry, settings);
+        modelPicker.setTierGate(tierGate);
         modelPicker.setPreferredSize(new Dimension(220, 22));
         modelPicker.setFont(new Font(Font.SANS_SERIF, Font.PLAIN, 11));
         modelPicker.setSelectionListener(new ModelPickerButton.SelectionListener() {
@@ -498,6 +526,17 @@ public class AiRootPanel extends JPanel implements ChatSurface {
         if (entry == null || launchOrchestrator == null) {
             return;
         }
+        if (usageTracker != null) {
+            usageTracker.recordLaunch(entry.providerId(), entry.modelId(), java.time.LocalDate.now());
+            usageTracker.recordSeenTier(entry.providerId(), entry.modelId(),
+                    entry.tier() == null ? null : entry.tier().yamlValue(),
+                    null, null);
+            try {
+                usageTracker.save();
+            } catch (java.io.IOException ex) {
+                IJ.log("[ImageJAI] Could not persist usage_tracking.json: " + ex.getMessage());
+            }
+        }
         final AgentLaunchOrchestrator.Transport transport =
                 AgentLaunchOrchestrator.transportFor(entry);
         if (transport != AgentLaunchOrchestrator.Transport.CLI) {
@@ -733,6 +772,36 @@ public class AiRootPanel extends JPanel implements ChatSurface {
         if (dialog.wasConfirmed()) {
             settings.save();
             refreshProfileSwitcher();
+        }
+    }
+
+    private void runFirstRunFlipNoticeIfNeeded() {
+        if (settings.useMultiProviderPicker && !settings.multiProviderFlipNoticeShown) {
+            IJ.log("[ImageJAI] Multi-provider model picker is now the default. "
+                    + "Old picker available in Settings → Multi-Provider tab → "
+                    + "Use legacy picker.");
+            settings.multiProviderFlipNoticeShown = true;
+            settings.save();
+        }
+    }
+
+    private void runStartupTierChangeCheck() {
+        if (tierChangeBanner == null || providerRegistry == null || usageTracker == null) {
+            return;
+        }
+        try {
+            java.util.List<MainNotificationCheck.ScheduledChange> changes =
+                    MainNotificationCheck.scheduledChangesFor(providerRegistry);
+            java.util.List<MainNotificationCheck.Notification> notifications =
+                    MainNotificationCheck.run(usageTracker, providerRegistry, changes,
+                            java.time.LocalDate.now());
+            java.util.Set<String> dismissed = settings.dismissedTierChangeBanners == null
+                    ? java.util.Collections.<String>emptySet()
+                    : settings.dismissedTierChangeBanners;
+            tierChangeBanner.setNotifications(
+                    MainNotificationCheck.filterDismissed(notifications, dismissed));
+        } catch (Exception ex) {
+            IJ.log("[ImageJAI] Tier-change check failed: " + ex.getMessage());
         }
     }
 

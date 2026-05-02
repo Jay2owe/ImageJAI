@@ -32,6 +32,59 @@ DEFAULT_MAX_TOKENS = 4096
 DEFAULT_TIMEOUT_SECONDS = 120.0
 DEFAULT_MAX_RETRIES = 2
 
+# Phase H — Anthropic's Messages API does not return the LiteLLM cost header
+# because we bypass the proxy. Convert the response usage block into the same
+# "x-litellm-response-cost" shape (USD as a string) so the budget tracker
+# observes a uniform stream regardless of transport.
+ANTHROPIC_PRICING_USD_PER_MTOK: dict[str, dict[str, float]] = {
+    "claude-opus-4-7": {"input": 15.0, "output": 75.0},
+    "claude-sonnet-4-6": {"input": 3.0, "output": 15.0},
+    "claude-haiku-4-5": {"input": 0.80, "output": 4.0},
+}
+
+_COST_LISTENERS: list[Callable[[str], None]] = []
+
+
+def add_cost_listener(listener: Callable[[str], None]) -> None:
+    """Register a function to receive cost values for every Anthropic call."""
+
+    if listener and listener not in _COST_LISTENERS:
+        _COST_LISTENERS.append(listener)
+
+
+def remove_cost_listener(listener: Callable[[str], None]) -> None:
+    if listener in _COST_LISTENERS:
+        _COST_LISTENERS.remove(listener)
+
+
+def _emit_cost(value: float) -> None:
+    if value <= 0:
+        return
+    payload = f"{value:.6f}"
+    for listener in list(_COST_LISTENERS):
+        try:
+            listener(payload)
+        except Exception:  # listeners must never break the call path
+            pass
+
+
+def _estimate_cost_usd(model: str, response: Any) -> float:
+    pricing = ANTHROPIC_PRICING_USD_PER_MTOK.get(model)
+    if not pricing:
+        return 0.0
+    usage = getattr(response, "usage", None)
+    if usage is None:
+        return 0.0
+    in_tok = int(getattr(usage, "input_tokens", 0) or 0)
+    out_tok = int(getattr(usage, "output_tokens", 0) or 0)
+    cache_read = int(getattr(usage, "cache_read_input_tokens", 0) or 0)
+    cache_write = int(getattr(usage, "cache_creation_input_tokens", 0) or 0)
+    # Treat cache reads at 10% of input rate (Anthropic ephemeral caching);
+    # cache writes at the standard input rate per Anthropic's billing docs.
+    billable_in = in_tok + cache_write + (cache_read * 0.1)
+    return (billable_in / 1_000_000.0) * pricing["input"] \
+        + (out_tok / 1_000_000.0) * pricing["output"]
+
 _SERVER_TOOL_SPECS: dict[str, dict[str, Any]] = {
     "web_search": {"type": "web_search_20250305", "name": "web_search"},
     "code_execution": {"type": "code_execution_20250522", "name": "code_execution"},
@@ -113,9 +166,14 @@ class AnthropicNativeClient(ProviderClient):
 
         kwargs.update(opts)
         try:
-            return self._client.messages.create(**kwargs)
+            response = self._client.messages.create(**kwargs)
         except (APIConnectionError, APIStatusError, APITimeoutError) as exc:
             raise RuntimeError(f"Anthropic chat failed for model {model!r}: {exc}") from exc
+        try:
+            _emit_cost(_estimate_cost_usd(model, response))
+        except Exception:
+            pass  # cost listeners must never block a successful call.
+        return response
 
     @staticmethod
     def _split_system(messages: list[dict[str, Any]]) -> tuple[str, list[dict[str, Any]]]:

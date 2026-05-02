@@ -31,6 +31,54 @@ from google.genai import types as genai_types
 from .base import ProviderClient, ToolCall, to_gemini_tool
 
 
+# Phase H — Gemini's API does not return the LiteLLM cost header (we bypass
+# the proxy on the native path). Convert response.usage_metadata into the same
+# "x-litellm-response-cost" shape so the budget tracker observes a uniform
+# stream regardless of transport.
+GEMINI_PRICING_USD_PER_MTOK: dict[str, dict[str, float]] = {
+    "gemini-2.5-pro": {"input": 1.25, "output": 5.0},
+    "gemini-2.5-flash": {"input": 0.30, "output": 2.5},
+    "gemini-2.5-flash-lite": {"input": 0.10, "output": 0.40},
+    "gemini-2.0-flash": {"input": 0.10, "output": 0.40},
+}
+
+_COST_LISTENERS: list[Callable[[str], None]] = []
+
+
+def add_cost_listener(listener: Callable[[str], None]) -> None:
+    if listener and listener not in _COST_LISTENERS:
+        _COST_LISTENERS.append(listener)
+
+
+def remove_cost_listener(listener: Callable[[str], None]) -> None:
+    if listener in _COST_LISTENERS:
+        _COST_LISTENERS.remove(listener)
+
+
+def _emit_cost(value: float) -> None:
+    if value <= 0:
+        return
+    payload = f"{value:.6f}"
+    for listener in list(_COST_LISTENERS):
+        try:
+            listener(payload)
+        except Exception:
+            pass
+
+
+def _estimate_cost_usd(model: str, response: Any) -> float:
+    pricing = GEMINI_PRICING_USD_PER_MTOK.get(model)
+    if not pricing:
+        return 0.0
+    usage = getattr(response, "usage_metadata", None)
+    if usage is None:
+        return 0.0
+    in_tok = int(getattr(usage, "prompt_token_count", 0) or 0)
+    out_tok = int(getattr(usage, "candidates_token_count", 0) or 0)
+    return (in_tok / 1_000_000.0) * pricing["input"] \
+        + (out_tok / 1_000_000.0) * pricing["output"]
+
+
 class GeminiNativeClient(ProviderClient):
     """Native Gemini client using google-genai."""
 
@@ -95,7 +143,7 @@ class GeminiNativeClient(ProviderClient):
         config = genai_types.GenerateContentConfig(**config_kwargs) if config_kwargs else None
         for attempt in range(self.max_retries + 1):
             try:
-                return self._client.models.generate_content(
+                response = self._client.models.generate_content(
                     model=model,
                     contents=self._messages_to_contents(messages),
                     config=config,
@@ -104,6 +152,12 @@ class GeminiNativeClient(ProviderClient):
                 if attempt >= self.max_retries:
                     raise RuntimeError(f"Gemini chat failed for model {model!r}: {exc}") from exc
                 time.sleep(self.retry_backoff * (2**attempt))
+                continue
+            try:
+                _emit_cost(_estimate_cost_usd(model, response))
+            except Exception:
+                pass
+            return response
         raise RuntimeError(f"Gemini chat failed for model {model!r}: retry loop exhausted")
 
     def extract_text(self, response: Any) -> str:

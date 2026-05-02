@@ -75,7 +75,10 @@ public class ModelMenuItem extends JMenuItem {
         // Hover-card replaces the Swing tooltip; for soft-deprecated rows we
         // surface the "no longer available since X" copy via an HTML tooltip
         // so screen readers still get the key date even with HoverCard down.
-        setToolTipText(deprecationTooltip(entry, LocalDate.now()));
+        // Tier-badge lay-language tooltips per docs/multi_provider/06_tier_safety.md §1.2
+        // are appended so screen-reader users get the headline before the
+        // hover-card opens.
+        setToolTipText(composeTooltip(entry, LocalDate.now()));
         addMouseMotionListener(new MouseMotionAdapter() {
             @Override
             public void mouseMoved(MouseEvent e) {
@@ -203,6 +206,49 @@ public class ModelMenuItem extends JMenuItem {
         Map<TextAttribute, Object> attrs = new HashMap<TextAttribute, Object>();
         attrs.put(TextAttribute.STRIKETHROUGH, TextAttribute.STRIKETHROUGH_ON);
         return base.deriveFont(attrs);
+    }
+
+    /**
+     * Lay-language tier-badge tooltip per docs/multi_provider/06_tier_safety.md §1.2.
+     * Returned text is the same whether the user hovers the badge column or the
+     * row body — Swing's per-cell tooltips are awkward inside JPopupMenu, so we
+     * surface the badge meaning at the row level and rely on the hover-card for
+     * the rest of the detail.
+     */
+    static String tierBadgeTooltip(ModelEntry.Tier tier) {
+        if (tier == null) {
+            return "Auto-detected from the provider — pricing and reliability not yet verified.";
+        }
+        switch (tier) {
+            case FREE:
+                return "Free to use. No card needed, no usage caps that matter for normal sessions.";
+            case FREE_WITH_LIMITS:
+                return "Free, but rate-limited. You may hit a per-minute or per-day cap on long sessions — keep an eye on the status bar.";
+            case PAID:
+                return "You pay per use. Charges only happen if you've already added credit or a card to this provider — see hover for current rates.";
+            case REQUIRES_SUBSCRIPTION:
+                return "Requires an active monthly subscription with this provider. Without it the request will be refused — no surprise charges.";
+            case UNCURATED:
+            default:
+                return "Auto-detected from the provider — pricing and reliability not yet verified. Check the provider's pricing page directly before running a long session.";
+        }
+    }
+
+    static String composeTooltip(ModelEntry entry, LocalDate today) {
+        if (entry == null) {
+            return null;
+        }
+        String deprecation = deprecationTooltip(entry, today);
+        String badge = tierBadgeTooltip(entry.tier());
+        if (deprecation == null) {
+            return badge;
+        }
+        return "<html>" + escapeHtml(deprecation) + "<br>" + escapeHtml(badge) + "</html>";
+    }
+
+    private static String escapeHtml(String value) {
+        if (value == null) return "";
+        return value.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;");
     }
 
     static String deprecationTooltip(ModelEntry entry, LocalDate today) {

@@ -620,6 +620,15 @@ models:
     context_size: large
     deprecated_since: null
     replacement: null
+    pricing:
+      input_usd_per_mtok: 0.435
+      output_usd_per_mtok: 0.87
+      note: "75% promotional discount; expires 2026-05-31"
+    pricing_changes:
+      - effective_date: "2026-06-01"
+        reason: "Promotional discount expires"
+        input_usd_per_mtok: 1.74
+        output_usd_per_mtok: 3.48
     notes: >
       75% promotional discount expires 2026-05-31; pricing increases ~4×
       after that date.

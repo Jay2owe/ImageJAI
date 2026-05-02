@@ -171,7 +171,7 @@ public class SettingsDialog extends JDialog {
         installerPanel = new InstallerPanel(settings);
         tabs.addTab("Models & Agents", installerPanel);
         multiProviderPanel = new MultiProviderPanel(
-                ProviderRegistry.loadBundled(), settings.providerCredentials());
+                ProviderRegistry.loadBundled(), settings.providerCredentials(), settings);
         tabs.addTab("Multi-Provider", multiProviderPanel);
         content.add(tabs, BorderLayout.CENTER);
 
