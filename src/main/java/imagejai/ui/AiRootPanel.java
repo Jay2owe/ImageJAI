@@ -69,7 +69,7 @@ public class AiRootPanel extends JPanel implements ChatSurface {
         setBackground(BG_MAIN);
 
         chatView = new ChatView(settings);
-        terminalView = new TerminalView();
+        terminalView = new TerminalView(settings);
 
         cardLayout = new CardLayout();
         cards = new JPanel(cardLayout);
