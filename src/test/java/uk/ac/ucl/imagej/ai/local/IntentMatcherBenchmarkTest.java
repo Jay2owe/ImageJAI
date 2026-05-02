@@ -56,8 +56,8 @@ public class IntentMatcherBenchmarkTest {
                 total,
                 percent));
         assertTrue("benchmark must contain at least one row", total > 0);
-        assertTrue("top-1 accuracy must improve over the stage 03 50.0% baseline",
-                percent > 50.0);
+        assertTrue("top-1 accuracy must be at least 80% for the stage 06 command surface",
+                percent >= 80.0);
     }
 
     @Test
@@ -86,6 +86,26 @@ public class IntentMatcherBenchmarkTest {
         assertEquals("image.pixel_size", ranked.get(0).intentId());
         assertTrue(ranked.get(0).score() >= 0.90);
         assertTrue(ranked.size() <= 3);
+    }
+
+    @Test
+    public void slotAwareControlIntentsExtractNumbersAndRanges() {
+        IntentLibrary library = IntentLibrary.load();
+        IntentMatcher matcher = new IntentMatcher(library);
+
+        IntentMatcher.MatchedIntent channel = matcher.match("switch to channel 2").get();
+        assertEquals("image.switch_channel", channel.intentId());
+        assertEquals("2", channel.slots().get("channel"));
+
+        IntentMatcher.MatchedIntent substack = matcher.match("make substack slices 5-20").get();
+        assertEquals("image.make_substack", substack.intentId());
+        assertEquals("5-20", substack.slots().get("slices"));
+
+        IntentMatcher.MatchedIntent scale = matcher.match("set scale 100 px equals 10 um").get();
+        assertEquals("image.set_scale", scale.intentId());
+        assertEquals("100", scale.slots().get("pixels"));
+        assertEquals("10", scale.slots().get("distance"));
+        assertEquals("um", scale.slots().get("unit"));
     }
 
     @Test
