@@ -110,6 +110,11 @@ public class FrictionLog {
         return out;
     }
 
+    /** Full retained buffer, most recent entries first. */
+    public synchronized List<FailureEntry> snapshot() {
+        return recent(CAPACITY);
+    }
+
     /** Patterns (groupings of recurring failures) within the recent window. */
     public synchronized List<Pattern> patterns() {
         long cutoff = System.currentTimeMillis() - WINDOW_MS;

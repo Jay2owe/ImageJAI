@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "intents": [
+    {
+      "id": "image.pixel_size",
+      "description": "Report the active image's pixel size",
+      "phrases": [
+        "pixel size",
+        "px size",
+        "calibration",
+        "what is the pixel size",
+        "what's the pixel size",
+        "spatial resolution",
+        "how big are the pixels",
+        "show pixel size",
+        "image calibration",
+        "pixel dimensions"
+      ]
+    }
+  ]
+}

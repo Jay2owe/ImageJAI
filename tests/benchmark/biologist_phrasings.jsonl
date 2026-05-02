@@ -1,0 +1,20 @@
+{"phrase":"pixel size","expected_intent_id":"image.pixel_size"}
+{"phrase":"px size","expected_intent_id":"image.pixel_size"}
+{"phrase":"calibration","expected_intent_id":"image.pixel_size"}
+{"phrase":"what is the pixel size","expected_intent_id":"image.pixel_size"}
+{"phrase":"what's the pixel size","expected_intent_id":"image.pixel_size"}
+{"phrase":"spatial resolution","expected_intent_id":"image.pixel_size"}
+{"phrase":"how big are the pixels","expected_intent_id":"image.pixel_size"}
+{"phrase":"show pixel size","expected_intent_id":"image.pixel_size"}
+{"phrase":"image calibration","expected_intent_id":"image.pixel_size"}
+{"phrase":"pixel dimensions","expected_intent_id":"image.pixel_size"}
+{"phrase":"image dimensions","expected_intent_id":"image.dimensions"}
+{"phrase":"bit depth","expected_intent_id":"image.bit_depth"}
+{"phrase":"how many channels","expected_intent_id":"image.channel_count"}
+{"phrase":"list open images","expected_intent_id":"image.list_open"}
+{"phrase":"close all images","expected_intent_id":"image.close_all"}
+{"phrase":"duplicate active image","expected_intent_id":"image.duplicate_active"}
+{"phrase":"auto threshold otsu","expected_intent_id":"segmentation.auto_threshold"}
+{"phrase":"measure intensity","expected_intent_id":"measurement.intensity"}
+{"phrase":"list rois","expected_intent_id":"roi.list"}
+{"phrase":"show results table","expected_intent_id":"results.show"}
