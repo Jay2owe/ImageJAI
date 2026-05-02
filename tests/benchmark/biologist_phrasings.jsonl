@@ -78,3 +78,38 @@
 {"phrase":"commands","expected_intent_id":"builtin.commands"}
 {"phrase":"which agent am i using","expected_intent_id":"builtin.current_agent"}
 {"phrase":"version","expected_intent_id":"builtin.version"}
+{"phrase":"subtract background","expected_intent_id":"preprocess.subtract_background"}
+{"phrase":"subtract background radius 50","expected_intent_id":"preprocess.subtract_background"}
+{"phrase":"gaussian blur","expected_intent_id":"preprocess.gaussian_blur"}
+{"phrase":"gaussian blur sigma 2","expected_intent_id":"preprocess.gaussian_blur"}
+{"phrase":"median filter","expected_intent_id":"preprocess.median_filter"}
+{"phrase":"mean filter","expected_intent_id":"preprocess.mean_filter"}
+{"phrase":"variance filter","expected_intent_id":"preprocess.variance"}
+{"phrase":"unsharp mask","expected_intent_id":"preprocess.unsharp_mask"}
+{"phrase":"bandpass filter","expected_intent_id":"preprocess.bandpass_filter"}
+{"phrase":"threshold otsu","expected_intent_id":"segmentation.auto_threshold"}
+{"phrase":"threshold li dark background","expected_intent_id":"segmentation.auto_threshold"}
+{"phrase":"compare thresholds","expected_intent_id":"segmentation.compare_thresholds"}
+{"phrase":"convert to mask","expected_intent_id":"segmentation.convert_to_mask"}
+{"phrase":"count cells","expected_intent_id":"segmentation.count_cells"}
+{"phrase":"count particles","expected_intent_id":"segmentation.count_particles"}
+{"phrase":"count nuclei","expected_intent_id":"segmentation.count_nuclei"}
+{"phrase":"fill holes","expected_intent_id":"segmentation.fill_holes"}
+{"phrase":"watershed","expected_intent_id":"segmentation.watershed"}
+{"phrase":"skeletonize","expected_intent_id":"segmentation.skeletonize"}
+{"phrase":"distance map","expected_intent_id":"segmentation.distance_map"}
+{"phrase":"voronoi","expected_intent_id":"segmentation.voronoi"}
+{"phrase":"find maxima prominence 10","expected_intent_id":"segmentation.find_maxima"}
+{"phrase":"calculate ctcf","expected_intent_id":"measurement.ctcf"}
+{"phrase":"measure rois","expected_intent_id":"measurement.measure_rois"}
+{"phrase":"summarize results","expected_intent_id":"measurement.summarise"}
+{"phrase":"clear results","expected_intent_id":"measurement.clear_results"}
+{"phrase":"set measurements area mean integrated","expected_intent_id":"measurement.set_measurements"}
+{"phrase":"line profile","expected_intent_id":"measurement.line_profile"}
+{"phrase":"histogram","expected_intent_id":"measurement.histogram"}
+{"phrase":"nearest neighbor distance","expected_intent_id":"measurement.nearest_neighbour"}
+{"phrase":"open threshold dialog","expected_intent_id":"dialog.threshold"}
+{"phrase":"analyze particles","expected_intent_id":"dialog.analyze_particles"}
+{"phrase":"open find maxima dialog","expected_intent_id":"dialog.find_maxima"}
+{"phrase":"open gaussian blur dialog","expected_intent_id":"dialog.gaussian_blur"}
+{"phrase":"open subtract background dialog","expected_intent_id":"dialog.subtract_background"}
