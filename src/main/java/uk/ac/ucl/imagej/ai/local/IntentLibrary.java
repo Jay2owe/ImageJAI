@@ -46,7 +46,20 @@ public class IntentLibrary {
         for (Intent intent : AnalysisIntentFactory.createAll()) {
             register(intent);
         }
-        addPhrase("help", HelpIntent.ID);
+        addSlashAliases();
+        addPhrase("help", "slash.help");
+    }
+
+    private void addSlashAliases() {
+        addPhrase("what slash commands can I use", "slash.help");
+        addPhrase("clear chat", "slash.clear");
+        addPhrase("show my macros", "slash.macros");
+        addPhrase("info", "slash.info");
+        addPhrase("show open images", "slash.info");
+        addPhrase("close images", "slash.close");
+        addPhrase("teach a command", "slash.teach");
+        addPhrase("show learned intents", "slash.intents");
+        addPhrase("forget a learned intent", "slash.forget");
     }
 
     public Intent byId(String id) {
