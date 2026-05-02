@@ -1,1 +1,6 @@
 litellm[proxy]==1.83.14
+openai==2.24.0
+anthropic==0.97.0
+google-genai==1.71.0
+respx==0.23.1
+pytest-httpx==0.36.2
