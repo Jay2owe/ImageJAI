@@ -95,6 +95,39 @@ public class IntentMatcher {
         return Collections.unmodifiableList(new ArrayList<RankedPhrase>(ranked.subList(0, limit)));
     }
 
+    public Match2Result match2(String input, double margin) {
+        List<RankedPhrase> top = topK(input, 2);
+        if (top.isEmpty()) {
+            return Match2Result.miss();
+        }
+        RankedPhrase best = top.get(0);
+        if (best.score() < settings.getLocalAssistantFuzzyThreshold()) {
+            return Match2Result.miss();
+        }
+        if (top.size() == 1 || margin <= 0.0) {
+            return Match2Result.confident(best);
+        }
+        RankedPhrase runner = top.get(1);
+        if (best.intentId().equals(runner.intentId())) {
+            return Match2Result.confident(best);
+        }
+        String exactIntentId = library.phraseToIntentId().get(normalise(input));
+        if (exactIntentId != null) {
+            if (exactIntentId.equals(runner.intentId())
+                    && Math.abs(best.score() - runner.score()) < 0.0000001) {
+                return Match2Result.confident(best);
+            }
+            if (exactIntentId.equals(best.intentId())
+                    && runner.intentId().startsWith("menu.")) {
+                return Match2Result.confident(best);
+            }
+        }
+        double gap = best.score() - runner.score();
+        return gap < margin
+                ? Match2Result.ambiguous(best, runner, gap)
+                : Match2Result.confident(best);
+    }
+
     public static String normalise(String input) {
         if (input == null) {
             return "";

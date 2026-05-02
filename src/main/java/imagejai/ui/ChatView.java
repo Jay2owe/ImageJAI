@@ -18,6 +18,8 @@ import javax.swing.*;
 import javax.swing.border.EmptyBorder;
 import javax.swing.event.DocumentEvent;
 import javax.swing.event.DocumentListener;
+import javax.swing.event.HyperlinkEvent;
+import javax.swing.event.HyperlinkListener;
 import javax.swing.text.html.HTMLDocument;
 import java.awt.*;
 import java.awt.event.*;
@@ -61,6 +63,7 @@ public class ChatView extends JPanel implements ChatPanelController, ChatSurface
     private JTextArea inputArea;
     private JButton sendBtn;
     private AutocompleteChipRow chipRow;
+    private List<RankedPhrase> clarificationCandidates = new ArrayList<RankedPhrase>();
     private Timer autocompleteTimer;
     private JLabel statusLabel;
     private JLabel thinkingLabel;
@@ -104,6 +107,14 @@ public class ChatView extends JPanel implements ChatPanelController, ChatSurface
         messageArea.setForeground(Color.WHITE);
         messageArea.putClientProperty(JEditorPane.HONOR_DISPLAY_PROPERTIES, Boolean.TRUE);
         messageArea.setFont(new Font(Font.SANS_SERIF, Font.PLAIN, 13));
+        messageArea.addHyperlinkListener(new HyperlinkListener() {
+            @Override
+            public void hyperlinkUpdate(HyperlinkEvent e) {
+                if (e.getEventType() == HyperlinkEvent.EventType.ACTIVATED) {
+                    handleChatLink(e.getDescription());
+                }
+            }
+        });
         initHtmlContent();
 
         scrollPane = new JScrollPane(messageArea);
@@ -840,6 +851,9 @@ public class ChatView extends JPanel implements ChatPanelController, ChatSurface
                 if (reply.text() != null && reply.text().trim().length() > 0) {
                     appendMessage("assistant", reply.text());
                 }
+                if (reply.isClarifying() && !reply.clarificationCandidates().isEmpty()) {
+                    appendClarificationChips(reply.clarificationCandidates());
+                }
                 if (reply.macroEcho() != null && !reply.macroEcho().trim().isEmpty()) {
                     appendMessage("assistant", "```\n" + reply.macroEcho() + "\n```");
                 }
@@ -858,6 +872,46 @@ public class ChatView extends JPanel implements ChatPanelController, ChatSurface
             // No listener wired yet — show placeholder
             appendMessage("assistant", "[Phase 2: LLM integration not yet wired]\n"
                     + "You said: " + text);
+        }
+    }
+
+    private void appendClarificationChips(List<RankedPhrase> candidates) {
+        clarificationCandidates = candidates == null
+                ? new ArrayList<RankedPhrase>()
+                : new ArrayList<RankedPhrase>(candidates.subList(0, Math.min(2, candidates.size())));
+        if (clarificationCandidates.isEmpty()) {
+            return;
+        }
+
+        StringBuilder html = new StringBuilder();
+        html.append("<div style='margin:0 0 6px 13px;padding:0;'>");
+        for (int i = 0; i < clarificationCandidates.size(); i++) {
+            RankedPhrase candidate = clarificationCandidates.get(i);
+            html.append("<a href='ijai-chip:")
+                    .append(i)
+                    .append("' style='background:#323740;color:#dce1e6;")
+                    .append("text-decoration:none;font-size:11px;padding:3px 7px;")
+                    .append("margin-right:4px;'>")
+                    .append(escapeHtml(candidate.phrase()))
+                    .append("</a>");
+        }
+        html.append("</div>");
+        appendHtml(html.toString());
+    }
+
+    private void handleChatLink(String description) {
+        if (description == null || !description.startsWith("ijai-chip:")) {
+            return;
+        }
+        try {
+            int index = Integer.parseInt(description.substring("ijai-chip:".length()));
+            if (index < 0 || index >= clarificationCandidates.size()) {
+                return;
+            }
+            inputArea.setText(clarificationCandidates.get(index).phrase());
+            sendMessage();
+        } catch (NumberFormatException ignored) {
+            // Ignore malformed links in the chat transcript.
         }
     }
 

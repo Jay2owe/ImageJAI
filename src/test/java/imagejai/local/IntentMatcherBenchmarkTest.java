@@ -50,14 +50,51 @@ public class IntentMatcherBenchmarkTest {
         }
 
         double percent = total == 0 ? 0.0 : (100.0 * correct) / total;
+        double roundedPercent = Math.round(percent * 10.0) / 10.0;
         System.out.println(String.format(Locale.ROOT,
                 "IntentMatcherBenchmarkTest top-1 accuracy: %d/%d (%.1f%%)",
                 correct,
                 total,
                 percent));
         assertTrue("benchmark must contain at least one row", total > 0);
-        assertTrue("top-1 accuracy must be at least 80% for the stage 06 command surface",
-                percent >= 80.0);
+        assertTrue("top-1 accuracy must stay at least 97.4%",
+                roundedPercent >= 97.4);
+    }
+
+    @Test
+    public void knownBenchmarkMissesAreDisambiguated() throws IOException {
+        IntentLibrary library = IntentLibrary.load();
+        IntentMatcher matcher = new IntentMatcher(library);
+        Gson gson = new Gson();
+
+        int checked = 0;
+        Path benchmark = Paths.get("tests", "benchmark", "biologist_phrasings.jsonl");
+        BufferedReader reader = Files.newBufferedReader(benchmark, StandardCharsets.UTF_8);
+        try {
+            String line;
+            while ((line = reader.readLine()) != null) {
+                line = line.trim();
+                if (line.length() == 0) {
+                    continue;
+                }
+                BenchmarkRow row = gson.fromJson(line, BenchmarkRow.class);
+                if (!isKnownMiss(row.phrase)) {
+                    continue;
+                }
+                Optional<IntentMatcher.MatchedIntent> matched = matcher.match(row.phrase);
+                boolean top1Hit = matched.isPresent()
+                        && row.expectedIntentId.equals(matched.get().intentId());
+                Match2Result match2 = matcher.match2(row.phrase, 0.05);
+                boolean ambiguousHit = match2.isAmbiguous()
+                        && candidateHasIntent(match2, row.expectedIntentId);
+                assertTrue(row.phrase + " must be top-1 or disambiguated",
+                        top1Hit || ambiguousHit);
+                checked++;
+            }
+        } finally {
+            reader.close();
+        }
+        assertEquals(3, checked);
     }
 
     @Test
@@ -135,5 +172,16 @@ public class IntentMatcherBenchmarkTest {
         String phrase;
         @SerializedName("expected_intent_id")
         String expectedIntentId;
+    }
+
+    private static boolean isKnownMiss(String phrase) {
+        return "how many frames".equals(phrase)
+                || "what can you do".equals(phrase)
+                || "commands".equals(phrase);
+    }
+
+    private static boolean candidateHasIntent(Match2Result result, String intentId) {
+        return (result.best() != null && intentId.equals(result.best().intentId()))
+                || (result.runnerUp() != null && intentId.equals(result.runnerUp().intentId()));
     }
 }

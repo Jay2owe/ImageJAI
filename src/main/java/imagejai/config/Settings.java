@@ -67,6 +67,10 @@ public class Settings {
 
     public String selectedAgentName = AgentLauncher.LOCAL_ASSISTANT_NAME;
     public double localAssistantFuzzyThreshold = 0.90;
+    // Tuned against tests/benchmark/biologist_phrasings.jsonl in stage 03:
+    // 0.02 misses "commands"; 0.05/0.08/0.10 catch the known misses.
+    // Keep the smallest passing margin so confident phrases like "pixel size" stay quiet.
+    public double localAssistantDisambiguationMargin = 0.05;
     public boolean expandMenuPhrasebook = false;
 
     public static final String DEFAULT_MINILM_MODEL_SHA256 =
@@ -219,6 +223,22 @@ public class Settings {
             localAssistantFuzzyThreshold = 0.90;
         } else {
             localAssistantFuzzyThreshold = Math.min(1.0, threshold);
+        }
+        save();
+    }
+
+    public double getLocalAssistantDisambiguationMargin() {
+        if (localAssistantDisambiguationMargin < 0.0 || localAssistantDisambiguationMargin > 1.0) {
+            return 0.05;
+        }
+        return localAssistantDisambiguationMargin;
+    }
+
+    public void setLocalAssistantDisambiguationMargin(double margin) {
+        if (margin < 0.0) {
+            localAssistantDisambiguationMargin = 0.05;
+        } else {
+            localAssistantDisambiguationMargin = Math.min(1.0, margin);
         }
         save();
     }

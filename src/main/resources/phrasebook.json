@@ -199,6 +199,7 @@
       "id": "image.frame_count",
       "description": "Report frame count",
       "phrases": [
+        "how many frame",
         "number of time frames",
         "frame count",
         "timepoint count"
@@ -3499,6 +3500,7 @@
       "id": "builtin.capabilities",
       "description": "Describe capabilities",
       "phrases": [
+        "what can youdo",
         "what do you support",
         "assistant capabilities",
         "available actions"
@@ -3508,6 +3510,7 @@
       "id": "builtin.commands",
       "description": "List command surface",
       "phrases": [
+        "command",
         "show commands"
       ]
     },

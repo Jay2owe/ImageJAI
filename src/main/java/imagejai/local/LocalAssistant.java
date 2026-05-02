@@ -6,6 +6,7 @@ import imagejai.engine.FrictionLog;
 import imagejai.engine.IntentRouter;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -23,10 +24,11 @@ public class LocalAssistant {
     private final IntentRouter intentRouter;
     private final SlashCommandRegistry slashCommands;
     private final ChatHistoryController chatHistory;
+    private final Settings settings;
     private Optional<PendingTurn> pending = Optional.empty();
 
     public LocalAssistant() {
-        this(IntentLibrary.load(), new FijiBridge(new CommandEngine()), new FrictionLog());
+        this(new Settings());
     }
 
     public LocalAssistant(Settings settings) {
@@ -39,7 +41,7 @@ public class LocalAssistant {
     }
 
     public LocalAssistant(IntentLibrary library, FijiBridge fiji, FrictionLog frictionLog) {
-        this(library, new IntentMatcher(library), fiji, frictionLog);
+        this(library, fiji, frictionLog, new Settings());
     }
 
     public LocalAssistant(IntentLibrary library, FijiBridge fiji, FrictionLog frictionLog,
@@ -60,20 +62,35 @@ public class LocalAssistant {
 
     public LocalAssistant(IntentLibrary library, IntentMatcher matcher, FijiBridge fiji,
                           FrictionLog frictionLog) {
-        this(library, matcher, fiji, frictionLog, new IntentRouter(), null, new SlashCommandRegistry());
+        this(library, matcher, fiji, frictionLog, new Settings());
+    }
+
+    public LocalAssistant(IntentLibrary library, IntentMatcher matcher, FijiBridge fiji,
+                          FrictionLog frictionLog, Settings settings) {
+        this(library, matcher, fiji, frictionLog, new IntentRouter(), null,
+                new SlashCommandRegistry(), settings);
     }
 
     public LocalAssistant(IntentLibrary library, IntentMatcher matcher, FijiBridge fiji,
                           FrictionLog frictionLog, IntentRouter intentRouter,
                           ChatHistoryController chatHistory) {
         this(library, matcher, fiji, frictionLog, intentRouter, chatHistory,
-                new SlashCommandRegistry());
+                new SlashCommandRegistry(), new Settings());
     }
 
     public LocalAssistant(IntentLibrary library, IntentMatcher matcher, FijiBridge fiji,
                           FrictionLog frictionLog, IntentRouter intentRouter,
                           ChatHistoryController chatHistory,
                           SlashCommandRegistry slashCommands) {
+        this(library, matcher, fiji, frictionLog, intentRouter, chatHistory,
+                slashCommands, new Settings());
+    }
+
+    public LocalAssistant(IntentLibrary library, IntentMatcher matcher, FijiBridge fiji,
+                          FrictionLog frictionLog, IntentRouter intentRouter,
+                          ChatHistoryController chatHistory,
+                          SlashCommandRegistry slashCommands,
+                          Settings settings) {
         this.library = library;
         this.matcher = matcher;
         this.fiji = fiji;
@@ -81,6 +98,7 @@ public class LocalAssistant {
         this.intentRouter = intentRouter == null ? new IntentRouter() : intentRouter;
         this.chatHistory = chatHistory;
         this.slashCommands = slashCommands == null ? new SlashCommandRegistry() : slashCommands;
+        this.settings = settings == null ? new Settings() : settings;
     }
 
     public AssistantReply handle(String input) {
@@ -105,6 +123,16 @@ public class LocalAssistant {
                     fiji, library, intentRouter, chatHistory, this::clearPending);
             if (slashAlias != null) {
                 return slashAlias;
+            }
+            Match2Result match2 = matcher.match2(input,
+                    settings.getLocalAssistantDisambiguationMargin());
+            if (match2.isAmbiguous()) {
+                List<RankedPhrase> candidates = new ArrayList<RankedPhrase>();
+                candidates.add(match2.best());
+                candidates.add(match2.runnerUp());
+                pending = Optional.of(PendingTurn.disambiguation("Did you mean:", candidates));
+                frictionLog.record("local_assistant", input, "event=disambiguation_shown");
+                return AssistantReply.clarifying("Did you mean:", candidates);
             }
             Intent intent = library.byId(match.intentId());
             if (intent != null) {
@@ -149,10 +177,25 @@ public class LocalAssistant {
             case PARAMETER:
                 return resolveParameter(pendingTurn, input);
             case DISAMBIGUATION:
-                return Optional.empty();
+                return resolveDisambiguation(pendingTurn, input);
             default:
                 return Optional.empty();
         }
+    }
+
+    private Optional<AssistantReply> resolveDisambiguation(PendingTurn pendingTurn, String input) {
+        String key = IntentMatcher.normalise(input);
+        for (RankedPhrase candidate : pendingTurn.candidates()) {
+            if (key.equals(IntentMatcher.normalise(candidate.phrase()))) {
+                Intent intent = library.byId(candidate.intentId());
+                if (intent == null) {
+                    return Optional.empty();
+                }
+                return Optional.of(executeOrPrompt(intent,
+                        Collections.<String, String>emptyMap()));
+            }
+        }
+        return Optional.empty();
     }
 
     private Optional<AssistantReply> resolveParameter(PendingTurn pendingTurn, String input) {
