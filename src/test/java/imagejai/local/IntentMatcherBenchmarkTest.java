@@ -82,7 +82,11 @@ public class IntentMatcherBenchmarkTest {
         java.util.List<RankedPhrase> ranked = matcher.topK("pixle siz", 3);
 
         assertFalse(ranked.isEmpty());
-        assertEquals("pixel size", ranked.get(0).phrase());
+        // After the LLM-distilled phrasebook lands, the top candidate may be
+        // "pixle size" (typo phrasing the LLM anticipated) rather than the
+        // canonical "pixel size" — both belong to image.pixel_size, which is
+        // what Tier 2 ranking is supposed to surface. Validate the intent and
+        // score; the specific phrase string is implementation detail.
         assertEquals("image.pixel_size", ranked.get(0).intentId());
         assertTrue(ranked.get(0).score() >= 0.90);
         assertTrue(ranked.size() <= 3);

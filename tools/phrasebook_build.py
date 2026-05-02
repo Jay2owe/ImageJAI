@@ -1,13 +1,18 @@
 #!/usr/bin/env python3
 """Build the Local Assistant phrasebook.
 
-Real providers read API keys from the environment:
-  - claude: ANTHROPIC_API_KEY
-  - openai: OPENAI_API_KEY
+This is a dev-time tool. The shipped plugin makes zero LLM calls at runtime;
+the developer regenerates the phrasebook periodically by running this tool.
 
-If the selected real provider has no key, the tool fails loudly before
-making any network request. Use --provider mock for deterministic,
-offline verification.
+Providers shell out to a CLI that the developer is already authenticated with
+via subscription, so no API keys or per-call billing are involved:
+
+  - gemini: shells out to `gemini -p <prompt> -m <model> -o json -y` (default)
+  - claude: shells out to `claude -p <prompt>`
+  - codex:  shells out to `codex exec <prompt>`
+  - mock:   deterministic, offline, for unit tests
+
+Default model for `gemini` is `gemini-3.1-pro-preview`.
 """
 
 from __future__ import annotations
@@ -16,6 +21,8 @@ import argparse
 import json
 import os
 import re
+import shutil
+import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -157,44 +164,111 @@ class MockProvider(LlmProvider):
         return "\n".join(lines[:58])
 
 
-class AnthropicProvider(LlmProvider):
+class CliProvider(LlmProvider):
+    """Shell out to a developer-authenticated CLI (no API key required)."""
+
+    name: str = ""
+    default_model: Optional[str] = None
+    timeout_seconds: int = 180
+
     def __init__(self, model: Optional[str]) -> None:
-        self.model = model or "claude-haiku-4-5"
-        self.api_key = os.environ.get("ANTHROPIC_API_KEY")
-        if not self.api_key:
-            raise RuntimeError("ANTHROPIC_API_KEY is required for --provider claude")
+        resolved = shutil.which(self.name)
+        if resolved is None:
+            raise RuntimeError(f"`{self.name}` CLI not found on PATH for --provider {self.name}")
+        # On Windows shutil.which honours PATHEXT and returns e.g. "gemini.cmd".
+        # subprocess's CreateProcess does NOT do PATHEXT lookup, so we MUST pass
+        # the resolved full path with extension as argv[0].
+        self.executable = resolved
+        self.model = model or self.default_model
+
+    def build_command(self, prompt: str) -> Tuple[List[str], Optional[str]]:
+        """Return (argv, stdin_text). stdin_text=None means no stdin piped.
+
+        argv[0] is just the CLI's basename — `generate()` swaps in the resolved
+        absolute path before invoking subprocess.
+        """
+        raise NotImplementedError
+
+    def parse_response(self, stdout: str) -> str:
+        """Extract the model's text response from raw CLI stdout."""
+        return stdout
 
     def generate(self, prompt: str, intent: IntentDef) -> str:
         del intent
+        argv, stdin_text = self.build_command(prompt)
+        argv = [self.executable, *argv[1:]]
         try:
-            import anthropic
-        except ImportError as exc:
-            raise RuntimeError("Missing dependency: anthropic. Run: python -m pip install -r tools/requirements.txt") from exc
-        client = anthropic.Anthropic(api_key=self.api_key)
-        message = client.messages.create(
-            model=self.model,
-            max_tokens=2000,
-            messages=[{"role": "user", "content": prompt}],
-        )
-        return "\n".join(block.text for block in message.content if getattr(block, "type", "") == "text")
+            result = subprocess.run(
+                argv,
+                input=stdin_text,
+                text=True,
+                capture_output=True,
+                timeout=self.timeout_seconds,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise RuntimeError(f"{self.name} CLI timed out after {self.timeout_seconds}s") from exc
+        if result.returncode != 0:
+            raise RuntimeError(
+                f"{self.name} CLI exited {result.returncode}: {result.stderr.strip() or result.stdout.strip()}"
+            )
+        return self.parse_response(result.stdout)
 
 
-class OpenaiProvider(LlmProvider):
-    def __init__(self, model: Optional[str]) -> None:
-        self.model = model or "gpt-5-mini"
-        self.api_key = os.environ.get("OPENAI_API_KEY")
-        if not self.api_key:
-            raise RuntimeError("OPENAI_API_KEY is required for --provider openai")
+class GeminiCliProvider(CliProvider):
+    name = "gemini"
+    default_model = "gemini-3.1-pro-preview"
 
-    def generate(self, prompt: str, intent: IntentDef) -> str:
-        del intent
+    def build_command(self, prompt: str) -> Tuple[List[str], Optional[str]]:
+        # Pass prompt via stdin to dodge shell-escape pitfalls on multi-line text.
+        # `-p ""` puts gemini in headless mode and still consumes stdin.
+        argv = ["gemini", "-p", "", "-m", self.model, "-o", "json", "-y", "--skip-trust"]
+        return argv, prompt
+
+    def parse_response(self, stdout: str) -> str:
+        # The gemini CLI prints a JSON object then sometimes appends informational
+        # lines like "Shell cwd was reset to ...". Use raw_decode to pull just the
+        # leading JSON object.
+        decoder = json.JSONDecoder()
         try:
-            from openai import OpenAI
-        except ImportError as exc:
-            raise RuntimeError("Missing dependency: openai. Run: python -m pip install -r tools/requirements.txt") from exc
-        client = OpenAI(api_key=self.api_key)
-        response = client.responses.create(model=self.model, input=prompt)
-        return response.output_text
+            data, _ = decoder.raw_decode(stdout.lstrip())
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(f"gemini CLI did not return valid JSON: {exc}; stdout head={stdout[:200]!r}") from exc
+        response = data.get("response")
+        if not isinstance(response, str):
+            raise RuntimeError(f"gemini CLI JSON had no 'response' string: keys={list(data)}")
+        return response
+
+
+class ClaudeCliProvider(CliProvider):
+    name = "claude"
+    default_model = None  # claude CLI picks its own default model
+
+    def build_command(self, prompt: str) -> Tuple[List[str], Optional[str]]:
+        argv = ["claude", "-p"]  # `-p` reads the prompt from stdin / argv
+        if self.model:
+            argv += ["--model", self.model]
+        # Claude CLI accepts the prompt as a positional after -p OR via stdin.
+        # Use stdin to avoid escape pitfalls.
+        return argv, prompt
+
+    def parse_response(self, stdout: str) -> str:
+        return stdout.strip()
+
+
+class CodexCliProvider(CliProvider):
+    name = "codex"
+    default_model = None  # codex CLI picks its own default
+
+    def build_command(self, prompt: str) -> Tuple[List[str], Optional[str]]:
+        argv = ["codex", "exec"]
+        if self.model:
+            argv += ["-m", self.model]
+        # codex exec takes the prompt as a positional. For multi-line safety use stdin.
+        argv.append("-")
+        return argv, prompt
+
+    def parse_response(self, stdout: str) -> str:
+        return stdout.strip()
 
 
 def load_intents(path: Path) -> List[IntentDef]:
@@ -244,10 +318,12 @@ def load_menu_intents(path: Path) -> List[IntentDef]:
 def provider_from_args(name: str, model: Optional[str]) -> LlmProvider:
     if name == "mock":
         return MockProvider()
+    if name == "gemini":
+        return GeminiCliProvider(model)
     if name == "claude":
-        return AnthropicProvider(model)
-    if name == "openai":
-        return OpenaiProvider(model)
+        return ClaudeCliProvider(model)
+    if name == "codex":
+        return CodexCliProvider(model)
     raise ValueError(f"unknown provider: {name}")
 
 
@@ -257,9 +333,14 @@ def prompt_for(intent: IntentDef) -> str:
 
 
 def collect_phrases(provider: LlmProvider, intent: IntentDef, minimum: int) -> List[str]:
+    import time
+    start = time.monotonic()
+    print(f"  -> {intent.id} ...", end="", file=sys.stderr, flush=True)
     raw = provider.generate(prompt_for(intent), intent)
     phrases = sorted({normalise(line) for line in raw.splitlines() if normalise(line)})
     phrases = [phrase for phrase in phrases if normalise(phrase) == phrase]
+    elapsed = time.monotonic() - start
+    print(f" {len(phrases)} phrases in {elapsed:.1f}s", file=sys.stderr, flush=True)
     if len(phrases) < minimum:
         raise ValueError(
             f"{intent.id} produced {len(phrases)} unique normalised phrases; expected at least {minimum}"
@@ -280,6 +361,8 @@ def build_phrasebook(
     minimum: int,
     existing: Optional[Dict[str, object]] = None,
     keep: bool = False,
+    resume: bool = False,
+    checkpoint_path: Optional[Path] = None,
 ) -> Dict[str, object]:
     existing_by_id: Dict[str, dict] = {}
     if existing:
@@ -287,12 +370,46 @@ def build_phrasebook(
             if isinstance(entry, dict) and isinstance(entry.get("id"), str):
                 existing_by_id[entry["id"]] = entry
 
+    # --resume reads the checkpoint and reuses any intent that already has
+    # >= minimum phrases. Failed mid-run intents (or thin pre-existing entries)
+    # get regenerated.
+    resume_by_id: Dict[str, dict] = {}
+    if resume and checkpoint_path and checkpoint_path.exists():
+        try:
+            checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+            for entry in checkpoint.get("intents", []):
+                if not isinstance(entry, dict):
+                    continue
+                phrases = entry.get("phrases", [])
+                if isinstance(entry.get("id"), str) and isinstance(phrases, list) and len(phrases) >= minimum:
+                    resume_by_id[entry["id"]] = entry
+            if resume_by_id:
+                print(f"resume: reusing {len(resume_by_id)} intent(s) from {checkpoint_path}", file=sys.stderr, flush=True)
+        except (OSError, json.JSONDecodeError) as exc:
+            print(f"resume: ignoring unreadable checkpoint at {checkpoint_path}: {exc}", file=sys.stderr, flush=True)
+
     built: List[dict] = []
     phrase_owner: Dict[str, str] = {}
-    collisions: List[Tuple[str, str, str]] = []
+    dropped_collisions: List[Tuple[str, str, str]] = []
+    total = len(intents)
 
-    for intent in intents:
-        if keep and intent.id in existing_by_id:
+    def write_checkpoint() -> None:
+        if checkpoint_path is None:
+            return
+        rendered = json.dumps({"version": 1, "intents": built}, indent=2, ensure_ascii=False) + "\n"
+        tmp = checkpoint_path.with_suffix(checkpoint_path.suffix + ".tmp")
+        checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp.write_text(rendered, encoding="utf-8")
+        os.replace(tmp, checkpoint_path)
+
+    for index, intent in enumerate(intents, start=1):
+        print(f"[{index}/{total}] {intent.id}", file=sys.stderr, flush=True)
+        if intent.id in resume_by_id:
+            entry = resume_by_id[intent.id]
+            phrases = sorted({normalise(str(p)) for p in entry.get("phrases", []) if normalise(str(p))})
+            description = str(entry.get("description") or intent.description)
+            print(f"  -> {intent.id} ... {len(phrases)} phrases (resumed)", file=sys.stderr, flush=True)
+        elif keep and intent.id in existing_by_id:
             entry = existing_by_id[intent.id]
             phrases = sorted({normalise(str(p)) for p in entry.get("phrases", []) if normalise(str(p))})
             description = str(entry.get("description") or intent.description)
@@ -300,19 +417,30 @@ def build_phrasebook(
             phrases = collect_phrases(provider, intent, minimum)
             description = intent.description
 
+        # First-insertion wins: drop phrases already owned by an earlier intent.
+        # The Java IntentMatcher uses a hash map with the same semantics, so doing
+        # the resolution here keeps the JSON in sync with runtime behaviour.
+        kept: List[str] = []
         for phrase in phrases:
             owner = phrase_owner.get(phrase)
             if owner and owner != intent.id:
-                collisions.append((phrase, owner, intent.id))
-            else:
-                phrase_owner[phrase] = intent.id
+                dropped_collisions.append((phrase, owner, intent.id))
+                continue
+            phrase_owner[phrase] = intent.id
+            kept.append(phrase)
 
-        built.append({"id": intent.id, "description": description, "phrases": phrases})
+        if len(kept) < minimum and intent.id not in resume_by_id:
+            raise ValueError(
+                f"{intent.id} has only {len(kept)} unique phrases after collision resolution; expected at least {minimum}"
+            )
 
-    if collisions:
-        for phrase, first, second in collisions:
-            print(f"warning: phrase collision {phrase!r} in {first} and {second}", file=sys.stderr)
-        raise ValueError(f"{len(collisions)} cross-intent phrase collision(s) detected")
+        built.append({"id": intent.id, "description": description, "phrases": kept})
+        write_checkpoint()
+
+    if dropped_collisions:
+        for phrase, first, later in dropped_collisions:
+            print(f"resolved collision: dropped {phrase!r} from {later} (kept in {first})", file=sys.stderr)
+        print(f"resolved {len(dropped_collisions)} cross-intent phrase collision(s)", file=sys.stderr)
 
     return {"version": 1, "intents": built}
 
@@ -482,10 +610,11 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--output", type=Path, default=DEFAULT_PHRASEBOOK)
     parser.add_argument("--intent", help="Regenerate one intent id")
     parser.add_argument("--menu-dump", type=Path, help="Read ImageJ/Fiji menu commands, one per line, and add menu.* intents")
-    parser.add_argument("--provider", choices=("mock", "claude", "openai"), default=os.environ.get("LOCAL_ASSISTANT_LLM_PROVIDER", "claude"))
+    parser.add_argument("--provider", choices=("mock", "gemini", "claude", "codex"), default=os.environ.get("LOCAL_ASSISTANT_LLM_PROVIDER", "gemini"))
     parser.add_argument("--model", help="Provider model override")
     parser.add_argument("--dry-run", action="store_true", help="Print generated JSON to stdout without writing")
     parser.add_argument("--keep", action="store_true", help="Keep existing intent entries instead of regenerating them")
+    parser.add_argument("--resume", action="store_true", help="Reuse intents from <output>.partial.json that already have at least --minimum phrases. Combine with mid-run failure recovery.")
     parser.add_argument("--minimum", type=int, default=40, help="Minimum unique normalised phrases per intent")
     parser.add_argument("--java-load-check", action="store_true", help="After writing, verify the output through IntentLibrary.load()")
     return parser.parse_args(argv)
@@ -495,6 +624,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     args = parse_args(argv)
     try:
         provider = provider_from_args(args.provider, args.model)
+        # Per-intent checkpoint path so a mid-run failure (quota, network) does
+        # not throw away work already done. Skipped on --dry-run.
+        checkpoint_path = None if args.dry_run else args.output.with_suffix(args.output.suffix + ".partial")
         if args.menu_dump:
             existing_output = existing_phrasebook(args.output)
             existing_ids = {
@@ -505,13 +637,15 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             menu_intents = [intent for intent in load_menu_intents(args.menu_dump)
                             if intent.id not in existing_ids]
             intents = select_intents(menu_intents, args.intent)
-            generated = build_phrasebook(intents, provider, minimum=args.minimum)
+            generated = build_phrasebook(intents, provider, minimum=args.minimum,
+                                         resume=args.resume, checkpoint_path=checkpoint_path)
             generated = remove_existing_phrase_collisions(existing_output, generated)
             phrasebook = merge_selected_intent(existing_output, generated)
         else:
             intents = select_intents(load_intents(args.intents_file), args.intent)
             existing = existing_phrasebook(args.output) if args.keep else None
-            phrasebook = build_phrasebook(intents, provider, minimum=args.minimum, existing=existing, keep=args.keep)
+            phrasebook = build_phrasebook(intents, provider, minimum=args.minimum, existing=existing,
+                                          keep=args.keep, resume=args.resume, checkpoint_path=checkpoint_path)
             if args.intent and not args.dry_run and args.output.exists():
                 phrasebook = merge_selected_intent(existing_phrasebook(args.output), phrasebook)
         validate_schema(phrasebook, require_normalised_phrases=not bool(args.menu_dump))
@@ -527,6 +661,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_text(rendered, encoding="utf-8")
         print(f"wrote {args.output}")
+        # Run completed cleanly; checkpoint no longer needed.
+        if checkpoint_path and checkpoint_path.exists():
+            try:
+                checkpoint_path.unlink()
+            except OSError:
+                pass
         if args.java_load_check:
             java_load_check(args.output)
         return 0
