@@ -26,11 +26,11 @@ public class LocalAssistant {
     }
 
     public LocalAssistant(Settings settings) {
-        this(IntentLibrary.load(), new FijiBridge(new CommandEngine()), new FrictionLog(), settings);
+        this(IntentLibrary.load(settings), new FijiBridge(new CommandEngine()), new FrictionLog(), settings);
     }
 
     public LocalAssistant(Settings settings, ChatHistoryController chatHistory) {
-        this(IntentLibrary.load(), new FijiBridge(new CommandEngine()), new FrictionLog(),
+        this(IntentLibrary.load(settings), new FijiBridge(new CommandEngine()), new FrictionLog(),
                 settings, new IntentRouter(), chatHistory);
     }
 
