@@ -69,7 +69,13 @@ public class AiRootPanel extends JPanel implements ChatSurface {
         setBackground(BG_MAIN);
 
         chatView = new ChatView(settings);
-        terminalView = new TerminalView(settings);
+        terminalView = new TerminalView(settings, new File(System.getProperty("user.dir", ".")),
+                new LeftRail.SessionRelauncher() {
+                    @Override
+                    public void relaunchEmbeddedSession(EmbeddedAgentSession oldSession) {
+                        AiRootPanel.this.relaunchEmbeddedSession(oldSession);
+                    }
+                });
 
         cardLayout = new CardLayout();
         cards = new JPanel(cardLayout);
@@ -101,6 +107,9 @@ public class AiRootPanel extends JPanel implements ChatSurface {
 
     public void setAgentLauncher(AgentLauncher launcher) {
         agentLauncher = launcher;
+        if (launcher != null) {
+            terminalView.setWorkspace(new File(launcher.getAgentWorkspace()));
+        }
     }
 
     public void refreshProfileSwitcher() {
@@ -412,6 +421,11 @@ public class AiRootPanel extends JPanel implements ChatSurface {
                 synchronized (liveSessions) {
                     liveSessions.remove(session);
                 }
+                if (!terminalView.isSession(session)) {
+                    IJ.log("[ImageJAI-Term] Replaced embedded agent exited with code "
+                            + session.exitValue() + ": " + session.info().name);
+                    return;
+                }
                 terminalView.clearSession(session);
                 IJ.log("[ImageJAI-Term] Embedded agent exited with code "
                         + session.exitValue() + ": " + session.info().name);
@@ -419,6 +433,43 @@ public class AiRootPanel extends JPanel implements ChatSurface {
             }
         });
         timer.start();
+    }
+
+    private void relaunchEmbeddedSession(final EmbeddedAgentSession oldSession) {
+        if (oldSession == null || agentLauncher == null) {
+            return;
+        }
+        final AgentLauncher.AgentInfo info = oldSession.info();
+        terminalView.clearSession(oldSession);
+        synchronized (liveSessions) {
+            liveSessions.remove(oldSession);
+        }
+
+        new SwingWorker<AgentSession, Void>() {
+            @Override
+            protected AgentSession doInBackground() {
+                try {
+                    oldSession.destroy();
+                    IJ.log("[ImageJAI-Term] Destroyed uncleared PTY before relaunch: "
+                            + info.name);
+                } catch (Exception ex) {
+                    IJ.log("[ImageJAI-Term] Failed to destroy uncleared PTY: "
+                            + ex.getMessage());
+                }
+                return agentLauncher.launch(info, AgentLauncher.Mode.EMBEDDED);
+            }
+
+            @Override
+            protected void done() {
+                try {
+                    AgentSession fresh = get();
+                    handleLaunchedSession(info, AgentLauncher.Mode.EMBEDDED, fresh);
+                } catch (Exception ex) {
+                    chatView.appendMessage("assistant",
+                            "Failed to relaunch " + info.name + ": " + ex.getMessage());
+                }
+            }
+        }.execute();
     }
 
     private void showTerminalCard() {

@@ -9,6 +9,7 @@ import javax.swing.JPanel;
 import javax.swing.SwingUtilities;
 import java.awt.BorderLayout;
 import java.awt.Color;
+import java.io.File;
 
 /**
  * Embedded-terminal card: rail on the left, terminal host in the center.
@@ -16,9 +17,11 @@ import java.awt.Color;
 public class TerminalView extends JPanel {
     private final TerminalHost terminalHost;
     private final TerminalToolbar toolbar;
+    private final LeftRail leftRail;
     private PromptWatcher promptWatcher;
 
-    public TerminalView(Settings settings) {
+    public TerminalView(Settings settings, File workspace,
+                        LeftRail.SessionRelauncher sessionRelauncher) {
         super(new BorderLayout(8, 0));
         setBackground(new Color(30, 30, 35));
 
@@ -33,7 +36,13 @@ public class TerminalView extends JPanel {
         terminalStack.setOpaque(false);
         terminalStack.add(toolbar, BorderLayout.NORTH);
         terminalStack.add(terminalHost, BorderLayout.CENTER);
-        add(new LeftRail(settings), BorderLayout.WEST);
+        leftRail = new LeftRail(settings, workspace, sessionRelauncher, new Runnable() {
+            @Override
+            public void run() {
+                requestTerminalFocus();
+            }
+        });
+        add(leftRail, BorderLayout.WEST);
         add(terminalStack, BorderLayout.CENTER);
     }
 
@@ -41,6 +50,7 @@ public class TerminalView extends JPanel {
         stopPromptWatcher();
         terminalHost.attachSession(session);
         toolbar.attachSession(session);
+        leftRail.attachSession(session);
         promptWatcher = new PromptWatcher(
                 session.terminalWidget(),
                 ApprovalPolicy.loadForAgent(session.info()),
@@ -107,10 +117,19 @@ public class TerminalView extends JPanel {
         promptWatcher.start();
     }
 
+    public void setWorkspace(File workspace) {
+        leftRail.setWorkspace(workspace);
+    }
+
     public void clearSession(EmbeddedAgentSession session) {
         stopPromptWatcher();
         toolbar.clearSession(session);
         terminalHost.clearSession(session);
+        leftRail.clearSession(session);
+    }
+
+    public boolean isSession(EmbeddedAgentSession session) {
+        return terminalHost.isSession(session);
     }
 
     public void requestTerminalFocus() {

@@ -61,6 +61,10 @@ public class TerminalHost extends JPanel {
         repaint();
     }
 
+    public boolean isSession(EmbeddedAgentSession expected) {
+        return expected != null && session == expected;
+    }
+
     public void requestTerminalFocus() {
         if (terminalComponent == null) {
             return;

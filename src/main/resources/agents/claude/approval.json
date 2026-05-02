@@ -1,0 +1,22 @@
+{
+  "auto_confirm": [
+    "(?i)do\\s+you\\s+trust\\s+.*folder",
+    "(?i)yes,?\\s+i\\s+trust\\s+this\\s+folder",
+    "(?i)quick\\s+safety\\s+check",
+    "(?i)^allow\\s+read\\s+access\\s+to\\s+.*CLAUDE\\.md",
+    "(?i)^permit\\s+access\\s+to\\s+.*/AI_Exports/",
+    "(?i)press\\s+enter\\s+to\\s+confirm\\s+paste",
+    "(?i)pasted\\s+\\d+\\s+lines"
+  ],
+  "always_escalate": [
+    "(?i)rm\\s+-rf",
+    "(?i)git\\s+reset\\s+--hard",
+    "(?i)drop\\s+table",
+    "(?i)delete\\s+.*\\b(AI_Exports|agent|src|docs)\\b",
+    "(?i)overwrite\\s+.*\\b(src|docs|agent)\\b"
+  ],
+  "pending": [
+    "(?i)\\b(allow|approve|permit|continue|proceed)\\b.*(\\?|:|\\[y/n\\])\\s*$",
+    "(?i)do\\s+you\\s+want\\s+.*(\\?|:|\\[y/n\\])\\s*$"
+  ]
+}

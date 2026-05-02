@@ -4,13 +4,18 @@ import com.google.gson.JsonObject;
 import ij.IJ;
 import ij.Prefs;
 import imagejai.config.Settings;
+import imagejai.engine.EmbeddedAgentSession;
+import imagejai.terminal.AgentRegistry;
 
 import javax.swing.BorderFactory;
 import javax.swing.Box;
 import javax.swing.BoxLayout;
 import javax.swing.JButton;
 import javax.swing.JLabel;
+import javax.swing.JMenuItem;
 import javax.swing.JPanel;
+import javax.swing.JPopupMenu;
+import javax.swing.JSeparator;
 import javax.swing.SwingUtilities;
 import javax.swing.SwingWorker;
 import javax.swing.Timer;
@@ -22,12 +27,19 @@ import java.awt.Font;
 import java.awt.Insets;
 import java.awt.event.ActionEvent;
 import java.awt.event.ActionListener;
+import java.io.File;
 import java.io.IOException;
+import java.util.List;
+import java.util.regex.Pattern;
 
 /**
  * Left-side terminal rail for deterministic Fiji actions.
  */
 public class LeftRail extends JPanel {
+    public interface SessionRelauncher {
+        void relaunchEmbeddedSession(EmbeddedAgentSession oldSession);
+    }
+
     public static final String PREF_COLLAPSED = "ai.assistant.rail.collapsed";
     public static final String PREF_FONT = "ai.assistant.rail.font";
 
@@ -44,17 +56,27 @@ public class LeftRail extends JPanel {
     private static final Color TEXT_MUTED = new Color(130, 130, 140);
 
     private final TcpHotline tcpHotline;
+    private final SessionRelauncher sessionRelauncher;
+    private final Runnable focusReturn;
     private final JPanel body;
     private final JButton collapseButton;
     private final JLabel titleLabel;
     private final JLabel statusLabel;
     private final Timer statusTimer;
+    private final JButton commandsButton;
+    private final JButton newAgentChatButton;
 
     private boolean collapsed;
     private int railFontSize;
+    private File workspace;
+    private EmbeddedAgentSession session;
 
-    public LeftRail(Settings settings) {
+    public LeftRail(Settings settings, File workspace,
+                    SessionRelauncher sessionRelauncher, Runnable focusReturn) {
         this.tcpHotline = new TcpHotline(settings);
+        this.workspace = workspace;
+        this.sessionRelauncher = sessionRelauncher;
+        this.focusReturn = focusReturn;
         this.collapsed = Prefs.get(PREF_COLLAPSED, false);
         this.railFontSize = clampFontSize((int) Math.round(Prefs.get(PREF_FONT, 12.0)));
         Prefs.set(PREF_FONT, railFontSize);
@@ -84,14 +106,48 @@ public class LeftRail extends JPanel {
         });
         statusTimer.setRepeats(false);
 
+        commandsButton = railButton("Commands", "no command list");
+        commandsButton.addActionListener(new ActionListener() {
+            @Override
+            public void actionPerformed(ActionEvent e) {
+                showCommandsPopup(commandsButton);
+            }
+        });
+        newAgentChatButton = railButton("New agent chat", "Clear agent context");
+        newAgentChatButton.addActionListener(new ActionListener() {
+            @Override
+            public void actionPerformed(ActionEvent e) {
+                newAgentChat();
+            }
+        });
+
         add(createHeader());
         add(Box.createVerticalStrut(8));
         add(body);
         add(Box.createVerticalGlue());
         add(statusLabel);
 
+        buildAgentSection();
         buildHotlineSection();
+        updateAgentButtons();
         applyCollapsedState(false);
+    }
+
+    public void setWorkspace(File workspace) {
+        this.workspace = workspace;
+    }
+
+    public void attachSession(EmbeddedAgentSession newSession) {
+        session = newSession;
+        updateAgentButtons();
+    }
+
+    public void clearSession(EmbeddedAgentSession expected) {
+        if (expected != null && session != expected) {
+            return;
+        }
+        session = null;
+        updateAgentButtons();
     }
 
     public void setRailFontSize(int fontSize) {
@@ -123,6 +179,15 @@ public class LeftRail extends JPanel {
         header.add(Box.createHorizontalGlue());
         header.add(collapseButton);
         return header;
+    }
+
+    private void buildAgentSection() {
+        body.add(sectionTitle("Agent"));
+        body.add(Box.createVerticalStrut(6));
+        body.add(commandsButton);
+        body.add(Box.createVerticalStrut(6));
+        body.add(newAgentChatButton);
+        body.add(Box.createVerticalStrut(12));
     }
 
     private void buildHotlineSection() {
@@ -157,6 +222,105 @@ public class LeftRail extends JPanel {
                 }));
     }
 
+    private void updateAgentButtons() {
+        boolean hasSession = session != null && session.isAlive();
+        boolean hasCommands = hasSession
+                && !AgentRegistry.builtInCommands(session.info()).isEmpty();
+        commandsButton.setEnabled(hasCommands);
+        commandsButton.setToolTipText(hasCommands
+                ? "Show agent slash commands"
+                : "no command list");
+        newAgentChatButton.setEnabled(hasSession);
+        newAgentChatButton.setToolTipText(hasSession
+                ? "Clear the agent chat; restart only if clear is not confirmed"
+                : "No embedded agent running");
+    }
+
+    private void showCommandsPopup(Component owner) {
+        if (session == null || !session.isAlive()) {
+            return;
+        }
+        List<AgentRegistry.CommandEntry> builtins =
+                AgentRegistry.builtInCommands(session.info());
+        if (builtins.isEmpty()) {
+            showStatus("No command list");
+            return;
+        }
+
+        JPopupMenu popup = new JPopupMenu();
+        addPopupSection(popup, "Built-in", builtins);
+        List<AgentRegistry.CommandEntry> user =
+                AgentRegistry.userCommands(session.info(), workspace);
+        if (!user.isEmpty()) {
+            popup.add(new JSeparator());
+            addPopupSection(popup, "User", user);
+        }
+        popup.show(owner, 0, owner.getHeight());
+    }
+
+    private void addPopupSection(JPopupMenu popup, String label,
+                                 List<AgentRegistry.CommandEntry> commands) {
+        JMenuItem header = new JMenuItem(label);
+        header.setEnabled(false);
+        popup.add(header);
+        for (final AgentRegistry.CommandEntry entry : commands) {
+            JMenuItem item = new JMenuItem(entry.command);
+            if (!entry.description.isEmpty()) {
+                item.setToolTipText(entry.description);
+            }
+            item.addActionListener(new ActionListener() {
+                @Override
+                public void actionPerformed(ActionEvent e) {
+                    if (session != null && session.isAlive()) {
+                        session.writeInput(entry.command);
+                        IJ.log("[ImageJAI-Term] Injected agent command: " + entry.command);
+                        focusTerminal();
+                    }
+                }
+            });
+            popup.add(item);
+        }
+    }
+
+    private void newAgentChat() {
+        final EmbeddedAgentSession current = session;
+        if (current == null || !current.isAlive()) {
+            showStatus("No agent running");
+            updateAgentButtons();
+            return;
+        }
+
+        final Pattern clearPattern = AgentRegistry.clearPattern(current.info());
+        current.writeInput("/clear");
+        showStatus("Sent /clear");
+        focusTerminal();
+
+        Timer clearTimer = new Timer(1000, new ActionListener() {
+            @Override
+            public void actionPerformed(ActionEvent e) {
+                if (session != current) {
+                    return;
+                }
+                String tail = AgentRegistry.readScrollback(current.terminalWidget(), 40);
+                if (clearPattern != null && clearPattern.matcher(tail).find()) {
+                    IJ.log("[ImageJAI-Term] Agent chat cleared without PTY restart: "
+                            + current.info().name);
+                    showStatus("Agent chat cleared");
+                    focusTerminal();
+                    return;
+                }
+                IJ.log("[ImageJAI-Term] Agent /clear not confirmed; restarting PTY: "
+                        + current.info().name);
+                showStatus("Restarting agent");
+                if (sessionRelauncher != null) {
+                    sessionRelauncher.relaunchEmbeddedSession(current);
+                }
+            }
+        });
+        clearTimer.setRepeats(false);
+        clearTimer.start();
+    }
+
     private JLabel sectionTitle(String text) {
         JLabel label = new JLabel(text);
         label.setForeground(TEXT_MUTED);
@@ -166,6 +330,17 @@ public class LeftRail extends JPanel {
     }
 
     private JButton hotlineButton(final String label, String tooltip, final HotlineTask task) {
+        final JButton button = railButton(label, tooltip);
+        button.addActionListener(new ActionListener() {
+            @Override
+            public void actionPerformed(ActionEvent e) {
+                runHotline(label, button, task);
+            }
+        });
+        return button;
+    }
+
+    private JButton railButton(final String label, String tooltip) {
         final JButton button = new JButton(label);
         button.setAlignmentX(Component.LEFT_ALIGNMENT);
         button.setMaximumSize(new Dimension(Integer.MAX_VALUE, 28));
@@ -180,18 +355,13 @@ public class LeftRail extends JPanel {
         button.setCursor(Cursor.getPredefinedCursor(Cursor.HAND_CURSOR));
         button.setToolTipText(tooltip);
         button.setMargin(new Insets(2, 6, 2, 6));
-        button.addActionListener(new ActionListener() {
-            @Override
-            public void actionPerformed(ActionEvent e) {
-                runHotline(label, button, task);
-            }
-        });
         return button;
     }
 
     private void runHotline(final String label, final JButton button, final HotlineTask task) {
         button.setEnabled(false);
         showStatus("Running " + label + "...");
+        focusTerminal();
         new SwingWorker<Void, Void>() {
             private String userMessage;
             private boolean ok;
@@ -216,6 +386,7 @@ public class LeftRail extends JPanel {
             protected void done() {
                 button.setEnabled(true);
                 showStatus(ok ? "Done: " + label : userMessage);
+                focusTerminal();
             }
         }.execute();
     }
@@ -277,6 +448,12 @@ public class LeftRail extends JPanel {
 
     private Font railFont() {
         return new Font(Font.SANS_SERIF, Font.PLAIN, railFontSize);
+    }
+
+    private void focusTerminal() {
+        if (focusReturn != null) {
+            focusReturn.run();
+        }
     }
 
     private static void applyFontRecursively(Component component, Font font) {

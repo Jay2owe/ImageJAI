@@ -1,0 +1,15 @@
+[
+  {"command": "/help", "description": "Show help and slash commands."},
+  {"command": "/clear", "description": "Clear conversation context."},
+  {"command": "/chat", "description": "Manage chat state."},
+  {"command": "/compress", "description": "Compress the conversation context."},
+  {"command": "/editor", "description": "Open or configure editor integration."},
+  {"command": "/exit", "description": "Exit Gemini CLI."},
+  {"command": "/mcp", "description": "Manage MCP servers."},
+  {"command": "/memory", "description": "Show or edit memory."},
+  {"command": "/restore", "description": "Restore a previous chat."},
+  {"command": "/stats", "description": "Show session statistics."},
+  {"command": "/theme", "description": "Change terminal theme."},
+  {"command": "/tools", "description": "List available tools."},
+  {"command": "/quit", "description": "Exit Gemini CLI."}
+]
