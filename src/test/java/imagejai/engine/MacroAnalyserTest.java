@@ -5,6 +5,7 @@ import org.junit.Test;
 
 import java.util.List;
 import java.util.Optional;
+import java.util.Collections;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
@@ -31,7 +32,7 @@ public class MacroAnalyserTest {
         assertEquals(1, warnings.size());
         MacroAnalyser.Warning w = warnings.get(0);
         assertEquals(ErrorReply.CODE_NRESULTS_TRAP, w.code);
-        assertEquals(List.of(3), w.affectedLines);
+        assertEquals(Collections.singletonList(3), w.affectedLines);
         assertTrue("message mentions Analyze Particles",
                 w.message.toLowerCase().contains("analyze particles"));
         assertTrue("hint steers toward summarize/display",

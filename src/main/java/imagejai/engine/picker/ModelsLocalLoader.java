@@ -11,6 +11,7 @@ import java.io.Writer;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.LinkedHashMap;
@@ -79,16 +80,16 @@ public final class ModelsLocalLoader {
         if (os.contains("win")) {
             String appData = System.getenv("APPDATA");
             base = appData != null && !appData.isEmpty()
-                    ? Path.of(appData, "imagejai")
-                    : Path.of(System.getProperty("user.home"), ".imagejai");
+                    ? Paths.get(appData, "imagejai")
+                    : Paths.get(System.getProperty("user.home"), ".imagejai");
         } else if (os.contains("mac")) {
-            base = Path.of(System.getProperty("user.home"),
+            base = Paths.get(System.getProperty("user.home"),
                     "Library", "Application Support", "imagejai");
         } else {
             String xdg = System.getenv("XDG_CONFIG_HOME");
             base = xdg != null && !xdg.isEmpty()
-                    ? Path.of(xdg, "imagejai")
-                    : Path.of(System.getProperty("user.home"), ".config", "imagejai");
+                    ? Paths.get(xdg, "imagejai")
+                    : Paths.get(System.getProperty("user.home"), ".config", "imagejai");
         }
         return base.resolve(FILENAME);
     }

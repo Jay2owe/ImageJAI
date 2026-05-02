@@ -2,6 +2,7 @@ package imagejai.local;
 
 import java.util.List;
 import java.util.Map;
+import java.util.Collections;
 
 /**
  * A deterministic Local Assistant action.
@@ -15,10 +16,10 @@ public interface Intent {
     AssistantReply execute(Map<String, String> slots, FijiBridge fiji);
 
     default List<SlotSpec> requiredSlots() {
-        return List.of();
+        return Collections.emptyList();
     }
 
     default List<SlotSpec> suggestedSlots() {
-        return List.of();
+        return Collections.emptyList();
     }
 }

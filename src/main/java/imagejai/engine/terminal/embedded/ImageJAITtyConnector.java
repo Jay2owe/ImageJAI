@@ -1,4 +1,4 @@
-package imagejai.terminal;
+package imagejai.engine.terminal.embedded;
 
 import com.jediterm.core.util.TermSize;
 import com.jediterm.terminal.TtyConnector;

@@ -31,15 +31,14 @@ public class ImproveSlashCommandTest {
         String closestIntent = closest.get(0).intentId();
 
         Path yaml = Files.createTempFile("imagejai-intents", ".yaml");
-        Files.writeString(yaml,
+        write(yaml,
                 "- id: " + closestIntent + "\n"
                         + "  description: Closest intent\n"
                         + "  seeds: [\"existing seed\"]\n"
                         + "\n"
                         + "- id: diagnostics.plugins\n"
                         + "  description: List plugins\n"
-                        + "  seeds: [\"list commands\"]\n",
-                StandardCharsets.UTF_8);
+                        + "  seeds: [\"list commands\"]\n");
 
         SlashCommandRegistry registry = new SlashCommandRegistry();
         registry.register(new ImproveSlashCommand(yaml));
@@ -63,7 +62,7 @@ public class ImproveSlashCommandTest {
         assertTrue(apply.text().contains("python tools/phrasebook_build.py"));
         assertTrue(apply.text().contains("mvn package"));
 
-        String updated = Files.readString(yaml, StandardCharsets.UTF_8);
+        String updated = read(yaml);
         assertTrue(updated.contains("  seeds: [\"existing seed\", \"how many frames\"]"));
     }
 
@@ -76,8 +75,7 @@ public class ImproveSlashCommandTest {
         IntentLibrary library = IntentLibrary.load();
 
         Path yaml = Files.createTempFile("imagejai-intents", ".yaml");
-        Files.writeString(yaml, "- id: image.stack_counts\n  seeds: [\"x\"]\n",
-                StandardCharsets.UTF_8);
+        write(yaml, "- id: image.stack_counts\n  seeds: [\"x\"]\n");
         SlashCommandRegistry registry = new SlashCommandRegistry();
         registry.register(new ImproveSlashCommand(yaml));
         LocalAssistant assistant = new LocalAssistant(library, new IntentMatcher(library),
@@ -91,9 +89,8 @@ public class ImproveSlashCommandTest {
     @Test
     public void missingYamlRefusesBeforeStartingSession() throws Exception {
         Path root = Files.createTempDirectory("imagejai-friction");
-        Files.writeString(root.resolve(FrictionLogJournal.FILE_NAME),
-                jsonLine(1, "how many frames"),
-                StandardCharsets.UTF_8);
+        write(root.resolve(FrictionLogJournal.FILE_NAME),
+                jsonLine(1, "how many frames"));
         FrictionLogJournal journal = new FrictionLogJournal(root);
         FrictionLog log = new FrictionLog();
         log.setJournal(journal);
@@ -119,8 +116,7 @@ public class ImproveSlashCommandTest {
         for (int i = 0; i < 2; i++) {
             sb.append(jsonLine(200 + i, "potato salad"));
         }
-        Files.writeString(root.resolve(FrictionLogJournal.FILE_NAME), sb.toString(),
-                StandardCharsets.UTF_8);
+        write(root.resolve(FrictionLogJournal.FILE_NAME), sb.toString());
     }
 
     private static String jsonLine(long ts, String argsSummary) {
@@ -128,5 +124,13 @@ public class ImproveSlashCommandTest {
                 + ",\"agent_id\":\"agent\",\"command\":\"local_assistant\""
                 + ",\"args_summary\":\"" + argsSummary.replace("\"", "\\\"") + "\""
                 + ",\"error\":\"miss\",\"normalised_error\":\"miss\"}\n";
+    }
+
+    private static void write(Path path, String text) throws Exception {
+        Files.write(path, text.getBytes(StandardCharsets.UTF_8));
+    }
+
+    private static String read(Path path) throws Exception {
+        return new String(Files.readAllBytes(path), StandardCharsets.UTF_8);
     }
 }

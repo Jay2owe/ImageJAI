@@ -6,6 +6,7 @@ import imagejai.config.Settings;
 import imagejai.engine.AgentLauncher;
 import imagejai.engine.AgentSession;
 import imagejai.engine.EmbeddedAgentSession;
+import imagejai.engine.ExternalAgentSession;
 import imagejai.engine.picker.AgentLaunchOrchestrator;
 import imagejai.engine.picker.ModelEntry;
 import imagejai.engine.picker.NativeAgentLauncher;
@@ -18,6 +19,7 @@ import imagejai.ui.picker.ProviderTierGate;
 import imagejai.ui.picker.TierChangeBanner;
 
 import javax.swing.JButton;
+import javax.swing.BoxLayout;
 import javax.swing.JComboBox;
 import javax.swing.JComponent;
 import javax.swing.JFrame;
@@ -60,6 +62,7 @@ public class AiRootPanel extends JPanel implements ChatSurface {
     private static final Color BG_MAIN = new Color(30, 30, 35);
     private static final Color ACCENT = new Color(0, 200, 255);
     private static final Color TEXT_MUTED = new Color(120, 120, 130);
+    private static boolean terminalFallbackNoticeShown;
 
     private final Settings settings;
     private final ChatView chatView;
@@ -77,6 +80,7 @@ public class AiRootPanel extends JPanel implements ChatSurface {
     private ProviderTierGate tierGate;
     private UsageTracker usageTracker;
     private TierChangeBanner tierChangeBanner;
+    private JPanel terminalFallbackNotice;
     private JButton agentBtn;
     private JFrame frame;
     private String currentCard = CARD_CHAT;
@@ -118,7 +122,13 @@ public class AiRootPanel extends JPanel implements ChatSurface {
             settings.dismissedTierChangeBanners.add(n.key);
             settings.save();
         });
-        top.add(tierChangeBanner, BorderLayout.CENTER);
+        terminalFallbackNotice = createTerminalFallbackNotice();
+        JPanel notices = new JPanel();
+        notices.setOpaque(false);
+        notices.setLayout(new BoxLayout(notices, BoxLayout.Y_AXIS));
+        notices.add(tierChangeBanner);
+        notices.add(terminalFallbackNotice);
+        top.add(notices, BorderLayout.CENTER);
 
         add(top, BorderLayout.NORTH);
         add(cards, BorderLayout.CENTER);
@@ -390,6 +400,29 @@ public class AiRootPanel extends JPanel implements ChatSurface {
         return button;
     }
 
+    private JPanel createTerminalFallbackNotice() {
+        JPanel panel = new JPanel(new FlowLayout(FlowLayout.LEFT, 6, 2));
+        panel.setBackground(new Color(42, 37, 28));
+        panel.setBorder(new EmptyBorder(3, 6, 3, 6));
+        javax.swing.JLabel label = new javax.swing.JLabel(
+                "Embedded terminal needs Java 11+ - launching agent in an external window.");
+        label.setForeground(new Color(230, 210, 160));
+        label.setFont(new Font(Font.SANS_SERIF, Font.PLAIN, 11));
+        JButton why = new JButton("Why?");
+        why.setFont(new Font(Font.SANS_SERIF, Font.PLAIN, 11));
+        why.setMargin(new Insets(1, 6, 1, 6));
+        why.addActionListener(new ActionListener() {
+            @Override
+            public void actionPerformed(ActionEvent e) {
+                showJavaCompatibilityDialog();
+            }
+        });
+        panel.add(label);
+        panel.add(why);
+        panel.setVisible(false);
+        return panel;
+    }
+
     private void refreshAgentSelectorAsync() {
         if (agentSelector == null) {
             return;
@@ -622,9 +655,44 @@ public class AiRootPanel extends JPanel implements ChatSurface {
             chatView.appendMessage("assistant", "Launched " + agent.name
                     + " inside the plugin window.");
         } else {
+            if (mode == AgentLauncher.Mode.EMBEDDED && session instanceof ExternalAgentSession) {
+                ExternalAgentSession external = (ExternalAgentSession) session;
+                if (external.isFallbackLaunch()) {
+                    showTerminalFallbackNotice(external.notice());
+                }
+            }
             chatView.appendMessage("assistant", "Launched " + agent.name
                     + " in: " + agentLauncher.getAgentWorkspace());
         }
+    }
+
+    private void showTerminalFallbackNotice(String reason) {
+        if (terminalFallbackNoticeShown || terminalFallbackNotice == null) {
+            return;
+        }
+        terminalFallbackNoticeShown = true;
+        terminalFallbackNotice.setToolTipText(reason == null || reason.isEmpty()
+                ? null
+                : reason);
+        terminalFallbackNotice.setVisible(true);
+        terminalFallbackNotice.revalidate();
+        terminalFallbackNotice.repaint();
+    }
+
+    private void showJavaCompatibilityDialog() {
+        JOptionPane.showMessageDialog(
+                this,
+                "This Fiji is running Java "
+                        + System.getProperty("java.specification.version", "unknown")
+                        + ".\n\n"
+                        + "ImageJAI is built as Java 8 bytecode so Fiji can load it on "
+                        + "older Zulu 8 installs. The embedded terminal backend "
+                        + "is loaded only on Java 11 or newer.\n\n"
+                        + "On Java 8, the selected agent still launches in a normal "
+                        + "terminal window. Upgrade Fiji's Java runtime to Java 11+ "
+                        + "to use the embedded terminal.",
+                "ImageJAI Java compatibility",
+                JOptionPane.INFORMATION_MESSAGE);
     }
 
     private void watchSessionExit(final EmbeddedAgentSession session) {

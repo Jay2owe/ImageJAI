@@ -1,4 +1,4 @@
-package imagejai.terminal;
+package imagejai.engine.terminal;
 
 import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;

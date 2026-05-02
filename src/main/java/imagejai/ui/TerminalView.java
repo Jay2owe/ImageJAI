@@ -2,8 +2,8 @@ package imagejai.ui;
 
 import imagejai.engine.EmbeddedAgentSession;
 import imagejai.config.Settings;
-import imagejai.terminal.ApprovalPolicy;
-import imagejai.terminal.PromptWatcher;
+import imagejai.engine.terminal.ApprovalPolicy;
+import imagejai.engine.terminal.PromptWatcher;
 
 import javax.swing.JPanel;
 import javax.swing.SwingUtilities;
@@ -52,7 +52,12 @@ public class TerminalView extends JPanel {
         toolbar.attachSession(session);
         leftRail.attachSession(session);
         promptWatcher = new PromptWatcher(
-                session.terminalWidget(),
+                new PromptWatcher.ScrollbackReader() {
+                    @Override
+                    public String readScrollback(int lineLimit) {
+                        return session.readScrollback(lineLimit);
+                    }
+                },
                 ApprovalPolicy.loadForAgent(session.info()),
                 new PromptWatcher.RawWriter() {
                     @Override

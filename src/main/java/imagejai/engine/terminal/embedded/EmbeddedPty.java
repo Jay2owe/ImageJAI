@@ -1,4 +1,4 @@
-package imagejai.terminal;
+package imagejai.engine.terminal.embedded;
 
 import com.jediterm.terminal.TtyConnector;
 import com.jediterm.terminal.TerminalColor;
@@ -6,6 +6,8 @@ import com.jediterm.terminal.TextStyle;
 import com.jediterm.terminal.emulator.ColorPalette;
 import com.jediterm.terminal.model.SelectionUtil;
 import com.jediterm.terminal.model.TerminalSelection;
+import com.jediterm.terminal.model.LinesBuffer;
+import com.jediterm.terminal.model.TerminalTextBuffer;
 import com.jediterm.terminal.model.hyperlinks.HyperlinkFilter;
 import com.jediterm.terminal.model.hyperlinks.LinkInfo;
 import com.jediterm.terminal.model.hyperlinks.LinkResult;
@@ -98,8 +100,47 @@ public final class EmbeddedPty {
         connector.write(new byte[] { 0x03 });
     }
 
+    public String readScrollback(int limit) {
+        if (widget == null) {
+            return "";
+        }
+        TerminalTextBuffer buffer = widget.getTerminalTextBuffer();
+        List<String> lines = new ArrayList<String>();
+        buffer.lock();
+        try {
+            appendLast(lines, buffer.getHistoryBuffer(), limit);
+            appendLast(lines, buffer.getScreenBuffer(), limit);
+        } catch (RuntimeException e) {
+            IJ.log("[ImageJAI-Term] Failed to read terminal scrollback: " + e.getMessage());
+        } finally {
+            buffer.unlock();
+        }
+
+        int start = Math.max(0, lines.size() - limit);
+        StringBuilder out = new StringBuilder();
+        for (int i = start; i < lines.size(); i++) {
+            if (out.length() > 0) {
+                out.append('\n');
+            }
+            out.append(lines.get(i));
+        }
+        return out.toString();
+    }
+
+    public void resize(int columns, int rows) {
+        connector.resize(new com.jediterm.core.util.TermSize(columns, rows));
+    }
+
     public void closeWidget() {
         widget.close();
+    }
+
+    private static void appendLast(List<String> target, LinesBuffer source, int limit) {
+        int count = source.getLineCount();
+        int start = Math.max(0, count - limit);
+        for (int i = start; i < count; i++) {
+            target.add(source.getLineText(i));
+        }
     }
 
     private static void configurePtyNativeFolder() {

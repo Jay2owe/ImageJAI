@@ -87,7 +87,12 @@ public class ProcessRunnerTest {
 
         @Override
         public OutputStream getOutputStream() {
-            return OutputStream.nullOutputStream();
+            return new OutputStream() {
+                @Override
+                public void write(int b) {
+                    // discard
+                }
+            };
         }
 
         @Override

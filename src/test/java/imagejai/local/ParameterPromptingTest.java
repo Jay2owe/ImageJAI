@@ -9,6 +9,8 @@ import imagejai.engine.FrictionLog;
 
 import java.util.List;
 import java.util.Map;
+import java.util.Arrays;
+import java.util.Collections;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
@@ -21,7 +23,7 @@ public class ParameterPromptingTest {
     public void missingChannelPromptsAndParksPendingTurn() {
         LocalAssistant assistant = assistantWithRecordingIntents(new RecordingIntent(
                 "image.switch_channel",
-                List.of(new SlotSpec("channel", "channel number", null))));
+                Collections.singletonList(new SlotSpec("channel", "channel number", null))));
 
         AssistantReply reply = assistant.handle("switch to channel");
 
@@ -34,7 +36,7 @@ public class ParameterPromptingTest {
     public void numericReplyFillsChannelAndExecutesHeldIntent() {
         RecordingIntent switchChannel = new RecordingIntent(
                 "image.switch_channel",
-                List.of(new SlotSpec("channel", "channel number", null)));
+                Collections.singletonList(new SlotSpec("channel", "channel number", null)));
         LocalAssistant assistant = assistantWithRecordingIntents(switchChannel);
 
         assistant.handle("switch to channel");
@@ -49,7 +51,7 @@ public class ParameterPromptingTest {
     public void numericReplyMayIncludeLeadingSlotWords() {
         RecordingIntent switchChannel = new RecordingIntent(
                 "image.switch_channel",
-                List.of(new SlotSpec("channel", "channel number", null)));
+                Collections.singletonList(new SlotSpec("channel", "channel number", null)));
         LocalAssistant assistant = assistantWithRecordingIntents(switchChannel);
 
         assistant.handle("switch to channel");
@@ -62,8 +64,9 @@ public class ParameterPromptingTest {
     public void nonNumericReplyDropsPendingTurnAndRunsFreshRequest() {
         RecordingIntent switchChannel = new RecordingIntent(
                 "image.switch_channel",
-                List.of(new SlotSpec("channel", "channel number", null)));
-        RecordingIntent closeAll = new RecordingIntent("image.close_all", List.<SlotSpec>of());
+                Collections.singletonList(new SlotSpec("channel", "channel number", null)));
+        RecordingIntent closeAll = new RecordingIntent("image.close_all",
+                Collections.<SlotSpec>emptyList());
         LocalAssistant assistant = assistantWithRecordingIntents(switchChannel, closeAll);
 
         assistant.handle("switch to channel");
@@ -79,7 +82,7 @@ public class ParameterPromptingTest {
     public void inlineChannelExecutesImmediatelyWithoutPrompt() {
         RecordingIntent switchChannel = new RecordingIntent(
                 "image.switch_channel",
-                List.of(new SlotSpec("channel", "channel number", null)));
+                Collections.singletonList(new SlotSpec("channel", "channel number", null)));
         LocalAssistant assistant = assistantWithRecordingIntents(switchChannel);
 
         AssistantReply reply = assistant.handle("switch to channel 2");
@@ -106,7 +109,7 @@ public class ParameterPromptingTest {
     @Test
     public void multipleRequiredSlotsAreAskedOneAtATime() {
         RecordingIntent twoSlot = new RecordingIntent("test.two_slots",
-                List.of(new SlotSpec("alpha", "alpha value", null),
+                Arrays.asList(new SlotSpec("alpha", "alpha value", null),
                         new SlotSpec("beta", "beta value", null)));
         IntentLibrary library = IntentLibrary.load();
         library.register(twoSlot);

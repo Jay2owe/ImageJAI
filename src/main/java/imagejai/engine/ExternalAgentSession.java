@@ -18,13 +18,27 @@ import java.io.InputStream;
 public final class ExternalAgentSession implements AgentSession {
     private final AgentLauncher.AgentInfo info;
     private final boolean spawned;
+    private final String notice;
 
     public ExternalAgentSession(AgentLauncher.AgentInfo info, boolean spawned) {
+        this(info, spawned, "");
+    }
+
+    public ExternalAgentSession(AgentLauncher.AgentInfo info, boolean spawned, String notice) {
         this.info = info;
         this.spawned = spawned;
+        this.notice = notice == null ? "" : notice;
     }
 
     @Override public AgentLauncher.AgentInfo info() { return info; }
+
+    public String notice() {
+        return notice;
+    }
+
+    public boolean isFallbackLaunch() {
+        return !notice.isEmpty();
+    }
 
     @Override public void writeInput(String s) {
         IJ.log("[AgentLauncher] writeInput ignored — external terminal is detached");

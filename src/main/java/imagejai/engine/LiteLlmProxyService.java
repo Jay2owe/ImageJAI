@@ -76,8 +76,15 @@ public class LiteLlmProxyService {
         IJ.log(LOG_PREFIX + " stopping proxy sidecar");
         if (isWindows()) {
             try {
-                new ProcessBuilder("taskkill", "/PID",
-                        Long.toString(running.pid()), "/T", "/F").start().waitFor();
+                String pid = processPid(running);
+                if (pid != null) {
+                    new ProcessBuilder("taskkill", "/PID", pid, "/T", "/F").start().waitFor();
+                } else {
+                    running.destroy();
+                    if (!running.waitFor(5, java.util.concurrent.TimeUnit.SECONDS)) {
+                        running.destroyForcibly();
+                    }
+                }
             } catch (Exception e) {
                 running.destroyForcibly();
             }
@@ -268,5 +275,15 @@ public class LiteLlmProxyService {
 
     private boolean isWindows() {
         return System.getProperty("os.name", "").toLowerCase().contains("win");
+    }
+
+    private static String processPid(Process process) {
+        try {
+            java.lang.reflect.Method method = Process.class.getMethod("pid");
+            Object value = method.invoke(process);
+            return value == null ? null : String.valueOf(value);
+        } catch (Exception ignored) {
+            return null;
+        }
     }
 }

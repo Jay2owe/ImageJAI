@@ -4,6 +4,7 @@ import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.Optional;
 import java.util.regex.Matcher;
@@ -62,7 +63,9 @@ final class MacroAnalyser {
             this.code = code;
             this.message = message;
             this.hint = hint;
-            this.affectedLines = affectedLines != null ? affectedLines : List.of();
+            this.affectedLines = affectedLines != null
+                    ? affectedLines
+                    : Collections.<Integer>emptyList();
         }
 
         JsonObject toJson() {
@@ -143,7 +146,7 @@ final class MacroAnalyser {
                 "Analyze Particles was called without a flag that writes to "
                         + "Results; nResults is 0 by design.",
                 hint,
-                List.of(line)));
+                Collections.singletonList(line)));
     }
 
     // -----------------------------------------------------------------------

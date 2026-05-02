@@ -2,6 +2,9 @@ package imagejai.engine;
 
 import ij.IJ;
 import imagejai.config.Settings;
+import imagejai.engine.terminal.ExternalTerminalProvider;
+import imagejai.engine.terminal.TerminalProvider;
+import imagejai.engine.terminal.TerminalProviderFactory;
 
 import java.io.File;
 import java.io.IOException;
@@ -137,15 +140,20 @@ public class AgentLauncher {
             syncContextFiles();
 
             if (mode == Mode.EMBEDDED) {
-                AgentLaunchSpec spec = buildEmbeddedLaunchSpec(agent);
-                return new EmbeddedAgentSession(agent, spec);
+                AgentLaunchSpec embeddedSpec = buildEmbeddedLaunchSpec(agent);
+                AgentLaunchSpec externalSpec = buildExternalLaunchSpec(agent);
+                TerminalProvider terminal =
+                        TerminalProviderFactory.create(embeddedSpec, externalSpec);
+                terminal.start();
+                if (terminal.isEmbedded()) {
+                    return new EmbeddedAgentSession(agent, terminal, embeddedSpec.workingDir);
+                }
+                return new ExternalAgentSession(agent, true, terminal.notice());
             }
 
             AgentLaunchSpec spec = buildExternalLaunchSpec(agent);
-            ProcessBuilder pb = new ProcessBuilder(spec.agentCommand);
-            pb.directory(spec.workingDir);
-            pb.environment().putAll(spec.env);
-            pb.start();
+            TerminalProvider terminal = new ExternalTerminalProvider(spec);
+            terminal.start();
 
             IJ.log("[AgentLauncher] Launched: " + agent.name + " (" + agent.command + ")");
             return new ExternalAgentSession(agent, true);
@@ -171,16 +179,28 @@ public class AgentLauncher {
         List<String> cmd = new ArrayList<String>();
 
         if (os.contains("win")) {
-            cmd.add("cmd.exe");
-            cmd.add("/c");
-            cmd.add("start");
-            cmd.add("\"" + agent.name + "\"");
-            cmd.add("cmd.exe");
-            cmd.add("/k");
-            cmd.add(fullCommand);
+            String command = "cd /d \"" + agentWorkspace + "\" && " + fullCommand;
+            if (commandExists("wt.exe")) {
+                cmd.add("wt.exe");
+                cmd.add("new-tab");
+                cmd.add("--title");
+                cmd.add("ImageJAI Agent");
+                cmd.add("cmd.exe");
+                cmd.add("/k");
+                cmd.add(command);
+            } else {
+                cmd.add("cmd.exe");
+                cmd.add("/c");
+                cmd.add("start");
+                cmd.add("\"ImageJAI Agent\"");
+                cmd.add("cmd.exe");
+                cmd.add("/k");
+                cmd.add(command);
+            }
         } else if (os.contains("mac")) {
+            String shell = "cd " + shellQuote(agentWorkspace) + " && " + fullCommand;
             String script = "tell application \"Terminal\" to do script "
-                    + "\"cd '" + agentWorkspace + "' && " + fullCommand + "\"";
+                    + appleScriptString(shell);
             cmd.add("osascript");
             cmd.add("-e");
             cmd.add(script);
@@ -190,12 +210,20 @@ public class AgentLauncher {
                 throw new UnsupportedOperationException(
                         "No terminal emulator found (gnome-terminal / konsole / xterm / ...).");
             }
+            String shell = "cd " + shellQuote(agentWorkspace) + " && "
+                    + fullCommand + "; exec bash";
             cmd.add(terminal);
-            cmd.add("-e");
-            cmd.add("bash -c 'cd \"" + agentWorkspace + "\" && " + fullCommand + "; bash'");
+            if (terminal.contains("gnome-terminal")) {
+                cmd.add("--");
+            } else {
+                cmd.add("-e");
+            }
+            cmd.add("bash");
+            cmd.add("-lc");
+            cmd.add(shell);
         }
 
-        Map<String, String> env = new LinkedHashMap<>();
+        Map<String, String> env = new LinkedHashMap<String, String>();
         env.put("IMAGEJAI_TCP_PORT", String.valueOf(tcpPort));
 
         return new AgentLaunchSpec(agent, cmd, new File(agentWorkspace), env);
@@ -221,7 +249,7 @@ public class AgentLauncher {
             cmd.add("exec " + fullCommand);
         }
 
-        Map<String, String> env = new LinkedHashMap<>(System.getenv());
+        Map<String, String> env = new LinkedHashMap<String, String>(System.getenv());
         env.put("IMAGEJAI_TCP_PORT", String.valueOf(tcpPort));
         env.put("TERM", "xterm-256color");
         env.put("COLORTERM", "truecolor");
@@ -336,20 +364,46 @@ public class AgentLauncher {
      * Find an available terminal emulator on Linux.
      */
     private String findLinuxTerminal() {
-        String[] terminals = {
-            "gnome-terminal", "konsole", "xterm", "xfce4-terminal", "lxterminal"
-        };
+        String envTerminal = System.getenv("TERMINAL");
+        if (envTerminal != null && !envTerminal.trim().isEmpty()) {
+            String candidate = envTerminal.trim();
+            File file = new File(candidate);
+            if ((file.isAbsolute() && file.isFile() && file.canExecute())
+                    || commandExists(candidate)) {
+                return candidate;
+            }
+        }
+
+        String[] terminals = {"xterm", "gnome-terminal", "konsole"};
         for (String term : terminals) {
-            try {
-                Process p = new ProcessBuilder("which", term).start();
-                if (p.waitFor() == 0) {
-                    return term;
-                }
-            } catch (Exception ignore) {
-                // continue
+            if (commandExists(term)) {
+                return term;
             }
         }
         return null;
+    }
+
+    private boolean commandExists(String command) {
+        try {
+            String os = System.getProperty("os.name", "").toLowerCase();
+            String whichCmd = os.contains("win") ? "where" : "which";
+            Process p = new ProcessBuilder(whichCmd, command).start();
+            return p.waitFor() == 0;
+        } catch (Exception ignore) {
+            return false;
+        }
+    }
+
+    private static String shellQuote(String value) {
+        if (value == null || value.isEmpty()) {
+            return "''";
+        }
+        return "'" + value.replace("'", "'\"'\"'") + "'";
+    }
+
+    private static String appleScriptString(String value) {
+        String text = value == null ? "" : value;
+        return "\"" + text.replace("\\", "\\\\").replace("\"", "\\\"") + "\"";
     }
 
     /**

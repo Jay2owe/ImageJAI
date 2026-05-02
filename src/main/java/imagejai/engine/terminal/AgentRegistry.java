@@ -1,12 +1,9 @@
-package imagejai.terminal;
+package imagejai.engine.terminal;
 
 import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
-import com.jediterm.terminal.model.LinesBuffer;
-import com.jediterm.terminal.model.TerminalTextBuffer;
-import com.jediterm.terminal.ui.JediTermWidget;
 import ij.IJ;
 import imagejai.engine.AgentLauncher;
 
@@ -123,33 +120,6 @@ public final class AgentRegistry {
         return immutable;
     }
 
-    public static String readScrollback(JediTermWidget terminal, int limit) {
-        if (terminal == null) {
-            return "";
-        }
-        TerminalTextBuffer buffer = terminal.getTerminalTextBuffer();
-        List<String> lines = new ArrayList<String>();
-        buffer.lock();
-        try {
-            appendLast(lines, buffer.getHistoryBuffer(), limit);
-            appendLast(lines, buffer.getScreenBuffer(), limit);
-        } catch (RuntimeException e) {
-            IJ.log("[ImageJAI-Term] Failed to read terminal scrollback: " + e.getMessage());
-        } finally {
-            buffer.unlock();
-        }
-
-        int start = Math.max(0, lines.size() - limit);
-        StringBuilder out = new StringBuilder();
-        for (int i = start; i < lines.size(); i++) {
-            if (out.length() > 0) {
-                out.append('\n');
-            }
-            out.append(lines.get(i));
-        }
-        return out.toString();
-    }
-
     private static List<CommandEntry> scanUserCommands(String id, File workspace) {
         List<CommandEntry> commands = new ArrayList<CommandEntry>();
         if ("claude".equals(id) && workspace != null) {
@@ -202,14 +172,6 @@ public final class AgentRegistry {
     private static String stripExtension(String name) {
         int dot = name.lastIndexOf('.');
         return dot > 0 ? name.substring(0, dot) : name;
-    }
-
-    private static void appendLast(List<String> target, LinesBuffer source, int limit) {
-        int count = source.getLineCount();
-        int start = Math.max(0, count - limit);
-        for (int i = start; i < count; i++) {
-            target.add(source.getLineText(i));
-        }
     }
 
     private static String stringValue(JsonObject obj, String key) {

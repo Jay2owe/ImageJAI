@@ -278,7 +278,7 @@ public final class SessionCodeJournal {
         if (fileName.isEmpty()) return null;
         Path file = dir.resolve(fileName);
         if (!Files.isRegularFile(file)) return null;
-        String code = Files.readString(file, StandardCharsets.UTF_8);
+        String code = readUtf8(file);
         String language = stringValue(obj, "language", "ijm");
         long timestamp = longValue(obj, "timestamp", System.currentTimeMillis());
         boolean plumbingOnly = obj.has("plumbingOnly")
@@ -375,7 +375,8 @@ public final class SessionCodeJournal {
                 if (dir == null) return;
                 Files.createDirectories(dir);
                 if (e != null) {
-                    Files.writeString(dir.resolve(e.fileName), e.code, StandardCharsets.UTF_8,
+                    Files.write(dir.resolve(e.fileName),
+                            e.code.getBytes(StandardCharsets.UTF_8),
                             StandardOpenOption.CREATE_NEW);
                 }
                 writeIndexAtomically(dir.resolve("INDEX.json"), indexSnapshot);
@@ -455,7 +456,7 @@ public final class SessionCodeJournal {
             pw.print("]\n");
         }
         Path tmp = Files.createTempFile(index.getParent(), "INDEX", ".tmp");
-        Files.writeString(tmp, sw.toString(), StandardCharsets.UTF_8,
+        Files.write(tmp, sw.toString().getBytes(StandardCharsets.UTF_8),
                 StandardOpenOption.TRUNCATE_EXISTING);
         try {
             Files.move(tmp, index, StandardCopyOption.REPLACE_EXISTING,
@@ -468,5 +469,9 @@ public final class SessionCodeJournal {
     private static String jsonEscape(String s) {
         if (s == null) return "";
         return s.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n");
+    }
+
+    private static String readUtf8(Path file) throws IOException {
+        return new String(Files.readAllBytes(file), StandardCharsets.UTF_8);
     }
 }

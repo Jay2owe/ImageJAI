@@ -1,10 +1,12 @@
 package imagejai.engine.picker;
 
+import java.io.BufferedReader;
 import java.io.IOException;
-import java.net.URI;
-import java.net.http.HttpClient;
-import java.net.http.HttpRequest;
-import java.net.http.HttpResponse;
+import java.io.InputStream;
+import java.io.InputStreamReader;
+import java.net.HttpURLConnection;
+import java.net.URL;
+import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.Collections;
 import java.util.LinkedHashMap;
@@ -246,30 +248,57 @@ public final class ProviderDiscovery {
     }
 
     static HttpFetcher defaultFetcher() {
-        final HttpClient client = HttpClient.newBuilder()
-                .followRedirects(HttpClient.Redirect.NORMAL)
-                .build();
         return new HttpFetcher() {
             @Override
             public HttpResult fetch(Endpoint endpoint, Duration timeout) {
+                HttpURLConnection connection = null;
                 try {
-                    HttpRequest.Builder b = HttpRequest.newBuilder()
-                            .uri(URI.create(endpoint.url()))
-                            .timeout(timeout)
-                            .GET();
+                    connection = (HttpURLConnection) new URL(endpoint.url()).openConnection();
+                    int timeoutMs = timeoutMillis(timeout);
+                    connection.setInstanceFollowRedirects(true);
+                    connection.setConnectTimeout(timeoutMs);
+                    connection.setReadTimeout(timeoutMs);
+                    connection.setRequestMethod("GET");
                     for (Map.Entry<String, String> h : endpoint.headers().entrySet()) {
-                        b.header(h.getKey(), h.getValue());
+                        connection.setRequestProperty(h.getKey(), h.getValue());
                     }
-                    HttpResponse<String> resp = client.send(b.build(),
-                            HttpResponse.BodyHandlers.ofString());
-                    return new HttpResult(resp.statusCode(), resp.body());
+                    int status = connection.getResponseCode();
+                    InputStream stream = status >= 400
+                            ? connection.getErrorStream()
+                            : connection.getInputStream();
+                    return new HttpResult(status, readAll(stream));
                 } catch (IOException ex) {
                     return new HttpResult(ex);
-                } catch (InterruptedException ex) {
-                    Thread.currentThread().interrupt();
-                    return new HttpResult(new IOException("interrupted", ex));
+                } finally {
+                    if (connection != null) {
+                        connection.disconnect();
+                    }
                 }
             }
         };
+    }
+
+    private static int timeoutMillis(Duration timeout) {
+        long millis = timeout == null ? 5000L : timeout.toMillis();
+        if (millis <= 0L) {
+            return 5000;
+        }
+        return millis > Integer.MAX_VALUE ? Integer.MAX_VALUE : (int) millis;
+    }
+
+    private static String readAll(InputStream stream) throws IOException {
+        if (stream == null) {
+            return "";
+        }
+        StringBuilder out = new StringBuilder();
+        try (BufferedReader reader = new BufferedReader(new InputStreamReader(
+                stream, StandardCharsets.UTF_8))) {
+            char[] buffer = new char[4096];
+            int n;
+            while ((n = reader.read(buffer)) >= 0) {
+                out.append(buffer, 0, n);
+            }
+        }
+        return out.toString();
     }
 }

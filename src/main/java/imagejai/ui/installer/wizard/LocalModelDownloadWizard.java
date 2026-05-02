@@ -229,7 +229,7 @@ public class LocalModelDownloadWizard implements InstallerWizard {
             if (in == null) {
                 return sizes;
             }
-            String json = new String(in.readAllBytes(), StandardCharsets.UTF_8);
+            String json = readAll(in);
             // Tiny ad-hoc parser — file is hand-curated, no nested structures.
             Pattern entry = Pattern.compile("\"([^\"]+)\"\\s*:\\s*\"([^\"]+)\"");
             Matcher m = entry.matcher(json);
@@ -240,5 +240,18 @@ public class LocalModelDownloadWizard implements InstallerWizard {
             // Resource-load failure isn't fatal; rows just show "size unknown".
         }
         return sizes;
+    }
+
+    private static String readAll(InputStream in) throws IOException {
+        StringBuilder out = new StringBuilder();
+        try (BufferedReader reader = new BufferedReader(new InputStreamReader(
+                in, StandardCharsets.UTF_8))) {
+            char[] buffer = new char[4096];
+            int n;
+            while ((n = reader.read(buffer)) >= 0) {
+                out.append(buffer, 0, n);
+            }
+        }
+        return out.toString();
     }
 }

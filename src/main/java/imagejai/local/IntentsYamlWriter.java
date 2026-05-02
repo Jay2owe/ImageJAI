@@ -207,7 +207,7 @@ public final class IntentsYamlWriter {
     }
 
     private static String read(Path yaml) throws IOException {
-        return Files.readString(yaml, StandardCharsets.UTF_8);
+        return new String(Files.readAllBytes(yaml), StandardCharsets.UTF_8);
     }
 
     private static void writeAtomically(Path target, String content) throws IOException {
@@ -220,7 +220,7 @@ public final class IntentsYamlWriter {
         }
         Path tmp = Files.createTempFile(parent, target.getFileName().toString(), ".tmp");
         try {
-            Files.writeString(tmp, content == null ? "" : content, StandardCharsets.UTF_8);
+            Files.write(tmp, (content == null ? "" : content).getBytes(StandardCharsets.UTF_8));
             try {
                 Files.move(tmp, target, StandardCopyOption.REPLACE_EXISTING,
                         StandardCopyOption.ATOMIC_MOVE);

@@ -1,13 +1,12 @@
 package imagejai.engine;
 
-import com.jediterm.terminal.ui.JediTermWidget;
 import ij.ImagePlus;
 import ij.IJ;
 import ij.WindowManager;
 import ij.io.FileInfo;
 import imagejai.config.Settings;
-import imagejai.terminal.AgentRegistry;
-import imagejai.terminal.EmbeddedPty;
+import imagejai.engine.terminal.AgentRegistry;
+import imagejai.engine.terminal.TerminalProvider;
 
 import javax.swing.JComponent;
 import java.io.File;
@@ -30,22 +29,20 @@ public final class EmbeddedAgentSession implements AgentSession {
             DateTimeFormatter.ofPattern("yyyyMMdd_HHmmss");
 
     private final AgentLauncher.AgentInfo info;
-    private final EmbeddedPty pty;
+    private final TerminalProvider terminal;
     private final File workingDir;
     private boolean scrollbackPersisted;
 
-    public EmbeddedAgentSession(AgentLauncher.AgentInfo info, AgentLaunchSpec spec) throws IOException {
+    public EmbeddedAgentSession(AgentLauncher.AgentInfo info,
+                                TerminalProvider terminal,
+                                File workingDir) {
         this.info = info;
-        this.pty = new EmbeddedPty(spec);
-        this.workingDir = spec.workingDir;
+        this.terminal = terminal;
+        this.workingDir = workingDir;
     }
 
     public JComponent component() {
-        return pty.component();
-    }
-
-    public JediTermWidget terminalWidget() {
-        return pty.widget();
+        return terminal.component();
     }
 
     @Override
@@ -56,7 +53,7 @@ public final class EmbeddedAgentSession implements AgentSession {
     @Override
     public void writeInput(String s) {
         try {
-            pty.write((s == null ? "" : s) + "\r");
+            terminal.write((s == null ? "" : s) + "\r");
         } catch (IOException e) {
             IJ.log("[ImageJAI-Term] Failed to write input: " + e.getMessage());
         }
@@ -64,35 +61,35 @@ public final class EmbeddedAgentSession implements AgentSession {
 
     public void writeRaw(String s) {
         try {
-            pty.write(s == null ? "" : s);
+            terminal.write(s == null ? "" : s);
         } catch (IOException e) {
             IJ.log("[ImageJAI-Term] Failed to write raw input: " + e.getMessage());
         }
     }
 
+    public String readScrollback(int lineLimit) {
+        return terminal.readScrollback(lineLimit);
+    }
+
     @Override
     public InputStream output() {
-        return pty.process().getInputStream();
+        return terminal.output();
     }
 
     @Override
     public boolean isAlive() {
-        return pty.process().isRunning();
+        return terminal.isAlive();
     }
 
     @Override
     public int exitValue() {
-        try {
-            return pty.process().exitValue();
-        } catch (IllegalThreadStateException stillRunning) {
-            return -1;
-        }
+        return terminal.exitValue();
     }
 
     @Override
     public void interrupt() {
         try {
-            pty.interrupt();
+            terminal.interrupt();
         } catch (IOException e) {
             IJ.log("[ImageJAI-Term] Failed to interrupt session: " + e.getMessage());
         }
@@ -103,21 +100,21 @@ public final class EmbeddedAgentSession implements AgentSession {
         persistScrollbackIfEnabled();
 
         try {
-            pty.write(new String(new byte[] { 0x04 }, StandardCharsets.UTF_8));
+            terminal.write(new String(new byte[] { 0x04 }, StandardCharsets.UTF_8));
         } catch (IOException e) {
             IJ.log("[ImageJAI-Term] Failed to send EOF: " + e.getMessage());
         }
 
-        try {
-            if (!pty.process().waitFor(2, TimeUnit.SECONDS)) {
-                pty.process().destroyForcibly();
+        long deadline = System.currentTimeMillis() + TimeUnit.SECONDS.toMillis(2);
+        while (terminal.isAlive() && System.currentTimeMillis() < deadline) {
+            try {
+                Thread.sleep(100L);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                break;
             }
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            pty.process().destroyForcibly();
-        } finally {
-            pty.closeWidget();
         }
+        terminal.dispose();
     }
 
     public synchronized void persistScrollbackIfEnabled() {
@@ -131,7 +128,7 @@ public final class EmbeddedAgentSession implements AgentSession {
             return;
         }
 
-        String text = AgentRegistry.readScrollback(terminalWidget(), SCROLLBACK_LINES);
+        String text = readScrollback(SCROLLBACK_LINES);
         if (text == null || text.trim().isEmpty()) {
             return;
         }
@@ -147,7 +144,7 @@ public final class EmbeddedAgentSession implements AgentSession {
         Path file = dir.resolve(agent + "_" + timestamp + ".log");
         try {
             Files.createDirectories(dir);
-            Files.writeString(file, text, StandardCharsets.UTF_8);
+            Files.write(file, text.getBytes(StandardCharsets.UTF_8));
             IJ.log("[ImageJAI-Term] Persisted terminal scrollback: " + file);
         } catch (IOException e) {
             IJ.log("[ImageJAI-Term] Failed to persist terminal scrollback: " + e.getMessage());

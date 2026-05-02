@@ -1,8 +1,5 @@
-package imagejai.terminal;
+package imagejai.engine.terminal;
 
-import com.jediterm.terminal.model.LinesBuffer;
-import com.jediterm.terminal.model.TerminalTextBuffer;
-import com.jediterm.terminal.ui.JediTermWidget;
 import ij.IJ;
 
 import javax.swing.Timer;
@@ -15,6 +12,10 @@ import java.util.regex.Pattern;
  * Polls visible terminal output for approval prompts and URLs.
  */
 public final class PromptWatcher {
+    public interface ScrollbackReader {
+        String readScrollback(int lineLimit);
+    }
+
     public interface Listener {
         void onAutoConfirm(String promptText);
         void onEscalate(String promptText);
@@ -30,7 +31,7 @@ public final class PromptWatcher {
     private static final Pattern URL =
             Pattern.compile("(https?://\\S+|file://\\S+)");
 
-    private final JediTermWidget terminal;
+    private final ScrollbackReader scrollbackReader;
     private final ApprovalPolicy policy;
     private final RawWriter writer;
     private final Listener listener;
@@ -40,11 +41,11 @@ public final class PromptWatcher {
     private String lastPrompt = "";
     private String lastUrl = "";
 
-    public PromptWatcher(JediTermWidget terminal,
+    public PromptWatcher(ScrollbackReader scrollbackReader,
                          ApprovalPolicy policy,
                          RawWriter writer,
                          Listener listener) {
-        this.terminal = terminal;
+        this.scrollbackReader = scrollbackReader;
         this.policy = policy;
         this.writer = writer;
         this.listener = listener;
@@ -102,35 +103,12 @@ public final class PromptWatcher {
     }
 
     private String readLastLines(int limit) {
-        TerminalTextBuffer buffer = terminal.getTerminalTextBuffer();
-        List<String> lines = new ArrayList<String>();
-        buffer.lock();
         try {
-            appendLast(lines, buffer.getHistoryBuffer(), limit);
-            appendLast(lines, buffer.getScreenBuffer(), limit);
+            return scrollbackReader == null ? "" : scrollbackReader.readScrollback(limit);
         } catch (RuntimeException e) {
             IJ.log("[ImageJAI-Term] Failed to read terminal buffer: " + e.getMessage());
-        } finally {
-            buffer.unlock();
         }
-
-        int start = Math.max(0, lines.size() - limit);
-        StringBuilder out = new StringBuilder();
-        for (int i = start; i < lines.size(); i++) {
-            if (out.length() > 0) {
-                out.append('\n');
-            }
-            out.append(lines.get(i));
-        }
-        return out.toString();
-    }
-
-    private static void appendLast(List<String> target, LinesBuffer source, int limit) {
-        int count = source.getLineCount();
-        int start = Math.max(0, count - limit);
-        for (int i = start; i < count; i++) {
-            target.add(source.getLineText(i));
-        }
+        return "";
     }
 
     private static String promptCandidate(String tail) {

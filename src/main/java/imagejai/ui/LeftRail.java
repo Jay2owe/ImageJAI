@@ -5,7 +5,7 @@ import ij.IJ;
 import ij.Prefs;
 import imagejai.config.Settings;
 import imagejai.engine.EmbeddedAgentSession;
-import imagejai.terminal.AgentRegistry;
+import imagejai.engine.terminal.AgentRegistry;
 
 import javax.swing.BorderFactory;
 import javax.swing.Box;
@@ -395,7 +395,7 @@ public class LeftRail extends JPanel {
                 if (session != current) {
                     return;
                 }
-                String tail = AgentRegistry.readScrollback(current.terminalWidget(), 40);
+                String tail = current.readScrollback(40);
                 if (clearPattern != null && clearPattern.matcher(tail).find()) {
                     IJ.log("[ImageJAI-Term] Agent chat cleared without PTY restart: "
                             + current.info().name);
