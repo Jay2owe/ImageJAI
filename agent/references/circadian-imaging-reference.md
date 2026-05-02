@@ -3,9 +3,116 @@
 Bioluminescence/fluorescence imaging of circadian rhythms in SCN and brain tissue:
 acquisition, analysis methods, software tools, pitfalls, and statistics.
 
+Covers bioluminescence (PER2::LUC, Bmal1-ELuc, Per1-luc) on PMT and EMCCD,
+fluorescence (GCaMP6, Per2-Venus, R-GECO), Incucyte fibroblast rhythm assays,
+and downstream rhythm analysis — detrending, period estimation (FFT,
+Lomb-Scargle, wavelet/pyBOAT, cosinor), phase analysis (Hilbert, peak
+detection, pixel-wise phase maps), synchrony metrics (Kuramoto, PLV), and
+circular/rhythmicity statistics (Rayleigh, JTK_CYCLE, CircaCompare).
+
+Invoke from the agent:
+`python ij.py macro '<code>'` — run ImageJ macro (.ijm) code for ROI
+extraction, registration (StackReg), bleach correction, kymographs.
+Python analysis (detrending, periodogram, Hilbert, circular stats) runs
+locally; R tools (CircaCompare, MetaCycle) run in R.
+
 ---
 
-## 1. Reporter Systems
+## §0 Lookup Map — "How do I find X?"
+
+| Question | Where to look |
+|---|---|
+| "Which bioluminescent reporter should I use?" | §2 reporter systems |
+| "EMCCD vs PMT vs Incucyte — which system?" | §3 acquisition systems |
+| "How do I extract ROI time series in ImageJ?" | §4.1 preprocessing |
+| "How do I detrend a bioluminescence baseline?" | §4.1 preprocessing |
+| "How do I estimate period (FFT / Lomb-Scargle / wavelet / cosinor)?" | §4.2 period estimation |
+| "How do I compute phase / phase maps?" | §4.3 phase analysis |
+| "How do I measure synchrony across cells?" | §4.5 synchrony metrics |
+| "Which R / Python package for rhythm analysis?" | §5 software tools |
+| "Which statistical test for rhythmicity / group comparison?" | §6 statistics |
+| "What's the end-to-end workflow?" | §7 quick-reference workflow |
+| "What does acrophase / MESOR / CT / ZT / TTFL / Kuramoto R mean?" | §8 glossary |
+| "Key papers on PER2::LUC / JTK_CYCLE / pyBOAT / CircaCompare?" | §9 key papers |
+| "Why did my rhythm analysis give spurious oscillations?" | §10 pitfalls |
+
+---
+
+## §1 Term Index (A–Z)
+
+Alphabetical pointer to the section containing each reporter, instrument,
+method, or concept. Use `grep -n '<term>' circadian-imaging-reference.md`
+to jump.
+
+### A
+`Acrophase` §8 · `Amplitude analysis` §4.4 · `Andor iXon3` §3 · `ARSER` §5 · `astropy.timeseries` §5 · `Autocorrelation` §4.2
+
+### B
+`Background subtraction` §4.1 · `Baseline detrending` §4.1 · `Binning` §3 · `BioDare2` §5 · `Bleach correction` §4.1 · `Bmal1-dLuc` §2 · `Bmal1-ELuc` §2
+
+### C
+`Calcium imaging (GCaMP6, R-GECO)` §2 · `CCD parameters` §3 · `CircaCompare` §5, §6 · `Circular mean` §4.3 · `Circular statistics` §4.3, §6 · `Cooling (camera)` §3 · `Cosinor fitting` §4.2, §5, §6 · `CosinorPy` §5 · `Correct 3D Drift` §5 · `CT (Circadian Time)` §8
+
+### D
+`Damping` §4.4, §8, §10 · `Detrending` §4.1, §10 · `DiscoRhythm` §5 · `Dual biolum+fluor` §3
+
+### E
+`EM gain` §3 · `EMCCD` §3 · `Evaporation (medium)` §10 · `Exponential fit` §4.1 · `Exposure` §3
+
+### F
+`FAST (SCN bioluminescence plugin)` §5 · `FFT` §4.2 · `Fluorescence reporters` §2
+
+### G
+`GCaMP6` §2 · `Glossary` §8
+
+### H
+`Half-life (damping)` §4.4 · `Hilbert transform` §4.3 · `Hyperstack` — see ImageJ operations §5
+
+### I
+`ImageJ operations (StackReg / Multi Measure / Bleach Correction / Kymograph)` §5 · `Incucyte` §3 · `Instantaneous phase` §4.3
+
+### J
+`JTK_CYCLE` §5, §6
+
+### K
+`Key papers` §9 · `Kuramoto order parameter` §4.5, §8 · `Kymograph (Multi Kymograph)` §5
+
+### L
+`LomB-Scargle` §4.2, §6 · `Lomb-Scargle FAP (false alarm probability)` §4.2, §6 · `lme4 (mixed-effects)` §6 · `LumiCycle 32` §3 · `Luciferin (0.1 mM / depletion)` §3, §10
+
+### M
+`MESOR` §4.2, §8 · `MetaCycle` §5, §6 · `Mixed-effects models` §6 · `Morlet wavelet` §4.2 · `Moving average` §4.1 · `Multi Kymograph` §5 · `Multi Measure` §5 · `Multiple comparisons` §10
+
+### O
+`Objective (NA)` §3 · `ORCA-Flash4.0 (sCMOS)` §3
+
+### P
+`Pairwise phase coherence (PLV)` §4.5, §8 · `Peak detection` §4.3, §4.4 · `Peak-trough amplitude` §4.4 · `PER2::LUC` §2, §9 · `PER2::LUC-SV40` §2 · `Per1-luc` §2 · `Per2-Venus` §2 · `Period estimation` §4.2 · `Phase analysis` §4.3 · `Phase map (pixel-wise)` §4.3 · `Phototoxicity` §2, §10 · `pingouin` §5 · `PMT` §3 · `Polynomial detrending` §4.1 · `Preprocessing` §4.1 · `pyBOAT (wavelet)` §4.2, §5, §9
+
+### Q
+`Quick-Reference Workflow` §7
+
+### R
+`RAIN (asymmetric waveforms)` §5, §6 · `Rayleigh test` §4.3, §6 · `Reporter systems` §2 · `R-GECO` §2 · `Rhythmicity testing` §6 · `RLU (Relative Light Units)` §8 · `ROI extraction (ImageJ)` §4.1
+
+### S
+`Sample size` §6 · `Savitzky-Golay smoothing` §4.1 · `sCMOS` §3 · `SCN coupling (VIP)` §8 · `Sealing dishes (vacuum grease)` §3, §10 · `Set Measurements` §4.1 · `Sinc filter (pyBOAT)` §4.1, §10 · `Smoothing` §4.1 · `Software tools` §5 · `Spatial resolution (systems)` §3 · `Stability (temperature)` §3, §10 · `StackReg / TurboReg` §5 · `Statistics` §6 · `Synchrony metrics` §4.5
+
+### T
+`Temperature (+/- 0.5C)` §3, §10 · `Time Series Analyzer` §5 · `TrackMate` §5 · `TTFL (Transcription-Translation Feedback Loop)` §8
+
+### V
+`Vibration` §10 · `VIP (Vasoactive Intestinal Peptide)` §8
+
+### W
+`Watson-Williams test` §4.3, §6 · `Wavelet analysis (Morlet)` §4.2, §5 · `Workflow (end-to-end)` §7
+
+### Z
+`Z Project` §5 · `ZT (Zeitgeber Time)` §8
+
+---
+
+## §2 Reporter Systems
 
 ### Bioluminescence
 
@@ -33,7 +140,7 @@ acquisition, analysis methods, software tools, pitfalls, and statistics.
 
 ---
 
-## 2. Acquisition Systems
+## §3 Acquisition Systems
 
 ### System Comparison
 
@@ -76,9 +183,9 @@ acquisition, analysis methods, software tools, pitfalls, and statistics.
 
 ---
 
-## 3. Analysis Methods
+## §4 Analysis Methods
 
-### 3.1 Preprocessing
+### §4.1 Preprocessing
 
 #### ROI Extraction (ImageJ)
 
@@ -138,7 +245,7 @@ from scipy.signal import savgol_filter
 smoothed = savgol_filter(signal, window_length=5, polyorder=3)  # adjust window to ~2h
 ```
 
-### 3.2 Period Estimation
+### §4.2 Period Estimation
 
 | Method | Best For | Python |
 |--------|----------|--------|
@@ -200,7 +307,7 @@ fitted = cosinor_model(time, *popt)
 r_squared = 1 - np.sum((signal-fitted)**2) / np.sum((signal-np.mean(signal))**2)
 ```
 
-### 3.3 Phase Analysis
+### §4.3 Phase Analysis
 
 #### Peak Detection
 
@@ -277,7 +384,7 @@ rayleigh.test(phases_rad)
 watson.williams.test(list(group1_rad, group2_rad))
 ```
 
-### 3.4 Amplitude Analysis
+### §4.4 Amplitude Analysis
 
 ```python
 def peak_trough_amplitude(signal, time, sampling_interval_hours):
@@ -295,7 +402,7 @@ def peak_trough_amplitude(signal, time, sampling_interval_hours):
 For damping rate estimation, fit exponential envelope to peaks: `a * exp(-t/tau)`.
 Half-life = `tau * ln(2)`. Useful for peripheral vs SCN comparison.
 
-### 3.5 Synchrony Metrics
+### §4.5 Synchrony Metrics
 
 #### Kuramoto Order Parameter
 
@@ -323,7 +430,7 @@ def pairwise_phase_coherence(phases_matrix):
 
 ---
 
-## 4. Software Tools
+## §5 Software Tools
 
 ### Web-Based
 
@@ -392,32 +499,13 @@ FAST (SCN bioluminescence), TrackMate, Bio-Formats.
 
 ---
 
-## 5. Pitfalls
-
-| Pitfall | Impact | Mitigation |
-|---------|--------|------------|
-| **Phototoxicity** (fluorescence) | Blue light suppresses SCN rhythms | Use red-shifted reporters; minimize exposure; spinning-disk |
-| **Medium evaporation** | Increased osmolarity kills cells | Seal with vacuum grease; water reservoir |
-| **Vibration** | Frame jitter, streaks in long exposures | Anti-vibration table; StackReg post-hoc |
-| **Luciferin depletion** | Signal declines ~10-20%/day | Detrend baseline; consider 0.2 mM for >7 days |
-| **Temperature fluctuation** | Phase resets, luminescence noise | Stable to +/- 0.5C |
-| **Motion in slices** | ROI drift over days | StackReg registration; relative intensity changes |
-| **Damping (peripheral)** | Amplitude decays over 3-7 days | Normal biology (not artifact). Use wavelet, not FFT. |
-| **Detrending artifacts** | Aggressive polynomial introduces spurious oscillations | Use sinc filter (pyBOAT) or exponential fit |
-| **Short recordings** | <3 cycles makes period unreliable | Aim for 5+ cycles (120h+) |
-| **Edge effects** | FFT/wavelet artifacts at boundaries | Trim first/last half-cycle |
-| **Assuming stationarity** | Period changes over time in perturbation experiments | Use wavelet for non-stationary data |
-| **Multiple comparisons** | When testing many ROIs/cells | Bonferroni or Benjamini-Hochberg FDR |
-
----
-
-## 6. Statistics
+## §6 Statistics
 
 ### Testing for Rhythmicity
 
 | Method | Best For | Tool |
 |--------|----------|------|
-| Rayleigh test | Phase clustering | `circular::rayleigh.test()` (R), see sec 3.3 (Python) |
+| Rayleigh test | Phase clustering | `circular::rayleigh.test()` (R), see §4.3 (Python) |
 | JTK_CYCLE | Omics (short, replicated) | `MetaCycle` (R) |
 | Cosinor F-test | Single time series | `CosinorPy`, `cosinor` (R) |
 | Lomb-Scargle FAP | Unevenly sampled | `astropy` (Python), `lomb` (R) |
@@ -460,7 +548,7 @@ preprocessing methods, software versions.
 
 ---
 
-## 7. Quick-Reference Workflow
+## §7 Quick-Reference Workflow
 
 ```
 SLICE PREP (Day 0) -> START RECORDING
@@ -489,7 +577,7 @@ FIGURES: Raw traces, periodogram, phase map, polar plot, raster heatmap
 
 ---
 
-## 8. Glossary
+## §8 Glossary
 
 | Term | Definition |
 |------|-----------|
@@ -506,7 +594,7 @@ FIGURES: Raw traces, periodogram, phase map, polar plot, raster heatmap
 
 ---
 
-## 9. Key Papers
+## §9 Key Papers
 
 - **Yoo et al. 2004** PNAS -- PER2::LUC knockin mouse (gold standard reporter)
 - **Welsh et al. 2004** Curr Biol -- First single-cell bioluminescence imaging
@@ -518,3 +606,22 @@ FIGURES: Raw traces, periodogram, phase map, polar plot, raster heatmap
 - **Hughes et al. 2010** J Biol Rhythms -- JTK_CYCLE algorithm
 - **Parsons et al. 2020** Bioinformatics -- CircaCompare method
 - **Moeneclaey et al. 2022** Methods Mol Biol -- pyBOAT wavelet toolkit
+
+---
+
+## §10 Pitfalls
+
+| Pitfall | Impact | Mitigation |
+|---------|--------|------------|
+| **Phototoxicity** (fluorescence) | Blue light suppresses SCN rhythms | Use red-shifted reporters; minimize exposure; spinning-disk |
+| **Medium evaporation** | Increased osmolarity kills cells | Seal with vacuum grease; water reservoir |
+| **Vibration** | Frame jitter, streaks in long exposures | Anti-vibration table; StackReg post-hoc |
+| **Luciferin depletion** | Signal declines ~10-20%/day | Detrend baseline; consider 0.2 mM for >7 days |
+| **Temperature fluctuation** | Phase resets, luminescence noise | Stable to +/- 0.5C |
+| **Motion in slices** | ROI drift over days | StackReg registration; relative intensity changes |
+| **Damping (peripheral)** | Amplitude decays over 3-7 days | Normal biology (not artifact). Use wavelet, not FFT. |
+| **Detrending artifacts** | Aggressive polynomial introduces spurious oscillations | Use sinc filter (pyBOAT) or exponential fit |
+| **Short recordings** | <3 cycles makes period unreliable | Aim for 5+ cycles (120h+) |
+| **Edge effects** | FFT/wavelet artifacts at boundaries | Trim first/last half-cycle |
+| **Assuming stationarity** | Period changes over time in perturbation experiments | Use wavelet for non-stationary data |
+| **Multiple comparisons** | When testing many ROIs/cells | Bonferroni or Benjamini-Hochberg FDR |

@@ -3,11 +3,143 @@
 Concise reference for SCN biology, markers, quantification methods, and experimental
 approaches. For image analysis workflows, see `scn-analysis-reference.md`.
 
+Sources: Paxinos & Franklin mouse atlas; Allen CCFv3 (SCH = ID 286); primary
+literature on SCN anatomy, neuropeptides, coupling, and circadian quantification
+(Welsh 1995; Aton 2005; Brancaccio 2013, 2017, 2019, 2024; Hastings/Maywood/Brancaccio
+2018; Hughes 2010; Parsons 2020; Patton & Hastings 2023). Markers and antibody
+catalogue numbers as listed per-row.
+
+Invoke-adjacent commands the agent uses when applying this reference:
+`python ij.py macro '<code>'` for macro operations (thresholding, ROI work,
+measurement), `python ij.py script '<code>'` for Groovy/Jython when macros
+cannot reach a plugin, and `python ij.py capture` to inspect mask / label
+results visually. Analysis-specific recipes live in `scn-analysis-reference.md`
+and `circadian-analysis.md`.
+
 ---
 
-## 1. Anatomy & Structure
+## §0 Lookup Map — "How do I find X?"
 
-### 1.1 Location & Coordinates
+| Question | Where to look |
+|---|---|
+| "Where is the SCN in the mouse brain — stereotaxic coordinates?" | §2.1 |
+| "What's the difference between SCN core and shell?" | §2.3 |
+| "Which neuropeptide marks the core vs the shell?" | §3.1 |
+| "What antibody should I use for VIP / AVP / PER2?" | §3.3 |
+| "Which reporter lines exist for live imaging?" | §3.4 |
+| "How do I estimate circadian period from a time series?" | §5.1 |
+| "How do I measure synchrony between oscillators?" | §5.3 |
+| "What's the Kuramoto R / Rayleigh test formula?" | §5.3 |
+| "What period should a mouse SCN slice have?" | §8 |
+| "What's the SCN doing in Alzheimer's / Parkinson's?" | §7 |
+| "What does abbreviation X stand for?" | §10 |
+
+---
+
+## §1 Term Index (A–Z)
+
+Alphabetical pointer to the section containing each marker, antibody,
+anatomical structure, or concept. Use `grep -n '<term>' scn-reference.md`
+to jump.
+
+### A
+`Abeta` §7 · `ALDH1L1` §3.2 · `Allen CCFv3 (SCH=286)` §2.1 · `Alpha-synuclein` §7 ·
+`Alzheimer's` §7 · `anterior hypothalamic area` §2.1 · `Aton 2005` §9 ·
+`Autocorrelation` §5.1 · `AVP` §3.1, §3.3, §4.1, §8 · `astrocytes` §3.2, §4.1
+
+### B
+`BB2 (receptor)` §4.1, §8 · `Bio-luminescence / luciferin` §6.1 ·
+`BMAL1` §3.3, §7 · `Brancaccio 2013` §9 · `Brancaccio 2017` §3.2, §9 ·
+`Brancaccio 2019` §3.2, §9 · `Brancaccio 2024` §3.2, §9
+
+### C
+`C1q / C3` §3.2, §7 · `c-Fos` §3.3 · `Calbindin (Calb1)` §3.1, §3.3 ·
+`Calretinin (Calb2)` §3.1 · `CCDA/EMCCD` §6.2 · `CircaCompare` §5.5, §9 ·
+`Circular variance` §5.3 · `clock protein` §3.3 · `commissural tract` §2.4 ·
+`core (ventrolateral)` §2.3 · `Cosinor` §5.4 · `CREB` §4.1, §8 ·
+`Cry1-luc` §3.4 · `CT / ZT` §10 · `CX3CR1` §3.2 · `CX3CR1-GFP` §3.4 ·
+`Cx36 (gap junctions)` §4.1
+
+### D
+`DD (constant darkness)` §8 · `DMH` §2.5, §10 · `DREADDs` §6.3
+
+### E
+`efferent projections` §2.5 · `EMBO J` §9
+
+### F
+`Fiber photometry` §6.3 · `FFT` §5.1
+
+### G
+`GABA` §3.1, §3.2, §4.1 · `GABA-A` §4.1 · `GABAergic` §3.1 ·
+`gap junctions` §4.1 · `GCaMP6f/s` §3.4, §6.3 · `GFAP` §3.2, §3.3 ·
+`GHT` §2.4 · `glia` §3.2 · `Gq` §4.1, §8 · `Gs` §4.1, §8 ·
+`GRP (Grp)` §3.1, §3.3, §4.1, §8 · `glymphatic` §7
+
+### H
+`Hastings/Maywood/Brancaccio 2018` §9 · `Hilbert transform` §5.2 ·
+`Hughes 2010` §9 · `human` §2.2, §8 · `Huntington's` §7
+
+### I
+`Iba1` §3.2, §3.3 · `IGL` §2.4 · `IML` §2.5 · `Incucyte` §6.2 ·
+`ipRGCs (melanopsin, ~480 nm)` §2.4, §10 · `IP3 → Ca2+` §8
+
+### J
+`JTK_CYCLE` §5.5, §9
+
+### K
+`KCC2` §3.1 · `Kuramoto R` §5.3
+
+### L
+`LumiCycle` §6.2 · `Lomb-Scargle` §5.1
+
+### M
+`median raphe` §2.4 · `melanopsin` §2.4, §7 · `melatonin` §2.5 ·
+`Miniscope` §6.3 · `microglia` §3.2, §7 · `Morlet wavelet` §5.1 ·
+`mouse stereotaxic (Paxinos & Franklin)` §2.1
+
+### N
+`NeuN` §3.3 · `NFTs` §7 · `NKCC1` §3.1 · `NMDA (NR2C)` §4.1 ·
+`NMS (Nms)` §3.1, §10 · `NPY` §2.4
+
+### O
+`optic chiasm` §2.1 · `Optogenetics` §6.3 · `organotypic slice` §6.1
+
+### P
+`P2RY12` §3.2 · `PACAP` §2.4 · `Parkinson's` §7 · `Parsons 2020` §5.5, §9 ·
+`Patton & Hastings 2023` §9 · `Peak detection (phase)` §5.2 · `Peninsula T-4563` §3.3 ·
+`PER2` §3.3 · `PER2::LUC` §3.4, §4.2, §8 · `PER2::VENUS` §3.4 ·
+`Per1-luc` §3.4 · `Per1::GFP` §3.4 · `PK2 (Prok2)` §3.1, §2.5, §10 ·
+`PKA` §8 · `photoperiod encoding` §4.3 · `photoentrainment` §2.3, §2.4 ·
+`PMT` §6.2 · `POA` §2.5 · `PRC` §10 · `PVN` §2.5, §10
+
+### R
+`RAIN` §5.5 · `rat` §2.2 · `Rayleigh test` §5.3 · `RBD` §7 ·
+`REV-ERBa` §3.2, §7 · `retinorecipient zone` §3.1 · `RHT` §2.4, §10
+
+### S
+`S100beta` §3.2 · `SCG` §2.5 · `SCH (Allen CCFv3 ID 286)` §2.1 ·
+`SCN` §10 · `serotonergic / 5-HT` §2.4 · `shell (dorsomedial)` §2.3 ·
+`SPZ` §2.1, §2.5, §10 · `SON` §2.1 · `sundowning` §7 ·
+`synchrony` §5.3 · `synaptic phagocytosis` §3.2
+
+### T
+`third ventricle (3V)` §2.1, §10 · `TMEM119` §3.2 · `TTFL` §3.2, §10
+
+### V
+`V1a/V1b (receptor)` §4.1, §8 · `VENUS` §3.4 · `VIP (Vip)` §3.1, §3.3, §4.1, §8, §10 ·
+`VPAC2` §4.1, §8 · `vibratome` §6.1
+
+### W
+`Wavelet (Morlet)` §5.1 · `Welsh 1995` §9
+
+### Z
+`ZT` §10
+
+---
+
+## §2. Anatomy & Structure
+
+### §2.1 Location & Coordinates
 
 Paired bilateral structure in anterior hypothalamus, above optic chiasm, flanking ventral 3V.
 
@@ -20,7 +152,7 @@ Paired bilateral structure in anterior hypothalamus, above optic chiasm, flankin
 
 **Mouse stereotaxic (Paxinos & Franklin):** AP bregma -0.34 to -0.70 mm (mid ~-0.46 to -0.58), ML +/- 0.0–0.3 mm, DV ~-5.3 to -5.7 mm. Allen CCFv3 ID: 286 (SCH).
 
-### 1.2 Size
+### §2.2 Size
 
 | Species | Neurons/side | Dimensions |
 |---------|-------------|------------|
@@ -28,7 +160,7 @@ Paired bilateral structure in anterior hypothalamus, above optic chiasm, flankin
 | Rat | ~10,000 | ~400 x 400 x 800 um |
 | Human | ~10,000 | 1.4–1.8 mm A-P |
 
-### 1.3 Core vs Shell Subdivisions
+### §2.3 Core vs Shell Subdivisions
 
 | Property | Core (Ventrolateral) | Shell (Dorsomedial) |
 |----------|---------------------|---------------------|
@@ -40,7 +172,7 @@ Paired bilateral structure in anterior hypothalamus, above optic chiasm, flankin
 
 Core → shell connectivity is dense (~90% AVP neurons receive >=3 VIP contacts); shell → core is sparse (<10%).
 
-### 1.4 Afferent Pathways
+### §2.4 Afferent Pathways
 
 | Source | Tract | Transmitters | Function |
 |--------|-------|-------------|----------|
@@ -49,7 +181,7 @@ Core → shell connectivity is dense (~90% AVP neurons receive >=3 VIP contacts)
 | Median raphe | Serotonergic | 5-HT | Non-photic phase shifting |
 | Contralateral SCN | Commissural | GABA, VIP | Bilateral coordination |
 
-### 1.5 Efferent Projections
+### §2.5 Efferent Projections
 
 | Target | Function | Key mediators |
 |--------|----------|---------------|
@@ -62,9 +194,9 @@ Melatonin: SCN → PVN → IML → SCG → pineal (duration encodes photoperiod)
 
 ---
 
-## 2. Cell Types & Markers
+## §3. Cell Types & Markers
 
-### 2.1 Neurons
+### §3.1 Neurons
 
 All SCN neurons are GABAergic (~95%), subdivided by co-expressed neuropeptides.
 
@@ -80,14 +212,14 @@ All SCN neurons are GABAergic (~95%), subdivided by co-expressed neuropeptides.
 
 GABA dual polarity: excitatory (day, NKCC1-dominant) / inhibitory (night, KCC2-dominant).
 
-### 2.2 Glia
+### §3.2 Glia
 
 | Cell type | Markers | Circadian role |
 |-----------|---------|---------------|
 | Astrocytes | GFAP, ALDH1L1, S100beta | Anti-phasic Ca2+ vs neurons; glutamate/GABA oscillations drive neuronal synchrony (Brancaccio 2017, 2019, 2024) |
 | Microglia | Iba1, CX3CR1, CD68, P2RY12, TMEM119 | Self-sustained clocks; REV-ERBa-regulated activation; diurnal synaptic phagocytosis via C1q/C3 |
 
-### 2.3 Common IHC Antibodies
+### §3.3 Common IHC Antibodies
 
 | Target | Host | Catalogue | Application |
 |--------|------|-----------|-------------|
@@ -102,7 +234,7 @@ GABA dual polarity: excitatory (day, NKCC1-dominant) / inhibitory (night, KCC2-d
 | BMAL1 | Rabbit | Novus NB100-2288 | Clock protein |
 | c-Fos | Rabbit | Cell Signaling 2250; Santa Cruz sc-52 | IEG, light induction |
 
-### 2.4 Fluorescent Reporters
+### §3.4 Fluorescent Reporters
 
 | Reporter | Type | Reports |
 |----------|------|---------|
@@ -115,9 +247,9 @@ GABA dual polarity: excitatory (day, NKCC1-dominant) / inhibitory (night, KCC2-d
 
 ---
 
-## 3. Network Properties & Coupling
+## §4. Network Properties & Coupling
 
-### 3.1 Coupling Mechanisms
+### §4.1 Coupling Mechanisms
 
 | Mechanism | Receptor | Importance |
 |-----------|----------|-----------|
@@ -130,21 +262,21 @@ GABA dual polarity: excitatory (day, NKCC1-dominant) / inhibitory (night, KCC2-d
 
 Hierarchy: VIP/VPAC2 >> AVP/V1a > GRP/BB2.
 
-### 3.2 Phase Relationships
+### §4.2 Phase Relationships
 
 - Dorsal leads ventral by 1–4 hours
 - Long photoperiod → caudal leads by 4–12 h (phase dispersal encodes day length)
 - PER2::LUC reveals daily spatiotemporal expression wave
 
-### 3.3 Photoperiod Encoding
+### §4.3 Photoperiod Encoding
 
 Day length encoded via network-level phase distribution (compressed = short day, dispersed = long day). Individual neurons maintain identical patterns regardless. ~50 neurons needed for detectable photoperiodic differences.
 
 ---
 
-## 4. Quantification Methods
+## §5. Quantification Methods
 
-### 4.1 Period Estimation
+### §5.1 Period Estimation
 
 | Method | Best for | Notes |
 |--------|----------|-------|
@@ -153,14 +285,14 @@ Day length encoded via network-level phase distribution (compressed = short day,
 | Wavelet (Morlet) | Time-resolved period/amplitude | Cone of influence at edges |
 | Autocorrelation | Model-free | Period = lag of first positive peak |
 
-### 4.2 Phase Estimation
+### §5.2 Phase Estimation
 
 | Method | Approach |
 |--------|----------|
 | Hilbert transform | phi(t) = arctan(H[x(t)] / x(t)). **Must bandpass filter first** (~0.8–1.2 cycles/day). |
 | Peak detection | Phase 0 at maxima; interpolate. Smooth first (3–5 point MA). |
 
-### 4.3 Synchrony Metrics
+### §5.3 Synchrony Metrics
 
 | Metric | Formula | SCN values |
 |--------|---------|-----------|
@@ -168,11 +300,11 @@ Day length encoded via network-level phase distribution (compressed = short day,
 | Rayleigh test | z = N*R^2; p ~ exp(-z) | Reject uniform if p < 0.05 |
 | Circular variance | V = 1 - R | — |
 
-### 4.4 Cosinor Analysis
+### §5.4 Cosinor Analysis
 
 y(t) = M + A*cos(2*pi*t/tau + phi) + epsilon. Linearised: fit beta*cos + gamma*sin. A = sqrt(beta^2 + gamma^2), phi = atan2(-gamma, beta). Rhythm test: F(2, N-3).
 
-### 4.5 Rhythm Detection Tools
+### §5.5 Rhythm Detection Tools
 
 | Method | Type | Notes |
 |--------|------|-------|
@@ -182,13 +314,13 @@ y(t) = M + A*cos(2*pi*t/tau + phi) + epsilon. Linearised: fit beta*cos + gamma*s
 
 ---
 
-## 5. Experimental Preparations
+## §6. Experimental Preparations
 
-### 5.1 Organotypic Slice Cultures
+### §6.1 Organotypic Slice Cultures
 
 Typically P2–P7, 250–350 um coronal sections, vibratome → Millicell inserts, DMEM + B27 + luciferin (0.1–1 mM). 35–37C, CO2-free sealed (biolum) or 5% CO2 (fluorescence). Stable oscillations for weeks–months.
 
-### 5.2 Recording Methods
+### §6.2 Recording Methods
 
 | Method | Resolution | Throughput | Use |
 |--------|-----------|------------|-----|
@@ -196,7 +328,7 @@ Typically P2–P7, 250–350 um coronal sections, vibratome → Millicell insert
 | CCD/EMCCD | Cellular–10 um | Low (1–4) | Spatial phase mapping |
 | Incucyte | ~1–5 um/pixel | Medium (multi-well) | Long-term + morphology |
 
-### 5.3 In Vivo Methods
+### §6.3 In Vivo Methods
 
 | Method | Resolution | Duration |
 |--------|-----------|----------|
@@ -206,7 +338,7 @@ Typically P2–P7, 250–350 um coronal sections, vibratome → Millicell insert
 
 ---
 
-## 6. SCN in Disease
+## §7. SCN in Disease
 
 | Disease | SCN pathology | Key mechanism |
 |---------|--------------|---------------|
@@ -218,7 +350,7 @@ Typically P2–P7, 250–350 um coronal sections, vibratome → Millicell insert
 
 ---
 
-## 7. Quick Reference Values
+## §8. Quick Reference Values
 
 ### Period
 
@@ -239,7 +371,7 @@ Typically P2–P7, 250–350 um coronal sections, vibratome → Millicell insert
 
 ---
 
-## 8. Key Publications
+## §9. Key Publications
 
 | Authors | Year | Journal | Finding |
 |---------|------|---------|---------|
@@ -256,7 +388,7 @@ Typically P2–P7, 250–350 um coronal sections, vibratome → Millicell insert
 
 ---
 
-## 9. Glossary
+## §10. Glossary
 
 | Abbrev | Full Name |
 |--------|-----------|

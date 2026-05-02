@@ -3,9 +3,129 @@
 Validates automated image analysis against manual ground truth: segmentation metrics,
 agreement statistics, inter-observer variability, power analysis, reporting standards.
 
+Sources: Bland & Altman (Lancet 1986) for limits of agreement; Shrout & Fleiss
+(Psych Bull 1979) and Koo & Li (J Chiropr Med 2016) for ICC forms; Lin
+(Biometrics 1989) for CCC; Cohen (1960) and Fleiss (1971) for kappa; Landis & Koch
+(Biometrics 1977) for kappa thresholds; Maier-Hein et al. (Nature Methods 2024) for
+the modern metrics framework; Kirillov et al. (CVPR 2019) for Panoptic Quality;
+Lu et al. (Int J Biostat 2016) for Bland-Altman sample size; Bonett (Stat Med 2002)
+for ICC sample size. Dice/Jaccard/Hausdorff/BF1/PQ formulas are standard in the
+biomedical segmentation literature. Full citation list in §15.
+
+Invoke from the agent:
+`python ij.py macro '<code>'` — run ImageJ macro (.ijm) for pixel-level agreement
+(Dice, precision/recall) on open binary masks.
+Python-side stats (Bland-Altman, ICC, CCC, Passing-Bablok, kappa, Hausdorff, PQ,
+boundary F1, matching) run locally using the snippets in §5, §7, §8 and the
+copy-paste utilities in §16.
+
 ---
 
-## 1. Quick Start: Validate Automated Cell Count vs Manual
+## §0 Lookup Map — "How do I find X?"
+
+| Question | Where to look |
+|---|---|
+| "When should I validate at all?" | §3 |
+| "How much ground truth do I need?" | §4.3, §10 |
+| "How do I make label/mask ground truth in ImageJ?" | §4.2 |
+| "Dice / Jaccard / IoU formula and thresholds?" | §5.1, §5.7 |
+| "Hausdorff, HD95, boundary F1?" | §5.4, §5.5 |
+| "Panoptic Quality for instance segmentation?" | §5.6 |
+| "Match predicted objects to GT by IoU / by point?" | §6.1, §6.4 |
+| "Counting MAE / MAPE / signed error?" | §6.3 |
+| "Average Precision (AP / AP@0.5 / mAP)?" | §6.2 |
+| "Bland-Altman, bias, LoA, CI formulas?" | §7.1 |
+| "Which ICC form (1,1 / 2,1 / 3,1 / 2,k / 3,k)?" | §7.2, §14 |
+| "Lin's CCC vs Pearson r?" | §7.3, §7.4 |
+| "Passing-Bablok regression?" | §7.5 |
+| "Cohen's kappa, weighted kappa, Fleiss' kappa?" | §8.1, §8.2 |
+| "Inter-observer variability, STAPLE, majority vote?" | §9 |
+| "Sample size for B-A / ICC / Dice / kappa?" | §10 |
+| "End-to-end TCP workflow for Dice check?" | §11 |
+| "Which metric for which task? reporting template?" | §12 |
+| "Common pitfalls / why my numbers look wrong?" | §13 |
+| "Decision tree — which metric to pick?" | §14 |
+| "Key references / software packages?" | §15 |
+| "Copy-paste ready Python utilities?" | §16 |
+| "ImageJ macro quick reference (Dice / ROIs / error map)?" | §16 |
+| "Comprehensive metric comparison table?" | §17 |
+
+---
+
+## §1 Term Index (A–Z)
+
+Alphabetical pointer to the section containing each metric, test, or concept. Use
+`grep -n '<term>' method-validation-reference.md` to jump to the exact line.
+
+### A
+`absolute agreement` §7.2, §14 · `acceptable range (B-A)` §7.1, §13 · `AP / AP@0.5 / AP@0.75 / mAP` §6.2, §12, §17 · `arbitration (consensus GT)` §9 · `association vs agreement` §7.4, §13 · `assumptions (B-A)` §7.1 · `average of k raters ICC` §7.2, §14
+
+### B
+`balanced accuracy` §5.1, §12 · `batch Dice macro` §5.8 · `bias (Bland-Altman)` §7.1, §12, §17 · `binary segmentation metrics` §5 · `Bland-Altman analysis` §2, §7.1, §7.6, §10, §12, §14, §15 · `Bland-Altman sample size` §10 · `boundary F1 (BF1 / BF score)` §5.5, §5.7, §12, §16, §17 · `boundary precision / recall` §5.5, §16
+
+### C
+`CCC (Lin's Concordance Correlation Coefficient)` §2, §7.3, §7.6, §12, §14, §15, §16, §17 · `Cell Counter` §4.1 · `chance-corrected agreement` §8.1, §17 · `circular validation` §13 · `classification task` §4.1, §12, §14 · `Cohen's kappa` §8.1, §10, §12, §14, §15 · `confidence intervals (bias, LoA, CCC, ICC)` §7.1, §7.2, §7.3, §12 · `confusion matrix` §5, §12 · `Connected Components Labeling (MorphoLibJ)` §4.2 · `consensus ground truth` §9 · `consistency only (ICC)` §7.2, §14 · `constant bias (Passing-Bablok)` §7.5 · `correlation (Pearson / Spearman)` §7.4, §13, §17 · `counting metrics (MAE/MAPE/signed)` §6.3, §12, §16
+
+### D
+`decision trees` §14 · `detection metrics` §6, §12 · `Dice coefficient (F1)` §2, §5.1, §5.2, §5.3, §5.7, §5.8, §10, §11, §12, §13, §14, §16, §17 · `Dice vs Jaccard relationship` §5.1, §13 · `dilation tolerance (BF1)` §5.5 · `distance threshold (points)` §6.4
+
+### E
+`edge cases (empty masks)` §5.3, §13 · `empty mask handling` §5.3, §13, §16 · `error map macro` §16 · `Euclidean distance matching` §6.4 · `expected ICC (power)` §10
+
+### F
+`F1 (Dice)` §5.1, §5.3, §16 · `Fleiss' kappa` §8.2, §12, §14, §15 · `F distribution CI (ICC)` §7.2
+
+### G
+`ground truth preparation` §4 · `ground truth types table` §4.1 · `ground truth consensus` §9
+
+### H
+`Hausdorff distance / HD95` §5.4, §5.7, §12, §14, §16, §17 · `Hungarian algorithm (linear_sum_assignment)` §6.1, §6.4 · `hypothesis-based threshold` §7.1, §13
+
+### I
+`ICC (Intraclass Correlation Coefficient)` §2, §7.2, §7.6, §10, §12, §14, §15, §16, §17 · `ICC(1,1)` §7.2, §14 · `ICC(2,1)` §2, §7.2, §14, §16 · `ICC(2,k)` §7.2, §14 · `ICC(3,1)` §7.2, §13, §14 · `ICC(3,k)` §7.2, §14 · `ICC sample size` §10 · `IHC grades (ordinal kappa)` §8.1 · `image-level summaries` §7.1, §13 · `imageCalculator (Dice)` §5.2, §5.8, §11, §16 · `instance segmentation` §5.6, §12, §14 · `inter-annotator / inter-observer variability (IOV)` §4.5, §9, §12 · `interpretation thresholds` §5.1, §7.2, §7.3, §8.1, §17 · `IoU (Jaccard)` §4.3, §5.1, §5.6, §6.1, §10, §12, §14, §17 · `IoU threshold (matching)` §5.6, §6.1
+
+### J
+`Jaccard index (IoU)` §5.1, §5.3, §5.7, §10, §16, §17
+
+### K
+`kappa (Cohen's / Fleiss' / weighted)` §8, §10, §12, §14, §15 · `kappa paradox` §13 · `Koo & Li thresholds` §7.2, §15
+
+### L
+`Labkit` §4.1 · `label image from ROIs` §4.2, §16 · `Landis & Koch thresholds` §8.1, §15 · `Lin's CCC` §7.3 · `linear_sum_assignment` §6.1, §6.4, §16 · `LoA (Limits of Agreement)` §2, §7.1, §7.6, §10, §12, §13, §14, §16 · `log-transform (proportional bias)` §7.1, §14
+
+### M
+`MAE (Mean Absolute Error)` §6.3, §12, §14, §16 · `MAPE` §6.3, §16 · `Maier-Hein metrics framework` §15 · `majority vote` §4.5, §9 · `matching objects (IoU)` §6.1 · `matching points (Euclidean)` §6.4 · `mean signed error` §6.3, §16 · `measurement agreement` §7, §12, §14 · `methods sentence templates` §12 · `minimum reporting checklist` §12 · `MorphoLibJ connected components` §4.2
+
+### N
+`n_images vs n_objects` §10 · `nominal kappa` §8.1 · `normalization of binary (divide by 255)` §5.2, §5.8, §11, §16
+
+### O
+`object detection metrics` §6, §12 · `object matching` §6.1 · `object-level F1 vs pixel-level F1` §6.1, §13 · `ordinal kappa (quadratic weights)` §8.1, §14 · `outliers (Hausdorff)` §5.4, §17 · `overlap metrics` §5.1, §5.7, §17
+
+### P
+`Panoptic Quality (PQ, SQ, RQ)` §5.6, §5.7, §12, §14, §15, §16, §17 · `paired measurements` §10, §13 · `Passing-Bablok regression` §7.5, §7.6, §12, §14 · `Pearson correlation` §7.3, §7.4, §13, §16, §17 · `percent agreement` §8.3 · `pingouin (ICC)` §15 · `pitfalls` §13 · `pixel-level metrics` §5, §12 · `point-based detection matching` §6.4 · `power analysis (sample size)` §10 · `PQ (Panoptic Quality)` §5.6 · `precision` §5.1, §5.3, §5.8, §6.4, §12, §16, §17 · `precision-recall curve (AP)` §6.2 · `proportional bias` §7.1, §7.5, §14 · `publication minimum` §3, §7.6, §12
+
+### Q
+`qualitative vs quantitative validation` §3 · `quadratic weights (kappa)` §8.1, §14
+
+### R
+`random / stratified sampling` §4.4, §13 · `raw statistics (ImageJ)` §5.2, §5.8, §11, §16 · `recall` §5.1, §5.3, §5.8, §6.4, §12, §16, §17 · `reliability (ICC)` §7.2, §7.6, §14 · `repeated measures` §7.1 · `reporting standards` §12 · `RGB error map` §16 · `ROI Manager` §4.1, §4.2, §16 · `ROIs to binary mask` §4.2 · `ROIs to label image` §4.2, §16 · `RQ (Recognition Quality)` §5.6, §12, §17
+
+### S
+`sample size` §4.3, §10 · `sampling strategy` §4.4, §13 · `scikit-learn (kappa)` §8.1, §15 · `segmentation metrics` §5 · `semantic segmentation` §5, §12, §14 · `sensitivity (recall)` §5.1 · `Shapiro-Wilk (B-A assumption)` §7.1 · `Shrout & Fleiss` §15 · `SimpleITK (STAPLE)` §4.5, §9, §15 · `software packages` §15 · `Spearman correlation` §7.4 · `specificity` §5.1 · `spatial dependence (cells within image)` §13 · `SQ (Segmentation Quality)` §5.6, §12, §17 · `stacking masks (majority vote)` §9 · `STAPLE algorithm` §4.5, §9, §15 · `stratified random sampling` §4.4, §13 · `systematic bias` §7.1, §7.3, §7.5, §13
+
+### T
+`template methods sentences` §12 · `test-retest` §7.2 · `thresholding to 0/255 (Convert to Mask)` §11 · `tolerance (BF1)` §5.5 · `training/test split` §12 · `two-way random (ICC(2,1))` §2, §7.2 · `TP/FP/FN counting` §5, §5.3, §6.1, §6.4
+
+### V
+`validation levels` §3 · `validation triggers` §3 · `variance components (ICC)` §7.2
+
+### W
+`weighted kappa` §8.1, §14 · `which metric? (decision tree)` §14 · `worst-case boundary (Hausdorff)` §5.4, §5.7, §17
+
+---
+
+## §2 Quick Start: Validate Automated Cell Count vs Manual
 
 ```python
 import numpy as np
@@ -43,7 +163,7 @@ print(f"ICC(2,1) = {icc_val:.3f}, CCC = {ccc:.3f}")
 
 ---
 
-## 2. When to Validate
+## §3 When to Validate
 
 | Trigger | Reason |
 |---------|--------|
@@ -60,9 +180,9 @@ For publication, quantitative is the minimum; rigorous for methods papers.
 
 ---
 
-## 3. Ground Truth Preparation
+## §4 Ground Truth Preparation
 
-### 3.1 Ground Truth Types
+### §4.1 Ground Truth Types
 
 | Task | GT Type | Tool |
 |------|---------|------|
@@ -72,7 +192,7 @@ For publication, quantitative is the minimum; rigorous for methods papers.
 | Classification | Category labels | Spreadsheet |
 | Measurement | Expert measurements | Manual measurement in ImageJ |
 
-### 3.2 Key ImageJ Macros
+### §4.2 Key ImageJ Macros
 
 ```
 // ROIs to label image
@@ -102,7 +222,7 @@ run("Select None");
 run("Connected Components Labeling", "connectivity=4 type=[16 bits]");
 ```
 
-### 3.3 How Many Images to Annotate
+### §4.3 How Many Images to Annotate
 
 | Metric | Minimum | Recommended | Notes |
 |--------|---------|-------------|-------|
@@ -117,12 +237,12 @@ run("Connected Components Labeling", "connectivity=4 type=[16 bits]");
 images: 20 images with 50 cells each (1000 objects) is more informative than 50 images
 with 5 cells each.
 
-### 3.4 Sampling
+### §4.4 Sampling
 
 Use stratified random sampling to ensure the validation set includes images from all
 experimental conditions. Consider at least 10 images per condition group, or 20% of each.
 
-### 3.5 Inter-Annotator Ground Truth
+### §4.5 Inter-Annotator Ground Truth
 
 For rigorous validation: 2-3 independent annotators with written guidelines.
 Create consensus by majority vote or STAPLE algorithm (`sitk.STAPLE()`).
@@ -130,7 +250,7 @@ Inter-annotator agreement establishes the **ceiling** for automated performance.
 
 ---
 
-## 4. Segmentation Metrics (Pixel-Level)
+## §5 Segmentation Metrics (Pixel-Level)
 
 ### Confusion Matrix
 
@@ -141,7 +261,7 @@ Predicted Pos   TP         FP
           Neg   FN         TN
 ```
 
-### 4.1 Metric Formulas and Interpretation
+### §5.1 Metric Formulas and Interpretation
 
 | Metric | Formula | Range | Interpretation Thresholds |
 |--------|---------|-------|--------------------------|
@@ -156,7 +276,7 @@ Predicted Pos   TP         FP
 They rank methods identically. Report whichever is conventional in your field
 (Dice for biomedical, IoU for computer vision).
 
-### 4.2 ImageJ Macro — Dice/Jaccard/Precision/Recall
+### §5.2 ImageJ Macro — Dice/Jaccard/Precision/Recall
 
 ```
 // Assumes "Predicted" and "GroundTruth" open as binary (0/255)
@@ -181,7 +301,7 @@ print("Precision=" + precision + " Recall=" + recall);
 selectWindow("TP_img"); close();
 ```
 
-### 4.3 Python — Core Metrics
+### §5.3 Python — Core Metrics
 
 ```python
 import numpy as np
@@ -208,7 +328,7 @@ def precision_recall_f1(pred, gt):
     return {'precision': prec, 'recall': rec, 'f1': f1, 'tp': int(tp), 'fp': int(fp), 'fn': int(fn)}
 ```
 
-### 4.4 Hausdorff Distance
+### §5.4 Hausdorff Distance
 
 Captures worst-case boundary error. Use HD95 (95th percentile) for robustness to outliers.
 
@@ -230,7 +350,7 @@ def hausdorff_distance(pred, gt, percentile=100):
                np.percentile(np.min(dists, axis=0), percentile))
 ```
 
-### 4.5 Boundary F1 Score
+### §5.5 Boundary F1 Score
 
 Precision/recall on boundary pixels within a tolerance distance. Tolerance: consider
 starting at 2 pixels, adjusting based on expected boundary uncertainty.
@@ -250,7 +370,7 @@ def boundary_f1(pred, gt, tolerance=2):
     return {'bf1': bf, 'boundary_precision': bp, 'boundary_recall': br}
 ```
 
-### 4.6 Panoptic Quality (Instance Segmentation)
+### §5.6 Panoptic Quality (Instance Segmentation)
 
 PQ = SQ * RQ, where SQ = mean IoU of matched pairs, RQ = detection F1.
 Matching: IoU > 0.5 (typically). Always report SQ and RQ separately.
@@ -279,7 +399,7 @@ def panoptic_quality(pred_labels, gt_labels, iou_threshold=0.5):
     return {'pq': sq*rq, 'sq': sq, 'rq': rq, 'tp': tp, 'fp': fp, 'fn': fn}
 ```
 
-### 4.7 Metric Comparison Table
+### §5.7 Metric Comparison Table
 
 | Metric | Type | Range | Strengths | Weaknesses |
 |--------|------|-------|-----------|------------|
@@ -292,7 +412,7 @@ def panoptic_quality(pred_labels, gt_labels, iou_threshold=0.5):
 **Recommended reporting:** Dice + HD95 or BF for semantic segmentation.
 PQ (with SQ, RQ) for instance segmentation. Report mean, SD, range.
 
-### 4.8 Batch Dice (ImageJ Macro)
+### §5.8 Batch Dice (ImageJ Macro)
 
 ```
 pred_dir = "/path/to/predictions/";
@@ -325,9 +445,9 @@ for (i = 0; i < pred_list.length; i++) {
 
 ---
 
-## 5. Object Detection Metrics
+## §6 Object Detection Metrics
 
-### 5.1 Object Matching
+### §6.1 Object Matching
 
 Match predicted objects to ground truth using IoU-based Hungarian algorithm.
 IoU threshold: typically 0.5 for detection, higher for strict evaluation.
@@ -358,12 +478,12 @@ def match_objects(pred_labels, gt_labels, iou_threshold=0.5):
 **Object-level F1** is NOT pixel-level F1 (Dice). Merging adjacent cells gives high
 pixel overlap but poor object-level F1.
 
-### 5.2 Average Precision (AP)
+### §6.2 Average Precision (AP)
 
 Sort detections by confidence, compute cumulative precision-recall curve, AP = area under it.
 **AP@0.5** (lenient), **AP@0.75** (strict), **mAP** (COCO: 0.5-0.95 in 0.05 steps).
 
-### 5.3 Counting Metrics
+### §6.3 Counting Metrics
 
 | Metric | Formula |
 |--------|---------|
@@ -371,7 +491,7 @@ Sort detections by confidence, compute cumulative precision-recall curve, AP = a
 | MAPE | mean(\|predicted - GT\| / GT * 100) |
 | Mean signed error | mean(predicted - GT) — shows systematic over/undercounting |
 
-### 5.4 Point-Based Detection Matching
+### §6.4 Point-Based Detection Matching
 
 When GT is point annotations (Cell Counter), match by Euclidean distance instead of IoU.
 Distance threshold: consider using mean cell diameter as starting point.
@@ -397,9 +517,9 @@ def match_points(pred_points, gt_points, max_distance=20):
 
 ---
 
-## 6. Measurement Agreement (Continuous Variables)
+## §7 Measurement Agreement (Continuous Variables)
 
-### 6.1 Bland-Altman Analysis
+### §7.1 Bland-Altman Analysis
 
 **What it answers:** If I replace method A with method B, how much could results differ?
 
@@ -464,7 +584,7 @@ def bland_altman_analysis(method1, method2, method1_name="Method 1",
 
 **For repeated measures:** Use image-level means as the unit, not individual cells.
 
-### 6.2 Intraclass Correlation Coefficient (ICC)
+### §7.2 Intraclass Correlation Coefficient (ICC)
 
 **What it measures:** Proportion of total variance due to true between-subject differences.
 
@@ -517,7 +637,7 @@ def icc(ratings, icc_type='ICC(2,1)'):
     return {'icc': val, 'ci_lower': ci_lo, 'ci_upper': ci_hi, 'p_value': p_val, 'type': icc_type}
 ```
 
-### 6.3 Lin's Concordance Correlation Coefficient (CCC)
+### §7.3 Lin's Concordance Correlation Coefficient (CCC)
 
 CCC = Pearson r * bias correction. Captures both precision AND accuracy.
 **Why CCC > Pearson r:** r=1.0 is possible even when methods systematically differ.
@@ -548,13 +668,13 @@ def lins_ccc(x, y, confidence=0.95):
             'ci_upper': np.tanh(z+z_crit*se_z), 'pearson_r': r, 'bias_correction': c_b}
 ```
 
-### 6.4 Correlation (Pearson/Spearman)
+### §7.4 Correlation (Pearson/Spearman)
 
 **Correlation measures association, NOT agreement.** Two methods can correlate perfectly
 (r=1.0) while completely disagreeing (one always double the other). Report only alongside
 ICC/CCC/Bland-Altman, never alone.
 
-### 6.5 Passing-Bablok Regression
+### §7.5 Passing-Bablok Regression
 
 Non-parametric method comparison regression. If 95% CI of intercept includes 0 AND
 slope CI includes 1, methods are equivalent. Intercept != 0 = constant bias;
@@ -583,7 +703,7 @@ def passing_bablok(x, y, confidence=0.95):
             'intercept': intercept_est, 'intercept_ci': intercept_ci}
 ```
 
-### 6.6 Which Agreement Metric?
+### §7.6 Which Agreement Metric?
 
 | Question | Metric |
 |----------|--------|
@@ -597,9 +717,9 @@ def passing_bablok(x, y, confidence=0.95):
 
 ---
 
-## 7. Categorical Agreement
+## §8 Categorical Agreement
 
-### 7.1 Cohen's Kappa
+### §8.1 Cohen's Kappa
 
 Agreement corrected for chance. K = (p_observed - p_chance) / (1 - p_chance).
 
@@ -622,7 +742,7 @@ kappa = cohen_kappa_score(rater1, rater2, weights=None)        # nominal
 kappa_w = cohen_kappa_score(rater1, rater2, weights='quadratic')  # ordinal
 ```
 
-### 7.2 Fleiss' Kappa (3+ raters)
+### §8.2 Fleiss' Kappa (3+ raters)
 
 ```python
 def fleiss_kappa(ratings_matrix):
@@ -635,13 +755,13 @@ def fleiss_kappa(ratings_matrix):
     return (p_bar - p_e) / (1 - p_e) if p_e != 1.0 else 1.0
 ```
 
-### 7.3 Percent Agreement
+### §8.3 Percent Agreement
 
 Misleading alone (does not correct for chance). Report only alongside kappa.
 
 ---
 
-## 8. Inter-Observer Variability
+## §9 Inter-Observer Variability
 
 IOV establishes the **ceiling** for automated performance. If experts agree at Dice=0.85,
 an automated method at Dice=0.83 is essentially human-level.
@@ -665,7 +785,7 @@ def majority_vote_mask(masks):
 
 ---
 
-## 9. Power Analysis (Sample Size)
+## §10 Power Analysis (Sample Size)
 
 ### Quick Reference
 
@@ -704,7 +824,7 @@ need 200-500+ objects. For pixel-level (Dice), 20-50 images is usually sufficien
 
 ---
 
-## 10. Agent Workflow: Validation via TCP
+## §11 Agent Workflow: Validation via TCP
 
 ```bash
 # Single-image Dice check
@@ -729,7 +849,7 @@ python ij.py log
 
 ---
 
-## 11. Reporting
+## §12 Reporting
 
 ### Which Metrics for Which Task
 
@@ -768,7 +888,7 @@ accuracy [val]%, balanced accuracy [val]%."
 
 ---
 
-## 12. Common Pitfalls
+## §13 Common Pitfalls
 
 | Pitfall | Problem | Fix |
 |---------|---------|-----|
@@ -787,7 +907,7 @@ accuracy [val]%, balanced accuracy [val]%."
 
 ---
 
-## 13. Decision Trees
+## §14 Decision Trees
 
 ### Which Agreement Metric
 
@@ -833,7 +953,7 @@ Classification:   REQUIRED: Kappa+CI, confusion matrix      |  RECOMMENDED: Per-
 
 ---
 
-## 14. Key References
+## §15 Key References
 
 | Topic | Reference |
 |-------|-----------|
@@ -854,7 +974,7 @@ Classification:   REQUIRED: Kappa+CI, confusion matrix      |  RECOMMENDED: Per-
 
 ---
 
-## Appendix: Compact Utility Functions
+## §16 Appendix: Compact Utility Functions
 
 ```python
 """validation_utils.py — copy-paste ready."""
@@ -981,7 +1101,7 @@ macro "Error_Map" {
 
 ---
 
-## Comprehensive Metric Comparison
+## §17 Comprehensive Metric Comparison
 
 | Metric | Category | Input | Range | Better | Chance-Corrected | Typical Threshold |
 |--------|----------|-------|-------|--------|------------------|-------------------|

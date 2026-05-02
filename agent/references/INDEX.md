@@ -1,6 +1,6 @@
 # Reference Documents Index
 
-49 reference documents, ~31,700 lines total.
+51 reference documents, ~33,000 lines total.
 Read the relevant reference before starting any analysis in that domain.
 
 ---
@@ -17,6 +17,7 @@ Read the relevant reference before starting any analysis in that domain.
 | [file-formats-saving-reference.md](file-formats-saving-reference.md) | 521 | All formats, saveAs(), File.* functions, Bio-Formats Exporter, TIFF deep dive |
 | [bioformats-multiseries-reference.md](bioformats-multiseries-reference.md) | 220 | .lif/.czi/.nd2: list series without opening, open by index, filter by name, batch |
 | [pipeline-construction-reference.md](pipeline-construction-reference.md) | 862 | Pipeline patterns, TCP protocol, parameter sweeps, recipe YAML |
+| [fiji-toolbar-tools-reference.md](fiji-toolbar-tools-reference.md) | 317 | Tool macro syntax, icon mini-language, toolsets, StartupMacros, runtime install via MacroInstaller |
 
 ## Image Analysis Methods
 
@@ -94,8 +95,11 @@ Read the relevant reference before starting any analysis in that domain.
 
 | Document | Lines | Topics |
 |----------|------:|--------|
-| [light-sheet-reference.md](light-sheet-reference.md) | 807 | LSFM types, tissue clearing, BigStitcher/BDV, N5/Zarr/HDF5, whole-brain |
+| [light-sheet-reference.md](light-sheet-reference.md) | 1992 | Clearing chemistry (DISCO/CUBIC/SHIELD/ExM), sample prep, LSFM platforms (Z.1/2, Ultramicroscope, mesoSPIM v2), OME-Zarr 0.4/0.5 spec, BigStitcher + BigStitcher-Spark, TeraStitcher, BrainGlobe, ClearMap2, VesselExpress, HPC, end-to-end pipelines |
+| [light-sheet-big-data-reference.md](light-sheet-big-data-reference.md) | 1 | Stub — merged into light-sheet-reference.md |
+| [light-sheet-microscopy-reference.md](light-sheet-microscopy-reference.md) | 1 | Stub — merged into light-sheet-reference.md |
 | [large-dataset-optimization-reference.md](large-dataset-optimization-reference.md) | 640 | Memory/JVM tuning, virtual stacks, CLIJ2 GPU, headless, OMERO |
+| [clij2-gpu-reference.md](clij2-gpu-reference.md) | 1502 | CLIJ2 ~300 ops by category, ImageJ→CLIJ2 mapping, push/pull, macro/Groovy/pyclesperanto, custom OpenCL kernels, TCP integration, troubleshooting |
 
 ## Publication & Output
 

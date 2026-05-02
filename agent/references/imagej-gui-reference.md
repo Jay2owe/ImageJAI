@@ -1,11 +1,114 @@
-# ImageJ/Fiji GUI Reference (Condensed)
+# ImageJ/Fiji GUI Reference
 
 Agent-oriented reference for ImageJ/Fiji GUI, menus, dialogs, and macro API.
-Use `probe_plugin.py` to discover any plugin's parameters at runtime.
+Covers toolbar tools, menu commands, dialogs, ROIs, overlays, results tables,
+file I/O, batch mode, and keyboard shortcuts.
+
+Sources: `imagej.net/ij/docs/`, `imagej.net/plugins/`, Fiji wiki
+(`imagej.net/software/fiji`). Use `python probe_plugin.py "Plugin..."` to
+discover any installed plugin's parameters at runtime.
+
+Invoke from the agent:
+`python ij.py macro '<code>'` — run ImageJ macro (.ijm) code.
+`python ij.py script '<code>'` — run Groovy (default), Jython, or JavaScript.
 
 ---
 
-## 1. Core Concepts
+## §0 Lookup Map — "How do I find X?"
+
+| Question | Where to look |
+|---|---|
+| "What does `setTool` take?" | §1 → §3 |
+| "How do I open a .nd2 / .lif / .czi file?" | §4.1 |
+| "What image types does ImageJ support?" | §4.2 |
+| "How do I threshold / binarize?" | §4.3, §5.2 |
+| "What options does Analyze Particles take?" | §5.3 |
+| "What columns does Set Measurements produce?" | §5.4 |
+| "How do I draw a polygon / line / rectangle ROI?" | §6.1 |
+| "How do I query the active selection?" | §6.2 |
+| "How do I manage many ROIs?" | §7 |
+| "How do I add non-destructive annotations?" | §8 |
+| "How do I read / write the Results table?" | §9.1 |
+| "How do I make a custom table?" | §9.2 |
+| "What's the `File.*` API?" | §10 |
+| "How do I speed up / batch a macro?" | §11 |
+| "Keyboard shortcut for X?" | §12 |
+| "How does the agent interact with dialogs?" | §13 |
+| "Why did my macro fail / destroy my data?" | §14 |
+
+---
+
+## §1 Term Index (A–Z)
+
+Alphabetical pointer to the section containing each term. Use
+`grep -n '`<term>`' imagej-gui-reference.md` to jump.
+
+### A
+`Analyze Particles` §5.3 · `AND (binary)` §7 · `Apply LUT` §4.8 · `Apply (B&C)` §5.1 · `autoUpdate` §4 · `AVI` §4.1
+
+### B
+`Batch Mode` §11 · `Bio-Formats Importer` §4.1 · `B&C` §5.1 · `binary ops` §4.6
+
+### C
+`call` §11 · `Circ.` §5.4 · `circularity` §5.3 · `Clear Results` §9.1 · `close / close("*") / close("\\Others")` §4.1 · `Close-` (binary) §4.6, §14 · `Convert to Mask` §4.3 · `Crop` §4.4
+
+### D
+`Dialog handling (agent)` §13 · `Dilate` §4.6 · `Distance Map` §4.6 · `Duplicate` §4.4
+
+### E
+`Enhance Contrast` §4.5, §14 · `eval` §11 · `exec` §11 · `Erode` §4.6
+
+### F
+`feret` §5.4 · `File.*` §10 · `Fill Holes` §4.6 · `Find Maxima` §4.5 · `Flatten` §4.4, §14 · `Font` §8
+
+### G
+`Gaussian Blur` §4.5 · `getDirectory` §10 · `getFileList` §10 · `getResult / getResultString` §9.1 · `getSelectionBounds` §6.2
+
+### H
+`HiLo` §4.8 · `Histogram` §12 · `home (getDirectory)` §10 · `Hyperstack` §4.3
+
+### I
+`imageCalculator` §4.7 · `Image Sequence` §4.1 · `integrated` §5.4 · `invokeAndWait` §2
+
+### L
+`Li (threshold)` §5.2 · `limit` §5.4 · `List.*` §9.3 · `LUTs` §4.8
+
+### M
+`makeRectangle / makeOval / makeLine / makePoint / makePolygon / makeSelection` §6.1 · `Measure` §12 · `Median` §4.5 · `Merge Channels` §4.3 · `Make Montage` §4.3 · `Multi Measure` §7
+
+### N
+`nResults` §9.1
+
+### O
+`open` §4.1 · `Open (binary)` §4.6 · `Otsu` §5.2 · `Overlay.*` §8
+
+### P
+`polygon` §3, §6.1 · `probe_plugin` §13 · `Process menu` §4.5
+
+### R
+`Rectangle (tool)` §3 · `resetMinAndMax` §4.3 · `Results table` §9.1 · `RGB Color` §4.2 · `Roi.*` §6.3 · `roiManager` §7 · `Rotate` §4.4 · `run (command invocation)` §2, §4 · `runMacro` §11
+
+### S
+`saveAs` §4.1 · `Scale` §4.4 · `selectionType` §6.2 · `Set Measurements` §5.4 · `setAutoThreshold` §4.3, §5.2 · `setBatchMode` §11 · `setMinAndMax` §4.3, §14 · `setThreshold` §4.3 · `setTool` §3 · `setResult` §9.1 · `Skeletonize` §4.6 · `Stack.*` §4.3 · `Subtract Background` §4.5 · `Summarize` §5.3
+
+### T
+`Table.*` §9.2 · `Threshold` §4.3, §5.2 · `Toolbar tools` §3 · `Triangle (threshold)` §5.2
+
+### U
+`Undo` §12, §14 · `updateResults` §9.1
+
+### W
+`Wand` §3 · `Watershed` §4.6
+
+### Y
+`Yen (threshold)` §5.2
+
+### Z
+`Z Project` §4.3 · `Zoom` §3
+
+---
+
+## §2 Core Concepts
 
 - **ImageJ** = base app; **Fiji** = ImageJ + ~300 plugins + updater
 - **run()** invokes any menu command: `run("Command", "key1=val1 key2=val2")`
@@ -15,7 +118,7 @@ Use `probe_plugin.py` to discover any plugin's parameters at runtime.
 
 ---
 
-## 2. Toolbar Tools
+## §3 Toolbar Tools
 
 | Tool | setTool name | Notes |
 |------|-------------|-------|
@@ -32,11 +135,11 @@ Use `probe_plugin.py` to discover any plugin's parameters at runtime.
 
 ---
 
-## 3. Key Menu Commands
+## §4 Key Menu Commands
 
 Agents can probe any command; below are the most commonly needed.
 
-### File
+### §4.1 File
 
 | Macro | Notes |
 |-------|-------|
@@ -47,7 +150,7 @@ Agents can probe any command; below are the most commonly needed.
 | `saveAs("Tiff", "/path")` | Always TIFF for science; also PNG, Zip, Results |
 | `run("AVI... ", "compression=JPEG frame=7 save=/path")` | Stack as video |
 
-### Image Types
+### §4.2 Image Types
 
 | Type | Range | Macro |
 |------|-------|-------|
@@ -56,7 +159,7 @@ Agents can probe any command; below are the most commonly needed.
 | 32-bit | float | `run("32-bit")` — for calculations |
 | RGB | 3x8-bit | `run("RGB Color")` — required before colour save |
 
-### Adjust
+### §4.3 Adjust
 
 | Macro | Notes |
 |-------|-------|
@@ -66,7 +169,7 @@ Agents can probe any command; below are the most commonly needed.
 | `setThreshold(lo, hi)` | Manual threshold |
 | `run("Convert to Mask")` | Apply threshold to binary |
 
-### Stacks & Hyperstacks
+### §4.3.1 Stacks & Hyperstacks
 
 ```javascript
 Stack.getDimensions(w, h, ch, sl, fr);
@@ -77,7 +180,7 @@ run("Z Project...", "projection=[Max Intensity]");  // also Sum, Average, Median
 run("Make Montage...", "columns=3 rows=2 scale=1 border=2");
 ```
 
-### Transform / Scale
+### §4.4 Transform / Scale
 
 | Macro | Notes |
 |-------|-------|
@@ -87,7 +190,7 @@ run("Make Montage...", "columns=3 rows=2 scale=1 border=2");
 | `run("Rotate...", "angle=45 interpolation=Bilinear")` | Arbitrary rotation |
 | `run("Flatten")` | Burns overlays to RGB — non-reversible |
 
-### Process
+### §4.5 Process
 
 | Macro | Notes |
 |-------|-------|
@@ -97,11 +200,11 @@ run("Make Montage...", "columns=3 rows=2 scale=1 border=2");
 | `run("Find Maxima...", "prominence=10 output=Count")` | Peak detection |
 | `run("Enhance Contrast...", "saturated=0.35")` | Safe display; **with "normalize" = DESTRUCTIVE** |
 
-### Binary Operations
+### §4.6 Binary Operations
 
 `Erode`, `Dilate`, `Open`, `Close-` (note hyphen!), `Fill Holes`, `Watershed`, `Skeletonize`, `Distance Map`
 
-### Math & Image Calculator
+### §4.7 Math & Image Calculator
 
 ```javascript
 run("Subtract...", "value=25");
@@ -111,7 +214,7 @@ imageCalculator("Subtract create", "img1", "img2");  // add "stack", "32-bit"
 // Operations: Add, Subtract, Multiply, Divide, AND, OR, Min, Max, Average, Difference
 ```
 
-### LUTs
+### §4.8 LUTs
 
 | LUT | Use |
 |-----|-----|
@@ -123,9 +226,9 @@ imageCalculator("Subtract create", "img1", "img2");  // add "stack", "32-bit"
 
 ---
 
-## 4. Key Dialogs
+## §5 Key Dialogs
 
-### Brightness & Contrast (Ctrl+Shift+C)
+### §5.1 Brightness & Contrast (Ctrl+Shift+C)
 
 | Button | Safe? | Notes |
 |--------|-------|-------|
@@ -136,18 +239,18 @@ imageCalculator("Subtract create", "img1", "img2");  // add "stack", "32-bit"
 
 For 16/32-bit: B&C is always display-only until Apply. For RGB: always modifies pixels.
 
-### Threshold (Ctrl+Shift+T)
+### §5.2 Threshold (Ctrl+Shift+T)
 
 Methods: Default, Huang, IsoData, Li, MaxEntropy, Mean, MinError, Minimum, Moments, **Otsu** (general-purpose), Triangle (sparse cells), Yen
 
-### Analyze Particles
+### §5.3 Analyze Particles
 
 ```javascript
 run("Analyze Particles...", "size=50-Infinity circularity=0.5-1.00 show=Outlines display exclude summarize add");
 ```
 Checkboxes: display results, clear results, summarize, add to manager, exclude on edges, include holes
 
-### Set Measurements
+### §5.4 Set Measurements
 
 ```javascript
 run("Set Measurements...", "area mean standard min integrated median display redirect=None decimal=3");
@@ -167,9 +270,9 @@ run("Set Measurements...", "area mean standard min integrated median display red
 
 ---
 
-## 5. ROIs and Selections
+## §6 ROIs and Selections
 
-### Creation
+### §6.1 Creation
 
 ```javascript
 makeRectangle(x, y, w, h);
@@ -180,7 +283,7 @@ makePolygon(x1,y1, x2,y2, x3,y3);
 makeSelection("polygon", xArray, yArray);  // also "freehand", "polyline", "point"
 ```
 
-### Query
+### §6.2 Query
 
 ```javascript
 type = selectionType();  // -1=none, 0=rect, 1=oval, 2=polygon, 5=line, 10=point
@@ -188,7 +291,7 @@ getSelectionBounds(x, y, w, h);
 Roi.getName(); Roi.getBounds(x, y, w, h);
 ```
 
-### Properties
+### §6.3 Properties
 
 ```javascript
 Roi.setName("name"); Roi.setStrokeColor("yellow"); Roi.setStrokeWidth(2);
@@ -200,7 +303,7 @@ run("Enlarge...", "enlarge=10");  // negative = shrink
 
 ---
 
-## 6. ROI Manager
+## §7 ROI Manager
 
 ```javascript
 roiManager("Add");                          // add current selection
@@ -218,7 +321,7 @@ roiManager("Save", "/path/rois.zip"); roiManager("Open", "/path/rois.zip");
 
 ---
 
-## 7. Overlays
+## §8 Overlays
 
 Non-destructive annotations. Preserved in TIFF metadata; flatten to burn into RGB.
 
@@ -240,9 +343,9 @@ Overlay.drawString("label", x, y);
 
 ---
 
-## 8. Results Table
+## §9 Results Table
 
-### Built-in Results
+### §9.1 Built-in Results
 
 ```javascript
 n = nResults;
@@ -254,7 +357,7 @@ run("Clear Results");
 saveAs("Results", "/path/results.csv");
 ```
 
-### Custom Tables (Table.*)
+### §9.2 Custom Tables (Table.*)
 
 ```javascript
 Table.create("My Table");
@@ -266,7 +369,7 @@ Table.save("/path.csv"); Table.open("/path.csv");
 Table.applyMacro("Norm = Mean / 255;");     // per-row expression
 ```
 
-### List (Key-Value Store)
+### §9.3 List (Key-Value Store)
 
 ```javascript
 List.setMeasurements;                       // quick measure to key-value
@@ -276,7 +379,7 @@ List.set("key", "value"); List.get("key");
 
 ---
 
-## 9. File & I/O
+## §10 File & I/O
 
 ```javascript
 path = File.openDialog("Select"); dir = getDirectory("Choose a Directory");
@@ -290,7 +393,7 @@ list = getFileList(dir);  // array of filenames
 
 ---
 
-## 10. Batch & Automation
+## §11 Batch & Automation
 
 ```javascript
 setBatchMode(true);                 // 10-100x faster, suppresses display
@@ -303,9 +406,9 @@ eval("js", "IJ.getVersion()");
 
 ---
 
-## 11. Keyboard Shortcuts
+## §12 Keyboard Shortcuts
 
-### Essential
+### §12.1 Essential
 
 | Key | Action |
 |-----|--------|
@@ -320,7 +423,7 @@ eval("js", "IJ.getVersion()");
 | Ctrl+Shift+C / T | B&C / Threshold |
 | Ctrl+B | Add to Overlay |
 
-### Navigation
+### §12.2 Navigation
 
 | Key | Action |
 |-----|--------|
@@ -333,15 +436,15 @@ eval("js", "IJ.getVersion()");
 
 ---
 
-## 12. Agent Integration
+## §13 Agent Integration
 
-### Dialog Handling
+### §13.1 Dialog Handling
 
 1. Every `execute_macro` response auto-includes open dialogs
 2. TCP timeout triggers auto `get_dialogs` fallback
 3. `close_dialogs` never closes: main window, image windows, AI Assistant
 
-### Probe Flow
+### §13.2 Probe Flow
 
 ```
 scan_plugins.py → .tmp/commands.md (what exists, with lookup map)
@@ -354,19 +457,19 @@ probe_command reads from GenericDialog: numeric fields, strings, checkboxes, cho
 
 ---
 
-## 13. Tips & Gotchas
+## §14 Gotchas / Pitfalls
 
-1. Only **one level of Undo** — always work on duplicates
-2. `close("*")` can close toolbar — use `close("\\Others")`
-3. `run("Flatten")` converts to RGB permanently
-4. **Apply in B&C destroys data** — use `setMinAndMax()` for display
-5. Fiji caches classes — must restart after JAR deployment
-6. Use Bio-Formats for microscopy files, not plain `open()`
-7. Binary `Close-` has a hyphen: `run("Close-")` != `close()`
-8. Dialog.get* order must match Dialog.add* order
-9. `run("Enhance Contrast...", "saturated=0.35")` safe; with `normalize` destructive
-10. ROI Manager indices are 0-based
-11. Overlay text y = baseline (bottom), not top
-12. No try/catch in macro language — use agent retry loop
-13. Font size in macros is pixels, not points
-14. Some plugins need an image open to show their dialog for probing
+1. Only **one level of Undo** — always work on duplicates.
+2. `close("*")` can close toolbar — use `close("\\Others")`.
+3. `run("Flatten")` converts to RGB permanently.
+4. **Apply in B&C destroys data** — use `setMinAndMax()` for display (§4.3, §5.1).
+5. Fiji caches classes — must restart after JAR deployment.
+6. Use Bio-Formats for microscopy files, not plain `open()` (§4.1).
+7. Binary `Close-` has a hyphen: `run("Close-")` != `close()` (§4.6).
+8. `Dialog.get*` order must match `Dialog.add*` order.
+9. `run("Enhance Contrast...", "saturated=0.35")` safe; with `normalize` destructive (§4.5).
+10. ROI Manager indices are 0-based (§7).
+11. Overlay text `y` = baseline (bottom), not top (§8).
+12. No try/catch in macro language — use agent retry loop.
+13. Font size in macros is pixels, not points.
+14. Some plugins need an image open to show their dialog for probing.

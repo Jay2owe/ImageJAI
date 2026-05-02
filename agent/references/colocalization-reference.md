@@ -1,8 +1,112 @@
 # Colocalization Analysis — Reference
 
+Agent-oriented reference for two-channel colocalization analysis in
+ImageJ/Fiji. Covers coefficients (PCC, Manders' tM1/tM2, ICQ, MOC),
+Costes' auto-threshold and randomization, Van Steensel's CCF,
+object-based methods, and the installed plugins (Coloc 2,
+Colocalization Threshold/Finder/Test, 3D MultiColoc; JACoP / ComDet /
+EzColocalization not installed).
+
+Sources: Fiji Coloc 2 (`imagej.net/plugins/coloc-2`), JACoP
+(`imagej.net/plugins/jacop`), Dunn et al. 2011 (*Am J Physiol Cell Physiol*
+300:C723), Bolte & Cordelieres 2006 (*J Microsc* 224:213), Costes et al.
+2004 (*Biophys J* 86:3993), Manders et al. 1993 (*J Microsc* 169:375),
+Adler & Parmryd 2010/2021 (*Cytometry A* 77:733 / 99:910), Aaron et al.
+2018 (*J Cell Sci* 131:jcs211847).
+
+Invoke from the agent:
+`python ij.py macro '<code>'` — run ImageJ macro (.ijm) code.
+`python ij.py probe "Coloc 2"` — discover a plugin's parameters.
+
 ---
 
-## 1. Core Concepts
+## §0 Lookup Map — "How do I find X?"
+
+| Question | Where to look |
+|---|---|
+| "Which coefficient should I use?" | §7 → §2 |
+| "How do I run Coloc 2 from a macro?" | §4.1 |
+| "How do I avoid MOC (Manders Overlap Coefficient)?" | §2, §5 |
+| "How do I threshold automatically (Costes)?" | §3.4 |
+| "What does tM1 vs tM2 mean?" | §3.2 |
+| "How do I test significance within one image?" | §6.1 |
+| "How do I compare conditions across images?" | §6.2 |
+| "Which plugins are installed vs need installing?" | §4.1, §4.2, §4.3 |
+| "What's a minimal agent workflow?" | §10 |
+| "How do I report colocalization in a paper?" | §8 |
+| "Full checklist — always/never?" | Cheat Sheet at end |
+| "Why did my analysis fail / is wrong?" | §5 gotchas |
+
+---
+
+## §1 Term Index (A–Z)
+
+Alphabetical pointer to the section containing each term. Use
+`grep -n '`<term>`' colocalization-reference.md` to jump.
+
+### A
+`Aaron 2018` §11 · `above threshold (Coloc 2 output)` §4.1 · `Adler & Parmryd 2010/2021` §2, §11 · `anti-correlation` §2, §3.1, §7 · `Analyze > Colocalization Analysis` §4.1, §4.2
+
+### B
+`background subtraction` §4.1, §5, §10 · `bleedthrough` §5, §5.1 · `Bolte & Cordelieres 2006` §11
+
+### C
+`CCF (Van Steensel's Cross-Correlation Function)` §3.5, §7 · `cell mask` §5, §7 · `channel_1 / channel_2 (macro key)` §4.1 · `Coloc 2` §4.1 · `Coloc 2 macro syntax` §4.1 · `Colocalization Finder` §4.2 · `Colocalization Test` §4.2 · `Colocalization Threshold` §4.2 · `ComDet` §4.3, §7 · `composite (avoid)` §4.1 · `Costes' auto-threshold` §3.4, §4.1, §5 · `Costes P-value` §4.1, §5.1, §6.1 · `costes_randomisations (macro key)` §4.1, §6.1 · `Costes et al. 2004` §11 · `co-occurrence` §2, §7 · `correlation (vs co-occurrence)` §2, §7 · `crosstalk` §5
+
+### D
+`decision tree` §7 · `display_images_in_result` §4.1 · `display_shuffled_images` §4.1 · `Dunn et al. 2011` §11
+
+### E
+`EzColocalization` §4.3 · `exclusion (anti-correlation)` §3.1, §3.5, §7
+
+### F
+`Fay randomization` §4.2 · `FRET / PLA (for molecular interaction)` §2, §7
+
+### I
+`ICQ (Li's Intensity Correlation Quotient)` §3.3, §7 · `interaction (NOT from colocalization)` §2, §5, §7 · `iterations (Costes)` §6.1
+
+### J
+`JACoP` §4.3, §7 · `Jython` — N/A
+
+### K
+`Kendall's tau` §4.1 · `kendall's_tau_rank_correlation (macro key)` §4.1
+
+### L
+`Li histogram` §4.1 · `li_histogram_channel_1 / li_histogram_channel_2` §4.1 · `li_icq (macro key)` §4.1
+
+### M
+`M1, M2 (Manders' coefficients)` §2, §3.2, §7 · `Manders et al. 1993` §11 · `manders'_correlation (macro key)` §4.1 · `mask (ROI or binary)` §4.1 · `MOC (Manders Overlap Coefficient — avoid)` §2, §5, §8 · `Mann-Whitney` §6.2, §8
+
+### N
+`negative control (rotation)` §5.1, §9 · `no correlation (PCC ~0)` §3.1, §7
+
+### O
+`object-based colocalization` §3.6, §7 · `Otsu` — not the recommended threshold for coloc; use Costes §3.4
+
+### P
+`PCC (Pearson's Correlation Coefficient)` §3.1, §7 · `PDM (Product of Differences from Mean)` §3.3 · `positive control (co-label)` §5.1 · `PSF (point-spread function) block size` §4.1, §6.1 · `psf=3 (macro key)` §4.1, §6.1 · `punctate / spots` §3.6, §7
+
+### R
+`randomization (Costes / Fay / Van Steensel)` §4.2, §6.1 · `range (of each coefficient)` §3.1, §3.2, §3.3, §7 · `reporting standards` §8 · `ROI (channel 1 / channel 2 / Manager)` §4.1 · `roi_or_mask (macro key)` §4.1 · `rolling ball background` §5, §9, §10 · `rotation control` §5.1, §9
+
+### S
+`saturated pixels` §5, §9 · `scatter plot` §4.1, §8 · `sequential scanning` §5 · `show_save_pdf_dialog` §4.1 · `single-label control` §5.1 · `Spearman's rank` §4.1 · `spearman's_rank_correlation (macro key)` §4.1 · `Split Channels` §4.1, §5, §9, §10 · `Subtract Background` §5, §9, §10
+
+### T
+`threshold_regression (macro key)` §4.1 · `tM1, tM2 (thresholded Manders')` §3.2, §4.1, §7
+
+### V
+`Van Steensel's CCF` §3.5, §7
+
+### W
+`whole image (incl. background — avoid)` §5
+
+### Z
+`zero-zero pixels (include in threshold calculation)` §4.2 · `2d_intensity_histogram (macro key)` §4.1 · `3D MultiColoc` §4.2
+
+---
+
+## §2 Core Concepts
 
 | Concept | Definition | Coefficients |
 |---------|-----------|-------------|
@@ -15,9 +119,9 @@
 
 ---
 
-## 2. Methods
+## §3 Methods
 
-### PCC (Pearson's Correlation Coefficient)
+### §3.1 PCC (Pearson's Correlation Coefficient)
 
 ```
 PCC = sum[(Ri - Ravg)(Gi - Gavg)] / sqrt[sum(Ri - Ravg)^2 * sum(Gi - Gavg)^2]
@@ -29,7 +133,7 @@ PCC = sum[(Ri - Ravg)(Gi - Gavg)] / sqrt[sum(Ri - Ravg)^2 * sum(Gi - Gavg)^2]
 | Background-sensitive? | No (subtracts mean) |
 | Use when | Testing whether two signals vary together in intensity |
 
-### Manders' Coefficients (tM1, tM2)
+### §3.2 Manders' Coefficients (tM1, tM2)
 
 ```
 tM1 = sum(Ri where Gi > threshold) / sum(Ri)    — fraction of Ch1 overlapping Ch2
@@ -42,7 +146,7 @@ tM2 = sum(Gi where Ri > threshold) / sum(Gi)    — fraction of Ch2 overlapping 
 | Asymmetric? | Yes — M1 != M2 is biologically meaningful |
 | Always use | Thresholded versions (tM1/tM2) with Costes auto-threshold |
 
-### ICQ (Li's Intensity Correlation Quotient)
+### §3.3 ICQ (Li's Intensity Correlation Quotient)
 
 ```
 ICQ = N(positive PDM) / N(total PDM) - 0.5
@@ -51,23 +155,23 @@ where PDM_i = (Ai - a)(Bi - b)
 
 Range: -0.5 (segregated) to +0.5 (dependent). Quick binary assessment; complement to PCC, not a replacement.
 
-### Costes' Auto-Threshold
+### §3.4 Costes' Auto-Threshold
 
 Progressively lowers thresholds until PCC for below-threshold pixels approaches 0. Removes subjective threshold selection entirely. Always use for Manders' coefficients.
 
-### Van Steensel's CCF
+### §3.5 Van Steensel's CCF
 
 Shifts one channel laterally (-20 to +20 px), calculates PCC at each shift. Peak at dx=0 = colocalization; dip = exclusion; off-centre peak = chromatic aberration. Available in JACoP only.
 
-### Object-Based Colocalization
+### §3.6 Object-Based Colocalization
 
 Segment objects per channel, then measure overlap (centroid distance or object overlap). Best for punctate structures (vesicles, foci). Depends on segmentation quality.
 
 ---
 
-## 3. Plugins
+## §4 Plugins
 
-### Coloc 2 (primary — built-in)
+### §4.1 Coloc 2 (primary — built-in)
 
 **Menu:** Analyze > Colocalization Analysis > Coloc 2
 
@@ -118,7 +222,7 @@ Manders' tM2 (above threshold): 0.67      — 67% of Ch2 overlaps Ch1
 Costes' P-value: 1.00                     — significant (>= 0.95 required)
 ```
 
-### Other Installed Plugins
+### §4.2 Other Installed Plugins
 
 | Plugin | Menu | Use case |
 |--------|------|----------|
@@ -153,7 +257,7 @@ run("Colocalization Finder",
   + "scatter_plot_size=_512 x 512_");
 ```
 
-### Not Installed
+### §4.3 Not Installed
 
 | Plugin | Install via | Adds |
 |--------|------------|------|
@@ -163,7 +267,7 @@ run("Colocalization Finder",
 
 ---
 
-## 4. Gotchas
+## §5 Common mistakes
 
 | Mistake | Why it matters | Fix |
 |---------|---------------|-----|
@@ -176,7 +280,7 @@ run("Colocalization Finder",
 | No controls | Cannot interpret coefficients without baseline | See controls table below |
 | Analysing whole image incl. background | Background cluster inflates PCC | Use ROIs/masks to restrict to cells |
 
-### Required Controls
+### §5.1 Required Controls
 
 | Control | Purpose | Expected result |
 |---------|---------|----------------|
@@ -188,9 +292,9 @@ run("Colocalization Finder",
 
 ---
 
-## 5. Statistical Testing
+## §6 Statistical Testing
 
-### Costes' Randomization (within a single image pair)
+### §6.1 Costes' Randomization (within a single image pair)
 
 Shuffles one channel in PSF-sized blocks (preserving local structure), computes PCC on shuffled vs real, repeats N times.
 
@@ -200,7 +304,7 @@ Shuffles one channel in PSF-sized blocks (preserving local structure), computes 
 | Block size (PSF) | Typically 3 px for confocal (0.61 * lambda_em / (NA * pixel_size)) |
 | P-value threshold | >= 0.95 (NOTE: higher = better, opposite of standard p-values) |
 
-### Comparing Conditions (across images)
+### §6.2 Comparing Conditions (across images)
 
 Costes P-value is per-image. To compare treatment vs control:
 1. Measure PCC/tM1/tM2 per cell/field (n >= 20-30)
@@ -210,7 +314,7 @@ Costes P-value is per-image. To compare treatment vs control:
 
 ---
 
-## 6. Decision Tree
+## §7 Decision Tree
 
 ```
 What is your question?
@@ -253,7 +357,7 @@ There are NO universal thresholds. Always compare to controls and between condit
 
 ---
 
-## 7. Reporting Standards
+## §8 Reporting Standards
 
 ### Minimum Requirements
 
@@ -278,7 +382,7 @@ There are NO universal thresholds. Always compare to controls and between condit
 
 ---
 
-## 8. Macro Recipes
+## §9 Macro Recipes
 
 ### Complete Workflow
 ```javascript
@@ -339,7 +443,7 @@ run("Rotate 90 Degrees Right");
 
 ---
 
-## 9. Agent Workflow
+## §10 Agent Workflow
 
 ```bash
 python ij.py macro 'run("Bio-Formats Importer", "open=[/path/to/file.lif] color_mode=Default view=Hyperstack stack_order=XYCZT");'
@@ -354,7 +458,7 @@ python ij.py log                          # read results
 
 ---
 
-## 10. Key References
+## §11 Key References
 
 1. **Dunn et al. 2011** — Practical guide to evaluating colocalization. *Am J Physiol Cell Physiol* 300:C723-C742.
 2. **Bolte & Cordelieres 2006** — Guided tour into subcellular colocalization. *J Microsc* 224:213-232.

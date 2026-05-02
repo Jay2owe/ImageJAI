@@ -3,9 +3,151 @@
 Reference for scripting Fiji/ImageJ via the agent's `run_script` TCP command.
 All scripts are copy-paste ready for `python ij.py script`.
 
+Sources: `imagej.net/scripting/`, `imagej.net/scripting/groovy`,
+`imagej.net/scripting/jython`, `imagej.net/develop/scripting-parameters`,
+`javadoc.scijava.org/ImageJ1/` (IJ1 API), Fiji plugin javadocs (TrackMate,
+SNT, CLIJ2, MorphoLibJ, Bio-Formats).
+
+Invoke from the agent:
+`python ij.py script '<code>'` — run Groovy (default).
+`python ij.py script --lang jython '<code>'` — run Jython (Python 2.7).
+`python ij.py script --file <path>` — run a script file.
+
 ---
 
-## 1. Quick Start
+## §0 Lookup Map — "How do I find X?"
+
+| Question | Where to look |
+|---|---|
+| "How do I run a Groovy / Jython script?" | §2 |
+| "When should I use a script instead of a macro?" | §3 |
+| "Which language should I pick — Groovy, Jython, JavaScript?" | §4 |
+| "How do SciJava `#@` parameters work?" | §5 |
+| "What services can I auto-inject (OpService, LogService, etc.)?" | §5 |
+| "What's the IJ1 API for `ImagePlus` / `ImageProcessor`?" | §6 |
+| "How do I read / write pixel values directly?" | §6 |
+| "How do I manage ROIs from a script?" | §6 |
+| "How do I read / write the Results table from a script?" | §6 |
+| "How do I draw overlays programmatically?" | §6 |
+| "How do I convert between IJ1 `ImagePlus` and IJ2 `Img`?" | §7 |
+| "What's the OpService for (filter.gauss, threshold.otsu, etc.)?" | §7 |
+| "Groovy closure / collection / regex syntax?" | §8 |
+| "How do I read/write a file in Groovy?" | §8 |
+| "Jython signed-byte / integer-division gotchas?" | §9 |
+| "How do I find a Swing window by title?" | §10 |
+| "How do I walk a Swing component tree / click a button / toggle a checkbox?" | §10 |
+| "How do I build a `GenericDialog` from a script?" | §10 |
+| "How do I drive TrackMate from a script?" | §11 |
+| "How do I call CLIJ2 (GPU), MorphoLibJ, Weka, SNT, Bio-Formats?" | §11 |
+| "How do I pass data between a macro and a script?" | §12 |
+| "How do I return structured JSON from a script?" | §12 |
+| "CTCF measurement / batch processing / Pearson colocalization recipes?" | §13 |
+| "Multi-threaded stack processing?" | §13 |
+| "Why does my script say `ClassNotFoundException` / `Must run on EDT`?" | §14 |
+| "What's the correct import path for `RoiManager` / `ResultsTable`?" | §14, §15 |
+| "Language names for `run_script`?" | §14 |
+| "One-liner to close all open images safely?" | §16 |
+| "Why is my per-pixel loop slow?" | §17 |
+
+---
+
+## §1 Term Index (A–Z)
+
+Alphabetical pointer to every function, class, plugin, keyword, and concept
+that appears below. Use `grep -n '`<term>`' fiji-scripting-reference.md` to
+jump.
+
+### A
+
+`abs` §6 · `add` §6 · `addAllAnalyzers` §11 · `addChoice` §10 · `addCheckbox` §10 · `addNumericField` §10 · `addRoi` §6 · `addSlice` §6 · `addSlider` §10 · `addValue` §6 · `append` §8 · `applyClassifier` §11 · `array` (Jython) §9, §10 · `Arrow` §6 · `autoThreshold` §6 · `awaitTermination` §13
+
+### B
+
+`Batch processing` §13 · `BF.openImagePlus` §11 · `Bio-Formats` §11, §15 · `blurGaussian` §6, §13 · `Boolean` (`#@`) §5 · `Bounding` (checkbox toggle) §10 · `ByteProcessor` §6, §15
+
+### C
+
+`Calibration` §6, §15 · `call` (macro) §3 · `ChannelSeparator` §11 · `ChannelSplitter` §13, §14, §15 · `checkInput` §11 · `ClassNotFoundException` §14 · `CLIJ2` §11 · `clij2.create` §11 · `clij2.pull` §11 · `clij2.push` §11 · `clij2.release` §11 · `Closures` §8 · `collect` §8 · `ColorRGB` (`#@`) §5 · `COLOR_MODE_COMPOSITE` §11 · `CommandService` §5 · `Common problems` §14 · `computeSpotFeatures` §11 · `computeTrackFeatures` §11 · `Colocalization recipe` §13 · `connectedComponentsLabelingBox` §11 · `Container` §10 · `convertToByte` §6 · `convertToFloat` §6, §13 · `convolve` §6 · `crop` §6 · `CTCF` §13
+
+### D
+
+`Data passing` §12 · `deleteRow` §6 · `deleteSlice` §6 · `DisplayService` §5 · `dilate` §6 · `doClick` §10, §16 · `drawLine` §6 · `drawString` §6 · `Duplicator` §14, §15 · `duplicate` (`ImagePlus`) §6
+
+### E
+
+`each` §8 · `eachFileRecurse` §8 · `eachWithIndex` §8, §13 · `EDT` §14 · `erode` §6 · `Error handling (script)` §12 · `eval` (macro) §3 · `execDetection` §11 · `execTracking` §11 · `Executors` §13 · `Exception handling` (Groovy) §8
+
+### F
+
+`File` (`#@`) §5 · `File I/O` (Groovy) §8 · `FileSaver` §6, §13, §15 · `find` §8 · `findAll` §8, §10 · `findEdges` §6 · `FloatProcessor` §6, §15 · `Float` (`#@`) §5 · `flatten` §6 · `flipHorizontal` §6 · `flipVertical` §6 · `fps` §6 · `frameInterval` §6 · `fromJson` §8
+
+### G
+
+`gamma` §6 · `gaussianBlur3D` §11 · `GenericDialog` §10, §15 · `getBitDepth` §6 · `getCalibration` §6, §16 · `getColumn` §6 · `getColumnIndex` §6 · `getComponents` §10 · `getCount` (RoiManager) §6 · `getCurrentImage` §6 · `getDataset` (error) §14 · `getDefaultSettings` §11 · `getErrorMessage` §11 · `getf / setf` §6 · `getFeature` §11 · `getHeight` §6, §8 · `getIDList` §6, §16 · `getImage` §6 · `getImageTitles` §6 · `getInstance` (RoiManager) §6 · `getInstance` (CLIJ2) §11 · `getMax` (Sholl) §11 · `getNBranches` §11 · `getNChannels / getNSlices / getNFrames` §6 · `getName` §6 · `getNextChoice` §10 · `getNextNumber` §10 · `getNonImageTitles` §6 · `getOverlay` §6 · `getPixel` §6 · `getPixels` §6, §13, §17 · `getPixelValue` §6, §17 · `getProcessor` §6 · `getResultsTable` §6 · `getRoi` §6 · `getRoisAsArray` §6, §13 · `getSelectedItem` §10 · `getSeriesCount` §11 · `getSize` (stack) §6 · `getSizeC / getSizeZ / getSizeT` §11 · `getStack` §6 · `getStackIndex` §13 · `getStackSize` §6 · `getStatistics` §6, §13 · `getStringValue` §6 · `getText` §10, §16 · `getTips` §11 · `getTitle` §6, §8, §16 · `getType` §6 · `getUnit` §6 · `getValue` §6 · `getWidth` §6, §8 · `Gson` §8, §12, §16 · `groupBy` §8 · `GStrings` §4, §8
+
+### H
+
+`help` (ops) §7 · `Hyperstack` §6, §13
+
+### I
+
+`IJ` (class) §6, §15 · `IJ.createImage` §6 · `IJ.freeMemory` §14 · `IJ.getImage` §6 · `IJ.log` §2, §6 · `IJ.open` §6 · `IJ.openImage` §6, §13 · `IJ.run` §6, §13, §17 · `IJ.save` §6 · `IJ.saveAs` §6 · `IJ.showProgress` §6, §13 · `IJ.showStatus` §6 · `IJ1 <-> IJ2 conversion` §7 · `IJ1 API` §6 · `ij.plugin.frame.RoiManager` §6, §14, §15 · `ij.measure.ResultsTable` §6, §14, §15 · `ImageCalculator` §14, §15 · `ImageJFunctions.wrap` §7 · `ImagePlus` §6, §15 · `ImageProcessor` §6, §15 · `ImageStack` §6, §15 · `import paths` §14, §15 · `incrementCounter` §6, §13 · `Integer` (`#@`) §5 · `inject` §8 · `Interpolation` §6 · `IntrinsicVolumes2D` §11 · `invokeAndWait` §14 · `IOService` §5 · `ImporterOptions` §11, §15
+
+### J
+
+`jarray` §9, §15 · `javascript` §4, §14 · `jython` §4, §9, §14, §15 · `JButton` §10 · `JCheckBox` §10, §16 · `JComboBox` §10 · `JLabel` §10 · `JSlider` §10 · `JTextField` §10
+
+### L
+
+`LabelImages` §11 · `labelAllParticles` §11 · `Language comparison` §4 · `Line` (roi) §6, §15 · `Lists` (Groovy) §8 · `LogDetectorFactory` §11 · `LogService` §5
+
+### M
+
+`Maps` §8 · `Math.sqrt` §13 · `Measurements` (constants) §6, §13, §15 · `medianFilter` §6 · `MorphoLibJ` §11 · `Morphology.gradient` §11 · `Morphology.opening` §11 · `MouseLightLoader` §11 · `mergeChannels` §13 · `Multi Measure` §6 · `Multi-threaded processing` §13 · `multiply` §6
+
+### N
+
+`new ImagePlus` §6 · `new ImageStack` §6 · `new ResultsTable` §6, §13 · `newFixedThreadPool` §13 · `NoSuchMethodError` §14
+
+### O
+
+`OpService` §5, §7 · `ops.filter.gauss` §7 · `ops.math.add` §7 · `ops.morphology.erode` §7 · `ops.stats.mean` §7 · `ops.threshold.otsu` §7 · `Overlay` §6, §15 · `OvalRoi` §6, §15
+
+### P
+
+`ParticleAnalyzer` §14, §15 · `Parameters (SciJava)` §5 · `Pearson R` §13 · `Performance tips` §17 · `pixelDepth` §6 · `pixelHeight` §6 · `pixelWidth` §6 · `Plot` §15 · `Plugin scripting APIs` §11 · `Pool` (thread) §13
+
+### Q
+
+`Quick Start` §2
+
+### R
+
+`Raycaster` §10 · `Regex` (Groovy) §8 · `rename` (RoiManager) §6 · `reset` (RoiManager) §6 · `resize` §6 · `ResultsTable` §6, §13, §15 · `RGBStackMerge` §13, §15 · `Roi` §6, §15 · `RoiManager` §6, §13, §14, §15 · `rotate` §6 · `runCommand` (RoiManager) §6 · `run_script` (TCP) §2, §12 · `run` (IJ) §6
+
+### S
+
+`save` (RoiManager) §6 · `saveAs` (IJ) §6 · `saveAsJpeg` §6 · `saveAsPng` §6 · `saveAsTiff` §6, §13 · `saveAsTiffStack` §6 · `saveClassifier` §11 · `SciJava script parameters` §5 · `SciJava services` §5 · `ScriptEngine not found` §14 · `setC / setZ / setT` §6 · `setCalibration` §6 · `setColor` §6 · `setDisplayRange` §6 · `setId` §11 · `setInterpolationMethod` §6 · `setLineWidth` §6 · `setOpenAllSeries` §11 · `setOverlay` §6 · `setPosition` §6 · `setProcessor` §6 · `setRoi` §6, §13 · `setSeries` §11 · `setSeriesOn` §11 · `setStrokeColor` §6 · `setStrokeWidth` §6 · `setText` §10 · `setThreshold` §6 · `setUnit` §6 · `setValue` §6 · `Sets` (Groovy) §8 · `Settings` (TrackMate) §11 · `sharpen` §6 · `ShollAnalyzer` §11 · `show` §6 · `size` (ResultsTable) §6 · `smooth` §6 · `SNT` §11 · `sort` §6 · `SparseLAPTrackerFactory` §11 · `sqrt` §6, §13 · `stack_stats` (pixels) — see agent CLAUDE · `Stack.*` §6 · `Strel.Shape.DISK` §11 · `StrahlerAnalyzer` §11 · `String` (`#@`) §5 · `Structured data return` §12 · `SwingUtilities.invokeAndWait` §14
+
+### T
+
+`TextRoi` §6, §15 · `thresholdOtsu` §11 · `times` §6 · `TmXmlWriter` §11 · `toJson` §8, §12 · `TrackMate` §11 · `Trainable Weka Segmentation` §11 · `trackIDs` §11 · `TreeStatistics` §11 · `try / catch / finally` §8, §12, §14
+
+### U
+
+`unable to resolve class` §14 · `updateAndDraw` §6, §13, §17
+
+### W
+
+`walkComponents` §10 · `wasOKed` §10 · `WekaSegmentation` §11, §14 · `WindowManager` §6, §15, §16
+
+### Z
+
+`ZProjector` §14, §15
+
+---
+
+## §2 Quick Start
 
 ```bash
 python ij.py script 'import ij.IJ; IJ.log("Hello from Groovy")'
@@ -20,7 +162,7 @@ Scripts run inside Fiji's JVM with full access to all Java APIs, plugins, and th
 
 ---
 
-## 2. When to Script (vs Macros)
+## §3 When to Script (vs Macros)
 
 | Capability | Macro | Script |
 |-----------|-------|--------|
@@ -38,7 +180,7 @@ Scripts run inside Fiji's JVM with full access to all Java APIs, plugins, and th
 
 ---
 
-## 3. Language Comparison
+## §4 Language Comparison
 
 | Feature | Groovy | Jython | JavaScript |
 |---------|--------|--------|------------|
@@ -50,13 +192,13 @@ Scripts run inside Fiji's JVM with full access to all Java APIs, plugins, and th
 
 ---
 
-## 4. SciJava Script Parameters
+## §5 SciJava Script Parameters
 
 Syntax: `#@ Type (properties) variableName`
 
 **Agent note**: Parameters requesting user input create dialogs. For automation, typically hardcode values. Service injection parameters work without dialogs and are useful.
 
-### Parameter Types
+### §5.1 Parameter Types
 
 | Type | Example | Notes |
 |------|---------|-------|
@@ -69,7 +211,7 @@ Syntax: `#@ Type (properties) variableName`
 | ColorRGB | `#@ ColorRGB (label="Color") color` | |
 | Output | `#@output String summary` | ImagePlus outputs auto-display |
 
-### Properties
+### §5.2 Properties
 
 | Property | Description |
 |----------|-------------|
@@ -81,7 +223,7 @@ Syntax: `#@ Type (properties) variableName`
 | `persist` | Remember between runs (default true) |
 | `visibility` | NORMAL, MESSAGE, INVISIBLE |
 
-### SciJava Services (auto-injected, no dialog)
+### §5.3 SciJava Services (auto-injected, no dialog)
 
 ```groovy
 #@ ij.ImagePlus imp                              // current image
@@ -95,9 +237,9 @@ Syntax: `#@ Type (properties) variableName`
 
 ---
 
-## 5. IJ1 API Reference
+## §6 IJ1 API Reference
 
-### Core Classes
+### §6.1 Core Classes
 
 | Class | Package | Purpose |
 |-------|---------|---------|
@@ -112,7 +254,7 @@ Syntax: `#@ Type (properties) variableName`
 | `Calibration` | `ij.measure` | Pixel-to-physical unit mapping |
 | `FileSaver` | `ij.io` | Save in various formats |
 
-### IJ Static Methods
+### §6.2 IJ Static Methods
 
 ```groovy
 import ij.IJ
@@ -140,7 +282,7 @@ IJ.saveAs(imp, "Tiff", "/path/to/output.tif")
 IJ.save(imp, "/path/to/output.tif")               // Auto-detect format
 ```
 
-### ImagePlus
+### §6.3 ImagePlus
 
 ```groovy
 def imp = IJ.getImage()
@@ -182,7 +324,7 @@ def dup = imp.duplicate()
 def crop = imp.crop()                             // Crop to ROI
 ```
 
-### ImageProcessor
+### §6.4 ImageProcessor
 
 ```groovy
 def ip = imp.getProcessor()
@@ -224,7 +366,7 @@ ip.setColor(java.awt.Color.RED); ip.setLineWidth(2)
 ip.drawLine(0, 0, 100, 100); ip.drawString("Hello", 10, 30)
 ```
 
-### ImageStack
+### §6.5 ImageStack
 
 ```groovy
 def stack = imp.getStack()
@@ -242,7 +384,7 @@ def newStack = new ImageStack(512, 512)
 def newImp = new ImagePlus("my stack", newStack)
 ```
 
-### WindowManager
+### §6.6 WindowManager
 
 ```groovy
 import ij.WindowManager
@@ -254,7 +396,7 @@ String[] titles = WindowManager.getImageTitles()
 String[] nonImage = WindowManager.getNonImageTitles()
 ```
 
-### RoiManager
+### §6.7 RoiManager
 
 ```groovy
 import ij.plugin.frame.RoiManager
@@ -283,7 +425,7 @@ rm.getRoisAsArray().eachWithIndex { roi, i ->
 }
 ```
 
-### ResultsTable
+### §6.8 ResultsTable
 
 ```groovy
 import ij.measure.ResultsTable
@@ -307,7 +449,7 @@ rt.setValue("CTCF", 0, 12345.67); rt.sort("Area"); rt.deleteRow(5)
 rt.show("Results"); rt.save("/path/to/results.csv")
 ```
 
-### Calibration
+### §6.9 Calibration
 
 ```groovy
 def cal = imp.getCalibration()
@@ -320,7 +462,7 @@ cal.pixelWidth = 0.325; cal.setUnit("um")
 imp.setCalibration(cal)
 ```
 
-### Overlay
+### §6.10 Overlay
 
 ```groovy
 import ij.gui.*
@@ -344,7 +486,7 @@ imp.setOverlay(overlay)
 def flat = imp.flatten()                          // Burn overlay to pixels (destructive)
 ```
 
-### FileSaver
+### §6.11 FileSaver
 
 ```groovy
 import ij.io.FileSaver
@@ -355,11 +497,11 @@ fs.saveAsJpeg("/path/out.jpg"); fs.saveAsTiffStack("/path/stack.tif")
 
 ---
 
-## 6. IJ2/SciJava API
+## §7 IJ2/SciJava API
 
 **Agent note**: `#@` injection may not work reliably via TCP `run_script`. Prefer IJ1 API for reliability.
 
-### OpService
+### §7.1 OpService
 
 ```groovy
 #@ net.imagej.ops.OpService ops
@@ -371,7 +513,7 @@ ops.help("filter.gauss")
 // ops.stats().mean/stdDev/size(input)
 ```
 
-### IJ1 <-> IJ2 Conversion
+### §7.2 IJ1 <-> IJ2 Conversion
 
 ```groovy
 import net.imglib2.img.display.imagej.ImageJFunctions
@@ -381,9 +523,9 @@ def imp2 = ImageJFunctions.wrap(img, "title")    // Img -> ImagePlus
 
 ---
 
-## 7. Groovy Patterns
+## §8 Groovy Patterns
 
-### Strings
+### §8.1 Strings
 
 ```groovy
 // Double quotes = interpolation, single quotes = literal
@@ -392,7 +534,7 @@ def macro = """run("Gaussian Blur...", "sigma=${sigma}");"""
 def pattern = ~/\d+\.\d+/                        // Regex literal
 ```
 
-### Collections
+### §8.2 Collections
 
 ```groovy
 def list = [1, 2, 3]; list << 4                   // Append
@@ -402,7 +544,7 @@ def set = [1, 2, 3] as Set
 def range = 1..10                                 // Inclusive
 ```
 
-### Closures & Functional
+### §8.3 Closures & Functional
 
 ```groovy
 [1,2,3].each { println it }
@@ -415,7 +557,7 @@ boolean any = [1,2,100].any { it > 50 }
 def grouped = [1,2,3,4].groupBy { it % 2 == 0 ? "even" : "odd" }
 ```
 
-### File I/O
+### §8.4 File I/O
 
 ```groovy
 def text = new File("/path/file.txt").text        // Read entire file
@@ -432,7 +574,7 @@ def json = new Gson().toJson([name: "exp1", cells: 42])
 def parsed = new Gson().fromJson('{"x": 1}', Map.class)
 ```
 
-### Regex
+### §8.5 Regex
 
 ```groovy
 def text = "blobs_ch1_z05.tif"
@@ -441,7 +583,7 @@ def matcher = (text =~ /ch(\d+)_z(\d+)/)
 if (matcher.find()) { def ch = matcher.group(1) }
 ```
 
-### Exception Handling
+### §8.6 Exception Handling
 
 ```groovy
 try {
@@ -457,11 +599,11 @@ try {
 
 ---
 
-## 8. Jython Patterns
+## §9 Jython Patterns
 
 Jython = Python 2.7. No NumPy/SciPy/external packages.
 
-### Java Interop
+### §9.1 Java Interop
 
 ```python
 from ij import IJ, ImagePlus, WindowManager
@@ -479,7 +621,7 @@ bytes = zeros(100, 'b')                           # byte array
 doubles = array([1.0, 2.0], 'd')                  # double array
 ```
 
-### Gotchas
+### §9.2 Gotchas
 
 | Issue | Problem | Fix |
 |-------|---------|-----|
@@ -489,7 +631,7 @@ doubles = array([1.0, 2.0], 'd')                  # double array
 | No `with` statement | Early Jython versions | Use try/finally |
 | Module path | Can't find modules | `sys.path.append("/path")` |
 
-### Common Pattern
+### §9.3 Common Pattern
 
 ```python
 from ij import IJ
@@ -507,9 +649,9 @@ for i in range(len(pixels)):
 
 ---
 
-## 9. GUI Manipulation
+## §10 GUI Manipulation
 
-### Finding Windows
+### §10.1 Finding Windows
 
 ```groovy
 import java.awt.Window
@@ -523,7 +665,7 @@ def findWindow(String titlePart) {
 }
 ```
 
-### Walking Component Trees
+### §10.2 Walking Component Trees
 
 ```groovy
 import java.awt.Container
@@ -549,7 +691,7 @@ walkComponents(win) { comp, depth ->
 }
 ```
 
-### Widget Manipulation Helpers
+### §10.3 Widget Manipulation Helpers
 
 ```groovy
 // Toggle checkbox by text
@@ -608,7 +750,7 @@ def clickButton(Container c, String buttonText) {
 }
 ```
 
-### 3Dscript Checkbox Toggle Example
+### §10.4 3Dscript Checkbox Toggle Example
 
 ```groovy
 import javax.swing.JCheckBox
@@ -629,7 +771,7 @@ Window.getWindows().findAll {
 }.each { walk(it) }
 ```
 
-### GenericDialog
+### §10.5 GenericDialog
 
 ```groovy
 import ij.gui.GenericDialog
@@ -649,9 +791,9 @@ if (gd.wasOKed()) {
 
 ---
 
-## 10. Plugin Scripting APIs
+## §11 Plugin Scripting APIs
 
-### TrackMate
+### §11.1 TrackMate
 
 ```groovy
 import fiji.plugin.trackmate.*
@@ -694,7 +836,7 @@ def writer = new fiji.plugin.trackmate.io.TmXmlWriter(new File("/path/out.xml"))
 writer.appendModel(model); writer.appendSettings(settings); writer.writeToFile()
 ```
 
-### SNT (Neurite Tracing)
+### §11.2 SNT (Neurite Tracing)
 
 ```groovy
 import sc.fiji.snt.*
@@ -712,7 +854,7 @@ def sholl = new ShollAnalyzer(axon, axon.getRoot())
 println "Max intersections: ${sholl.getMax()}, Critical radius: ${sholl.getCriticalRadius()}"
 ```
 
-### Trainable Weka Segmentation
+### §11.3 Trainable Weka Segmentation
 
 ```groovy
 import trainableSegmentation.WekaSegmentation
@@ -728,7 +870,7 @@ result.show()
 weka.saveClassifier("/path/to/my_classifier.model")
 ```
 
-### CLIJ2 (GPU)
+### §11.4 CLIJ2 (GPU)
 
 ```groovy
 import net.haesleinhuepf.clij2.CLIJ2
@@ -747,7 +889,7 @@ clij2.pull(labeled).show()
 [input, blurred, thresholded, labeled].each { clij2.release(it) }
 ```
 
-### MorphoLibJ
+### §11.5 MorphoLibJ
 
 ```groovy
 import inra.ijpb.morphology.*
@@ -763,7 +905,7 @@ def labels = LabelImages.labelAllParticles(ip, 4) // 4-connectivity
 println "Found ${LabelImages.findAllLabels(labels).length} components"
 ```
 
-### Bio-Formats
+### §11.6 Bio-Formats
 
 ```groovy
 import loci.plugins.BF
@@ -789,9 +931,9 @@ reader.close()
 
 ---
 
-## 11. Agent Integration
+## §12 Agent Integration
 
-### Data Passing Between Macros and Scripts
+### §12.1 Data Passing Between Macros and Scripts
 
 Macros and scripts share: open images (WindowManager), Results table, ROI Manager, Log window, image properties.
 
@@ -806,7 +948,7 @@ println "Working on: ${imp.getTitle()}"
 '
 ```
 
-### Returning Structured Data
+### §12.2 Returning Structured Data
 
 ```groovy
 import com.google.gson.Gson
@@ -814,7 +956,7 @@ def results = [particles: 65, meanArea: 432.1, cv: 43.3]
 new Gson().toJson(results)   // Last expression = return value in response JSON
 ```
 
-### Error Handling
+### §12.3 Error Handling
 
 ```groovy
 try {
@@ -827,9 +969,9 @@ try {
 
 ---
 
-## 12. Complete Examples
+## §13 Complete Examples
 
-### CTCF Measurement
+### §13.1 CTCF Measurement
 
 ```groovy
 // CTCF = IntDen - (Area * background mean). Requires ROIs; last ROI = background.
@@ -858,7 +1000,7 @@ for (int i = 0; i < rois.length - 1; i++) {
 rt.show("CTCF Results")
 ```
 
-### Batch Processing
+### §13.2 Batch Processing
 
 ```groovy
 import ij.IJ
@@ -881,7 +1023,7 @@ files.eachWithIndex { file, idx ->
 }
 ```
 
-### Colocalization (No Plugin Needed)
+### §13.3 Colocalization (No Plugin Needed)
 
 ```groovy
 import ij.IJ
@@ -899,7 +1041,7 @@ for (int i=0; i<n; i++) { double a=p1[i]-m1, b=p2[i]-m2; num+=a*b; d1+=a*a; d2+=
 println "Pearson R: ${num / Math.sqrt(d1*d2)}"
 ```
 
-### Hyperstack Channel Split/Merge
+### §13.4 Hyperstack Channel Split/Merge
 
 ```groovy
 import ij.IJ
@@ -915,7 +1057,7 @@ merged.setTitle("Processed_${imp.getTitle()}")
 merged.show()
 ```
 
-### Multi-threaded Stack Processing
+### §13.5 Multi-threaded Stack Processing
 
 ```groovy
 import ij.IJ
@@ -941,7 +1083,7 @@ imp.updateAndDraw()
 
 ---
 
-## 13. Common Problems & Solutions
+## §14 Common Problems & Solutions
 
 | Error | Cause | Fix |
 |-------|-------|-----|
@@ -954,7 +1096,7 @@ imp.updateAndDraw()
 | Jython negative pixel values | Java bytes are signed | `pixels[i] & 0xFF` |
 | GenericDialog choice fails | Needs String[] | `["A","B"] as String[]` (Groovy) or `array(["A","B"], str)` (Jython) |
 
-### Correct Import Paths
+### §14.1 Correct Import Paths
 
 | Class | Correct Import |
 |-------|---------------|
@@ -968,17 +1110,17 @@ imp.updateAndDraw()
 | ZProjector | `ij.plugin.ZProjector` |
 | ParticleAnalyzer | `ij.plugin.filter.ParticleAnalyzer` |
 
-### Threading: IJ1 methods (IJ.run, IJ.open) handle EDT internally. Direct Swing manipulation needs EDT wrapping.
+### §14.2 Threading: IJ1 methods (IJ.run, IJ.open) handle EDT internally. Direct Swing manipulation needs EDT wrapping.
 
-### Memory: Close images in try/finally. Run `System.gc(); IJ.freeMemory()` every ~10 images in batch.
+### §14.3 Memory: Close images in try/finally. Run `System.gc(); IJ.freeMemory()` every ~10 images in batch.
 
-### Language names: `groovy`, `jython`, `javascript` (not `python`, `py`, `js`).
+### §14.4 Language names: `groovy`, `jython`, `javascript` (not `python`, `py`, `js`).
 
 ---
 
-## 14. Import Quick Reference
+## §15 Import Quick Reference
 
-### Groovy
+### §15.1 Groovy
 
 ```groovy
 // Core
@@ -1003,7 +1145,7 @@ import javax.swing.*; import java.awt.Window; import java.awt.Frame; import java
 import loci.plugins.BF; import loci.plugins.in.ImporterOptions
 ```
 
-### Jython
+### §15.2 Jython
 
 ```python
 from ij import IJ, ImagePlus, ImageStack, WindowManager
@@ -1022,9 +1164,9 @@ import os, sys
 
 ---
 
-## 15. Agent Task Recipes
+## §16 Agent Task Recipes
 
-### Get image info as JSON
+### §16.1 Get image info as JSON
 
 ```bash
 python ij.py script '
@@ -1036,7 +1178,7 @@ new Gson().toJson([title: imp.getTitle(), width: imp.getWidth(), height: imp.get
 '
 ```
 
-### Toggle checkbox in named window
+### §16.2 Toggle checkbox in named window
 
 ```bash
 python ij.py script '
@@ -1056,7 +1198,7 @@ if (win) walk(win) else println "Window not found"
 '
 ```
 
-### Safe close all images
+### §16.3 Safe close all images
 
 ```bash
 python ij.py script '
@@ -1068,7 +1210,7 @@ if (ids != null) { ids.each { WindowManager.getImage(it).with { changes = false;
 
 ---
 
-## 16. Performance Tips
+## §17 Performance Tips
 
 | Slow | Fast | Why |
 |------|------|-----|

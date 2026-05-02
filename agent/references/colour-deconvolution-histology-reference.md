@@ -3,9 +3,119 @@
 Colour deconvolution, DAB quantification, IHC scoring systems, stain normalisation,
 and WSI handling in ImageJ/Fiji.
 
+Sources: Ruifrok & Johnston (2001) *Analytical and Quantitative Cytology and
+Histology* 23: 291-299 (original colour deconvolution); Landini et al. (2021)
+*Bioinformatics* 37(10): 1485-1487 (Colour Deconvolution 2 / CD2). The
+**Colour Deconvolution** (v1 / CD1) plugin ships with Fiji; **Colour
+Deconvolution2** (CD2) is installed via Help > Update > Manage Update Sites >
+"Colour Deconvolution2". Use `python probe_plugin.py "Colour Deconvolution..."`
+to discover any installed plugin's parameters at runtime.
+
+Invoke from the agent:
+`python ij.py macro '<code>'` — run ImageJ macro (.ijm) code.
+`python ij.py script '<code>'` — run Groovy (default), Jython, or JavaScript.
+
 ---
 
-## 1. Quick Start — DAB Area Fraction
+## §0 Lookup Map — "How do I find X?"
+
+| Question | Where to look |
+|---|---|
+| "How do I quantify DAB as a simple area fraction?" | §2 quick start, §6.2 area fraction |
+| "What vector set separates H and DAB (for Ki67, PR, etc.)?" | §3 channel mapping, §16 vector values |
+| "How do I compute an H-score from a DAB image?" | §7.1 H-Score macro |
+| "What's the Allred score and its cutoffs?" | §7.2 Allred |
+| "How do I compute the Ki67 proliferation index?" | §7.3 Ki67 (StarDist recommended) |
+| "Can I run HER2 / PD-L1 scoring automatically?" | §7.4 HER2, §7.5 PD-L1 |
+| "How do I pick stain vectors for my own protocol?" | §5 custom vectors, §5 CD2 "From ROI" |
+| "How do I convert 8-bit transmittance to optical density?" | §6.4 toOpticalDensity, §17 OD conversion |
+| "How do I normalise stains across batches?" | §9 stain normalisation |
+| "How do I process a whole slide image (WSI)?" | §10 WSI handling, Bio-Formats crop |
+| "Which quantification method should I use?" | §14 decision tree |
+| "Why is my Colour_3 residual not blank?" | §5 troubleshooting vectors, §15 troubleshooting |
+| "Plugin not found / 'Colour' vs 'Color' spelling?" | §3 v1 notes, §15 troubleshooting |
+| "What are the dropdown names for all v1 vector sets?" | §18 v1 vector dropdown names |
+| "What's the IHC Profiler plugin and when should I use it?" | §8 IHC Profiler |
+| "How do I handle fibrosis (Masson Trichrome)?" | §11 fibrosis workflow |
+| "How do I batch-process a folder of IHC images?" | §11 batch processing |
+
+---
+
+## §1 Term Index (A–Z)
+
+Alphabetical pointer to every stain, vector, plugin, scoring system, and concept
+covered. Use `grep -n '`<term>`' colour-deconvolution-histology-reference.md`
+to jump.
+
+### A
+`AEC` §3, §16 · `Alcian Blue & H` §3, §16 · `Allred Score` §7.2 · `Aniline Blue` §3, §16 · `Area Fraction` §2, §6.1, §6.2 · `Azan-Mallory` §3, §16 · `Azocarmine` §3, §16
+
+### B
+`Batch Processing` §11 · `Beer-Lambert` §6.1 · `Bio-Formats Importer (WSI)` §10 · `Brilliant Blue (CD2)` §4 · `Brown pigment` §12
+
+### C
+`CD1` §3 · `CD2` §4 · `Cell-based H-Score` §7.1 · `Channel Mapping` §3 · `CMY diagnostic vectors` §16, §18 · `Colour_1 / Colour_2 / Colour_3` §3 · `Colour Deconvolution (v1)` §3 · `Colour Deconvolution2 (CD2)` §4 · `CPS (PD-L1)` §7.5 · `Cross-contamination` §5, §15 · `Custom Vectors` §5
+
+### D
+`DAB` §2, §3, §6, §16 · `DAB Quantification Methods` §6 · `Decision Tree` §14 · `Diagnostic vectors (RGB/CMY)` §16
+
+### E
+`Eosin` §3, §16 · `ER/PR` §7.2, §14
+
+### F
+`Fast Blue` §3, §16 · `Fast Red` §3, §16 · `FastRed FastBlue DAB` §3, §16 · `Feulgen & Light Green (CD2)` §4, §18 · `Fibrosis` §11 · `Formalin pigment` §12 · `From ROI (CD2)` §4, §5
+
+### G
+`Giemsa (v1)` §18
+
+### H
+`H&E` §3, §16 · `H&E 2` §3, §16 · `H&E DAB` §3, §16 · `H AEC` §3, §16 · `Haematoxylin` §3, §16 · `Haematoxylin/DAB/New-Fuchsin (CD2)` §4 · `Haematoxylin/HRP-Green/New-Fuchsin (CD2)` §4 · `Haemosiderin` §12 · `HALO` §7.4 · `H DAB` §3, §16 · `HER2` §7.4 · `Histoscore (H-Score)` §7.1 · `Hot-spot method` §7.3 · `H PAS` §3, §16
+
+### I
+`IHC Profiler` §8 · `IHC Scoring Systems` §7 · `Integrated OD (IOD)` §6.1, §6.3 · `Intensity Zones (IHC Profiler)` §8 · `Inter-Observer Agreement` §13 · `Inverted DAB transmittance` §7.1
+
+### K
+`Ki67 Index` §7.3
+
+### L
+`Landini` §4 · `Lipofuscin` §12
+
+### M
+`Macenko normalisation` §9 · `Masson Trichrome` §3, §11, §16 · `Matrix determinant` §5 · `Melanin` §12 · `Membrane staining` §7.4, §8 · `Methyl Blue` §3, §16 · `Methyl Green` §3, §16 · `Methyl Green DAB` §3, §16
+
+### N
+`NBT/BCIP & Red Counterstain II (CD2)` §4 · `Necrotic background` §12 · `Normalisation` §9
+
+### O
+`Optical Density (OD)` §3, §6.1, §6.3, §6.4, §17 · `Orthogonality (vectors)` §5 · `Otsu` §6.2, §13
+
+### P
+`PAS` §3, §16 · `PD-L1` §7.5 · `Ponceau Fuchsin` §3, §16 · `Proportion Score (Allred)` §7.2 · `Pyramid level (WSI)` §10
+
+### Q
+`QuPath` §10, §7.4, §14 · `Quality Control` §13
+
+### R
+`Reciprocal intensity` §6.1 · `Reinhard normalisation` §9 · `Residual channel` §3, §12, §15 · `RGB diagnostic vectors` §16, §18 · `Ruifrok & Johnston` header, §19
+
+### S
+`Saturation` §12 · `Scoring Systems` §7 · `Simulated LUTs (CD2)` §4 · `Singular matrix` §15 · `StainTools (Python)` §9 · `Stain Normalisation` §9 · `StarDist` §7.3, §14 · `Subtract Background` §12
+
+### T
+`Threshold Selection` §13 · `Tissue folds` §12 · `TPS (PD-L1)` §7.5 · `Transmittance` §3, §4, §6.4, §17 · `Troubleshooting (vectors)` §5 · `Troubleshooting (colour deconvolution)` §15
+
+### U
+`User values (CD2 custom vectors)` §4, §5
+
+### V
+`Vahadane normalisation` §9 · `Vector Set` §3, §16
+
+### W
+`Watershed (Ki67)` §7.3 · `WSI (Whole Slide Image)` §10
+
+---
+
+## §2. Quick Start — DAB Area Fraction
 
 ```bash
 python ij.py macro '
@@ -21,7 +131,7 @@ python ij.py results
 
 ---
 
-## 2. Colour Deconvolution v1
+## §3. Colour Deconvolution v1
 
 **Spelling:** Plugin uses British "Colour" not "Color".
 
@@ -64,7 +174,7 @@ selectWindow(title + "-(Colour_2)");  // DAB channel
 
 ---
 
-## 3. Colour Deconvolution 2 (Landini)
+## §4. Colour Deconvolution 2 (Landini)
 
 **Install:** Help > Update > Manage Update Sites > "Colour Deconvolution2" > Apply > Restart.
 
@@ -118,7 +228,7 @@ Haematoxylin/DAB/New-Fuchsin, Haematoxylin/HRP-Green/New-Fuchsin, Feulgen & Ligh
 
 ---
 
-## 4. Custom Stain Vector Determination
+## §5. Custom Stain Vector Determination
 
 ### Why Custom Vectors
 
@@ -176,9 +286,9 @@ print("Stain 1: [" + d2s(od_r1,6) + ", " + d2s(od_g1,6) + ", " + d2s(od_b1,6) + 
 
 ---
 
-## 5. DAB Quantification Methods
+## §6. DAB Quantification Methods
 
-### Method Comparison
+### §6.1 Method Comparison
 
 | Method | Reliability with DAB | When to Use |
 |--------|---------------------|-------------|
@@ -191,7 +301,7 @@ print("Stain 1: [" + d2s(od_r1,6) + ", " + d2s(od_g1,6) + ", " + d2s(od_b1,6) + 
 concentration, violating Beer-Lambert law. OD measurements are semi-quantitative.
 Area fraction is more reliable because it avoids intensity quantification.
 
-### Area Fraction
+### §6.2 Area Fraction
 
 ```java
 title = getTitle();
@@ -203,7 +313,7 @@ run("Set Measurements...", "area area_fraction limit display redirect=None decim
 run("Measure");
 ```
 
-### Optical Density (using CD2 32-bit absorbance)
+### §6.3 Optical Density (using CD2 32-bit absorbance)
 
 ```java
 title = getTitle();
@@ -215,7 +325,7 @@ run("Set Measurements...", "mean integrated area limit display redirect=None dec
 run("Measure");
 ```
 
-### Converting v1 8-bit Transmittance to OD
+### §6.4 Converting v1 8-bit Transmittance to OD
 
 ```java
 function toOpticalDensity() {
@@ -230,9 +340,9 @@ function toOpticalDensity() {
 
 ---
 
-## 6. IHC Scoring Systems
+## §7. IHC Scoring Systems
 
-### 6.1 H-Score (Histoscore)
+### §7.1 H-Score (Histoscore)
 
 ```
 H-Score = 1 x (%weak) + 2 x (%moderate) + 3 x (%strong)
@@ -281,7 +391,7 @@ measure mean DAB intensity per nucleus, classify each cell. Use
 `run("Analyze Particles...", "size=20-500 circularity=0.3-1.00 display");`
 with `redirect=DAB_inv`.
 
-### 6.2 Allred Score
+### §7.2 Allred Score
 
 Used primarily for ER/PR in breast cancer. Range: 0-8.
 
@@ -300,7 +410,7 @@ Allred = Proportion Score (PS) + Intensity Score (IS)
 
 **Interpretation:** 0 or 2 = Negative; 3-8 = Positive.
 
-### 6.3 Ki67 Index
+### §7.3 Ki67 Index
 
 ```
 Ki67 Index (%) = (Ki67-positive nuclei / total tumour nuclei) x 100
@@ -322,7 +432,7 @@ Ki67 Index (%) = (Ki67-positive nuclei / total tumour nuclei) x 100
 **Hot-spot method:** Some protocols require scoring in the highest-proliferation region.
 Tile the image, score each field, report the maximum (or average of top 3).
 
-### 6.4 HER2 Scoring (0 / 1+ / 2+ / 3+)
+### §7.4 HER2 Scoring (0 / 1+ / 2+ / 3+)
 
 | Score | Pattern | Interpretation |
 |-------|---------|---------------|
@@ -335,7 +445,7 @@ Tile the image, score each field, report the maximum (or average of top 3).
 pattern recognition. Consider QuPath, HALO, or deep learning for HER2. Simple
 thresholding is insufficient for clinical scoring.
 
-### 6.5 PD-L1 Scoring
+### §7.5 PD-L1 Scoring
 
 **TPS:** `(PD-L1+ tumour cells / total tumour cells) x 100`
 **CPS:** `(PD-L1+ tumour cells + PD-L1+ immune cells) / total tumour cells x 100`
@@ -345,7 +455,7 @@ should be validated against pathologist assessment.
 
 ---
 
-## 7. IHC Profiler Plugin
+## §8. IHC Profiler Plugin
 
 **Install:** Download from https://sourceforge.net/projects/ihcprofiler/ > Plugins > Install.
 
@@ -381,7 +491,7 @@ Pixel-based (not cell-based), fixed thresholds, ~88.6% agreement with pathologis
 
 ---
 
-## 8. Stain Normalisation
+## §9. Stain Normalisation
 
 ### When to Normalise
 
@@ -416,7 +526,7 @@ Image.fromarray(normalised).save('/path/to/normalised.tif')
 
 ---
 
-## 9. Whole Slide Image (WSI) Handling
+## §10. Whole Slide Image (WSI) Handling
 
 ### Common Formats
 
@@ -451,7 +561,7 @@ unlimited image sizes, built-in cell detection, StarDist support, and Groovy scr
 
 ---
 
-## 10. Agent Workflows
+## §11. Agent Workflows
 
 ### DAB Area Fraction
 
@@ -522,7 +632,7 @@ python ij.py macro '
 
 ---
 
-## 11. Common Problems and Solutions
+## §12. Common Problems and Solutions
 
 | Problem | Solution |
 |---------|----------|
@@ -545,7 +655,7 @@ python ij.py macro '
 
 ---
 
-## 12. Best Practices
+## §13. Best Practices
 
 ### Threshold Selection
 
@@ -591,7 +701,7 @@ or ICC. Kappa > 0.80 = excellent, 0.60-0.80 = good, < 0.60 = revise criteria.
 
 ---
 
-## 13. Decision Tree — Choosing Quantification Method
+## §14. Decision Tree — Choosing Quantification Method
 
 ```
 What type of IHC quantification?
@@ -615,7 +725,7 @@ What type of IHC quantification?
 
 ---
 
-## 14. Troubleshooting Colour Deconvolution
+## §15. Troubleshooting Colour Deconvolution
 
 | Symptom | Likely Cause | Fix |
 |---------|-------------|-----|
@@ -629,7 +739,7 @@ What type of IHC quantification?
 
 ---
 
-## Appendix A: Stain Vector Values
+## §16. Appendix A: Stain Vector Values
 
 All built-in normalised optical density vectors [R, G, B]:
 
@@ -665,7 +775,7 @@ along axes — for testing only.
 
 ---
 
-## Appendix B: OD Conversion
+## §17. Appendix B: OD Conversion
 
 ```
 OD = -log10(I / 255)     ImageJ macro: -log(I/255) / log(10)
@@ -682,7 +792,7 @@ I  = 255 * 10^(-OD)
 
 ---
 
-## Appendix C: All v1 Vector Dropdown Names
+## §18. Appendix C: All v1 Vector Dropdown Names
 
 ```java
 run("Colour Deconvolution", "vectors=[H&E]");
@@ -704,7 +814,7 @@ run("Colour Deconvolution", "vectors=[CMY]");
 
 ---
 
-## Key References
+## §19. Key References
 
 1. Ruifrok & Johnston (2001). Analytical and Quantitative Cytology and Histology 23: 291-299. *Original colour deconvolution.*
 2. Landini, Martinelli & Piccinini (2021). Bioinformatics 37(10): 1485-1487. *CD2.*

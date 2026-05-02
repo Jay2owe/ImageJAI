@@ -1,10 +1,162 @@
 # Fluorescence Microscopy Reference
 
 Practical reference for fluorescence microscopy analysis in ImageJ/Fiji.
+Covers fluorophore selection, modality choice, sample prep, acquisition
+sampling, artifact recognition, and quantitative readouts (CTCF, FRAP,
+FRET, calcium, colocalization).
+
+Sources: FPbase spectra database (`fpbase.org/spectra`), Nyquist sampling
+theory, ImageJ docs on Bleach Correction and Coloc 2, and standard
+fluorescence-microscopy texts (Pawley's *Handbook of Biological Confocal
+Microscopy*, Murphy & Davidson's *Fundamentals of Light Microscopy*).
+
+Invoke from the agent: this is a concept / interpretation reference. Used
+for interpreting images and picking acquisition/analysis strategy. For the
+actual macro code, see `references/macro-reference.md` and the recipe
+snippets in §8 below. Run macro code with `python ij.py macro '<code>'`.
 
 ---
 
-## 1. Fluorophore Quick Reference
+## §0 Lookup Map — "How do I find X?"
+
+| Question | Where to look |
+|---|---|
+| "What's CTCF and how do I compute it?" | §7.1 |
+| "Which fluorophore for my green/red/far-red channel?" | §2, §9.2 |
+| "What's the Nyquist pixel size for a 60x oil objective?" | §5.1 |
+| "How do I detect saturation / check exposure?" | §5.3 |
+| "How do I correct uneven illumination?" | §6, §9.1 |
+| "How do I quantify FRAP recovery?" | §7.2 |
+| "How do I compute FRET efficiency?" | §7.3 |
+| "How do I do dF/F0 for GCaMP?" | §7.4 |
+| "Which projection for quantitative intensity?" | §7.6, §10 |
+| "Which modality for my sample (thick tissue / super-res / live)?" | §3 |
+| "How do I fix photobleaching / autofluorescence / bleed-through?" | §6 |
+| "What's the SNR I need for detection / FRET / colocalization?" | §7.7 |
+| "What's the acquisition checklist before I start?" | §5 |
+| "How do I batch-process a folder of TIFFs?" | §8 |
+
+---
+
+## §1 Term Index (A–Z)
+
+Alphabetical pointer to every modality, measurement, artifact, fluorophore,
+and concept in this document. Use `grep -n '`<term>`'
+fluorescence-microscopy-reference.md` to jump.
+
+### A
+`acceptor photobleaching` §7.3 · `acquisition checklist` §5 · `Airyscan` §3 ·
+`Alexa Fluor 488` §2 · `Alexa Fluor 546` §2 · `Alexa Fluor 594` §2 ·
+`Alexa Fluor 647` §2 · `Analyze Particles` §8 · `anti-fade` §4.4 ·
+`autofluorescence` §6 · `axial resolution` §3
+
+### B
+`background subtraction` §8, §9.1 · `BaSiC` §6 · `batch processing` §8 ·
+`Bio-Formats` §8 · `bit depth` §5.2 · `bleach correction` §6 ·
+`bleed-through` §5.4, §6 · `blocking (IF)` §4.3 · `brightness (extinction × QY)` §2
+
+### C
+`calcein AM` §4.5 · `calcium imaging` §7.4 · `CellMask Deep Red` §4.5 ·
+`channel operations` §8 · `chromatic aberration` §6 · `CFP/mCerulean` §7.3 ·
+`colocalization (PCC / Manders / Costes)` §7.5 · `confocal (LSCM)` §3 ·
+`Coloc 2` §7.5 · `Correct 3D Drift` — see `macro-reference.md` ·
+`Costes test` §7.5 · `coverslip #1.5` §10 · `CTCF` §7.1 · `Cy5` §2
+
+### D
+`DAPI` §2 · `dark current` §6 · `deconvolution` §5.1 · `decision tree (modality)` §3 ·
+`decision tree (background)` §9.1 · `decision tree (fluorophore)` §9.2 ·
+`dF/F0` §7.4 · `diffusion coefficient (FRAP)` §7.2 · `digitonin` §4.2 ·
+`display range` §8, §10 · `donor / acceptor (FRET)` §7.3 · `dynamic range` §5.2
+
+### E
+`EGFP` §2 · `emission peak` §2 · `environmental chamber` §5.5 ·
+`Enhance Contrast (warning)` §8, §10 · `Expansion Microscopy (ExM)` §3 ·
+`exposure (don't vary between conditions)` §5.3, §10 · `extinction coefficient` §2
+
+### F
+`far-red` §2, §10 · `FITC` §2 · `fixation (PFA / MeOH / glutaraldehyde)` §4.1 ·
+`flat-field correction` §6, §9.1 · `FLIM-FRET` §7.3 · `Fluo-4 AM` §4.5 ·
+`Fluoromount-G` §4.4 · `fluorophore panel design` §2 · `FPbase` §2 ·
+`FRAP` §7.2 · `FRAPCalc` §7.2 · `FRAP Profiler` §7.2 · `FRET` §7.3 ·
+`Fura-2 AM` §4.5, §7.4, §10
+
+### G
+`Gaussian Blur` §8 · `GCaMP` §4.5, §7.4 · `genetically encoded FPs` §4.5, §9.2 ·
+`GFP` §2, §7.3 · `glutaraldehyde` §4.1
+
+### H
+`half-time (FRAP)` §7.2 · `hardware autofocus` §5.5 · `HiLo LUT` §5.3, §8 ·
+`Hoechst 33342` §2
+
+### I
+`immersion oil RI` §4.4, §6 · `immunofluorescence (IF) staining` §4.3 ·
+`IntDen (integrated density)` §7.1 · `intensiometric (GCaMP)` §7.4 ·
+`iRFP` §9.2
+
+### L
+`lateral resolution` §3 · `light sheet` §3 · `line profile` — see `macro-reference.md` ·
+`live cell reagents` §4.5 · `LSCM (confocal)` §3 · `LUTs` §8 ·
+`LysoTracker Red` §4.5
+
+### M
+`Manders M1 / M2` §7.5 · `mCherry` §2, §7.3 · `mEos3.2` §9.2 ·
+`MeOH / acetone fixation` §4.1 · `Merge Channels` §8 · `MitoTracker Red` §4.5, §10 ·
+`mKate2` §9.2 · `mNeonGreen` §2, §9.2 · `mobile fraction (FRAP)` §7.2 ·
+`mounting media` §4.4, §6 · `mScarlet` §2, §9.2 · `mTurquoise2` §7.3 ·
+`multi-color panels` §2 · `multi-channel acquisition (simultaneous / sequential)` §5.4
+
+### N
+`NA (numerical aperture)` §5.1 · `NH4Cl quench` §4.1, §6 · `Nyquist sampling` §5.1
+
+### O
+`Otsu` §8 · `out-of-focus blur` §6 · `oversampling (deconvolution)` §5.1
+
+### P
+`PALM` §3, §9.2 · `PCC (Pearson)` §7.5 · `permeabilization` §4.2 ·
+`PFA (paraformaldehyde)` §4.1 · `phototoxicity` §4.5 · `photobleaching` §6 ·
+`pixel size (Nyquist)` §5.1 · `Plan-apochromat` §6 · `primary antibody` §4.3 ·
+`ProLong Diamond / Glass / Gold` §4.4 · `projection methods (Sum / Max / Average / Median)` §7.6
+
+### Q
+`quantum yield (QY)` §2 · `quenching (post-PFA)` §4.1
+
+### R
+`ratiometric (Fura-2)` §7.4 · `R0 (Förster radius)` §7.3 · `RenyiEntropy` §8 ·
+`RI mismatch` §4.4, §6 · `ROI (CTCF / background)` §7.1 · `rolling ball` §8, §9.1
+
+### S
+`sample preparation` §4 · `saponin` §4.2 · `saturation detection` §5.3 ·
+`secondary antibody` §4.3 · `segmentation (StarDist / threshold+watershed)` §8 ·
+`sensitized emission (FRET)` §7.3 · `sequential acquisition` §5.4, §10 ·
+`Set Measurements` §7.1, §8 · `setMinAndMax` §8, §10 · `shot noise` §7.7, §9.1 ·
+`SIM` §3, §9.2 · `SiR-Tubulin` §4.5 · `SNR` §7.7 · `spectral overlap / unmixing` §6 ·
+`spherical aberration` §6, §10 · `spinning disk` §3 · `StarDist 2D` §8 ·
+`STED` §3, §9.2 · `STORM` §3, §9.2 · `Subtract Background` §8 · `Sum Slices` §7.6, §10 ·
+`Sudan Black` §6
+
+### T
+`tdTomato` §2, §9.2 · `TetraSpeck beads` §6 · `TIRF` §3 · `threshold methods (Otsu / Triangle / Li / Renyi / Moments)` §8 ·
+`time-lapse considerations` §5.5 · `TrueBlack` §6 · `Triton X-100` §4.2 ·
+`two-photon` §3
+
+### U
+`uneven illumination` §6, §9.1 · `UV fluorophores` §2
+
+### V
+`Vectashield` §4.4 · `vignetting` §6
+
+### W
+`Watershed` §8 · `widefield` §3
+
+### Y
+`YFP / mVenus` §7.3
+
+### Z
+`Z-drift` §5.5 · `Z Project` §7.4, §7.6 · `z-step (Nyquist)` §5.1
+
+---
+
+## §2. Fluorophore Quick Reference
 
 | Fluorophore | Ex (nm) | Em (nm) | QY | Notes |
 |---|---|---|---|---|
@@ -45,7 +197,7 @@ Alexa 488 ~2.4, tdTomato ~2.8, mCherry 0.47, Cy5 0.68.
 
 ---
 
-## 2. Microscopy Modalities
+## §3. Microscopy Modalities
 
 | Modality | Lateral res. | Axial res. | Speed | Best for |
 |---|---|---|---|---|
@@ -80,9 +232,9 @@ Membrane-proximal only? → TIRF
 
 ---
 
-## 3. Sample Preparation
+## §4. Sample Preparation
 
-### Fixation
+### 4.1 Fixation
 
 | Fixative | Protocol | Preserves | Destroys |
 |---|---|---|---|
@@ -92,7 +244,7 @@ Membrane-proximal only? → TIRF
 
 Post-PFA: wash 3x PBS, quench with 50 mM NH4Cl 10 min.
 
-### Permeabilization (after PFA only)
+### 4.2 Permeabilization (after PFA only)
 
 | Agent | Concentration | Time | Notes |
 |---|---|---|---|
@@ -100,14 +252,14 @@ Post-PFA: wash 3x PBS, quench with 50 mM NH4Cl 10 min.
 | Saponin | 0.1-0.5% | 10-30 min | Reversible, keep in all buffers |
 | Digitonin | 25-50 ug/mL | 5 min | Very mild |
 
-### Blocking & Antibody Staining
+### 4.3 Blocking & Antibody Staining
 
 - Block: 1-5% BSA or 5-10% normal serum (from secondary Ab host), 30-60 min RT
 - Primary Ab: typically 1:50-1:500, overnight 4C
 - Secondary Ab: typically 1:200-1:1000 (Alexa Fluor: 1:500), 1 hr RT, in dark
 - Wash 3x 5-10 min PBS between steps
 
-### Mounting Media
+### 4.4 Mounting Media
 
 | Medium | RI | Anti-fade | Notes |
 |---|---|---|---|
@@ -120,7 +272,7 @@ Post-PFA: wash 3x PBS, quench with 50 mM NH4Cl 10 min.
 RI mismatch (mounting medium vs immersion oil 1.515) causes spherical aberration.
 ProLong Glass minimizes this for oil-immersion objectives.
 
-### Live Cell Reagents
+### 4.5 Live Cell Reagents
 
 | Reagent | Target | Ex/Em (nm) |
 |---|---|---|
@@ -138,9 +290,9 @@ genetically encoded reporters for long time-lapse.
 
 ---
 
-## 4. Acquisition Checklist
+## §5. Acquisition Checklist
 
-### Nyquist Sampling
+### 5.1 Nyquist Sampling
 
 ```
 pixel_size <= lambda_em / (2 * NA) / 2.3
@@ -156,13 +308,13 @@ z_step    <= 2 * lambda_em * n / (NA^2) / 2.3
 
 For deconvolution: oversample 4x (half the pixel sizes above).
 
-### Bit Depth
+### 5.2 Bit Depth
 
 - Acquire at highest bit depth (typically 12 or 16-bit)
 - Save as 16-bit TIFF -- never JPEG for quantitative data
 - Use ~50-75% of dynamic range (leave headroom)
 
-### Saturation Detection
+### 5.3 Saturation Detection
 
 ```javascript
 // HiLo LUT: saturated=red, zero=blue
@@ -172,7 +324,7 @@ run("HiLo");
 **Avoidance:** Set exposure on brightest sample first. Never adjust exposure
 between conditions in a quantitative experiment.
 
-### Multi-Channel Acquisition
+### 5.4 Multi-Channel Acquisition
 
 | Mode | Speed | Bleed-through | When |
 |---|---|---|---|
@@ -182,7 +334,7 @@ between conditions in a quantitative experiment.
 
 Always image single-stained controls to quantify bleed-through.
 
-### Time-Lapse Considerations
+### 5.5 Time-Lapse Considerations
 
 - Budget total light exposure across experiment
 - Use hardware autofocus for Z-drift
@@ -191,7 +343,7 @@ Always image single-stained controls to quantify bleed-through.
 
 ---
 
-## 5. Artifacts & Troubleshooting
+## §6. Artifacts & Troubleshooting
 
 | Artifact | Cause | Prevention / Fix |
 |---|---|---|
@@ -226,9 +378,9 @@ run("Multiply...", "value=" + ffMean);
 
 ---
 
-## 6. Quantitative Fluorescence
+## §7. Quantitative Fluorescence
 
-### 6.1 CTCF (Corrected Total Cell Fluorescence)
+### 7.1 CTCF (Corrected Total Cell Fluorescence)
 
 ```
 CTCF = IntDen - (Area_cell x Mean_background)
@@ -261,7 +413,7 @@ macro "CTCF Measurement" {
 }
 ```
 
-### 6.2 FRAP
+### 7.2 FRAP
 
 - **Mobile fraction:** Mf = (F_final - F_postbleach) / (F_prebleach - F_postbleach)
 - **Half-time:** t1/2 = time to 50% recovery
@@ -271,7 +423,7 @@ Protocol: 5-10 pre-bleach frames -> bleach ROI -> acquire until plateau.
 Normalize: F_norm(t) = (F_bleach - F_bg) / (F_ref - F_bg), double-normalize to pre-bleach.
 Fit single exponential. Plugins: FRAP Profiler, FRAPCalc.
 
-### 6.3 FRET
+### 7.3 FRET
 
 ```
 E = 1 / (1 + (r/R0)^6)
@@ -288,7 +440,7 @@ E = 1 - (tau_DA / tau_D)       // lifetime-based
 
 Methods: sensitized emission, acceptor photobleaching, FLIM-FRET (most quantitative).
 
-### 6.4 Calcium Imaging
+### 7.4 Calcium Imaging
 
 **Fura-2 (ratiometric):** R = F340/F380. [Ca2+] = Kd x (Sf2/Sb2) x (R-Rmin)/(Rmax-R).
 ```javascript
@@ -305,7 +457,7 @@ imageCalculator("Subtract create 32-bit stack", "time_lapse", "F0");
 imageCalculator("Divide create 32-bit stack", "deltaF", "F0");
 ```
 
-### 6.5 Colocalization
+### 7.5 Colocalization
 
 - **PCC:** -1 to +1. Linear correlation between channels.
 - **Manders M1/M2:** 0-1. Fraction of overlap (threshold-dependent, asymmetric).
@@ -320,7 +472,7 @@ run("Coloc 2",
 
 See `references/colocalization-reference.md` for full guide.
 
-### 6.6 Projection Methods
+### 7.6 Projection Methods
 
 | Projection | Use |
 |---|---|
@@ -331,7 +483,7 @@ See `references/colocalization-reference.md` for full guide.
 
 **Never use MIP for quantitative intensity measurements.**
 
-### 6.7 SNR Requirements
+### 7.7 SNR Requirements
 
 | Task | Min SNR |
 |---|---|
@@ -347,7 +499,7 @@ To double SNR, need 4x more photons.
 
 ---
 
-## 7. ImageJ/Fiji Operations
+## §8. ImageJ/Fiji Operations
 
 ### Channel Operations
 ```javascript
@@ -463,9 +615,9 @@ setBatchMode(false);
 
 ---
 
-## 8. Decision Trees
+## §9. Decision Trees
 
-### Background Subtraction
+### 9.1 Background Subtraction
 ```
 Uneven illumination (bright center, dark edges) → Rolling ball (radius=200+)
 Autofluorescence (diffuse haze) → Rolling ball (radius=50-100)
@@ -474,7 +626,7 @@ Structured background (striping) → FFT bandpass filter
 Have flat-field reference → Flat-field division
 ```
 
-### Fluorophore Selection
+### 9.2 Fluorophore Selection
 ```
 Fixed cells → Alexa Fluor series
   Blue: DAPI | Green: AF488 | Red: AF555/568 | Far-red: AF647
@@ -486,21 +638,21 @@ Super-resolution →
 
 ---
 
-## 9. Gotchas
+## §10. Gotchas
 
-- **Never adjust exposure between conditions** in quantitative experiments
-- **Sum Slices** for quantification, not Max Intensity projection
-- **setMinAndMax()** for display; **never normalize** pixel values
-- **Sequential acquisition** for colocalization to avoid bleed-through
-- **#1.5 coverslips** (170 um) always for high-NA objectives
-- **Match mounting medium RI** to immersion medium to avoid spherical aberration
-- **Far-red channel** (AF647/Cy5) has lowest autofluorescence -- use for weakest signals
-- **12-bit in 16-bit TIFF** is fine -- no information lost
-- Fura-2 requires xenon lamp (flat spectrum); mercury gaps miss 380 nm excitation
+- **Never adjust exposure between conditions** in quantitative experiments (§5.3)
+- **Sum Slices** for quantification, not Max Intensity projection (§7.6)
+- **setMinAndMax()** for display; **never normalize** pixel values (§8)
+- **Sequential acquisition** for colocalization to avoid bleed-through (§5.4, §7.5)
+- **#1.5 coverslips** (170 um) always for high-NA objectives (§6)
+- **Match mounting medium RI** to immersion medium to avoid spherical aberration (§4.4, §6)
+- **Far-red channel** (AF647/Cy5) has lowest autofluorescence -- use for weakest signals (§2)
+- **12-bit in 16-bit TIFF** is fine -- no information lost (§5.2)
+- Fura-2 requires xenon lamp (flat spectrum); mercury gaps miss 380 nm excitation (§4.5, §7.4)
 
 ---
 
-## 10. Cross-References
+## §11. Cross-References
 
 - **Colocalization**: `references/colocalization-reference.md`
 - **IF post-processing**: `references/if-postprocessing-reference.md`

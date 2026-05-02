@@ -2,11 +2,214 @@
 
 ImageJ measurements, Python statistical scripts, and integration workflow for the ImageJAI agent.
 
+Covers the full ImageJ → Python → figures pipeline: ImageJ measurement
+commands (`Set Measurements`, morphometric/intensity metrics, CTCF,
+multi-channel redirect, stack/time-lapse, Coloc 2, Analyze Particles,
+AnalyzeSkeleton, nearest-neighbour, ROI-based and batch measurements);
+eight self-contained Python statistical scripts (two-group, multi-group,
+paired, correlation, mixed-effects, proportion, dose-response, multiple-
+comparisons correction); end-to-end integration workflow with decision
+tree and common extraction patterns; Python package tiers; and a
+reporting template.
+
+Invoke from the agent:
+`python ij.py macro '<code>'` — run ImageJ macro (.ijm) code to set
+measurements, segment, and measure.
+`python ij.py results > .tmp/raw_results.csv` — export Results table.
+`python stats_<script>.py <csv> <args> --output <plot.png>` — run a
+stats script and write a figure.
+
 ---
 
-## 1. ImageJ Measurement Commands
+## §0 Lookup Map — "How do I find X?"
 
-### 1.1 Set Measurements — Keyword Reference
+| Question | Where to look |
+|---|---|
+| "What keywords does `Set Measurements...` take?" | §2.1 |
+| "What's the formula for Circularity / Solidity / Aspect Ratio?" | §2.2 |
+| "What's the difference between IntDen and RawIntDen?" | §2.3 |
+| "How do I compute CTCF (Corrected Total Cell Fluorescence)?" | §2.4 |
+| "How do I segment on one channel and measure another?" | §2.5 |
+| "How do I measure each slice / frame of a stack?" | §2.6 |
+| "How do I run Coloc 2 and what does it output?" | §2.7 |
+| "What options does `Analyze Particles` take?" | §2.8 |
+| "How do I extract skeleton branch counts?" | §2.9 |
+| "How do I compute nearest-neighbour distances?" | §2.10 |
+| "How do I measure all ROIs / batch a folder?" | §2.11 |
+| "Which Python packages are assumed / optional?" | §3.0, §5 |
+| "Compare X between two groups (t-test / Mann-Whitney)?" | §3.1 |
+| "Compare X across 3+ groups (ANOVA / Kruskal-Wallis)?" | §3.2 |
+| "Before-vs-after on same subjects?" | §3.3 |
+| "Does X correlate with Y?" | §3.4 |
+| "Account for animal-level variability (mixed model / SuperPlot)?" | §3.5 |
+| "Compare proportions (Fisher / chi-squared)?" | §3.6 |
+| "Fit a dose-response curve / get EC50?" | §3.7 |
+| "Correct p-values for multiple tests (Bonferroni / Holm / BH)?" | §3.8 |
+| "End-to-end example: ImageJ → CSV → stats → figure?" | §4.1 |
+| "Which script for which question?" | §4.2 |
+| "Cell counting / CTCF / colocalization / skeleton extraction patterns?" | §4.3 |
+| "What format to report stats in?" | §6 |
+| "Master decision tree by data type and question?" | §7 |
+| "What test for counts / proportions / survival?" | §7.3, §7.4, §7.5 |
+| "Why is `n=300 cells from 3 mice` wrong?" | §8.1 |
+| "What is a SuperPlot, how do I draw one?" | §9.1, §9.2 |
+| "Worked `lmer` example with imaging structure?" | §10.1 |
+| "Convergence / singular-fit warning — what next?" | §10.3 |
+| "Power for `lmer` with `simr`?" | §11.2 |
+| "FWER vs FDR — which correction when?" | §12.1 |
+| "Image-wise correction (cluster / TFCE)?" | §12.3 |
+| "Why is p alone not enough? Effect size + CI?" | §13.1 |
+| "Saturated pixels skew my distribution?" | §14.1 |
+| "Spatial / temporal autocorrelation in imaging?" | §14.2, §14.3 |
+| "Below-detection / right-censored intensity?" | §14.4 |
+| "R vs Python vs Prism — which tool when?" | §15.1 |
+| "Worked end-to-end: wrong vs right, 3×5×10×50 cells?" | §16.1 |
+| "Reviewer says n is too low / use non-parametric / etc.?" | §17.1 |
+
+**Companion references** (do not duplicate; cross-link):
+- `references/statistics-reference.md` — concept-level distributions, post-hoc decision trees, R/Python cheat sheets, transformation rules.
+- `references/hypothesis-testing-microscopy-reference.md` — research-question → test mapping (Q1–Q36) and rigour/blinding pitfalls.
+- `references/mixed-effects-models-reference.md` — formula syntax, REML vs ML, KR vs Satterthwaite, GLMM, `pymer4`.
+
+---
+
+## §1 Term Index (A–Z)
+
+Alphabetical pointer to the section containing each term. Use
+`grep -n '<term>' statistical-analysis-workflow-reference.md` to jump.
+
+### A
+`Aarts 2014` §8.2 · `Analyze Particles` §2.8 · `Analyze Skeleton (2D/3D)` §2.9 ·
+`ANOVA` §3.2, §7.2 · `ANOVA assumptions` §7.2 · `area` §2.1 ·
+`Area (column)` §2.1, §2.2 · `area_fraction` §2.1 ·
+`Aspect Ratio` §2.2 · `ASA 2016 statement` §13.1 · `auditor` §4.3 ·
+`autocorrelation (spatial)` §14.2 · `autocorrelation (temporal)` §14.3
+
+### B
+`Batch Measurements` §2.11 · `BAR (Fiji)` §15.2 ·
+`Benjamini-Hochberg (BH)` §3.8, §12.1 · `Bonferroni` §3.8, §12.1 ·
+`bounding_box` §2.1 · `boundary effects (TFCE)` §12.3
+
+### C
+`censored data (left/right)` §14.4 · `center_of_mass` §2.1 ·
+`centroid` §2.1 · `Chi-squared` §3.6, §7.4 · `Circ.` §2.1, §2.2 ·
+`Circularity` §2.2 · `cliff's delta` §13.1 · `cluster correction` §12.3 ·
+`Cohen's d` §11.1, §13.1 · `Cohen's dz` §3.3 · `Coloc 2` §2.7, §4.3 ·
+`Confidence band (regression)` §3.4 · `Confidence interval (CI)` §13.1 ·
+`Correlation` §3.4, §7.6 · `Costes` §2.7, §4.3 ·
+`Cox proportional hazards` §7.5 · `CTCF` §2.4, §4.3 · `curve_fit` §3.7
+
+### D
+`decimal=N` §2.1 · `Decision tree (script chooser)` §4.2 ·
+`Decision tree (test choice)` §7 · `Delacre & Lakens 2017` §7.1 ·
+`Detection limit` §14.4 · `display (Set Measurements)` §2.1 ·
+`Dose-Response` §3.7 · `Dunn's test` §3.2, §7.2
+
+### E
+`EC50` §3.7 · `Effect size` §3.1, §3.3, §6, §11.1, §13.1 ·
+`emmeans` §10.2, §15.1 · `End-to-End Example` §4.1, §16.1 ·
+`Eta-squared (partial)` §3.2, §11.1, §13.1
+
+### F
+`Family-wise error rate (FWER)` §12.1 · `feret's` §2.1, §2.2 ·
+`Fisher's exact` §3.6, §7.4 · `fit_ellipse` §2.1 ·
+`four_pl (Hill equation)` §3.7
+
+### G
+`G*Power` §11.1 · `GLMM (`glmer`)` §10.4 · `GLMM negative binomial` §7.3, §10.4 ·
+`Group-wise vs cell-wise n` §8.1
+
+### H
+`Hazard ratio` §7.5 · `Hedges' g` §3.1, §13.1 · `Hierarchical data` §8, §10 ·
+`High-content screening` §12.4 · `Hill equation` §3.7 ·
+`Holm` §3.2, §3.8, §12.1 · `Hyperstack per-frame loop` §2.6
+
+### I
+`ICC (intraclass correlation)` §3.5, §10.1, §11.2 ·
+`Image-wise corrections` §12.3 · `integrated_density` §2.1, §2.3, §2.4 ·
+`IntDen` §2.1, §2.3, §2.4 · `Integration Workflow` §4 ·
+`Interaction term (factorial ANOVA)` §7.2 ·
+`Intraclass correlation` §10.1, §11.2
+
+### K
+`Kaplan-Meier` §7.5 · `Kendall's tau` §7.6 · `Kenward-Roger` §10.2 ·
+`KR / Satterthwaite df` §10.2 · `Kruskal-Wallis` §3.2, §7.2 ·
+`kurtosis` §2.1
+
+### L
+`Label (column)` §2.1, §4.1 · `Lazic 2010` §8.2 · `Left-censored` §14.4 ·
+`Levene's test` §3.1 · `Li's ICQ` §2.7 · `lme4` §10 · `lmer` §10.1, §10.2 ·
+`lmerTest` §10.2 · `Logistic regression` §7.4 · `Log-rank test` §7.5 ·
+`Lord et al. 2020 (SuperPlots)` §9.1
+
+### M
+`Manders' M1/M2` §2.7, §4.3 · `Mann-Whitney U` §3.1, §7.1 ·
+`Math.* / matplotlib.Agg backend` §3.0 · `mean` §2.1, §2.3 ·
+`Measure (macro command)` §2.4, §2.6, §2.11 · `median` §2.1, §2.3 ·
+`min / Max (gray)` §2.1, §2.3 · `Mixed-Effects Model` §3.5, §10 ·
+`modal_gray / Mode` §2.1, §2.3 · `Morphometric Measurements` §2.2 ·
+`Multi-Channel Measurement` §2.5 · `Multi-Group Comparison` §3.2 ·
+`Multiple Comparisons Correction` §3.8, §12
+
+### N
+`Nearest Neighbor Distances` §2.10 · `Negative binomial GLM` §7.3, §10.4 ·
+`Normality check (Shapiro/normaltest)` §3.1, §3.2, §3.3, §3.4
+
+### O
+`Odds ratio` §3.6, §11.1 · `Otsu (threshold)` §2.11, §4.1 ·
+`Overdispersion` §7.3, §10.4
+
+### P
+`Package Detection` §3.0 · `Package Tiers` §5, §15.1 · `Paired comparison` §3.3 ·
+`pandas` §3.0, §5 · `Pearson's r` §3.4, §7.6 · `Pearson's R (Coloc 2)` §2.7 ·
+`perimeter` §2.1, §2.2 · `pingouin` §3.0, §3.1, §5, §15.1 ·
+`Poisson GLM` §7.3, §10.4 · `Power analysis` §11 · `Pre-registration` §17.1 ·
+`Prism (when to / not to use)` §15.3 · `Proportion Comparison` §3.6, §7.4 ·
+`Pseudoreplication` §8 · `pymer4` §15.1 · `Python Package Tiers` §5, §15.1 ·
+`Python Statistical Scripts` §3
+
+### R
+`Random intercept / random slope` §10.1 · `RawIntDen` §2.1, §2.3 ·
+`redirect=ImageName` §2.1, §2.5, §4.3 · `Regression line` §3.4 ·
+`Reporting Template` §6, §17.2 · `Reviewer pushback` §17.1 ·
+`Right-censored` §14.4 · `roiManager` §2.4, §2.11 · `Roundness` §2.2 ·
+`rstatix` §15.1
+
+### S
+`Saturation truncation` §14.1 · `Satterthwaite df` §10.2 ·
+`Script 1: Two-Group` §3.1 · `Script 2: Multi-Group` §3.2 ·
+`Script 3: Paired` §3.3 · `Script 4: Correlation` §3.4 ·
+`Script 5: Mixed-Effects` §3.5 · `Script 6: Proportion` §3.6 ·
+`Script 7: Dose-Response` §3.7 · `Script 8: Multiple Corrections` §3.8 ·
+`Set Measurements` §2.1 · `setBatchMode` §2.11 ·
+`shape_descriptors` §2.1, §2.2 · `Shapiro-Wilk` §3.1, §3.2, §3.3 ·
+`Singular fit` §10.3 · `skewness` §2.1 · `Skeletonize (2D/3D)` §2.9, §4.3 ·
+`simr (power simulation)` §11.2 · `Solidity` §2.2 · `Spatial autocorrelation` §14.2 ·
+`Spearman's rho` §3.4, §7.6 · `stack_position` §2.1 · `Stack.setSlice / setFrame` §2.6 ·
+`standard_deviation / StdDev` §2.1, §2.3 · `statsmodels` §3.0, §3.2, §5, §15.1 ·
+`SuperPlot` §3.5, §9 · `Survival analysis` §7.5 · `Summary row (summarize)` §2.8
+
+### T
+`t-test (Welch's)` §3.1, §3.5, §7.1 · `t-test (paired)` §3.3, §7.1 ·
+`Temporal autocorrelation` §14.3 · `TFCE (threshold-free cluster enhancement)` §12.3 ·
+`Time-to-event` §7.5 · `Tukey HSD` §3.2, §7.2, §12.1 ·
+`Two-Group Comparison` §3.1, §7.1 · `Type I/II error` §11.1
+
+### U
+`updateResults` §2.4 · `Unit of analysis` §8.1
+
+### W
+`Watershed` §2.11, §4.1 · `Welch's t-test` §3.1, §7.1 ·
+`Westfall, Kenny, Judd 2014` §8.2 · `Wilcoxon signed-rank` §3.3, §7.1
+
+### Z
+`Z Project (Sum Intensity)` §2.4 · `Zenodo / OSF (data sharing)` §17.1
+
+---
+
+## §2 ImageJ Measurement Commands
+
+### §2.1 Set Measurements — Keyword Reference
 
 ```javascript
 // Enable all measurements
@@ -42,7 +245,7 @@ run("Set Measurements...",
 | `redirect=ImageName` | — | Measure from a different image |
 | `decimal=N` | — | Decimal places |
 
-### 1.2 Morphometric Measurements
+### §2.2 Morphometric Measurements
 
 | Measurement | Formula / Range | Typical biological use |
 |-------------|----------------|----------------------|
@@ -54,7 +257,7 @@ run("Set Measurements...",
 | **Solidity** | Area/ConvexHull; 0-1 | Process complexity (low = many concavities) |
 | **Feret's** | Max caliper diameter | Longest dimension; MinFeret = narrowest |
 
-### 1.3 Intensity Measurements
+### §2.3 Intensity Measurements
 
 | Measurement | What it is | Notes |
 |-------------|-----------|-------|
@@ -66,7 +269,7 @@ run("Set Measurements...",
 | **IntDen** | Mean * Area (calibrated) | Total fluorescence; affected by spatial calibration |
 | **RawIntDen** | Sum of pixel values | Total fluorescence; not affected by calibration |
 
-### 1.4 CTCF (Corrected Total Cell Fluorescence)
+### §2.4 CTCF (Corrected Total Cell Fluorescence)
 
 ```javascript
 // Measure cell ROI
@@ -87,7 +290,7 @@ updateResults();
 
 Use Sum Intensity Z-projection (not Max) for 3D. Never enhance contrast before measuring.
 
-### 1.5 Multi-Channel Measurement (Redirect)
+### §2.5 Multi-Channel Measurement (Redirect)
 
 ```javascript
 // Segment on channel 1, measure intensity from channel 2
@@ -96,7 +299,7 @@ run("Set Measurements...", "mean integrated_density display redirect=C2-imageNam
 run("Analyze Particles...", "size=50-Infinity display");
 ```
 
-### 1.6 Stack/Time-Lapse Measurements
+### §2.6 Stack/Time-Lapse Measurements
 
 ```javascript
 // Per-slice
@@ -106,7 +309,7 @@ getDimensions(w, h, channels, slices, frames);
 for (f = 1; f <= frames; f++) { Stack.setFrame(f); run("Measure"); }
 ```
 
-### 1.7 Coloc 2
+### §2.7 Coloc 2
 
 ```javascript
 run("Split Channels");
@@ -118,7 +321,7 @@ run("Coloc 2",
 
 Output (Log window): Pearson's R, Manders' M1/M2, Li's ICQ, Costes p-value.
 
-### 1.8 Analyze Particles
+### §2.8 Analyze Particles
 
 ```javascript
 run("Set Measurements...",
@@ -139,7 +342,7 @@ run("Analyze Particles...",
 
 Particle count: `n = nResults;`
 
-### 1.9 AnalyzeSkeleton
+### §2.9 AnalyzeSkeleton
 
 ```javascript
 run("Skeletonize (2D/3D)");
@@ -148,7 +351,7 @@ run("Analyze Skeleton (2D/3D)", "prune=[shortest branch] show display");
 
 Output: # Branches, # Junctions, # End-point voxels, Average/Maximum Branch Length, Triple/Quadruple points.
 
-### 1.10 Nearest Neighbor Distances
+### §2.10 Nearest Neighbor Distances
 
 Best done in Python after exporting centroids:
 ```python
@@ -158,7 +361,7 @@ np.fill_diagonal(dists, np.inf)
 nn_dists = dists.min(axis=1)
 ```
 
-### 1.11 ROI-Based and Batch Measurements
+### §2.11 ROI-Based and Batch Measurements
 
 ```javascript
 // Measure all ROIs
@@ -187,9 +390,9 @@ saveAs("Results", "/path/to/output/all_results.csv");
 
 ---
 
-## 2. Python Statistical Scripts
+## §3 Python Statistical Scripts
 
-### Package Detection (use at top of every script)
+### §3.0 Package Detection (use at top of every script)
 
 ```python
 import numpy as np
@@ -221,7 +424,7 @@ for p in ['numpy','scipy','matplotlib','pandas','statsmodels','pingouin','scikit
 
 ---
 
-### Script 1: Two-Group Comparison
+### §3.1 Script 1: Two-Group Comparison
 
 Usage: `python stats_two_group.py results.csv "Area" "Group" --output plot.png`
 
@@ -322,7 +525,7 @@ if __name__ == "__main__":
 
 ---
 
-### Script 2: Multi-Group Comparison (ANOVA / Kruskal-Wallis)
+### §3.2 Script 2: Multi-Group Comparison (ANOVA / Kruskal-Wallis)
 
 Usage: `python stats_multi_group.py results.csv "Area" "Treatment" --output plot.png`
 
@@ -428,7 +631,7 @@ if __name__ == "__main__":
 
 ---
 
-### Script 3: Paired Comparison
+### §3.3 Script 3: Paired Comparison
 
 Usage: `python stats_paired.py results.csv "Before" "After" --output plot.png`
 
@@ -494,7 +697,7 @@ if __name__ == "__main__":
 
 ---
 
-### Script 4: Correlation Analysis
+### §3.4 Script 4: Correlation Analysis
 
 Usage: `python stats_correlation.py results.csv "Area" "Mean" --output plot.png`
 
@@ -569,7 +772,7 @@ if __name__ == "__main__":
 
 ---
 
-### Script 5: Mixed-Effects Model (Hierarchical Data)
+### §3.5 Script 5: Mixed-Effects Model (Hierarchical Data)
 
 Usage: `python stats_mixed.py results.csv "Mean" "Treatment" "Animal" --output plot.png`
 
@@ -663,7 +866,7 @@ if __name__ == "__main__":
 
 ---
 
-### Script 6: Proportion Comparison (Fisher's Exact / Chi-Squared)
+### §3.6 Script 6: Proportion Comparison (Fisher's Exact / Chi-Squared)
 
 Usage: `python stats_proportion.py --counts 45 55 30 70` or `python stats_proportion.py results.csv "Positive" "Group"`
 
@@ -729,7 +932,7 @@ if __name__ == "__main__":
 
 ---
 
-### Script 7: Dose-Response Curve
+### §3.7 Script 7: Dose-Response Curve
 
 Usage: `python stats_dose_response.py results.csv "Concentration" "Response" --output plot.png`
 
@@ -795,7 +998,7 @@ if __name__ == "__main__":
 
 ---
 
-### Script 8: Multiple Comparisons Correction
+### §3.8 Script 8: Multiple Comparisons Correction
 
 Usage: `python stats_multiple_corrections.py pvalues.csv "p_value" [effect_col] [label_col] --output plot.png`
 
@@ -875,9 +1078,9 @@ if __name__ == "__main__":
 
 ---
 
-## 3. Integration Workflow
+## §4 Integration Workflow
 
-### 3.1 End-to-End Example
+### §4.1 End-to-End Example
 
 ```bash
 # 1. Check state
@@ -921,7 +1124,7 @@ python stats_mixed.py .tmp/labeled_results.csv "Area" "Group" "Animal" --output 
 # 7. Read figure and report
 ```
 
-### 3.2 Decision Tree
+### §4.2 Decision Tree
 
 | User question | Script | Key measurement |
 |--------------|--------|-----------------|
@@ -938,7 +1141,7 @@ python stats_mixed.py .tmp/labeled_results.csv "Area" "Group" "Animal" --output 
 | "How close together?" | Centroids + scipy NND | Distance |
 | "Colocalized?" | Coloc 2 + log parsing | PCC, M1, M2 |
 
-### 3.3 Common Extraction Patterns
+### §4.3 Common Extraction Patterns
 
 ```bash
 # Cell counting
@@ -964,7 +1167,7 @@ python ij.py results
 
 ---
 
-## 4. Python Package Tiers
+## §5 Python Package Tiers
 
 | Tier | Packages | What they provide |
 |------|----------|-------------------|
@@ -977,7 +1180,7 @@ Install: `pip install statsmodels pingouin` (suggest but do not install without 
 
 ---
 
-## 5. Reporting Template
+## §6 Reporting Template
 
 ```
 ANALYSIS: [Brief description]
@@ -991,3 +1194,1302 @@ CONCLUSION: [One sentence]
 FIGURE: [path]
 CAVEATS: [small n, non-normality, pseudoreplication, etc.]
 ```
+
+---
+
+## §7 Master Decision Tree — Choosing the Right Test by Data Type and Question
+
+Sister-reference cross-link: a research-question-driven version (Q1–Q36 imaging
+scenarios) lives in `references/hypothesis-testing-microscopy-reference.md §2`.
+A concept-level decision tree lives in `references/statistics-reference.md §20`.
+The tree below is **data-type-first** — pick the row that matches your outcome
+variable, then descend.
+
+```
+What is the OUTCOME variable?
+
+CONTINUOUS  → §7.1 (two-group)  /  §7.2 (3+ groups, factorial)
+COUNTS      → §7.3 (Poisson / NB GLM)
+PROPORTIONS → §7.4 (chi-sq / Fisher / McNemar / logistic)
+SURVIVAL    → §7.5 (Kaplan-Meier / log-rank / Cox PH)
+TWO CONTINUOUS (relationship) → §7.6 (Pearson / Spearman / Kendall)
+HIERARCHICAL  (cells in animals, slices in batches) → §10 mixed model
+SPATIAL FIELD (per-pixel maps)  → §12.3 cluster / TFCE
+```
+
+### §7.1 Two-Group Continuous
+
+```
+Continuous outcome, TWO groups
+│
+├── Independent samples
+│   ├── Paired samples? ────── NO ──┐
+│   │                                │
+│   ├── ~normal residuals (n>=10 or Shapiro p>0.05 + QQ plot OK)?
+│   │   ├── YES → Welch's t-test  (DEFAULT — see Delacre & Lakens 2017)
+│   │   │           reason: equal-variance Student's t fails badly when
+│   │   │           variances differ; Welch is identical when they don't,
+│   │   │           safer when they do.
+│   │   └── NO  → Mann-Whitney U  (tests stochastic dominance, NOT medians
+│   │             unless distributions are identical in shape)
+│   └── Effect size: Hedges' g (n<20) or Cohen's d (n>=20). Cliff's delta
+│       for non-parametric.
+│
+└── Paired samples (same subject before/after, same animal two regions,
+    same culture two channels)
+    ├── Differences ~normal? ── YES → paired t-test (df = n_pairs - 1)
+    │                           NO  → Wilcoxon signed-rank
+    └── Effect size: Cohen's dz = mean(diffs)/SD(diffs)
+```
+
+**Welch's-by-default rationale (Delacre, Lakens & Leys 2017, _IRSP_)**:
+- If variances are equal, Student's and Welch's are equivalent (within rounding).
+- If variances differ even moderately (ratio ~1.5–2), Student's t inflates
+  Type I error to 7–10%; Welch's stays at 5%.
+- Pre-testing variance equality (Levene + branch) is *worse* than always
+  using Welch — adds a second decision and inflates error.
+- **Rule**: in code, default to `equal_var=False` (scipy) /
+  `var.equal=FALSE` (R is the default).
+
+**One-tailed vs two-tailed**: only one-tailed if (a) the opposite direction
+is biologically impossible AND (b) it was pre-registered. Otherwise two-tailed.
+
+**Common errors**:
+- Reporting `mean ± SEM` and calling it the spread of the data — SEM is the
+  precision of the mean, not the variability. Show SD (or 95% CI) for spread.
+- Using a paired test when subjects are not actually paired across rows —
+  scipy's `ttest_rel` blindly pairs `a[i]` with `b[i]`; sort errors silently
+  give wrong answers.
+
+### §7.2 Three-or-More Groups, Factorial
+
+```
+Continuous outcome, 3+ groups
+│
+├── ONE-WAY (single factor)
+│   ├── ~normal & equal variance → ANOVA (`aov`/`f_oneway`)
+│   │      └── significant → all-pairwise: Tukey HSD
+│   │                       vs control: Dunnett (more powerful)
+│   │                       pre-planned: Holm
+│   ├── Unequal variance       → Welch's ANOVA → Games-Howell post-hoc
+│   └── Non-normal             → Kruskal-Wallis → Dunn's (Holm-adjusted)
+│                                                Conover (more powerful)
+│
+├── TWO-WAY / FACTORIAL (genotype × time, dose × cell-type)
+│   ├── Balanced            → `aov(y ~ A * B)` Type I SS is fine
+│   ├── Unbalanced          → Type III SS with sum contrasts (R: `Anova(., type=3)`,
+│   │                          set `options(contrasts=c("contr.sum","contr.poly"))`)
+│   ├── Interaction term    → if `A:B` is significant, do not interpret main
+│   │                          effects without simple-effects analysis
+│   │                          (`emmeans(model, ~A|B)` or `pairwise|B`)
+│   └── If hierarchical (cells nested in animals) → mixed model (§10)
+│
+└── REPEATED MEASURES (same subject, multiple conditions)
+    ├── Sphericity OK (Mauchly p>0.05) → RM-ANOVA
+    ├── Sphericity violated → Greenhouse-Geisser corrected df
+    └── Non-normal → Friedman → Nemenyi/Conover post-hoc
+```
+
+**When NOT to use ANOVA**:
+- Nested / hierarchical data (cells in animals, wells in plates) →
+  mixed-effects model (§10).
+- Count outcomes with mean ≈ variance → Poisson GLM (§7.3).
+- Proportions / binary outcomes → logistic regression (§7.4).
+- Time-to-event with censoring → survival models (§7.5).
+- Three-or-more time points with autocorrelation → mixed model with
+  `(time | subject)` rather than RM-ANOVA.
+
+### §7.3 Counts and Rates
+
+Imaging count outcomes: cells per field, plaques per section, branches per
+neuron, vesicles per axon. Counts are NOT continuous — using a t-test/ANOVA
+on them works for large means but is biased for small means (predicts
+negative values, wrong variance structure).
+
+| Distribution | Variance | Use when | Test / model |
+|---|---|---|---|
+| Poisson | var = mean | Rare independent events | `glm(count ~ trt + offset(log(area)), family=poisson)` |
+| Negative binomial | var = mean + α·mean² | Overdispersed (clustered, contagious) | `MASS::glm.nb`, `statsmodels.NegativeBinomial` |
+| Quasi-Poisson | var = φ·mean | Mild overdispersion | `glm(..., family=quasipoisson)` |
+| Zero-inflated | excess zeros | Many empty fields + a count process | `pscl::zeroinfl` |
+
+**Detecting overdispersion**: fit Poisson, then compute `residual deviance /
+residual df`. If > 1.5, the data are overdispersed → switch to negative
+binomial. Or use `performance::check_overdispersion(model)` in R.
+
+```r
+library(MASS)
+# Cells per field, normalised to area; treatment effect on rate
+fit_pois <- glm(count ~ treatment + offset(log(area_mm2)), family=poisson, data=df)
+sum(residuals(fit_pois, type="pearson")^2) / df.residual(fit_pois)  # >>1 = bad
+
+fit_nb <- glm.nb(count ~ treatment + offset(log(area_mm2)), data=df)
+anova(fit_pois, fit_nb)  # likelihood-ratio test for overdispersion
+```
+
+```python
+import statsmodels.api as sm
+import statsmodels.formula.api as smf
+fit = smf.glm("count ~ C(treatment)", data=df,
+              family=sm.families.NegativeBinomial(),
+              offset=np.log(df.area_mm2)).fit()
+```
+
+**Always include an `offset(log(exposure))`** when fields/sections differ in
+size — otherwise you are testing absolute counts, not densities.
+
+### §7.4 Proportions and Binary Outcomes
+
+| Design | Test |
+|---|---|
+| 2×2, large counts (all cells expected ≥ 5) | Chi-squared |
+| 2×2, small counts | **Fisher's exact** (always valid; default for n < 20 per cell) |
+| Paired binary (same subject yes/no before-and-after) | **McNemar's test** |
+| 2×k contingency | Chi-squared with `df = k-1` |
+| Predictors continuous or multiple | Logistic regression `glm(y ~ x, family=binomial)` |
+| Hierarchical proportions (positive cells per animal) | Mixed-effects logistic `glmer(y ~ x + (1|animal), family=binomial)` |
+
+**Common error**: comparing two proportions by averaging "% positive" per
+animal and t-testing the means. This treats a bounded variable (0–100%)
+as continuous, ignores the binomial denominator, and is wrong when
+denominators differ. Use Fisher / chi-squared at the cell level **with
+animal as a random effect**, or aggregate to per-animal proportions and
+do a Welch's t — but report both.
+
+```r
+# Paired binary: did the same cell respond before vs after?
+mcnemar.test(matrix(c(a, b, c, d), 2, 2))
+
+# Per-cell logistic with random animal effect
+library(lme4)
+fit <- glmer(positive ~ treatment + (1|animal), data=df, family=binomial)
+summary(fit)
+```
+
+### §7.5 Survival / Time-to-Event
+
+Use when the outcome is *time until X happens* (cell death, division,
+fluorescence loss, behavioural failure) AND some events are censored
+(experiment ended before they happened).
+
+| Test | Question | Notes |
+|---|---|---|
+| Kaplan-Meier curve | Visualise survival probability over time | Step function, drops at each event |
+| Log-rank test | Are two/more curves different? | Equal-weight; use Wilcoxon if early differences matter more |
+| Cox proportional hazards | Effect of covariates on hazard | Assumes hazards proportional over time — check with `cox.zph` |
+| AFT (accelerated failure time) | Same Q, parametric distribution | When PH assumption fails |
+
+```r
+library(survival); library(survminer)
+fit <- survfit(Surv(time, event) ~ treatment, data=df)
+ggsurvplot(fit, pval=TRUE, risk.table=TRUE)            # KM + log-rank p
+cox <- coxph(Surv(time, event) ~ treatment + age, data=df)
+summary(cox)                                            # hazard ratio + CI
+cox.zph(cox)                                            # check PH
+```
+
+```python
+from lifelines import KaplanMeierFitter, CoxPHFitter
+kmf = KaplanMeierFitter().fit(df.time, df.event); kmf.plot_survival_function()
+from lifelines.statistics import logrank_test
+logrank_test(df.time[df.trt=="A"], df.time[df.trt=="B"],
+             df.event[df.trt=="A"], df.event[df.trt=="B"]).p_value
+cph = CoxPHFitter().fit(df, duration_col="time", event_col="event",
+                         formula="treatment + age")
+cph.print_summary()
+```
+
+**Censoring conventions**: `event = 1` if event observed, `0` if censored.
+A cell that survived to end-of-imaging is censored, NOT zero-survival.
+Treating censored cells as having survived "exactly until last frame" biases
+estimates downward.
+
+### §7.6 Correlation
+
+| Method | Relationship measured | Use when |
+|---|---|---|
+| Pearson r | Linear, both Gaussian | Continuous, linear, no outliers, both variables ~normal |
+| Spearman ρ | Monotonic | Non-normal, outliers present, ordinal data — **default for fluorescence intensity** |
+| Kendall τ | Monotonic, more robust to ties | Small n (< 30), many ties; pairs more interpretable |
+| Distance correlation | Any dependence (linear or not) | Suspected non-monotonic relationship |
+| Mutual information | Any dependence (information-theoretic) | Discretized data, machine-learning prep |
+
+**Imaging gotcha**: pixel-level correlations (e.g. between two channels) are
+biased high by spatial autocorrelation — neighbouring pixels are not
+independent. For colocalization use **Pearson on whole-image with
+Costes-thresholded ROI**, *not* a per-pixel scatter (Coloc 2 does this
+correctly; see `references/colocalization-reference.md`).
+
+**Non-monotonic relationships** (e.g. dose-response with peak at intermediate
+dose) are missed by all three of Pearson/Spearman/Kendall. Use distance
+correlation (`energy::dcor` in R, `dcor` in Python) or a structural model.
+
+---
+
+## §8 Pseudoreplication — The Most Common Imaging Error
+
+**Cross-link**: high-level pitfall list in `references/statistics-reference.md
+§9, §21`; mitigation patterns in `references/hypothesis-testing-microscopy-reference.md
+§5.1`. This section gives the *theory* and a numerical demonstration of why
+it matters.
+
+### §8.1 Imaging Hierarchy and the Unit of Analysis
+
+```
+Subject (animal / patient / donor / culture batch)   ← biological replicate, n
+│   randomised to treatment HERE
+├── Slice / well / plate / coverslip                  ← technical replicate
+│   ├── Field of view (tile)
+│   │   ├── Cell / nucleus / particle
+│   │   │   ├── ROI (per-cell sub-region)
+│   │   │   │   └── Pixel
+```
+
+The **unit of analysis** is the lowest level at which the treatment was
+*independently* applied. If 3 mice were assigned to drug and 3 to vehicle,
+**N = 6 (not 600 cells)** — every cell in the same mouse shares everything
+about that mouse: genetics, age, perfusion, fixation, mounting, imaging
+session.
+
+A common shortcut: **average within each animal first, then test on the
+animal-level means**. This is always valid but throws away within-animal
+information (variation across cells/fields). The mixed model in §10 keeps
+the within-animal variation while still treating animal as the replicate.
+
+### §8.2 Why It Matters — Numerical Demonstration
+
+A toy simulation that shows how pseudoreplication inflates the false-positive
+rate when there is *no real effect* (data adapted from Lazic 2010):
+
+```python
+import numpy as np
+from scipy import stats
+
+rng = np.random.default_rng(42)
+N_SIMS = 5000
+n_animals_per_group = 3
+n_cells_per_animal = 50
+animal_sd = 1.0       # variation between animals
+cell_sd   = 0.5       # variation between cells WITHIN an animal
+
+wrong_pvals, right_pvals = [], []
+for _ in range(N_SIMS):
+    # H0 is true: no group effect
+    g1 = []; g2 = []
+    for a in range(n_animals_per_group):
+        a1_mean = rng.normal(0, animal_sd); a2_mean = rng.normal(0, animal_sd)
+        g1.extend(rng.normal(a1_mean, cell_sd, n_cells_per_animal))
+        g2.extend(rng.normal(a2_mean, cell_sd, n_cells_per_animal))
+    g1, g2 = np.array(g1), np.array(g2)
+    # WRONG: treat all cells as independent, n_per_group = 150
+    wrong_pvals.append(stats.ttest_ind(g1, g2, equal_var=False).pvalue)
+    # RIGHT: average per animal, n_per_group = 3
+    means1 = g1.reshape(n_animals_per_group, -1).mean(axis=1)
+    means2 = g2.reshape(n_animals_per_group, -1).mean(axis=1)
+    right_pvals.append(stats.ttest_ind(means1, means2, equal_var=False).pvalue)
+
+print(f"WRONG (cells as n): false-positive rate = {np.mean(np.array(wrong_pvals)<0.05):.1%}")
+print(f"RIGHT (animal mean): false-positive rate = {np.mean(np.array(right_pvals)<0.05):.1%}")
+# Typical output:
+#   WRONG: ~37%        RIGHT: ~5%
+# Expected at α=0.05 is 5%. The wrong analysis lies seven-fold.
+```
+
+**The result is robust** — it's not about t-tests specifically. Any test
+that ignores hierarchy gives the same inflation. The size of the inflation
+scales with the intraclass correlation (ICC = animal variance / total
+variance). For typical imaging data ICC = 0.2–0.6.
+
+### §8.3 The Four Errors and Their Fixes
+
+| Error | What it looks like | Why it's wrong | Fix |
+|---|---|---|---|
+| **Pooled t-test on all cells** | "n = 300 cells, p < 0.001" | Inflates n, ignores animal variance | Average per animal, OR mixed model with `(1|animal)` |
+| **Average-then-no-replication** | 1 mouse/group, 100 cells/mouse, t-test on cells | Truly only N=2 — no biological replication | Need ≥3 animals per group; cells alone never replicate animals |
+| **Fixed-effect dummy for animal** | `lm(y ~ trt + animal)` with animal as fixed factor | Treats animals as the only animals of interest; can't generalise | `lmer(y ~ trt + (1|animal))` — random effect generalises to the population |
+| **"Average per cell across animals"** | Pool every cell into one big group, then average | Loses the link between cells and their animals | Keep the hierarchy; aggregate or model |
+
+### §8.4 Key References
+
+- **Lazic 2010** — "The problem of pseudoreplication in neuroscientific
+  studies: is it affecting your analysis?" *BMC Neurosci* 11:5. The original
+  imaging-aware exposition with worked examples.
+- **Aarts et al. 2014** — "A solution to dependency: using multilevel
+  analysis to accommodate nested data." *Nat Neurosci* 17(4):491. Mixed-
+  models prescription for nested data.
+- **Lord, Velle, Mullins, Fritz 2020** — "SuperPlots: Communicating
+  reproducibility and variability in cell biology." *J Cell Biol* 219(6):
+  e202001064. Visualisation standard, see §9.
+- **Westfall, Kenny & Judd 2014** — "Statistical power and optimal design
+  in experiments in which samples of participants respond to samples of
+  stimuli." *J Exp Psychol Gen* 143(5):2020. The general theory of
+  crossed-random-effects designs.
+- **Eisner 2021** — "Pseudoreplication in physiology: more means less."
+  *J Gen Physiol* 153(2):e202012826. Imaging-cardiology angle.
+
+---
+
+## §9 SuperPlots — Visualising Hierarchical Data Honestly
+
+A SuperPlot (Lord et al. 2020) overlays per-observation points with per-
+biological-replicate summary points so the reader simultaneously sees the
+full data spread *and* the actual sample size. **Use it whenever your data
+has more than one observation per biological replicate.**
+
+### §9.1 Anatomy of a SuperPlot
+
+A correct SuperPlot has THREE layers:
+
+1. **Background swarm** — every cell as a small grey dot (jittered).
+2. **Replicate means** — one large coloured dot per biological replicate
+   (animal/experiment), coloured *consistently* across groups so reader
+   can track the same replicate across conditions.
+3. **Group summary** — black bar/line at the mean of replicate means with
+   95% CI or SEM-of-replicate-means as error bar.
+
+Statistics are run on **layer 2 (replicate means)** or via mixed model;
+layer 1 is descriptive only.
+
+### §9.2 SuperPlot in Python (matplotlib)
+
+```python
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+
+def superplot(df, value, group, replicate, ax=None, jitter=0.15, palette=None):
+    """SuperPlot: cells as grey dots, replicate means as coloured dots, group mean as bar.
+
+    df         long DataFrame
+    value      column with the per-cell measurement (numeric)
+    group      column with treatment/condition (categorical)
+    replicate  column with biological-replicate ID (animal, experiment)
+    """
+    if ax is None: fig, ax = plt.subplots(figsize=(5, 6))
+    groups = df[group].astype(str).unique().tolist()
+    reps   = df[replicate].astype(str).unique().tolist()
+    if palette is None:
+        cmap = plt.get_cmap("tab10"); palette = {r: cmap(i % 10) for i, r in enumerate(reps)}
+
+    rep_mean_table = []
+    for i, g in enumerate(groups):
+        sub = df[df[group] == g]
+        # layer 1: cells (grey dots)
+        x = i + np.random.uniform(-jitter, jitter, len(sub))
+        ax.scatter(x, sub[value], color="#999", s=12, alpha=0.4, zorder=2)
+        # layer 2: replicate means (coloured dots)
+        for r, rsub in sub.groupby(replicate):
+            m = rsub[value].mean()
+            ax.scatter(i, m, color=palette[r], s=140, edgecolor="black",
+                       linewidth=1.2, zorder=4, label=r if i == 0 else None)
+            rep_mean_table.append({"group": g, "replicate": r, "mean": m, "n_cells": len(rsub)})
+        # layer 3: group summary (mean of replicate means + SEM)
+        rep_means = pd.DataFrame(rep_mean_table)
+        gm = rep_means[rep_means["group"] == g]["mean"]
+        if len(gm) >= 2:
+            sem = gm.std(ddof=1) / np.sqrt(len(gm))
+            ax.errorbar(i, gm.mean(), yerr=sem, fmt="_", color="black",
+                        markersize=28, linewidth=2.5, capsize=10, zorder=5)
+    ax.set_xticks(range(len(groups))); ax.set_xticklabels(groups)
+    ax.set_ylabel(value)
+    ax.spines["top"].set_visible(False); ax.spines["right"].set_visible(False)
+    ax.legend(title=replicate, fontsize=8, frameon=False, loc="best")
+    return ax, pd.DataFrame(rep_mean_table)
+```
+
+The `pd.DataFrame` returned (replicate means) is the right input to a
+group-level test (`ttest_ind`/`f_oneway` on the `mean` column grouped by
+`group`).
+
+### §9.3 SuperPlot in R (ggplot2)
+
+```r
+library(ggplot2); library(dplyr)
+rep_means <- df %>% group_by(group, replicate) %>%
+  summarise(mean_value = mean(value), n = n(), .groups = "drop")
+
+ggplot(df, aes(x = group, y = value)) +
+  # layer 1: cells
+  geom_jitter(width = 0.18, alpha = 0.3, size = 1, colour = "grey60") +
+  # layer 2: replicate means (one colour per replicate)
+  geom_point(data = rep_means, aes(y = mean_value, colour = replicate),
+             size = 5, position = position_dodge(width = 0.0)) +
+  # layer 3: group summary
+  stat_summary(data = rep_means, aes(y = mean_value),
+               fun = mean, geom = "crossbar", width = 0.5, colour = "black") +
+  stat_summary(data = rep_means, aes(y = mean_value),
+               fun.data = mean_se, geom = "errorbar", width = 0.2, colour = "black") +
+  theme_classic() +
+  labs(y = "Measured value", x = NULL, colour = "Biological replicate")
+```
+
+The `SuperPlotsofData` Shiny app (https://huygens.science.uva.nl/SuperPlotsOfData/)
+generates these from a CSV upload — useful for a quick check.
+
+### §9.4 What a Wrong vs Right SuperPlot Looks Like
+
+| Reader cue | Bad plot | SuperPlot |
+|---|---|---|
+| Sample size shown | Bar + SEM only — n could be 3 or 3000 | Replicate dots make N obvious at a glance |
+| Within-replicate spread | Hidden | Grey swarm reveals it |
+| Replicate consistency | Hidden | One colour per replicate exposes outlier replicates |
+| Test interpretation | Reader can't tell what was tested | Black bar shows what the test compared |
+
+### §9.5 SuperPlot ≠ Statistics
+
+A SuperPlot is a *plot*. The statistical test underneath should still be:
+- a t-test/ANOVA on **replicate means** (layer 2), OR
+- a mixed model with replicate as random effect, marginal means via
+  `emmeans::emmeans(model, ~group)` for the bars.
+
+If you draw a SuperPlot but report a p-value from a per-cell t-test, you've
+plotted hierarchy but tested as if it didn't exist.
+
+---
+
+## §10 Mixed-Effects Models — Imaging Patterns
+
+**Cross-link**: full formula syntax, REML/ML, KR vs Satterthwaite, GLMM, and
+`pymer4` lives in `references/mixed-effects-models-reference.md`. This
+section gives **imaging-specific worked patterns** that map common
+microscopy designs to `lmer` formulae.
+
+### §10.1 Random Intercepts vs Random Slopes
+
+```
+Random INTERCEPT only — (1 | animal)
+  Each animal has a different baseline level of the outcome,
+  but the treatment effect is assumed identical across animals.
+  Use when: treatment is between-animal (each animal sees one condition),
+            or you have no reason to expect treatment effect to vary by animal.
+
+Random SLOPE — (treatment | animal)  ≡  (1 + treatment | animal)
+  Each animal has its own baseline AND its own treatment effect.
+  Use when: treatment varies WITHIN animal (each animal sees multiple doses
+            or before/after), AND you have ≥ ~5 animals so the slope variance
+            is estimable.
+  Identifiability: if every animal sees only one level, the slope is
+  unidentifiable — drop it.
+
+Uncorrelated random intercept + slope — (1 | animal) + (0 + dose | animal)
+  Same as `(dose || animal)`. Removes the correlation parameter; helps with
+  convergence when full model is singular.
+```
+
+### §10.2 The Five Common Imaging Designs
+
+| Design | Imaging example | `lmer` formula |
+|---|---|---|
+| 1. Cells in animals, treatment between-animal | Drug vs vehicle, 3 mice/group, 50 cells/mouse | `lmer(y ~ treatment + (1|animal))` |
+| 2. Cells in slices in animals (3 levels) | Drug vs vehicle, 5 mice/group, 5 slices/mouse, 30 cells/slice | `lmer(y ~ treatment + (1|animal/slice))` (= `(1|animal) + (1|animal:slice)`) |
+| 3. Repeated dose within animal | Same animal sees 4 doses, multiple cells per dose | `lmer(y ~ dose + (dose|animal))` |
+| 4. Crossed: animal × imaging session | Each animal imaged in multiple sessions, sessions shared across animals | `lmer(y ~ trt + (1|animal) + (1|session))` |
+| 5. Time course + treatment | Treatment groups, multiple time points per cell | `lmer(y ~ treatment * time + (time|cell) + (1|animal))` |
+
+### §10.3 Worked Example — Designs 1 and 2
+
+```r
+library(lme4); library(lmerTest); library(emmeans); library(performance)
+
+# Read the cell-level CSV. Required columns:
+#   value     - per-cell measurement (e.g. CTCF, area)
+#   treatment - factor: drug / vehicle / ...
+#   animal    - factor: m01, m02, ...
+#   slice     - factor: m01_s1, m01_s2 ...   (globally unique slice IDs)
+df <- read.csv("AI_Exports/cells_labeled.csv", stringsAsFactors = TRUE)
+
+# Design 1: cells in animals
+fit1 <- lmer(value ~ treatment + (1 | animal), data = df, REML = TRUE)
+summary(fit1)               # Satterthwaite df + p-values via lmerTest
+anova(fit1)                 # Type-III F-test for treatment
+icc(fit1)                   # performance::icc — between-animal share of variance
+emmeans(fit1, pairwise ~ treatment, adjust = "tukey")  # post-hoc
+
+# Design 2: cells in slices in animals
+fit2 <- lmer(value ~ treatment + (1 | animal) + (1 | slice), data = df)
+# Note: writing (1 | animal/slice) is equivalent IF slice IDs are not unique
+# across animals. With globally-unique IDs, the explicit form is safer.
+
+# 95% CI for fixed effects (profile-based, slow but accurate)
+confint(fit1, method = "profile", parm = "beta_")
+
+# Kenward-Roger df (more conservative for small N)
+library(pbkrtest)
+summary(fit1, ddf = "Kenward-Roger")
+```
+
+```python
+# Python equivalent via statsmodels (random intercept only — for crossed
+# random effects use pymer4, which wraps R's lme4)
+import statsmodels.formula.api as smf
+fit = smf.mixedlm("value ~ C(treatment)", data=df, groups=df["animal"]).fit(
+        method="lbfgs", reml=True)
+print(fit.summary())
+# ICC = group variance / (group variance + residual)
+icc = fit.cov_re.iloc[0, 0] / (fit.cov_re.iloc[0, 0] + fit.scale)
+```
+
+### §10.4 Convergence and Singular Fits
+
+`lmer` warnings to know:
+
+| Warning | Meaning | Fix |
+|---|---|---|
+| `boundary (singular) fit: see ?isSingular` | One variance component is estimated as 0 — likely no variance at that level | Simplify the random structure (drop that term); often safe to ignore if it's a slope variance |
+| `Model failed to converge with max\|grad\|` | Optimiser stopped before reaching optimum | Try `control = lmerControl(optimizer="bobyqa", optCtrl=list(maxfun=2e5))` |
+| `Hessian is numerically singular` | Random structure too complex for the data | Drop slopes, then drop intercepts at smaller groupings |
+| `degenerate Hessian with X negative eigenvalues` | Same as above | Same |
+
+**Hierarchical simplification rule**: when the model fails to converge,
+drop terms in this order:
+1. Correlation between random intercept and slope (`(x || animal)` instead
+   of `(x | animal)`).
+2. Random slopes (`(1 | animal)` only).
+3. Lowest-level random intercept (e.g. drop `slice`, keep `animal`).
+
+If even `(1 | animal)` won't converge, the data are too sparse for a
+mixed model — fall back to averaging within animal and t-testing on
+the means.
+
+### §10.5 GLMM — When Outcomes Aren't Continuous
+
+```r
+library(lme4)
+# Counts (cells per field, cells nested in animals)
+glmer(count ~ treatment + (1 | animal), data = df, family = poisson,
+      offset = log(area_mm2))
+
+# Overdispersed counts → negative binomial via glmmTMB
+library(glmmTMB)
+glmmTMB(count ~ treatment + (1 | animal), data = df,
+        family = nbinom2, offset = log(area_mm2))
+
+# Binary (positive yes/no per cell)
+glmer(positive ~ treatment + (1 | animal), data = df, family = binomial)
+
+# Proportions with denominator (k positive of n_total per field)
+glmer(cbind(k, n - k) ~ treatment + (1 | animal), data = df, family = binomial)
+```
+
+GLMMs estimate fixed effects on the **link scale** (log for Poisson, logit
+for binomial). To report effects on the natural scale:
+
+```r
+emmeans(fit, ~ treatment, type = "response")  # back-transformed means + CI
+```
+
+---
+
+## §11 Power Analysis — Practical Sample-Size Planning
+
+**Cross-link**: concept-level table in `references/statistics-reference.md
+§12`. This section walks through *how to actually do* a power calculation
+for an imaging experiment.
+
+### §11.1 The Four-Way Trade-off
+
+Sample size n, effect size, α (Type I), and power (1-β, Type II) are linked:
+fix any three, the fourth follows.
+
+| Effect-size convention (Cohen 1988) | Small | Medium | Large |
+|---|---|---|---|
+| Cohen's d (two means) | 0.2 | 0.5 | 0.8 |
+| Pearson r (correlation) | 0.1 | 0.3 | 0.5 |
+| Cohen's f (ANOVA) | 0.1 | 0.25 | 0.4 |
+| Partial η² (ANOVA) | 0.01 | 0.06 | 0.14 |
+| Odds ratio | 1.5 | 2.5 | 4.0 |
+
+These are *social-science* conventions. In imaging, a 30% intensity
+difference often corresponds to d ≈ 0.7–1.0, KO/WT comparisons d ≈ 1.5–2.5.
+Use **prior data** if available; Cohen's bands are last-resort defaults.
+
+```r
+library(pwr)
+# Two-group t-test
+pwr.t.test(d = 0.8, power = 0.80, sig.level = 0.05, type = "two.sample")
+# n = 26 per group
+
+# One-way ANOVA with k groups
+pwr.anova.test(k = 4, f = 0.25, power = 0.80, sig.level = 0.05)
+
+# Correlation
+pwr.r.test(r = 0.4, power = 0.80, sig.level = 0.05)
+```
+
+```python
+from statsmodels.stats.power import TTestIndPower, FTestAnovaPower
+TTestIndPower().solve_power(effect_size=0.8, alpha=0.05, power=0.80)  # ~26
+FTestAnovaPower().solve_power(effect_size=0.25, k_groups=4,
+                               alpha=0.05, power=0.80)
+```
+
+**G*Power** (https://www.psychologie.hhu.de/arbeitsgruppen/allgemeine-psychologie-und-arbeitspsychologie/gpower)
+is a free GUI for the same calculations, with menu-driven test selection
+and curves. Use it for one-off planning and screenshot the result for
+grants.
+
+### §11.2 Power for Mixed Models — Use `simr`
+
+Closed-form power formulas don't apply to `lmer`/`glmer`. The right
+approach is **simulation**: assume a hypothesised effect size and variance
+structure, simulate datasets, fit the model, count significant outcomes.
+
+```r
+library(simr)
+
+# Start from a small pilot model (real or hand-built)
+fit_pilot <- lmer(value ~ treatment + (1 | animal), data = pilot_df)
+
+# Set the fixed effect of interest to the hypothesised difference
+fixef(fit_pilot)["treatmentdrug"] <- 0.5    # in units of the outcome
+
+# Power for the existing N
+powerSim(fit_pilot, nsim = 500)              # 500 simulated datasets
+
+# Extend to more animals and recompute
+fit_ext <- extend(fit_pilot, along = "animal", n = 10)   # 10 animals/group
+powerSim(fit_ext, nsim = 500)
+
+# Power curve over a range of N
+pc <- powerCurve(fit_ext, along = "animal", breaks = c(3, 5, 7, 10, 15))
+plot(pc)
+```
+
+**Key insight from `simr` simulations**: doubling cells per animal usually
+gains < 5% power; doubling animals gains 20–40%. Cells are cheap; animals
+are the lever.
+
+### §11.3 ICC and the "Effective Sample Size"
+
+For nested data, the *effective* sample size (ESS) is smaller than the
+total cell count by a *design effect*:
+
+```
+DEFF = 1 + (cells_per_animal - 1) * ICC
+ESS  = total_cells / DEFF
+```
+
+Example: 5 animals × 50 cells = 250 cells. With ICC = 0.3:
+`DEFF = 1 + 49 * 0.3 = 15.7`, so ESS ≈ 16. Adding more cells per animal
+only helps if ICC is small. If ICC > 0.5, you essentially have N = number
+of animals; cells are nearly redundant.
+
+### §11.4 Anti-Patterns
+
+- **Post-hoc / "observed" power** — calculating power from your own p-value
+  is circular and uninformative. Report effect size + CI instead.
+- **Round n up to whole animals** — power tables give fractional n; always
+  round UP, never down.
+- **Power = 0.80 is not sacred** — for irreversible interventions
+  (transgenic line) aim higher (0.90–0.95); for cheap pilots 0.70 is fine.
+- **Picking effect size to make the n feasible** — backwards. Decide the
+  smallest effect of biological interest first, then the n follows.
+
+---
+
+## §12 Multiple Comparisons — From Pairwise to Image-Wise
+
+**Cross-link**: pairwise correction methods (Holm, Tukey, BH) and decision
+table in `references/statistics-reference.md §10`. This section adds the
+*image-wise* corrections that arise when the test is run at every voxel/
+pixel/region of an image.
+
+### §12.1 Pairwise: FWER vs FDR
+
+```
+What is the cost of a false positive?
+│
+├── Confirmatory / mechanistic claim → control FAMILY-WISE error rate (FWER)
+│       Holm (always; uniformly more powerful than Bonferroni)
+│       Tukey HSD (built into ANOVA all-pairwise)
+│       Dunnett (built into ANOVA vs control; more powerful than Tukey
+│                when only vs-control comparisons are needed)
+│
+└── Exploratory / screening → control FALSE DISCOVERY RATE (FDR)
+        Benjamini-Hochberg (BH) — the default for genomics, high-content
+                                  screening, and any "many tests, few
+                                  expected hits" setting
+        Benjamini-Yekutieli — more conservative; use if tests are
+                              positively dependent and you need that proof
+```
+
+| Setting | Tests | Method |
+|---|---|---|
+| 3 pre-planned group comparisons | 3 | Holm |
+| All-pairwise after one-way ANOVA | k(k-1)/2 | Tukey HSD |
+| All-vs-control after one-way ANOVA | k-1 | Dunnett |
+| 200 protein candidates | 200 | BH at q = 0.05 |
+| 60,000 voxels in a brain map | 60,000 | Cluster correction or TFCE (§12.3), not BH |
+
+### §12.2 Holm vs Bonferroni
+
+Bonferroni: divide α by m. Holm: sort p-values ascending, then test the
+smallest against α/m, the next against α/(m-1), … the largest against α.
+Holm is **uniformly more powerful** than Bonferroni and controls FWER under
+the same conditions. There is no scenario where Bonferroni is preferable —
+use Holm.
+
+### §12.3 Image-wise Corrections (Per-Voxel Testing)
+
+When you run a per-pixel/per-voxel test (e.g. a t-map across a brain
+section, or a per-pixel two-channel correlation), pairwise corrections
+fail because:
+- m is huge (tens of thousands).
+- Tests are spatially correlated (neighbouring pixels are not independent),
+  so Bonferroni is overly conservative AND BH's independence assumption is
+  violated.
+- The biology of interest is *clusters* of significant pixels, not
+  individual pixels.
+
+**Cluster-extent correction**: pick an uncorrected pixel-wise threshold
+(usually p < 0.001), then keep only contiguous clusters of significant
+pixels larger than a critical size. Critical size derived from random
+permutation of group labels:
+
+```
+1. Run the per-pixel test on real labels → get a t-map.
+2. Threshold at p < 0.001 → get observed clusters (size = pixel count).
+3. Permute group labels 1000 times. Each permutation:
+     re-run the per-pixel test, threshold at p < 0.001,
+     record the SIZE of the largest cluster.
+4. Critical cluster size = 95th percentile of the null distribution
+   from step 3. Real clusters bigger than that survive correction.
+```
+
+**TFCE — threshold-free cluster enhancement** (Smith & Nichols 2009): a
+voxel's score is enhanced by integrating evidence across all possible
+threshold heights weighted by cluster size. Avoids the arbitrary p < 0.001
+choice. Implementations: FSL `randomise`, `nilearn`, MNE-Python
+`mne.stats.permutation_cluster_test`.
+
+```python
+# Cluster-permutation correction in MNE (works for any 2D/3D image stack)
+from mne.stats import permutation_cluster_test
+T_obs, clusters, p_cluster, H0 = permutation_cluster_test(
+    [group_a_stack, group_b_stack],   # arrays: (n_subjects, H, W)
+    n_permutations=1000, threshold=None,         # threshold=None → TFCE
+    tail=0, n_jobs=-1, out_type="indices")
+```
+
+These corrections are standard in fMRI/EEG and increasingly in light-sheet
+brain mapping. For 2D fluorescence images, cluster correction is
+appropriate when you compute a per-pixel statistic across animals at the
+same anatomical position (after registration — see
+`references/brain-atlas-registration-reference.md`).
+
+### §12.4 High-Content Screening
+
+In a 384-well screen with thousands of compound–phenotype combinations, the
+relevant correction is FDR, but with two refinements:
+- **Z-prime / robust z-score per plate** to absorb plate-batch effects
+  before testing.
+- **BH with q = 0.05** as the discovery cut-off, not p < 0.05.
+- Per-plate normalisation (median absolute deviation) before pooling.
+
+Hit-list reporting must include the q-value (BH-adjusted p) alongside the
+raw p so downstream readers can judge the discovery rate.
+
+---
+
+## §13 Effect Sizes and CIs — Why p Alone Is Insufficient
+
+### §13.1 The ASA 2016 Statement
+
+Wasserstein & Lazar 2016 (American Statistical Association) listed six
+principles. The two that matter most for imaging:
+
+1. *p-values do not measure the size of an effect or the importance of a
+   result.* A 0.0001% difference in nuclear area can have p < 0.001 with
+   n = 10,000 cells. It still doesn't matter biologically.
+2. *Proper inference requires full reporting and transparency.* Always
+   report effect size + CI in addition to p.
+
+| What p tells you | What it doesn't tell you |
+|---|---|
+| Are the data unlikely under H₀? | How big is the difference? |
+| Should I reject H₀? | How precise is my estimate? |
+| Discrete decision at α | The biological importance |
+
+### §13.2 Effect Size — Pick by Test
+
+| Test | Effect size | Function |
+|---|---|---|
+| Two-group t / Welch | Cohen's d, Hedges' g | `effectsize::hedges_g` (R), `pingouin.compute_effsize(eftype='hedges')` (py) |
+| Paired t | Cohen's dz | `mean(diffs) / sd(diffs)` |
+| One-way ANOVA | Partial η², ω² | `effectsize::eta_squared(model, partial=TRUE)` |
+| Two-way ANOVA | Partial η² per factor | same |
+| Mixed model | R² (marginal/conditional) | `performance::r2(fit)` (Nakagawa-Schielzeth) |
+| Mann-Whitney | Cliff's δ, rank-biserial | `effectsize::cliffs_delta`, `pingouin.compute_effsize(eftype='r')` |
+| Correlation | r itself | already an effect size |
+| 2×2 contingency | Odds ratio, Cohen's h, φ | `epitools::oddsratio`, `effectsize::oddsratio` |
+| Logistic / Poisson GLM | OR / IRR with 95% CI | `exp(confint(fit))` |
+| Survival | Hazard ratio | `summary(coxph_fit)$conf.int` |
+
+### §13.3 Confidence Intervals
+
+Always report a 95% CI for the effect size. If the CI crosses zero, the
+direction of the effect is uncertain regardless of p. Width tells you
+precision: a wide CI with a small p often means n is small AND variability
+is large — a single replication could change everything.
+
+```r
+library(effectsize)
+hedges_g(value ~ group, data = df, ci = 0.95)
+# returns g and 95% CI
+
+confint(lmer_fit, method = "profile", parm = "beta_")
+# CIs for fixed effects in a mixed model
+```
+
+```python
+import pingouin as pg
+pg.ttest(a, b)  # returns columns: T, dof, p-val, CI95% (for the difference),
+                # cohen-d, BF10, power
+```
+
+### §13.4 Bayesian Alternatives
+
+Frequentist NHST can't quantify evidence *for* the null. Bayes factors
+can:
+
+```r
+library(BayesFactor)
+bf <- ttestBF(x = group_a, y = group_b)
+# BF10 > 3 = moderate evidence for difference
+# BF10 < 1/3 = moderate evidence for null
+1 / bf  # BF01 = evidence for null
+```
+
+For "are these two methods equivalent?" use TOST (two one-sided tests) —
+see `references/hypothesis-testing-microscopy-reference.md §3` for the
+formula.
+
+---
+
+## §14 Imaging-Specific Statistical Gotchas
+
+### §14.1 Saturated-Pixel Truncation
+
+When pixel intensity hits the ADC ceiling (255 in 8-bit, 4095 in 12-bit,
+65535 in 16-bit), the camera reports the ceiling, not the true value. Any
+distribution mean / IntDen / CTCF computed from saturated regions is
+**biased downward** for the saturated condition.
+
+**Detection**:
+```python
+# Before measurement, check saturation rate per channel
+import numpy as np
+def saturation_rate(arr, max_val=None):
+    if max_val is None: max_val = np.iinfo(arr.dtype).max
+    return float((arr >= max_val).mean())
+```
+```javascript
+// ImageJ macro
+getStatistics(area, mean, min, max);
+n_saturated = 0;
+for (y=0; y<getHeight(); y++) for (x=0; x<getWidth(); x++)
+    if (getPixel(x,y) >= 65535) n_saturated++;
+print("Saturation: " + (100*n_saturated/area) + "%");
+```
+
+**Rules**:
+- > 1% of foreground pixels saturated → re-acquire with lower exposure.
+  Censor or exclude is a workaround, not a fix.
+- Do NOT compare a saturated bright group to a non-saturated dim group.
+  The bright group's mean is artificially compressed.
+- Set acquisition exposure on the *brightest* sample, not the dimmest, and
+  lock it for the whole batch.
+
+### §14.2 Spatial Autocorrelation
+
+Adjacent pixels are not independent — they share point-spread function
+support, share fixation/staining, share whatever organelle or cell they
+belong to. Treating per-pixel measurements as N independent samples
+inflates n by 10–1000×.
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| Pearson r between channels p < 10⁻²⁰ | Spatial autocorrelation; n_pixels is not n_independent | Use Coloc 2 (per-cell PCC, Costes-thresholded), test on per-cell values |
+| Per-pixel t-map gives "everything is significant" | Same | Cluster correction / TFCE (§12.3) |
+| Low r but tight scatter cloud | Pixel non-independence inflated significance | Aggregate to ROI/cell, then test |
+
+**Quantifying it** — Moran's I gives a 1-number autocorrelation index for
+spatial data; values near 0 are random, near 1 are highly autocorrelated.
+Most fluorescence images have Moran's I in the range 0.4–0.9 at the pixel
+scale.
+
+### §14.3 Time-Series Autocorrelation
+
+Frame-to-frame measurements (intensity traces, tracking) are autocorrelated:
+the value at frame t is similar to the value at frame t+1. Treating frames
+as independent observations inflates n by the autocorrelation length
+(typically 5–50 frames for live-cell imaging).
+
+**Detection**: ACF (autocorrelation function) plot. If the lag-1 ACF is
+> 0.5, the series is strongly autocorrelated.
+
+```python
+from statsmodels.tsa.stattools import acf
+ac = acf(trace, nlags=50)
+print("lag-1 ACF =", ac[1])
+import matplotlib.pyplot as plt
+from statsmodels.graphics.tsaplots import plot_acf
+plot_acf(trace, lags=50)
+```
+
+**Fixes**:
+- Test summary statistics per trace (peak amplitude, peak frequency, slope)
+  rather than every frame.
+- Use ARIMA / state-space models that include the autocorrelation term.
+- Use mixed model with `(time | cell)` random slope to absorb the slow
+  drift.
+
+### §14.4 Censored and Below-Detection Data
+
+Fluorescence below the detection limit is *left-censored* — you know it's
+< X but not what it actually is. Substituting 0 or LOD/2 biases means and
+SDs.
+
+| Situation | Censoring | Fix |
+|---|---|---|
+| Cell intensity < background, set to 0 | Left-censored at LOD | Tobit regression, or `survival::survreg` with `Surv(value, event=as.numeric(value > LOD), type="left")` |
+| Time-to-division but experiment ended | Right-censored | Survival analysis (§7.5) |
+| Pixel saturation | Right-censored at ADC max | Robust statistics (median, trimmed mean) or re-acquire |
+
+The `NADA` R package implements maximum-likelihood estimators (`cenfit`,
+`cenken`) for left-censored environmental-style data, applicable to
+detection-limited fluorescence.
+
+### §14.5 Post-Threshold Variance Distortion
+
+After thresholding (Otsu, manual), all sub-threshold pixels are forced to
+0 and supra-threshold pixels are kept (or forced to 255). The resulting
+distribution is *not* the underlying biological distribution — variance is
+artificially inflated (bimodal) and means are biased upward for the
+positive class.
+
+**Rule**: do statistics on **the original intensity values inside the
+ROI**, not on the thresholded mask. The mask defines *where* to measure;
+the intensity image provides *what* to measure. The `redirect=` keyword
+in `Set Measurements` is the canonical way to do this — see §2.5.
+
+### §14.6 Selection on the Outcome
+
+If you decide which cells to include based on the outcome variable
+(*"this cell is too dim to count"*, *"this cell is dying, exclude"*),
+you've selected on the dependent variable and biased every test that
+follows. Selection criteria must use **independent channels or
+pre-defined morphology**, never the channel being quantified.
+
+### §14.7 Calibration and Unit Mismatch
+
+A measurement of "Mean = 1842" is meaningless without:
+- bit depth (8/12/16-bit?)
+- calibration (raw DN, photons, fluorophore concentration?)
+- background subtraction state (raw, rolling-ball, image-min?)
+
+Imaging stats must report units. `python ij.py metadata` exposes the
+calibration; copy it into the figure caption.
+
+---
+
+## §15 Tools — R vs Python vs Fiji vs Prism
+
+### §15.1 R / Python Package Map
+
+| Need | R | Python |
+|---|---|---|
+| Data wrangling | `tidyverse` (`dplyr`, `tidyr`, `readr`) | `pandas` |
+| Tidy-style stats wrapper | `rstatix` | `pingouin` |
+| Mixed models | `lme4`, `lmerTest`, `glmmTMB` | `statsmodels.mixedlm` (random intercepts only); `pymer4` (full lme4 via rpy2) |
+| Post-hoc / EMMs | `emmeans`, `multcomp::glht` | `pingouin.pairwise_tests`, `scikit-posthocs` |
+| Effect sizes | `effectsize`, `psych::cohen.d` | `pingouin.compute_effsize` |
+| Tidy model outputs | `broom`, `broom.mixed` | `statsmodels.summary().tables`, `pandas` round-trip |
+| Power | `pwr`, `simr`, `WebPower` | `statsmodels.stats.power`, `pingouin.power_*` |
+| Survival | `survival`, `survminer` | `lifelines` |
+| Bayesian | `BayesFactor`, `brms`, `rstanarm` | `pymc`, `bambi` |
+| Plotting (publication) | `ggplot2`, `ggpubr`, `cowplot` | `matplotlib`, `seaborn`, `plotnine` |
+| SuperPlots | custom (see §9.3) or `superb` package | custom (see §9.2) |
+
+**Recommended default stack**:
+- *Quick exploration / scripting in agent* → Python with `scipy` + `pingouin`.
+- *Mixed models / publication figures* → R with `lme4` + `lmerTest` +
+  `emmeans` + `ggplot2`.
+- *Crossing the boundary* → save tidy CSVs from one and read in the other;
+  do not try to mirror `lmer` output directly in `statsmodels` — the df
+  approximations differ (see §10.2).
+
+### §15.2 Fiji — What It Can and Can't Do
+
+Fiji's macro language (`Array.getStatistics`, `nResults`, `getResult`)
+gives you:
+- mean, SD, min, max, median, percentiles per array
+- the Results table for export
+
+The **BAR (Broadly Applicable Routines)** plugin
+(https://imagej.net/plugins/bar/) adds:
+- `BAR > Data Analysis > Distribution Plotter` — histograms of any column
+- `BAR > Data Analysis > Find Peaks` — peak detection on traces
+- `BAR > Snippets > IJ Robot` — automation helpers
+
+**What Fiji can't do**: any hypothesis test, regression, mixed model, FDR,
+power, bootstrap, or effect size. Export the Results table
+(`saveAs("Results", path)` or `python ij.py results > stats.csv`) and use
+R / Python.
+
+### §15.3 GraphPad Prism — Strengths and Traps
+
+**Prism is enough when**:
+- One- or two-way ANOVA, t-test, Mann-Whitney, Wilcoxon, Friedman, RM-ANOVA
+- Two-factor designs (no nesting)
+- Non-linear regression (4PL, Hill, Michaelis-Menten) with EC50/IC50 and
+  curve comparison via F-test or AIC
+- Dose-response and standard curve fitting
+- Survival (Kaplan-Meier, log-rank)
+- Publication-quality figures with stats annotations baked in
+
+**Prism is a trap when**:
+- **Nested / hierarchical data** — Prism's "nested t-test" (since v9) is
+  helpful for two-group nested comparisons but does *not* generalise.
+  Anything more complex (3+ groups + nesting, random slopes, GLMM,
+  crossed effects) needs `lmer`.
+- **Programmatic pipelines** — Prism is GUI-only; you can't call it from
+  a TCP-controlled agent. For batch analysis use R or Python.
+- **Reproducibility** — Prism files are binary, not diff-friendly, not
+  scriptable. R/Python scripts in git are.
+- **Permutation / bootstrap / Bayesian** — Prism doesn't ship these.
+- **Multiple testing across thousands of genes/regions/wells** — Prism's
+  multiple-comparison adjustments stop at all-pairwise. Use BH in R/Python.
+
+**Pragmatic stance for the agent**: Prism is the standard for many wet labs
+because it produces clean figures fast. For exploratory pipelines and
+nested designs, prefer scripts. For final figures, either save the script
+plot or replicate it in Prism — but the *test* should already be done in
+script.
+
+---
+
+## §16 Worked End-to-End Example — 3 Conditions × 5 Animals × ~10 Slices × ~50 Cells
+
+A canonical imaging design and the wrong/right paths through it. The data
+table layout, code, and reporting language map directly onto what the
+agent's `python ij.py results` produces.
+
+### §16.1 The Setup
+
+- **Conditions** (treatment): `vehicle`, `low_dose`, `high_dose`
+- **Animals**: 5 per condition = 15 total. Each animal is randomised to
+  one condition.
+- **Slices**: ~10 per animal = ~150 slices total.
+- **Cells**: ~50 per slice = ~7,500 cells. Outcome: per-cell CTCF for a
+  marker.
+
+### §16.2 The Wrong Way — Pooled Two-Group Test
+
+```python
+# WRONG: treat every cell as independent
+import pandas as pd
+from scipy import stats
+df = pd.read_csv("AI_Exports/cells_labeled.csv")   # ~7500 rows
+
+# Comparing high_dose vs vehicle as a "two-group t-test"
+high = df.loc[df.treatment == "high_dose", "ctcf"].values
+veh  = df.loc[df.treatment == "vehicle",  "ctcf"].values
+
+stats.ttest_ind(high, veh, equal_var=False)
+# → t ~ 18.4, p ~ 1e-70
+# Reads as wildly significant. It is wrong. n = 2500 + 2500 cells, but
+# only 5 + 5 animals were independently assigned. The test inflates n
+# 500-fold and the false-positive rate accordingly.
+```
+
+What's wrong:
+- `ttest_ind` treats all 5,000 cells as independent observations.
+- Animal-level variance is ignored — every cell from animal m01 is treated
+  as informative as a fresh animal.
+- Repeating the analysis with simulated null data (see §8.2 demo)
+  reproduces the ~30–40% false-positive rate.
+
+### §16.3 The Right Way — Mixed Model + SuperPlot
+
+**Step 1**: produce a labelled tidy CSV from the agent.
+
+```bash
+python ij.py results > .tmp/raw_results.csv
+# Add columns: animal, slice, treatment (parsed from Label / filename)
+python -c "
+import csv, re, pathlib
+out = []
+with open('.tmp/raw_results.csv') as f:
+    for r in csv.DictReader(f):
+        lbl = r.get('Label','')
+        m_a = re.search(r'(m\d{2})', lbl)        # m01, m02, ...
+        m_s = re.search(r'(s\d{2})', lbl)        # s01, s02, ...
+        m_t = re.search(r'(vehicle|low_dose|high_dose)', lbl)
+        if not (m_a and m_s and m_t): continue
+        r['animal']    = m_a.group(1)
+        r['slice']     = f'{m_a.group(1)}_{m_s.group(1)}'   # globally unique
+        r['treatment'] = m_t.group(1)
+        out.append(r)
+with open('.tmp/cells_labeled.csv','w',newline='') as f:
+    w = csv.DictWriter(f, fieldnames=list(out[0].keys()))
+    w.writeheader(); w.writerows(out)
+"
+```
+
+The resulting `cells_labeled.csv` has columns:
+```
+ctcf,area,treatment,animal,slice
+1842.3,156.0,vehicle,m01,m01_s01
+1937.5,142.0,vehicle,m01,m01_s01
+...
+```
+
+**Step 2**: fit the mixed model in R.
+
+```r
+library(lme4); library(lmerTest); library(emmeans); library(performance)
+df <- read.csv(".tmp/cells_labeled.csv")
+df$treatment <- factor(df$treatment, levels = c("vehicle","low_dose","high_dose"))
+
+fit <- lmer(ctcf ~ treatment + (1 | animal) + (1 | slice), data = df, REML = TRUE)
+
+summary(fit)                         # fixed effects with Satterthwaite df
+anova(fit)                           # Type-III F-test for treatment
+icc(fit)                             # ICC by animal (and by slice)
+
+# Post-hoc: all pairwise with Tukey
+em <- emmeans(fit, ~ treatment)
+pairs(em, adjust = "tukey")
+# Effect sizes on the response scale
+eff <- contrast(em, method = "pairwise", adjust = "none")
+```
+
+Typical output (illustrative — actual values depend on data):
+
+```
+Random effects:
+ Groups   Name        Variance Std.Dev.
+ slice    (Intercept)   84321    290.4
+ animal   (Intercept)  152768    390.9
+ Residual               44102    210.0
+Number of obs: 7521, groups:  slice, 148; animal, 15
+
+Fixed effects:
+                       Estimate Std. Error      df t value Pr(>|t|)
+(Intercept)             1812.3      181.4   12.1    9.99   <0.001 ***
+treatmentlow_dose        180.5       89.2   12.0    2.02    0.066
+treatmenthigh_dose       420.7       91.1   12.0    4.62   <0.001 ***
+
+ICC (animal) = 0.62      ← most variation is between animals
+ICC (slice)  = 0.34      ← substantial slice-to-slice
+```
+
+p ~ 0.001 for high-dose vs vehicle on the *animal-level* test — almost
+20 orders of magnitude weaker than the pooled t-test gave, and *correct*.
+
+**Step 3**: SuperPlot for the figure (R or Python from §9).
+
+```r
+library(ggplot2); library(dplyr)
+rep_means <- df %>% group_by(treatment, animal) %>%
+  summarise(ctcf = mean(ctcf), .groups = "drop")
+
+ggplot(df, aes(treatment, ctcf)) +
+  geom_jitter(width=0.18, alpha=0.25, size=0.8, colour="grey60") +
+  geom_point(data=rep_means, aes(colour=animal), size=4) +
+  stat_summary(data=rep_means, fun=mean, geom="crossbar",
+               width=0.5, colour="black") +
+  stat_summary(data=rep_means, fun.data=mean_se,
+               geom="errorbar", width=0.2, colour="black") +
+  theme_classic() + labs(y="CTCF (a.u.)", x=NULL, colour="Animal")
+```
+
+### §16.4 The Reporting Sentence
+
+> CTCF was compared across treatments using a linear mixed-effects model
+> with treatment as a fixed effect and animal and slice as crossed random
+> intercepts (`lmer(ctcf ~ treatment + (1|animal) + (1|slice))`, REML
+> estimation, Satterthwaite-approximated degrees of freedom). High-dose
+> increased CTCF over vehicle by 421 a.u. (95% CI [222, 620], t(12.0) =
+> 4.62, p < 0.001, Hedges' g = 1.07); low-dose was indistinguishable from
+> vehicle (181 a.u., 95% CI [-14, 376], t(12.0) = 2.02, p = 0.066). N = 5
+> animals per group (10 ± 2 slices/animal, 50 ± 8 cells/slice; 7,521 cells
+> total). ICC for animal = 0.62, ICC for slice = 0.34, indicating
+> substantial between-animal variability that justifies the mixed model.
+
+### §16.5 What Changes If…
+
+| If… | Then… |
+|---|---|
+| Each animal received all three doses (cross-over) | `lmer(ctcf ~ treatment + (treatment | animal) + (1 | slice))` — random slope by animal |
+| Outcome is "fraction positive" | `glmer(positive ~ treatment + (1 | animal) + (1 | slice), family=binomial)` |
+| Outcome is per-field cell count | `glmer.nb(count ~ treatment + offset(log(area)) + (1|animal/slice))` |
+| Only 3 animals per group, model fails to converge | Drop `(1 | slice)`, or drop the mixed model entirely and t-test on per-animal means |
+| Slice IDs are not unique across animals (e.g. "s01" appears in m01 and m02) | Use `(1 | animal/slice)` instead of `(1 | animal) + (1 | slice)` |
+
+---
+
+## §17 Reviewer Pushback — Catalogue and Responses
+
+### §17.1 Common Comments and How to Answer
+
+| Reviewer comment | Response strategy |
+|---|---|
+| **"Your n is too low (n=3)."** | Report effect size + 95% CI. If CI excludes the null with margin, the small n is sufficient *for that effect size*. If it doesn't, agree and either (a) collect more or (b) frame as a pilot. Do NOT defend n=3 as adequate without the CI. |
+| **"You should have used [parametric/non-parametric]."** | Run BOTH. If they agree, report the more interpretable one and note "consistent with Mann-Whitney" / "consistent with Welch's t". If they disagree, the data are doing something that needs investigation (extreme outlier? bi-modal distribution?). |
+| **"You did not correct for multiple comparisons."** | For 2–10 pre-planned comparisons, apply Holm and re-report. For exploratory screens, apply BH and report q-values. State which framework (FWER vs FDR) and why. |
+| **"Show individual data points."** | Replace bar charts with SuperPlots / box+jitter / violin+points. Always show points if n ≤ 50 per group. |
+| **"Report effect sizes."** | Add Hedges' g (two-group), partial η² (ANOVA), HR (survival) with 95% CI. Update tables and text. |
+| **"Why not parametric — your data look normal."** | Show QQ-plots (in supplement). If clearly normal, switch. If borderline, report both — it's an honest position, not a weakness. |
+| **"The treatment × time interaction is significant — your main effects are uninterpretable."** | Switch to simple-effects analysis: `emmeans(fit, ~ treatment | time)`. Discuss the interaction first, main effects only if biologically meaningful within levels. |
+| **"You pooled cells — this is pseudoreplication."** | Re-analyse with mixed model with animal as random effect, OR aggregate to per-animal means. Both are correct; report the one that matches the design. Cite Lazic 2010 / Aarts 2014 (§8.4). |
+| **"You should report a p-value."** | If the model already reports a t/F with df, derive p from `lmerTest`/Satterthwaite or KR (`summary(fit, ddf="Kenward-Roger")`). For Bayesian models, report the BF. |
+| **"Your ANOVA assumed equal variance, but Levene is significant."** | Switch to Welch's ANOVA (`oneway.test(y ~ g, var.equal=FALSE)` in R; `pingouin.welch_anova` in py); follow with Games-Howell. |
+| **"Are these technical or biological replicates?"** | Define explicitly: "n = 5 animals (biological replicates); each contributed 10 ± 2 slices (technical) and 50 ± 8 cells per slice." Use the imaging hierarchy in §8.1 as a template. |
+| **"You report SEM but not SD — your error bars look smaller than they should."** | Switch to SD or 95% CI of the replicate-level mean for the figure. SEM bars on raw cell data hide the actual variability. |
+| **"This effect is significant but only 5% — biologically meaningful?"** | Cite the smallest meaningful effect for the biology (literature, mechanism). Discuss CI relative to that threshold — a 5% effect with [3%, 7%] CI is precisely small; with [-2%, 12%] CI it's uninformative. |
+
+### §17.2 Reporting Checklist (Expanded)
+
+For every test in a paper:
+
+- [ ] **Test name in full** — "Welch's two-sample t-test", not just "t-test".
+- [ ] **n with units** — "n = 5 mice/group, 10 ± 2 slices/mouse, 50 ± 8 cells/slice".
+- [ ] **Test statistic with df** — "t(12.0) = 4.62", "F(2, 12) = 14.3",
+      "U = 312", "χ²(2) = 8.4".
+- [ ] **Exact p-value** — "p = 0.013", "p < 0.001", not "p < 0.05".
+- [ ] **Effect size with 95% CI** — "Hedges' g = 1.07, 95% CI [0.32, 1.83]".
+- [ ] **Descriptive stats** — mean ± SD or median [IQR] per group.
+- [ ] **What n is** — biological replicate, not "all cells".
+- [ ] **Multiple-comparison method** — "Holm-adjusted", "Tukey HSD",
+      "BH-adjusted, q = 0.05".
+- [ ] **Data + code** — deposited (Zenodo, OSF, figshare); analysis script
+      in repository; raw CSV alongside.
+- [ ] **Pre-registration status** — confirmatory pre-registered / exploratory;
+      where the registration lives (OSF, AsPredicted).
+- [ ] **Software with versions** — "R 4.3.1, lme4 1.1-35, lmerTest 3.1-3,
+      emmeans 1.10.0".
+
+### §17.3 Pre-Registration and Open Data
+
+- **OSF** (https://osf.io) — free, accepts pre-registrations and data,
+  generates DOI.
+- **AsPredicted** (https://aspredicted.org) — minimal pre-registration form,
+  short.
+- **Zenodo** (https://zenodo.org) — DOI for the analysis repository on
+  release; integrates with GitHub.
+- **Pre-registration of a microscopy experiment should specify**:
+  - the imaging hypothesis and primary outcome variable
+  - the experimental unit (animal/well)
+  - target n per group and stopping rule
+  - inclusion/exclusion criteria
+  - the planned statistical test (and back-up if assumption fails)
+  - figure mock-up
+
+Distinguishing confirmatory from exploratory analyses in the manuscript is
+the single biggest credibility lever — a single confirmatory finding from
+a pre-registered analysis is worth more than ten exploratory ones from
+the same data.
+
+---

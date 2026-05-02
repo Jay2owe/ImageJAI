@@ -1,8 +1,124 @@
 # Wound Healing & Cell Migration Analysis Reference
 
+Agent-oriented reference for quantifying collective and single-cell migration
+in Fiji/ImageJ. Covers scratch assays, barrier inserts, transwell migration,
+transwell invasion, chemotaxis chambers, spheroid invasion, MSD-based motion
+classification, and TrackMate cell tracking. Includes wound-edge detection
+(variance filter, CLAHE, direct threshold), closure-rate metrics, chemotaxis
+statistics (FMI, Rayleigh), and batch workflows. Source: compiled from
+published assay protocols and plugin documentation; see §11 References.
+
+Invoke from the agent:
+`python ij.py macro '<code>'` — run ImageJ macro (.ijm) code.
+`python ij.py script --lang jython '<code>'` — run Jython inside Fiji's JVM
+(TrackMate, MSD analysis). Use `python probe_plugin.py "Plugin..."` to
+discover any installed plugin's parameters at runtime.
+
 ---
 
-## 1. Assay Selection
+## §0 Lookup Map — "How do I find X?"
+
+| Question | Where to look |
+|---|---|
+| "Which assay should I use for collective vs single-cell migration?" | §2.1, §2.1 decision tree |
+| "How do I detect a wound edge in brightfield / phase / fluorescence?" | §3.1, §3.2 |
+| "What variance filter radius should I use?" | §3.1, §3.2 |
+| "How do I measure wound area over a time-lapse?" | §3.4 |
+| "How do I measure wound width at multiple Y positions?" | §3.5 |
+| "What closure-rate metrics exist (%, T50, AUC)?" | §3.6, §3.7, §12 Key Formulas |
+| "Which existing wound-healing plugin is most accurate?" | §4 |
+| "Complete core-ImageJ wound-analysis macro (no plugins)?" | §4 |
+| "How do I configure TrackMate for my cell type?" | §5.1, §5.2 |
+| "TrackMate Jython script template?" | §5.2 |
+| "What migration metrics does TrackMate give me?" | §5.3 |
+| "How do I compute MSD and classify motion (free / directed / confined)?" | §5.4 |
+| "How do I draw a wind-rose plot?" | §5.5 |
+| "How do I quantify chemotaxis (FMI, Rayleigh)?" | §6.1, §6.2, §6.3 |
+| "How do I count cells on a transwell membrane?" | §7.1, §7.2 |
+| "How do I measure 3D invasion depth from a z-stack?" | §7.3 |
+| "How do I quantify spheroid invasion (core vs total)?" | §7.4 |
+| "Biological replicate vs technical replicate — which counts?" | §8.1 |
+| "How many experiments / wells do I need?" | §8.2 |
+| "Which statistical test compares two closure curves?" | §8.3, §8.4 |
+| "Agent commands for a wound-healing workflow?" | §9.1 |
+| "Agent commands for TrackMate tracking?" | §9.2 |
+| "Agent commands for batch wound healing?" | §9.3 |
+| "Why are my wound edges ragged / why do my tracks break?" | §10 |
+| "What plugin goes where, and which update site?" | §13 Plugin Installation |
+| "Real argument keys for an installed plugin?" | `python probe_plugin.py "Plugin..."` |
+
+---
+
+## §1 Term Index (A–Z)
+
+Alphabetical pointer to the section containing each term. Use
+`grep -n '<term>' wound-healing-migration-reference.md` to jump.
+
+### A
+`alpha (MSD exponent)` §5.4 · `Analyze Particles` §3.2, §3.3, §4, §7.1, §7.2, §7.3, §7.4 · `anomalous diffusion` §5.4 · `AUC` §3.6, §3.7, §8.4, §12 · `Auto Local Threshold (Phansalkar)` §10
+
+### B
+`Barrier insert` §2.1 · `batch mode` §7.2, §9.3 · `Bio-Formats` §9.1 · `biological replicate` §8.1 · `brightfield` §3.1, §3.2, §4
+
+### C
+`Canny edge detection` §4 · `Cellpose` §5.1 · `Center of mass (chemotaxis)` §6.2 · `chemotaxis` §2.1, §6, §6.1, §6.2, §6.3 · `Chemotaxis and Migration Tool (ibidi)` §6.1, §13 · `circularity` §7.1 · `CLAHE` §3.1, §3.2 · `classify_motion` §5.4 · `Clear Results` §4, §9.1 · `closure rate` §3.6, §3.7, §12 · `Cohen's d` §8.3 · `Colour Deconvolution` §7.1 · `confinement ratio` §5.3 · `confined motion` §5.4 · `Convert to Mask` §3.2, §3.3, §4, §7.1, §7.2, §7.3, §7.4, §9.1, §9.3, §10 · `Correct 3D drift` §10 · `Create Selection` §3.4, §4, §9.1, §9.3, §10 · `CSMA` §4 · `crystal violet` §7.1 · `curvelet transform (TScratch)` §4
+
+### D
+`debris` §3.3, §10 · `Decision Tree (assay)` §2.1 · `detector (TrackMate)` §5.1, §5.2 · `diffusion coefficient (D)` §5.4, §12 · `Dilate` §3.3 · `directed motion` §5.4 · `direction autocorrelation` §5.3 · `directionality ratio` §5.3, §12 · `DoG detector` §5.1 · `Duplicate...` §3.2, §4, §7.3, §7.4, §9.1, §9.3, §10
+
+### E
+`Edge detection` §3.1 · `endpoint angles` §6.3 · `Enhance Local Contrast (CLAHE)` §3.2 · `Erode` §3.3, §7.4 · `exponential fit (closure)` §3.7
+
+### F
+`feret's` §7.4 · `Fill Holes` §4, §7.4 · `Find Edges (MRI tool)` §4 · `FMI parallel / perpendicular` §6.2, §6.3, §12 · `focus drift` §10 · `Frangi filtering (INSIDIA)` §7.4 · `free diffusion` §5.4
+
+### G
+`GAP_CLOSING_MAX_DISTANCE` §5.1, §5.2, §10 · `Gaussian Blur` §3.2, §4, §7.4 · `getPixelSize` §3.5, §4, §7.3 · `getResult` §4, §9.1 · `gradient direction` §6.3
+
+### I
+`ibidi` §6.1, §13 · `INSIDIA plugin` §7.4 · `invasion assay` §2.1, §7 · `invasion depth` §7.3 · `Invasion Index` §7.3, §7.4, §12 · `Invert` §3.2, §4, §7.1, §9.1, §9.3, §10
+
+### K
+`Kalman tracker` §5.1, §10
+
+### L
+`LAP tracker` §5.1 · `Linear mixed model` §8.4 · `LINKING_FEATURE_PENALTIES` §10 · `LINKING_MAX_DISTANCE` §5.1, §5.2, §10 · `load_trackmate_csv` §5.4 · `LoG detector` §5.1, §5.2
+
+### M
+`Mann-Whitney` §8.3 · `Matrigel transwell` §2.1 · `MAX_FRAME_GAP` §5.1, §5.2, §10 · `Measure` §3.4, §4, §7.1, §9.1, §9.3 · `Median` §3.2, §4 · `membrane (transwell)` §7.3 · `mitomycin C` §10, §11 · `morphological opening` §3.3, §10 · `MRI Wound Healing Tool` §4, §13 · `MSD` §5.4, §12 · `MSD Behavior` §5.4
+
+### N
+`net displacement` §5.3, §12 · `nSlices` §3.4, §3.5, §4, §7.3, §9.1, §9.3
+
+### O
+`Open (binary)` §3.2, §4, §9.1, §9.3 · `origin-normalized tracks` §5.5, §6.3 · `Otsu` §3.2, §3.4, §4, §7.1, §7.2, §7.4, §9.1, §9.3 · `Overlap tracker` §5.1 · `Overlay.addSelection` §4
+
+### P
+`particle size filter` §3.3, §4, §7.1, §7.2, §7.3, §7.4 · `passage` §8.1, §11 · `per-frame threshold` §10 · `persistence time (tau)` §5.3 · `phase contrast` §3.1, §3.2, §4 · `pixel_size_um` §3.7 · `population metric` §2.1 · `proliferation control` §10, §11 · `pseudoreplication` §11
+
+### R
+`RADIUS (TrackMate)` §5.1, §5.2, §10 · `random migration` §2.1 · `Rayleigh test / R` §6.2, §6.3, §12 · `replicate (biological vs technical)` §8.1, §8.2 · `Remove Overlay` §4 · `Restore Selection` §4
+
+### S
+`sample size` §8.2 · `Scale (displacement)` §5.5 · `scratch assay` §2.1, §9.1 · `Set Measurements` §3.4, §4, §7.1, §7.4, §9.1, §9.3 · `setAutoThreshold` §3.2, §3.4, §4, §7.1, §7.2, §7.3, §7.4, §9.1, §9.3, §10 · `setBatchMode` §7.2, §9.3 · `setSlice` §3.4, §3.5, §4, §7.3, §9.1, §9.3, §10 · `setThreshold` §3.4, §4, §9.1, §9.3 · `Simple LAP tracker` §5.1 · `Sparse LAP` §5.2 · `spheroid invasion` §2.1, §7.4 · `stage drift` §10 · `StackReg` §10, §13 · `StarDist` §5.1 · `Subtract Background` §3.2, §4, §7.1, §7.2, §7.4, §9.3, §10 · `Summarize` §7.1, §7.2, §7.3
+
+### T
+`T50` §3.6, §3.7, §11, §12 · `THRESHOLD (detector)` §5.1, §5.2, §10 · `Time_h` §4 · `total distance traveled` §5.3 · `TOTAL_DISTANCE_TRAVELED` §5.2, §5.3 · `TRACK_DISPLACEMENT` §5.2, §5.3 · `TRACK_DURATION` §5.2 · `TRACK_MEAN_SPEED` §5.2, §5.3 · `TrackMate` §5, §5.1, §5.2, §10, §13 · `tracker (TrackMate)` §5.1, §5.2 · `Transwell (uncoated / Matrigel)` §2.1, §7.1, §7.2 · `Triangle threshold` §3.2, §7.4 · `trapezoid` §3.7, §8.4 · `TScratch` §4 · `Tukey HSD` §8.3 · `two-way ANOVA` §8.4
+
+### V
+`variance filter` §3.1, §3.2, §4, §9.1, §9.3, §10 · `varianceRadius` §3.2, §4, §9.1
+
+### W
+`Watershed` §7.1, §7.2, §7.3 · `Welch t-test` §8.3 · `wind rose plot` §5.5 · `Wound Healing Size Tool` §4, §11, §13 · `wound edge detection` §3.1, §3.2 · `wound width` §3.5
+
+### Z
+`Z-spacing` §7.3 · `z-stack invasion` §7.3
+
+---
+
+## §2 Assay Selection
+
+### §2.1 Assay Selection
 
 | Assay | Measures | Resolution | Kinetic? | Cost |
 |-------|----------|------------|----------|------|
@@ -32,9 +148,9 @@ What do you want to measure?
 
 ---
 
-## 2. Wound Healing Analysis
+## §3 Wound Healing Analysis
 
-### 2.1 Wound Edge Detection Methods
+### §3.1 Wound Edge Detection Methods
 
 | Method | Brightfield | Phase Contrast | Fluorescence |
 |--------|------------|----------------|--------------|
@@ -47,7 +163,7 @@ What do you want to measure?
 toward 20-25 for noisy/phase contrast images. If wound edges appear ragged, increase
 radius. If fine wound details disappear, decrease.
 
-### 2.2 Variance-Based Detection (Recommended for Brightfield/Phase)
+### §3.2 Variance-Based Detection (Recommended for Brightfield/Phase)
 
 ```javascript
 // Parameters — adjust per image type
@@ -79,7 +195,7 @@ rename("wound_mask");
 | Brightfield | `run("Enhance Local Contrast (CLAHE)", "blocksize=127 histogram=256 maximum=3 mask=*None* fast_(less_accurate)");` on duplicate |
 | Fluorescence | Skip variance. Instead: `run("Gaussian Blur...", "sigma=5 stack");` then direct Otsu threshold |
 
-### 2.3 Handling Debris
+### §3.3 Handling Debris
 
 ```javascript
 // After creating wound mask — remove small objects (debris)
@@ -91,7 +207,7 @@ run("Erode", "stack"); run("Erode", "stack"); run("Erode", "stack");
 run("Dilate", "stack"); run("Dilate", "stack"); run("Dilate", "stack");
 ```
 
-### 2.4 Wound Area Measurement Over Time
+### §3.4 Wound Area Measurement Over Time
 
 ```javascript
 selectWindow("wound_mask");
@@ -112,7 +228,7 @@ resetThreshold();
 updateResults();
 ```
 
-### 2.5 Wound Width Measurement
+### §3.5 Wound Width Measurement
 
 Use when wound length varies between images. Measures width at multiple Y positions.
 
@@ -155,7 +271,7 @@ for (frame = 1; frame <= nSlices(); frame++) {
 updateResults();
 ```
 
-### 2.6 Closure Rate Metrics
+### §3.6 Closure Rate Metrics
 
 | Metric | Formula | When to Use |
 |--------|---------|-------------|
@@ -164,7 +280,7 @@ updateResults();
 | T50 | Time to 50% closure | Single summary statistic |
 | AUC | Integral of closure curve | Full kinetic comparison |
 
-### 2.7 Python Closure Analysis
+### §3.7 Python Closure Analysis
 
 ```python
 import numpy as np
@@ -216,7 +332,7 @@ def full_analysis(csv_path, time_interval_hours, pixel_size_um=None):
 
 ---
 
-## 3. ImageJ Plugins for Wound Healing
+## §4 ImageJ Plugins for Wound Healing
 
 | Plugin | Method | Speed | Error vs Ref | Install |
 |--------|--------|-------|-------------|---------|
@@ -317,9 +433,9 @@ selectImage(procID); close();
 
 ---
 
-## 4. Individual Cell Migration Analysis
+## §5 Individual Cell Migration Analysis
 
-### 4.1 TrackMate Configuration
+### §5.1 TrackMate Configuration
 
 **Detector selection:**
 
@@ -346,7 +462,7 @@ selectImage(procID); close();
 - `GAP_CLOSING_MAX_DISTANCE`: Typically 1.5x LINKING_MAX_DISTANCE
 - `MAX_FRAME_GAP`: 2-3 frames is typical
 
-### 4.2 TrackMate Jython Script
+### §5.2 TrackMate Jython Script
 
 ```python
 from fiji.plugin.trackmate import Model, Settings, TrackMate, Logger
@@ -396,7 +512,7 @@ else:
         IJ.log("%d,%.2f,%.2f,%.2f,%.4f,%.4f" % (tid, dur, disp, dist, speed, dr))
 ```
 
-### 4.3 Migration Metrics
+### §5.3 Migration Metrics
 
 | Metric | Formula | TrackMate Feature | Interpretation |
 |--------|---------|-------------------|----------------|
@@ -410,7 +526,7 @@ else:
 DR by chance. Direction autocorrelation is less biased (persistence time = tau where
 C(tau) = 1/e).
 
-### 4.4 MSD Analysis
+### §5.4 MSD Analysis
 
 | Motion Type | MSD Behavior | Alpha | Meaning |
 |------------|-------------|-------|---------|
@@ -463,7 +579,7 @@ def load_trackmate_csv(csv_path):
     return tracks
 ```
 
-### 4.5 Wind Rose Plot (ImageJ Macro Generator)
+### §5.5 Wind Rose Plot (ImageJ Macro Generator)
 
 ```python
 def generate_wind_rose_macro(tracks, output_size=512, scale_um=100):
@@ -491,14 +607,14 @@ def generate_wind_rose_macro(tracks, output_size=512, scale_um=100):
 
 ---
 
-## 5. Chemotaxis Analysis
+## §6 Chemotaxis Analysis
 
-### 5.1 Chemotaxis and Migration Tool (ibidi)
+### §6.1 Chemotaxis and Migration Tool (ibidi)
 
 Install from ibidi website. Input: X,Y coordinates from Manual Tracking or TrackMate.
 Define gradient direction, then calculate metrics.
 
-### 5.2 Key Metrics
+### §6.2 Key Metrics
 
 | Metric | Formula | Interpretation |
 |--------|---------|----------------|
@@ -507,7 +623,7 @@ Define gradient direction, then calculate metrics.
 | Center of mass | `mean(endpoint_x), mean(endpoint_y)` | Population average displacement |
 | Rayleigh R | Mean resultant length | 0=uniform, 1=perfectly aligned |
 
-### 5.3 Rayleigh Test and Chemotaxis Analysis
+### §6.3 Rayleigh Test and Chemotaxis Analysis
 
 ```python
 import numpy as np
@@ -550,9 +666,9 @@ def chemotaxis_analysis(tracks, dt, gradient_dir_deg=90):
 
 ---
 
-## 6. Invasion Assays
+## §7 Invasion Assays
 
-### 6.1 Transwell Quantification
+### §7.1 Transwell Quantification
 
 Two approaches: **cell counting** (individual cells visible) or **area fraction**
 (confluent/clustered cells).
@@ -581,7 +697,7 @@ run("Select All"); run("Measure");
 // %Area = fraction of stained pixels
 ```
 
-### 6.2 Batch Transwell Processing
+### §7.2 Batch Transwell Processing
 
 ```javascript
 inputDir = getDirectory("Choose input folder");
@@ -602,7 +718,7 @@ setBatchMode(false);
 saveAs("Results", outputDir + "transwell_counts.csv");
 ```
 
-### 6.3 3D Invasion Depth (Z-Stack)
+### §7.3 3D Invasion Depth (Z-Stack)
 
 ```javascript
 // Count cells per z-slice; membrane surface at z=1
@@ -627,7 +743,7 @@ Invasion Index = cells_beyond_threshold / total_cells * 100
 Weighted Invasion = sum(n_cells(z) * depth(z)) / total_cells
 ```
 
-### 6.4 Spheroid Invasion
+### §7.4 Spheroid Invasion
 
 ```javascript
 // Detect total invaded region (core + protrusions)
@@ -659,15 +775,15 @@ for low-contrast cells.
 
 ---
 
-## 7. Statistical Analysis
+## §8 Statistical Analysis
 
-### 7.1 Biological Replicates (Critical)
+### §8.1 Biological Replicates (Critical)
 
 The biological replicate is the **independent experiment** (different passage/day),
 NOT individual wells. Multiple wells per condition within one experiment are technical
 replicates. Average wells within each experiment first, then compare between experiments.
 
-### 7.2 Sample Size Recommendations
+### §8.2 Sample Size Recommendations
 
 | Assay | Min n (experiments) | Technical reps per condition |
 |-------|--------------------|-----------------------------|
@@ -676,7 +792,7 @@ replicates. Average wells within each experiment first, then compare between exp
 | Cell tracking | 3 | 20-50 cells/experiment |
 | Spheroid invasion | 3 | 5-10 spheroids |
 
-### 7.3 Comparing Conditions
+### §8.3 Comparing Conditions
 
 ```python
 from scipy import stats
@@ -701,7 +817,7 @@ if p < 0.05:
     tukey = stats.tukey_hsd(*groups)
 ```
 
-### 7.4 Time-Course and Cell-Level Analysis
+### §8.4 Time-Course and Cell-Level Analysis
 
 **Closure curves:** Compare via AUC (trapezoid integration of % closure), then t-test
 on AUC values. Alternatively, two-way repeated measures ANOVA (condition x time).
@@ -715,9 +831,9 @@ model = smf.mixedlm("speed ~ condition", data=df, groups=df["experiment"]).fit()
 
 ---
 
-## 8. Agent Workflows
+## §9 Agent Workflows
 
-### 8.1 Wound Healing
+### §9.1 Wound Healing
 
 ```bash
 python ij.py state
@@ -762,7 +878,7 @@ python ij.py results
 python auditor.py
 ```
 
-### 8.2 Cell Tracking with TrackMate
+### §9.2 Cell Tracking with TrackMate
 
 ```bash
 python ij.py state
@@ -777,7 +893,7 @@ python ij.py log     # parse CSV track statistics
 python ij.py capture tracks_overlay
 ```
 
-### 8.3 Batch Wound Healing
+### §9.3 Batch Wound Healing
 
 ```bash
 python ij.py macro '
@@ -817,7 +933,7 @@ python auditor.py
 
 ---
 
-## 9. Common Problems and Solutions
+## §10 Common Problems and Solutions
 
 | Problem | Cause | Solution |
 |---------|-------|---------|
@@ -856,7 +972,7 @@ run("Select None");
 
 ---
 
-## 10. Best Practices Checklist
+## §11 Best Practices Checklist
 
 **Experimental:**
 - Consider barrier/insert assays when quantitative comparison matters

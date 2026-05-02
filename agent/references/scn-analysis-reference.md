@@ -2,12 +2,148 @@
 
 Workflows for SCN identification, bioluminescence rhythm analysis, fluorescence
 quantification, live imaging, microglia morphology, and neurodegeneration studies.
+Covers PER2::LUC bioluminescence reporter analysis, SCN ROI definition (manual,
+semi-automated, atlas-based), phase-map generation (FFT, Hilbert transform),
+fluorescence panels, microglia morphology (skeleton, fractal, Sholl, MotiQ),
+amyloid/neurodegeneration quantification, batch processing, and statistics.
+
+Sources: Young & Morrison (JoVE 2018) skeleton analysis; Shan et al. 2020
+Hodrick-Prescott detrending; BioDare2, pyBOAT, CircaCompare, MetaCycle,
+CosinorPy circadian tools; Allen CCFv3 atlas (SCH ID 286); FracLac, MotiQ,
+StarDist, Coloc 2 plugins.
+
+Invoke from the agent:
+`python ij.py macro '<code>'` — run ImageJ macro (.ijm) code.
+`python ij.py script '<code>'` — run Groovy (default), Jython, or JavaScript.
+`python probe_plugin.py "Plugin..."` — discover installed plugin parameters.
 
 ---
 
-## 1. SCN Identification & ROI Definition
+## §0 Lookup Map — "How do I find X?"
 
-### 1.1 Anatomical Landmarks
+| Question | Where to look |
+|---|---|
+| "How do I identify SCN anatomically?" | §2.1 |
+| "How do I draw an SCN ROI by hand?" | §2.2 |
+| "How do I auto-detect SCN from DAPI density?" | §2.3 |
+| "How do I register to Allen CCFv3?" | §2.4 |
+| "How do I split SCN into dorsal/ventral?" | §2.5 |
+| "What are typical PER2::LUC acquisition parameters?" | §3.1 |
+| "How do I pre-process bioluminescence stacks?" | §3.2 |
+| "How do I extract ROI time series?" | §3.3 |
+| "Which detrending method should I use?" | §3.4 |
+| "How do I make a pixel-by-pixel phase map (FFT)?" | §3.5 |
+| "What rhythm metrics matter and what are typical SCN values?" | §3.6 |
+| "Which circadian analysis tool (BioDare2, pyBOAT...)?" | §3.7 |
+| "What fluorescence staining panels are standard?" | §4.1 |
+| "How do I count cells (StarDist, watershed)?" | §4.2 |
+| "How do I compute CTCF?" | §4.3 |
+| "Which Z-projection for which purpose?" | §4.4 |
+| "How do I do colocalization?" | §4.5 |
+| "How do I analyse Incucyte live imaging?" | §5.1 |
+| "How do I compute dF/F for GCaMP?" | §5.2 |
+| "How do I build a Hilbert phase map?" | §5.3 |
+| "How do I measure Kuramoto synchrony?" | §5.4 |
+| "Which microglia markers distinguish homeostatic vs activated?" | §6.1 |
+| "How do I do skeleton analysis of microglia?" | §6.2 |
+| "How do I run FracLac fractal analysis?" | §6.3 |
+| "How do I run Sholl analysis?" | §6.4 |
+| "What does MotiQ do?" | §6.5 |
+| "How do I count microglia and measure distribution?" | §6.6 |
+| "How do I quantify amyloid plaques (DAB / ThioS)?" | §7.1 |
+| "How do I measure microglia-plaque proximity?" | §7.2 |
+| "How do I classify plaque-associated morphology?" | §7.3 |
+| "How do I batch-process many SCN sections?" | §8.1 |
+| "What counts as a biological vs technical replicate?" | §9.1 |
+| "Which statistical test for phase / period / amplitude?" | §9.2 |
+| "What sample size do I need?" | §9.3 |
+| "Why did my analysis go wrong?" | §10 |
+| "Where is the reference for circadian stats / colocalization / tracing?" | §11 |
+
+---
+
+## §1 Term Index (A–Z)
+
+Alphabetical pointer to every reporter, analysis method, and concept. Use
+`grep -n '`<term>`' scn-analysis-reference.md` to jump.
+
+### A
+`ABBA (atlas registration)` §2.4 · `acrophase` §3.6 · `Allen CCFv3` §2.4 · `amplitude` §3.6 · `Amyloid` §4.1, §7.1 · `Analyze Particles` §2.3, §4.2, §6.6, §7.1 · `Analyze Skeleton (2D/3D)` §6.2 · `ANOVA` §7.3, §9.2 · `area fraction (amyloid)` §7.1 · `autocorrelation` §3.6 · `autofluorescence` §2.2 · `AVP (shell marker)` §2.5, §4.1
+
+### B
+`background subtraction` §2.3, §3.3, §6.6 · `batch processing` §8.1 · `Benjamini-Hochberg FDR` §9.2 · `binarisation` §6.2 · `BioDare2` §3.7 · `bioluminescence` §3 · `BMAL1` §4.1 · `bregma` §2.1, §10
+
+### C
+`calcium imaging (GCaMP)` §5.2 · `CD68` §6.1 · `cell counting` §4.2, §6.6, §8.1 · `CircaCompare (R)` §3.7, §9.2 · `circadian phase` §3.5, §5.3 · `Clark-Evans R` §6.6 · `clock proteins (PER2, BMAL1)` §4.1 · `close-` (binary) §6.2 · `Colour Deconvolution` §7.1 · `Coloc 2` §4.5 · `colocalization` §4.4, §4.5 · `core/shell (VIP/AVP)` §2.5 · `cosinor` §3.4 via method, §3.6, §9.2 · `CosinorPy` §3.7 · `CTCF (Corrected Total Cell Fluorescence)` §4.3 · `CX3CR1-GFP` §6.1
+
+### D
+`D-luciferin` §3.1 · `damping rate` §3.6 · `DAPI` §2.2, §2.3, §4.1, §4.2 · `DAB (diaminobenzidine)` §7.1 · `density (microglia)` §6.6 · `despeckle` §6.2 · `detrending` §3.4 · `dF/F` §5.2 · `dorsal/ventral SCN` §2.5, §5.3 · `dorsomedial wave` §5.3
+
+### E
+`EMCCD` §3.1 · `Enhance Contrast (never on data)` §10 · `exponential fit (damping)` §3.6 · `exposure (bioluminescence)` §3.1
+
+### F
+`FFT (period mapping)` §3.5, §3.6 · `Fill Holes` §2.3 · `fluorescence microscopy` §4 · `FracLac` §6.3 · `fractal dimension (DB)` §6.3, §7.3 · `freehand tool` §2.2
+
+### G
+`Gaussian Blur` §2.3, §3.2, §8.1 · `GCaMP` §5.2 · `GFAP` §4.1 · `goodness of rhythm (R^2)` §3.6
+
+### H
+`Hilbert transform` §5.3 · `histology` §7.1 · `Hodrick-Prescott` §3.4 · `hypothalamus` §2.1, §4.3
+
+### I
+`Iba1` §4.1, §6.1 · `Incucyte` §5.1 · `intensity quantification (sum projection)` §4.4 · `IntDen` §4.3 · `Integrated Density` §4.3
+
+### J
+`JoVE 2018 (Young & Morrison)` §6.2 · `JTK_CYCLE` §9.2
+
+### K
+`Kruskal-Wallis` §7.3 · `Kuramoto R` §3.6, §5.4
+
+### L
+`lacunarity` §6.3 · `lateral ventricles (LV)` §2.1 · `live imaging` §5 · `luciferase / luciferin` §3.1, §3.4 · `lysosomal marker (CD68)` §6.1
+
+### M
+`macrophage` §6.1 · `manual ROI` §2.2 · `marker-based subdivision` §2.5 · `max intensity projection` §4.4 · `mean projection` §3.2, §5.1 · `MetaCycle (R)` §3.7 · `microglia` §6 · `Millicell insert` §5.1 · `MOAB-2 / 6E10` §4.1 · `motion correction (StackReg)` §3.2 · `MotiQ` §6.5 · `moving average (24 h)` §3.4 · `multi-channel IF` §2.5
+
+### N
+`NeuN` §4.1 · `nearest neighbour distance (NND)` §6.6 · `neurodegeneration` §7 · `neuron/astrocyte` §4.1
+
+### O
+`optic chiasm` §2.1 · `Otsu threshold` §2.3, §4.2, §6.6, §7.1, §8.1 · `outline` §6.3 · `overlay (never for object masks)` §10
+
+### P
+`P2RY12` §6.1 · `paraventricular nucleus (PVN)` §2.1 · `peak-trough amplitude` §3.6 · `Pearson's R` §4.5 · `PER2::LUC` §3.1 · `PER2 (clock protein)` §3.6, §4.1 · `period` §3.5, §3.6 · `phagocytic marker (CD68)` §6.1 · `phase (acrophase)` §3.6 · `phase map (FFT)` §3.5 · `phase map (Hilbert)` §5.3 · `phase-map cross-reference` §2.5, §5.3 · `plaque` §7.1, §7.2, §7.3 · `plaque-associated microglia (PAM)` §7.2 · `polynomial detrending` §3.4 · `pre-processing (biolum)` §3.2 · `pyBOAT` §3.4, §3.7
+
+### R
+`RAIN` §9.2 · `ramification index` §6.4, §6.5, §7.3 · `registration (ABBA)` §2.4 · `ROI Manager` §2.2, §2.5, §3.3, §4.3, §4.5, §7.1 · `rolling ball` §2.3, §6.6 · `rhythm analysis` §3 · `rhythm metrics` §3.6
+
+### S
+`S100b` §4.1 · `sample size` §9.3 · `SCN (suprachiasmatic nucleus)` §2 · `SCH (Allen ID 286)` §2.1, §2.4 · `semi-automated detection` §2.3 · `Set Measurements` §3.3, §4.3, §7.1 · `Sholl analysis` §6.4 · `sinc filter` §3.4 · `skeleton analysis` §6.2 · `Skeletonize` §6.2 · `sliding percentile` §3.4, §5.2 · `SON (supraoptic nucleus)` §10 · `spatial distribution` §6.6 · `StackReg` §3.2 · `staining panels` §4.1 · `StarDist` §4.2 · `Subtract Background` §2.3, §6.6 · `Sum Slices` §4.4 · `synchrony` §3.6, §5.4
+
+### T
+`technical replicate` §9.1 · `temperature (biolum)` §3.1 · `third ventricle (3V)` §2.1 · `Thioflavin S (ThioS)` §7.1 · `Threshold (binarise)` §6.2 · `tile (Millicell)` §5.1 · `TMEM119` §4.1, §6.1 · `Top Hat (cosmic ray removal)` §3.2
+
+### U
+`Unsharp Mask` §6.2
+
+### V
+`VIP (core marker)` §2.5, §4.1
+
+### W
+`Watershed` §4.2, §6.6, §8.1 · `Watson-Williams F-test` §9.2
+
+### Y
+`Young & Morrison skeleton method` §6.2
+
+### Z
+`Z-projection` §4.4 · `Z-stack` §4.4
+
+---
+
+## §2 SCN Identification & ROI Definition
+
+### §2.1 Anatomical Landmarks
 
 ```
          ┌───────────────────┐
@@ -29,7 +165,7 @@ quantification, live imaging, microglia morphology, and neurodegeneration studie
 
 **Bregma range:** -0.34 to -0.82 mm (mid-SCN ~-0.46 to -0.58). Allen CCFv3 ID: 286 (SCH).
 
-### 1.2 Manual ROI Macro
+### §2.2 Manual ROI Macro
 
 ```javascript
 // On DAPI or autofluorescence channel:
@@ -43,7 +179,7 @@ roiManager("Rename", "SCN_right");
 roiManager("Save", "/path/to/SCN_ROIs.zip");
 ```
 
-### 1.3 Semi-Automated Detection (DAPI density)
+### §2.3 Semi-Automated Detection (DAPI density)
 
 ```javascript
 // SCN has higher nuclear density than surrounding hypothalamus
@@ -57,13 +193,13 @@ run("Analyze Particles...", "size=5000-50000 circularity=0.3-1.0 show=Masks");
 // Adjust size range based on image calibration
 ```
 
-### 1.4 Atlas Registration (ABBA)
+### §2.4 Atlas Registration (ABBA)
 
 For cross-animal comparison: register to Allen CCFv3 in ABBA, export SCH (ID 286) as ROI. See `brain-atlas-registration-reference.md`.
 
 **Limitation:** Allen CCFv3 does NOT subdivide SCN into dorsal/ventral — must do manually.
 
-### 1.5 Dorsal/Ventral SCN Subdivision
+### §2.5 Dorsal/Ventral SCN Subdivision
 
 | Method | Approach | When to use |
 |--------|----------|-------------|
@@ -83,9 +219,9 @@ roiManager("Add"); roiManager("Rename", "SCN_ventral");
 
 ---
 
-## 2. Bioluminescence Rhythm Analysis
+## §3 Bioluminescence Rhythm Analysis
 
-### 2.1 Typical Acquisition Parameters
+### §3.1 Typical Acquisition Parameters
 
 | Parameter | Typical value |
 |-----------|---------------|
@@ -98,7 +234,7 @@ roiManager("Add"); roiManager("Rename", "SCN_ventral");
 | Duration | 5–7 days recommended |
 | Temperature | 36–37C (stable within 0.5C) |
 
-### 2.2 Pre-processing Pipeline
+### §3.2 Pre-processing Pipeline
 
 ```javascript
 // 1. Cosmic ray removal
@@ -115,7 +251,7 @@ run("Gaussian Blur...", "sigma=2 stack");
 run("Z Project...", "projection=[Average Intensity]");
 ```
 
-### 2.3 ROI Time Series Extraction
+### §3.3 ROI Time Series Extraction
 
 ```javascript
 run("Set Measurements...", "mean integrated redirect=None decimal=4");
@@ -129,7 +265,7 @@ for (r = 0; r < roiManager("count"); r++) {
 // IMPORTANT: Include a background ROI — subtract background mean per timepoint
 ```
 
-### 2.4 Detrending Methods
+### §3.4 Detrending Methods
 
 Bioluminescence decays due to luciferin consumption — MUST detrend before rhythm analysis.
 
@@ -141,7 +277,7 @@ Bioluminescence decays due to luciferin consumption — MUST detrend before rhyt
 | Hodrick-Prescott | Shan et al. 2020 method | Smooth trend removal |
 | Sliding percentile | Common default | Robust to transients |
 
-### 2.5 Pixel-by-Pixel Period/Phase Mapping
+### §3.5 Pixel-by-Pixel Period/Phase Mapping
 
 ```python
 import numpy as np
@@ -177,7 +313,7 @@ def compute_pixel_maps(stack, dt_hours, period_range=(20, 28)):
     return period_map, phase_hours, amplitude_map
 ```
 
-### 2.6 Rhythm Metrics
+### §3.6 Rhythm Metrics
 
 | Metric | How to compute | Typical SCN value |
 |--------|---------------|-------------------|
@@ -188,7 +324,7 @@ def compute_pixel_maps(stack, dt_hours, period_range=(20, 28)):
 | Goodness of rhythm | Cosinor R^2 | >0.3 rhythmic, >0.5 strong |
 | Kuramoto R (synchrony) | mean(exp(i*phase)) across cells | >0.7 synchronised |
 
-### 2.7 Software Tools
+### §3.7 Software Tools
 
 | Tool | Type | Strength |
 |------|------|----------|
@@ -200,9 +336,9 @@ def compute_pixel_maps(stack, dt_hours, period_range=(20, 28)):
 
 ---
 
-## 3. Fluorescence Microscopy of SCN
+## §4 Fluorescence Microscopy of SCN
 
-### 3.1 Common Staining Panels
+### §4.1 Common Staining Panels
 
 | Experiment | Ch1 | Ch2 | Ch3 | Ch4 |
 |-----------|-----|-----|-----|-----|
@@ -212,7 +348,7 @@ def compute_pixel_maps(stack, dt_hours, period_range=(20, 28)):
 | Microglia in SCN | DAPI | Iba1 | TMEM119 | Clock protein |
 | Neurodegeneration | DAPI | Amyloid (MOAB-2/6E10) | Iba1 | GFAP |
 
-### 3.2 Cell Counting
+### §4.2 Cell Counting
 
 ```javascript
 // StarDist for nuclear counting (DAPI channel)
@@ -227,7 +363,7 @@ run("Analyze Particles...", "size=20-200 circularity=0.5-1.0 show=Outlines displ
 // Report: total DAPI+ / marker+ per SCN, % positive, by subdivision
 ```
 
-### 3.3 CTCF (Corrected Total Cell Fluorescence)
+### §4.3 CTCF (Corrected Total Cell Fluorescence)
 
 ```javascript
 run("Set Measurements...", "area mean integrated redirect=None decimal=4");
@@ -238,7 +374,7 @@ run("Measure");
 // CTCF = IntDen - (Area * MeanBackground)
 ```
 
-### 3.4 Z-Stack Handling
+### §4.4 Z-Stack Handling
 
 | Purpose | Projection | Notes |
 |---------|-----------|-------|
@@ -247,7 +383,7 @@ run("Measure");
 | 3D cell counting | 3D Objects Counter | Direct on stack |
 | Colocalization | Per-plane or 3D | **Never project before coloc** — creates false overlap |
 
-### 3.5 Colocalization
+### §4.5 Colocalization
 
 ```javascript
 // PER2 vs VIP within SCN ROI
@@ -258,15 +394,15 @@ run("Coloc 2", "channel_1=C2-PER2 channel_2=C3-VIP roi_or_mask=<None> threshold_
 
 ---
 
-## 4. Live Imaging Analysis
+## §5 Live Imaging Analysis
 
-### 4.1 Incucyte Time-Lapse
+### §5.1 Incucyte Time-Lapse
 
 Typical: 6/24-well with Millicell inserts, 30–60 min interval, phase + GFP/RFP, 5–14 days, 36–37C.
 
 Workflow: export TIFF sequence → assemble stack → register → draw ROIs on mean projection → extract time series → rhythm analysis (Section 2).
 
-### 4.2 GCaMP Calcium Imaging
+### §5.2 GCaMP Calcium Imaging
 
 ```python
 def compute_dff(signal, baseline_percentile=10, window_hours=1, dt_hours=0.017):
@@ -277,7 +413,7 @@ def compute_dff(signal, baseline_percentile=10, window_hours=1, dt_hours=0.017):
     return (signal - f0) / f0, f0
 ```
 
-### 4.3 Phase Map Generation (Hilbert Transform)
+### §5.3 Phase Map Generation (Hilbert Transform)
 
 ```python
 from scipy.signal import hilbert, butter, filtfilt
@@ -302,7 +438,7 @@ def scn_phase_map(stack, dt_hours, band=(20, 28)):
 
 Typical gradient: dorsal SCN peaks 1–4 h before ventral (dorsomedial → ventrolateral wave).
 
-### 4.4 Kuramoto Order Parameter
+### §5.4 Kuramoto Order Parameter
 
 ```python
 def scn_synchrony(phases_matrix):
@@ -314,9 +450,9 @@ def scn_synchrony(phases_matrix):
 
 ---
 
-## 5. Microglia Analysis in SCN
+## §6 Microglia Analysis in SCN
 
-### 5.1 Markers
+### §6.1 Markers
 
 | Marker | Target | Notes |
 |--------|--------|-------|
@@ -326,7 +462,7 @@ def scn_synchrony(phases_matrix):
 | P2RY12 | Homeostatic | Circadian-regulated |
 | CD68 | Phagocytic/activated | Lysosomal marker |
 
-### 5.2 Skeleton Analysis (Young & Morrison, JoVE 2018)
+### §6.2 Skeleton Analysis (Young & Morrison, JoVE 2018)
 
 ```javascript
 // Preprocessing
@@ -348,7 +484,7 @@ run("Analyze Skeleton (2D/3D)", "prune=[none] show");
 // Per-cell: divide totals by soma count
 ```
 
-### 5.3 Fractal Analysis (FracLac)
+### §6.3 Fractal Analysis (FracLac)
 
 Isolate single cell in consistent ROI (consider ~120x120 um), erase neighbours, then:
 
@@ -359,7 +495,7 @@ run("Outline");
 // lacunarity, density, span ratio, circularity, convex hull area
 ```
 
-### 5.4 Sholl Analysis
+### §6.4 Sholl Analysis
 
 ```javascript
 // After isolating + skeletonising single cell:
@@ -368,11 +504,11 @@ run("Sholl Analysis...", "starting=5 ending=0 radius_step=5 #_samples=1 integrat
 // Key: max intersections, critical radius, ramification index, enclosing radius
 ```
 
-### 5.5 MotiQ (Automated)
+### §6.5 MotiQ (Automated)
 
 Three-step plugin: MotiQ_Cropper → MotiQ_Thresholder → MotiQ_2D/3D_Analyzer. Extracts 60+ parameters (ramification index, territory, soma area, process tree, motility).
 
-### 5.6 Density & Distribution
+### §6.6 Density & Distribution
 
 ```javascript
 // Automated counting
@@ -386,9 +522,9 @@ run("Analyze Particles...", "size=30-500 circularity=0.1-1.0 show=Outlines displ
 
 ---
 
-## 6. Amyloid/Neurodegeneration in SCN
+## §7 Amyloid/Neurodegeneration in SCN
 
-### 6.1 Plaque Quantification
+### §7.1 Plaque Quantification
 
 **DAB-stained sections:**
 ```javascript
@@ -411,7 +547,7 @@ run("Analyze Particles...", "size=10-Infinity circularity=0.2-1.0 show=Outlines 
 // Report: plaque count, density, mean area, area fraction, size distribution
 ```
 
-### 6.2 Microglia-Plaque Proximity
+### §7.2 Microglia-Plaque Proximity
 
 ```python
 from scipy.ndimage import distance_transform_edt
@@ -427,15 +563,15 @@ def microglia_plaque_distances(plaque_mask, microglia_centroids):
 # >50 um: plaque-distal
 ```
 
-### 6.3 Plaque-Associated Morphology
+### §7.3 Plaque-Associated Morphology
 
 Classify microglia by distance zone, quantify per zone (ramification index, fractal dimension, soma/territory ratio, process length). Compare across zones with one-way ANOVA or Kruskal-Wallis.
 
 ---
 
-## 7. Batch Processing
+## §8 Batch Processing
 
-### 7.1 Batch Cell Counting
+### §8.1 Batch Cell Counting
 
 ```javascript
 input = "/path/to/scn_sections/";
@@ -462,9 +598,9 @@ saveAs("Results", output + "cell_counts_summary.csv");
 
 ---
 
-## 8. Statistical Considerations
+## §9 Statistical Considerations
 
-### 8.1 Biological vs Technical Replicates
+### §9.1 Biological vs Technical Replicates
 
 | Analysis | Biological replicate | Technical replicate |
 |----------|---------------------|-------------------|
@@ -475,7 +611,7 @@ saveAs("Results", output + "cell_counts_summary.csv");
 
 **Critical:** Average within-mouse first, then compare between mice. N = mice, not sections.
 
-### 8.2 Circadian Statistics
+### §9.2 Circadian Statistics
 
 | Comparison | Test |
 |-----------|------|
@@ -485,7 +621,7 @@ saveAs("Results", output + "cell_counts_summary.csv");
 | Rhythmicity | Cosinor F-test, JTK_CYCLE, or RAIN |
 | Multiple ROIs | Benjamini-Hochberg FDR correction |
 
-### 8.3 Sample Size Guidelines
+### §9.3 Sample Size Guidelines
 
 | Analysis | Minimum N | Recommended N |
 |----------|-----------|---------------|
@@ -496,7 +632,7 @@ saveAs("Results", output + "cell_counts_summary.csv");
 
 ---
 
-## 9. Common Pitfalls
+## §10 Common Pitfalls
 
 | Category | Pitfall | Guidance |
 |----------|---------|----------|
@@ -515,7 +651,7 @@ saveAs("Results", output + "cell_counts_summary.csv");
 
 ---
 
-## 10. Cross-References
+## §11 Cross-References
 
 | Topic | Reference file |
 |-------|---------------|

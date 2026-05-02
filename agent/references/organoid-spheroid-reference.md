@@ -4,9 +4,118 @@ For an AI agent controlling Fiji/ImageJ via TCP. Covers brightfield/fluorescence
 segmentation, morphometry, lumen detection, budding/branching, 3D analysis,
 growth curves, multi-well plates, drug response, and statistics.
 
+Invoke from the agent:
+`python ij.py macro '<code>'` — run ImageJ macro (.ijm) code.
+`python ij.py script '<code>'` — run Groovy (default), Jython, or JavaScript.
+`python probe_plugin.py "Plugin..."` — discover plugin parameters at runtime.
+
 ---
 
-## 1. Quick Start
+## §0 Lookup Map — "How do I find X?"
+
+| Question | Where to look |
+|---|---|
+| "Quick-start pipeline + key measurements?" | §2 |
+| "Spheroid vs organoid vs tumoroid vs embryoid body?" | §3 |
+| "Which brightfield segmentation method should I use?" | §4.1 decision tree, §4.2–§4.8 |
+| "How do I segment with uneven illumination / phase halos?" | §4.3, §4.9 |
+| "Live/dead viability, nuclear counting, z-projections?" | §5.1–§5.3 |
+| "What shape descriptors / derived metrics / calibration?" | §6.1–§6.3 |
+| "How do I detect and classify lumens?" | §7.1–§7.3 |
+| "How do I quantify budding / branching / protrusions?" | §8.1–§8.4 |
+| "Confocal z-stack volume / sphericity / 3D tools?" | §9.1–§9.5 |
+| "Time-lapse growth curves and model fitting?" | §10.1–§10.3 |
+| "Multi-well plate batch + heatmap?" | §11.1–§11.2 |
+| "IC50 from area, composite drug response score?" | §12.1–§12.2 |
+| "Invasion assay (core vs total, INSIDIA metrics)?" | §13.1–§13.2 |
+| "Which external plugin/tool should I consider?" | §14.1–§14.2 |
+| "Common problems (debris, halos, touching organoids)?" | §15, gotchas |
+| "How do I choose n, test, sample size?" | §16.1–§16.4 |
+| "Methods paragraph / reporting checklist?" | §17 |
+| "Expected circularity / solidity / growth / viability ranges?" | §18 |
+
+---
+
+## §1 Term Index (A–Z)
+
+Alphabetical pointer to the section containing each term. Use
+`grep -n '<term>' organoid-spheroid-reference.md` to jump.
+
+### A
+`4PL (four-parameter logistic)` §12.1 · `Analyze Particles` §2, §4.2–§4.8, §5.1, §10.1, §11.1 · `Analyze Regions 3D` §9.2 · `Analyze Skeleton (2D/3D)` §8.2 · `AnaSP` §14.2 · `ANOVA` §16.3 · `Aspect Ratio (AR)` §2, §6.1 · `AUC (dose-response)` §12.1 · `Auto Local Threshold` §4.4 · `Auto Threshold` §2
+
+### B
+`Bandpass / Background (rolling ball)` §4.2, §15 · `Batch mode` §10.1, §11.1 · `Bernsen` §4.4 · `Bio-Formats` (via `open`) §4 · `Branching complexity` §8.4 · `Branch count / junction count / end-points` §8.2, §8.4 · `Brain organoid circularity` §18 · `Brightfield segmentation` §4 · `Budding index` §8.1 · `Budding indicator (solidity)` §18
+
+### C
+`Calcein / PI viability` §5.1 · `Calibration (pixel size)` §6.3, §15 · `Cellos` §14.1–§14.2 · `Chamfer Distance Map` §15 · `Circularity (Circ.)` §2, §6.1, §18 · `Close- (binary)` §4.3 · `Collapsed lumen` §7.3 · `Collect Garbage` §9.5 · `Combined drug score` §12.2 · `Composite score` §12.2 · `Connected Components Labeling` §9.2 · `Convert to Mask` §2, §4.2–§4.9 · `Convex Hull` §8.1 · `Core vs total (invasion)` §13.1 · `Create Selection` §5.1, §7.1, §8.1, §13.1 · `Cystic phenotype` §7.3
+
+### D
+`Derived measurements (EqDiam, BuddingIdx, FeretRatio, Roughness, VolEst)` §6.2 · `Distance Map` §15 · `Dose-response` §12.1 · `Doubling time` §10.2 · `Drug response` §12 · `Duplicate` §4.3–§4.9, §5.1, §7.1, §8.2, §13.1
+
+### E
+`Edge Detection (Method 4)` §4.5 · `Embryoid body` §3 · `Enhance Contrast` — see house rule, not used in this doc · `EqDiam (equivalent diameter)` §6.2 · `Erode / Dilate` §4.5, §13.1, §15 · `Experimental units (n)` §16.1 · `Exponential growth` §10.2 · `Extended Depth of Field` §5.3 · `Extended Maxima` §15
+
+### F
+`Feret (diameter)` §2, §6.1 · `FeretRatio` §6.2 · `Fill Holes` §2, §4.2–§4.9, §5.1, §7.1, §8.2–§8.3, §10.1–§11.1, §13.1 · `Fire (LUT)` §11.2 · `Fluorescence analysis` §5 · `Fold change (growth)` §18 · `Four-parameter logistic (4PL)` §12.1
+
+### G
+`Gaussian Blur / Gaussian Blur 3D` §4.5, §5.1–§5.2, §7.1, §9.1, §13.1 · `Gompertz growth` §10.2 · `Growth curves` §10 · `Growth rate interpretation` §18
+
+### H
+`Heatmap (plate)` §11.2 · `Huang` §4.2
+
+### I
+`IC50` §12.1 · `imageCalculator` (OR / Subtract / AND) §4.4, §5.1, §7.1, §8.3, §13.1 · `Illumination (uneven)` §4.3, §15 · `Independent data points (n)` §16.1 · `INSIDIA` §13.2, §14.1–§14.2 · `Intestinal crypt circularity` §18 · `Invasion assay` §13 · `Invasion index` §13.1–§13.2 · `Invert` §4.9, §7.1 · `Iterative Thresholding (3D)` §9.4
+
+### K
+`Kidney organoid circularity` §18 · `Kruskal-Wallis` §16.3
+
+### L
+`Li (threshold)` §4.2, §7.1, §13.1 · `Live/Dead viability` §5.1 · `Logistic growth` §10.2 · `Loss of tracked organoid` §10.3 · `Lumen detection` §7 · `Lumen classification` §7.3 · `Lumen-to-organoid ratio` §7.1, §7.3 · `Lung organoid circularity` §18 · `Lusca` §14.2
+
+### M
+`Marker-controlled Watershed` §15 · `Matrigel (circularity filter)` §15 · `Max Intensity projection` §5.3 · `Mean filter` §4.3 · `Measure` §5.1, §8.1 · `Median filter` §4.3, §4.4, §4.9, §15 · `MinError` §4.2 · `Mixed-effects model` §16.2–§16.3 · `MorphoLibJ` §9.2, §15 · `MOrgAna` §14.1–§14.2 · `Multi-lumen` §7.3 · `Multi-Window Adaptive (Method 3)` §4.4 · `Multi-well plate` §11
+
+### N
+`n (biological replicates)` §16.1, §16.4, §17 · `Niblack` §4.4 · `No lumen phenotype` §7.3 · `Nuclear counting` §5.2
+
+### O
+`Open / Close- (binary ops)` §2, §4.3–§4.9, §5.1, §7.1, §10.1, §11.1, §13.1 · `Options... (iterations)` §8.2, §8.3, §13.1 · `OrganoID` §14.2 · `OrganoSeg` §4.4, §14.1–§14.2 · `Organoid (vs spheroid)` §3 · `Otsu` §2, §4.2, §4.9, §5.1–§5.2, §9.1, §13.1
+
+### P
+`Pancreatic organoid circularity` §18 · `Patient-derived (n)` §16.1 · `Per-well summary` §16.2 · `Perimeter (Perim.)` §6.1 · `Phansalkar` §4.4 · `Phase contrast halos` §4.9, §15 · `Pixel calibration` §6.3, §15 · `Plate batch processing` §11.1 · `Plate heatmap` §11.2 · `Projection (Z)` §5.3 · `Protrusion detection` §8.3 · `Properties... (pixel_width)` §6.3
+
+### Q
+`Quick start` §2
+
+### R
+`RenyiEntropy` §4.2 · `Reporting standards` §17 · `Restore Selection` §5.1 · `Rolling ball` §4.2, §15 · `Roughness` §6.2 · `Roundness` §6.1
+
+### S
+`Sample size guidelines` §16.4 · `Sauvola` §4.4 · `Scale...` §9.5, §11.2 · `Set Measurements` §2, §6.1, §7.1, §8.1, §10.1, §11.1 · `setAutoThreshold` §2, §4.2–§4.9, §5.1–§5.2, §7.1, §9.1, §10.1, §11.1, §13.1 · `setBatchMode` §10.1, §11.1 · `setPixel` §11.2 · `setResult / updateResults` §6.2, §10.1, §11.1 · `setThreshold` §4.7 · `Skeletonize` §8.2 · `Solidity` §2, §6.1, §8.1, §8.4, §18 · `Sphericity` §9.2, §9.3 · `Spheroid (vs organoid)` §3 · `SpheroidJ` §14.1–§14.2 · `Splitting event (tracking)` §10.3 · `StarDist` §5.2 · `Statistics` §16 · `Subtract Background` §2, §4.2–§4.9, §5.1, §7.1, §10.1, §11.1, §13.1
+
+### T
+`Test selection` §16.3 · `Threshold method comparison` §4.2 · `Tracking gotchas` §10.3 · `Trainable Weka Segmentation` §4.7 · `Triangle` §4.2, §4.5, §7.1 · `Tumoroid` §3
+
+### U
+`Unsharp Mask` §15 · `updateResults` §6.2, §10.1, §11.1
+
+### V
+`Variance filter (Method 6)` §4.8 · `Viability` §5.1, §18 · `VolEst (volume estimate)` §6.2 · `Volume (3D)` §9.1–§9.2 · `Voxel_count / volume / surface_area / mean_breadth / sphericity / euler_number (Analyze Regions 3D)` §9.2
+
+### W
+`Watershed` §2, §5.2, §15 · `Weka (Method 5)` §4.7, §14.1–§14.2 · `Well (experimental unit)` §16.1
+
+### Y
+`Yen` — see §4.2 method table (not enumerated separately)
+
+### Z
+`Z Project` §5.3 · `Z-stack memory tips` §9.5
+
+---
+
+## §2 Quick Start
 
 ```bash
 python ij.py macro '
@@ -36,7 +145,7 @@ python ij.py results
 
 ---
 
-## 2. Structure Types Comparison
+## §3 Structure Types Comparison
 
 | Feature | Spheroid | Organoid | Tumoroid | Embryoid Body |
 |---------|----------|----------|----------|---------------|
@@ -54,9 +163,9 @@ indicates proper differentiation, not defects.
 
 ---
 
-## 3. Brightfield Segmentation
+## §4 Brightfield Segmentation
 
-### 3.1 Decision Tree
+### §4.1 Decision Tree
 
 ```
 Is the background uniform?
@@ -71,7 +180,7 @@ Touching organoids? --> Multi-window adaptive + watershed (Method 3)
 High-throughput (100+ images)? --> Train Weka once, batch-apply (Method 5)
 ```
 
-### 3.2 Method 1: Global Threshold (spheroids with uniform background)
+### §4.2 Method 1: Global Threshold (spheroids with uniform background)
 
 ```javascript
 run("8-bit");
@@ -93,7 +202,7 @@ run("Analyze Particles...", "size=500-Infinity show=Masks");
 | MinError | Clean brightfield with Gaussian distributions |
 | RenyiEntropy | Complex histograms where Otsu fails |
 
-### 3.3 Method 2: Local Adaptive Threshold (uneven illumination)
+### §4.3 Method 2: Local Adaptive Threshold (uneven illumination)
 
 ```javascript
 run("8-bit");
@@ -113,7 +222,7 @@ run("Analyze Particles...", "size=1000-Infinity show=Masks");
 rename("organoid_mask");
 ```
 
-### 3.4 Method 3: Multi-Window Adaptive (OrganoSeg-style)
+### §4.4 Method 3: Multi-Window Adaptive (OrganoSeg-style)
 
 Apply local threshold at multiple scales, combine with OR. Captures fine edges
 and full extent simultaneously.
@@ -151,7 +260,7 @@ rename("final_mask");
 | Niblack | Variable illumination |
 | Mean/Median | Simple, fast baseline |
 
-### 3.5 Method 4: Edge Detection
+### §4.5 Method 4: Edge Detection
 
 ```javascript
 run("8-bit");
@@ -167,7 +276,7 @@ run("Erode"); run("Erode");
 run("Analyze Particles...", "size=1000-Infinity show=Masks");
 ```
 
-### 3.6 Method 5: Weka ML (most accurate, difficult images)
+### §4.6 Method 5: Weka ML (most accurate, difficult images)
 
 ```javascript
 // Train interactively, then batch-apply saved classifier:
@@ -185,7 +294,7 @@ run("Fill Holes");
 run("Analyze Particles...", "size=1000-Infinity show=Masks");
 ```
 
-### 3.7 Method 6: Variance Filter
+### §4.7 Method 6: Variance Filter
 
 Detects textured regions (organoids) vs smooth background.
 
@@ -201,7 +310,7 @@ run("Fill Holes"); run("Open");
 run("Analyze Particles...", "size=2000-Infinity show=Masks");
 ```
 
-### 3.8 Phase Contrast Halo Removal
+### §4.8 Phase Contrast Halo Removal
 
 ```javascript
 run("8-bit");
@@ -217,9 +326,9 @@ run("Analyze Particles...", "size=1000-Infinity show=Masks");
 
 ---
 
-## 4. Fluorescence Analysis
+## §5 Fluorescence Analysis
 
-### 4.1 Live/Dead Viability
+### §5.1 Live/Dead Viability
 
 ```javascript
 // Input: 2-channel (C1=calcein/live, C2=PI/dead)
@@ -264,7 +373,7 @@ viability = live_intden / (live_intden + dead_intden) * 100;
 print("Viability: " + d2s(viability, 1) + "%");
 ```
 
-### 4.2 Nuclear Counting
+### §5.2 Nuclear Counting
 
 ```javascript
 // Option A: Threshold + watershed
@@ -281,7 +390,7 @@ print("Nuclei counted: " + nResults);
 // run("Command From Macro", "command=[de.csbdresden.stardist.StarDist2D], args=['input':'" + getTitle() + "', 'modelChoice':'Versatile (fluorescent nuclei)', 'normalizeInput':'true', 'percentileBottom':'1.0', 'percentileTop':'99.8', 'probThresh':'0.5', 'nmsThresh':'0.4', 'outputType':'Both', 'nTiles':'1', 'excludeBoundary':'2', 'roiPosition':'Automatic', 'verbose':'false', 'showCsbDeepProgress':'false', 'showProbAndDist':'false'], process=[false]");
 ```
 
-### 4.3 Z-Stack Projections
+### §5.3 Z-Stack Projections
 
 | Projection | Use for | Syntax |
 |-----------|---------|--------|
@@ -291,9 +400,9 @@ print("Nuclei counted: " + nResults);
 
 ---
 
-## 5. Morphometric Measurements
+## §6 Morphometric Measurements
 
-### 5.1 Standard Shape Descriptors
+### §6.1 Standard Shape Descriptors
 
 ```javascript
 run("Set Measurements...", "area perimeter shape feret fit display redirect=None decimal=3");
@@ -309,7 +418,7 @@ run("Set Measurements...", "area perimeter shape feret fit display redirect=None
 | Aspect Ratio | AR | Major/Minor axis | >=1 (1=round) |
 | Feret | Feret | Max caliper distance | >0 |
 
-### 5.2 Derived Measurements
+### §6.2 Derived Measurements
 
 ```javascript
 for (i = 0; i < nResults; i++) {
@@ -332,7 +441,7 @@ for (i = 0; i < nResults; i++) {
 updateResults();
 ```
 
-### 5.3 Calibration Check
+### §6.3 Calibration Check
 
 ```javascript
 getPixelSize(unit, pw, ph);
@@ -345,9 +454,9 @@ if (unit == "pixels" || unit == "pixel") {
 
 ---
 
-## 6. Lumen Detection
+## §7 Lumen Detection
 
-### 6.1 Phase Contrast / Brightfield
+### §7.1 Phase Contrast / Brightfield
 
 Lumens appear as bright regions within darker organoid body.
 
@@ -389,12 +498,12 @@ for (i = 0; i < n_lumens; i++) lumen_total += getResult("Area", i);
 print("Lumens: " + n_lumens + ", Ratio: " + d2s(lumen_total/org_area, 3));
 ```
 
-### 6.2 Fluorescence (Nuclear Stain)
+### §7.2 Fluorescence (Nuclear Stain)
 
 Lumens = dark voids enclosed by bright nuclei. Segment organoid (fill holes),
 segment nuclear signal, subtract nuclei from filled organoid to find voids.
 
-### 6.3 Lumen Classification
+### §7.3 Lumen Classification
 
 | Phenotype | Lumens | Lumen/Organoid Ratio | Notes |
 |-----------|--------|---------------------|-------|
@@ -406,9 +515,9 @@ segment nuclear signal, subtract nuclei from filled organoid to find voids.
 
 ---
 
-## 7. Budding and Branching
+## §8 Budding and Branching
 
-### 7.1 Convex Hull Budding Index
+### §8.1 Convex Hull Budding Index
 
 ```javascript
 // Input: binary mask of single organoid
@@ -424,7 +533,7 @@ hull_perim = getResult("Perim.", nResults-1);
 print("Budding index: " + d2s(budding_index, 3));
 ```
 
-### 7.2 Skeleton-Based Branching
+### §8.2 Skeleton-Based Branching
 
 ```javascript
 run("Duplicate...", "title=skel_input");
@@ -435,7 +544,7 @@ run("Analyze Skeleton (2D/3D)", "prune=[shortest branch] show");
 // Results: # Branches, # Junctions, # End-points, Avg Branch Length
 ```
 
-### 7.3 Protrusion Detection
+### §8.3 Protrusion Detection
 
 Subtract a heavily-opened (smoothed) version from the original mask to isolate
 protrusions. Tune opening iterations based on protrusion thickness: start with
@@ -452,7 +561,7 @@ rename("protrusions");
 run("Analyze Particles...", "size=100-Infinity display clear");
 ```
 
-### 7.4 Branching Complexity Metrics
+### §8.4 Branching Complexity Metrics
 
 | Metric | Low = | High = |
 |--------|-------|--------|
@@ -465,12 +574,12 @@ run("Analyze Particles...", "size=100-Infinity display clear");
 
 ---
 
-## 8. 3D Analysis
+## §9 3D Analysis
 
 Use when: confocal/light-sheet z-stacks, accurate volume needed, organoids
 overlap in 2D, or internal 3D structure matters.
 
-### 8.1 3D Objects Counter
+### §9.1 3D Objects Counter
 
 ```javascript
 run("Gaussian Blur 3D...", "x=2 y=2 z=1");
@@ -480,7 +589,7 @@ run("3D Objects Counter", "threshold=128 slice=1 min.=5000 max.=99999999 objects
 // Results: Volume, Surface area, Mean intensity, Centroid, Bounding box
 ```
 
-### 8.2 MorphoLibJ 3D
+### §9.2 MorphoLibJ 3D
 
 ```javascript
 run("Connected Components Labeling", "connectivity=26 type=[16 bits]");
@@ -488,7 +597,7 @@ run("Analyze Regions 3D", "voxel_count volume surface_area mean_breadth spherici
 // Sphericity = (36*pi*V^2)^(1/3) / S  (1 = perfect sphere)
 ```
 
-### 8.3 Sphericity Interpretation
+### §9.3 Sphericity Interpretation
 
 | Sphericity | Interpretation |
 |-----------|----------------|
@@ -497,7 +606,7 @@ run("Analyze Regions 3D", "voxel_count volume surface_area mean_breadth spherici
 | 0.5-0.7 | Irregular (budding organoid) |
 | <0.5 | Highly irregular (branched) |
 
-### 8.4 3D ImageJ Suite (mcib3d)
+### §9.4 3D ImageJ Suite (mcib3d)
 
 ```javascript
 // 3D iterative thresholding (better for touching organoids)
@@ -508,7 +617,7 @@ run("3D Watershed Split", "seeds_threshold=128 image_threshold=0 radius=2");
 run("3D Manager");
 ```
 
-### 8.5 Memory Tips for Large Z-Stacks
+### §9.5 Memory Tips for Large Z-Stacks
 
 ```javascript
 print("Free memory: " + IJ.freeMemory());
@@ -519,9 +628,9 @@ run("Collect Garbage");
 
 ---
 
-## 9. Growth Curves
+## §10 Growth Curves
 
-### 9.1 Batch Timepoint Measurement
+### §10.1 Batch Timepoint Measurement
 
 ```javascript
 inputDir = "/path/to/time_series/";
@@ -550,7 +659,7 @@ setBatchMode(false);
 saveAs("Results", inputDir + "growth_data.csv");
 ```
 
-### 9.2 Python Growth Curve Fitting
+### §10.2 Python Growth Curve Fitting
 
 ```python
 import numpy as np
@@ -574,7 +683,7 @@ def gompertz_growth(t, A0, K, k):
 # R^2 = 1 - SS_res/SS_tot
 ```
 
-### 9.3 Tracking Gotchas
+### §10.3 Tracking Gotchas
 
 - **Splitting** (area drops >30%): flag event, optionally sum daughter areas
 - **Merging** (area increases >100%): flag, exclude from growth rate
@@ -582,9 +691,9 @@ def gompertz_growth(t, A0, K, k):
 
 ---
 
-## 10. Multi-Well Plate Workflows
+## §11 Multi-Well Plate Workflows
 
-### 10.1 Batch Plate Processing
+### §11.1 Batch Plate Processing
 
 ```javascript
 inputDir = "/path/to/plate_images/";
@@ -614,7 +723,7 @@ setBatchMode(false);
 saveAs("Results", outputDir + "plate_all_organoids.csv");
 ```
 
-### 10.2 Plate Heatmap
+### §11.2 Plate Heatmap
 
 ```javascript
 // One pixel per well, scale up for visibility
@@ -627,9 +736,9 @@ run("Calibration Bar...", "location=[Upper Right] fill=White label=Black number=
 
 ---
 
-## 11. Drug Response
+## §12 Drug Response
 
-### 11.1 IC50 from Area (Python)
+### §12.1 IC50 from Area (Python)
 
 ```python
 import numpy as np
@@ -645,7 +754,7 @@ def four_parameter_logistic(x, bottom, top, ic50, hill):
 # AUC: np.trapz(responses, np.log10(doses)) -- lower AUC = more sensitive
 ```
 
-### 11.2 Combined Score
+### §12.2 Combined Score
 
 ```
 composite_score = (area_treated / area_control) * (viability_treated / viability_control)
@@ -655,9 +764,9 @@ composite_score = (area_treated / area_control) * (viability_treated / viability
 
 ---
 
-## 12. Invasion Assays
+## §13 Invasion Assays
 
-### 12.1 Spheroid Invasion Quantification
+### §13.1 Spheroid Invasion Quantification
 
 ```javascript
 original = getTitle();
@@ -694,7 +803,7 @@ invasion_index = total_area / core_area;
 print("Invasion index: " + d2s(invasion_index, 3));
 ```
 
-### 12.2 INSIDIA Metrics
+### §13.2 INSIDIA Metrics
 
 | Parameter | Description |
 |-----------|-------------|
@@ -706,9 +815,9 @@ print("Invasion index: " + d2s(invasion_index, 3));
 
 ---
 
-## 13. Plugins and Tools
+## §14 Plugins and Tools
 
-### 13.1 Comparison Matrix
+### §14.1 Comparison Matrix
 
 | Feature | ImageJ Macros | OrganoSeg | SpheroidJ | INSIDIA | MOrgAna | Cellos | Weka |
 |---------|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
@@ -725,7 +834,7 @@ Y* = with custom code. **Recommendation:** Use ImageJ macros as primary approach
 (works via TCP, fully automatable). Mention external tools when users need
 capabilities beyond macros.
 
-### 13.2 Tool Summary
+### §14.2 Tool Summary
 
 | Tool | Type | Best for | Limitation |
 |------|------|----------|------------|
@@ -740,7 +849,7 @@ capabilities beyond macros.
 
 ---
 
-## 14. Common Problems and Fixes
+## §15 Common Problems and Fixes
 
 | Problem | Fix | Macro |
 |---------|-----|-------|
@@ -789,9 +898,9 @@ Threshold result wrong:
 
 ---
 
-## 15. Statistics
+## §16 Statistics
 
-### 15.1 Experimental Units (Critical)
+### §16.1 Experimental Units (Critical)
 
 | Design | n = | NOT n = |
 |--------|-----|---------|
@@ -800,7 +909,7 @@ Threshold result wrong:
 | Multi-well, many org/well | # wells | # organoids (shared media) |
 | Patient-derived | # patients | # organoids |
 
-### 15.2 Analytical Approaches
+### §16.2 Analytical Approaches
 
 **Per-well summary (simplest):** Compute mean per well, use well means for tests.
 
@@ -818,7 +927,7 @@ model = smf.mixedlm("Area ~ Condition", df, groups=df["Well"])
 result = model.fit()
 ```
 
-### 15.3 Test Selection
+### §16.3 Test Selection
 
 | Comparison | Normal | Non-Normal | Notes |
 |-----------|--------|-----------|-------|
@@ -829,7 +938,7 @@ result = model.fit()
 | Dose-response | 4PL regression | -- | IC50 |
 | Nested data | Mixed-effects | -- | Organoids within wells |
 
-### 15.4 Sample Size Guidelines
+### §16.4 Sample Size Guidelines
 
 - Descriptive: n >= 3 biological replicates
 - Comparative: n >= 3, consider n >= 5 per condition
@@ -838,7 +947,7 @@ result = model.fit()
 
 ---
 
-## 16. Reporting Standards
+## §17 Reporting Standards
 
 ### Methods Checklist
 
@@ -864,7 +973,7 @@ mixed-effects model], n = [biological replicates]."
 
 ---
 
-## Appendix: Measurement Interpretation
+## §18 Appendix: Measurement Interpretation
 
 ### Circularity by Organoid Type
 

@@ -4,9 +4,117 @@ Agent-oriented reference for super-resolution image analysis in Fiji/ImageJ.
 Covers ThunderSTORM (SMLM), NanoJ-SRRF, SIM quality assessment, FRC resolution,
 cluster analysis, nanoscale colocalization, expansion microscopy, and STED.
 
+Sources: ThunderSTORM plugin docs (`zitmen.github.io/thunderstorm/`),
+NanoJ-SRRF docs (`github.com/HenriquesLab/NanoJ-SRRF`), NanoJ-SQUIRREL,
+fairSIM, SIMcheck, BIOP FRC, DeconvolutionLab2, GDSC SMLM. Use
+`python probe_plugin.py "Plugin..."` to discover any installed plugin's
+parameters at runtime.
+
+Invoke from the agent:
+`python ij.py macro '<code>'` — run ImageJ macro (.ijm) code.
+`python ij.py script '<code>'` — run Groovy (default), Jython, or JavaScript.
+
 ---
 
-## 1. Method Selection
+## §0 Lookup Map — "How do I find X?"
+
+| Question | Where to look |
+|---|---|
+| "Which SR method should I use?" | §2 method selection |
+| "What's the diffraction limit / SMLM precision formula?" | §3 key equations |
+| "How do I configure ThunderSTORM camera / run analysis?" | §4.2, §4.4 |
+| "How do I filter / merge / drift-correct localizations?" | §4.5, §4.6, §4.8 |
+| "What renderer should I use and what magnification?" | §4.9 |
+| "How do I export / import a localization CSV?" | §4.10 |
+| "How do I run SRRF / eSRRF on a time-lapse?" | §5 |
+| "How do I assess SIM quality (MCR, artifacts)?" | §6 |
+| "How do I measure resolution (FRC / decorrelation / SQUIRREL)?" | §7 |
+| "How do I cluster localizations (DBSCAN, Ripley, Voronoi)?" | §8 |
+| "How do I do nanoscale colocalization on SMLM?" | §9 |
+| "How do I correct ExM measurements for expansion factor?" | §10 |
+| "How do I deconvolve STED images?" | §11 |
+| "What went wrong with my SMLM / SRRF reconstruction?" | §12 troubleshooting |
+| "What must I report for publication?" | §13 |
+| "Which fluorophore / buffer for dSTORM / PALM?" | §14 |
+| "Which update site installs plugin X?" | §15 |
+| "Common SR pitfalls?" | §16 gotchas |
+
+---
+
+## §1 Term Index (A–Z)
+
+Alphabetical pointer to the section containing each term. Use
+`grep -n '`<term>`' super-resolution-reference.md` to jump.
+
+### A
+`Alexa Fluor 647` §14 · `Alexa Fluor 532` §14 · `Alexa Fluor 488` §14 · `angles (SIM)` §6 · `artifacts (SIM)` §6 · `artifacts (STED)` §11 · `astigmatism (3D SMLM)` §4.4 · `Averaged shifted histograms` §4.9
+
+### B
+`Batch Processing (SMLM)` §4.11 · `bead calibration (astigmatism)` §4.4 · `bkgstd (CSV column)` §4.10 · `buffer (dSTORM MEA)` §14
+
+### C
+`Camera setup (ThunderSTORM)` §4.2 · `CBC (Coordinate-Based Colocalization)` §9 · `CF568` §14 · `CF680` §14 · `chromatic aberration` §16 · `Cluster Analysis` §8 · `colocalization (nanoscale)` §9 · `connectivity (detector)` §4.3 · `correct_vibration (SRRF)` §5 · `Cross-correlation drift` §4.8 · `Cross-pair correlation` §9 · `CSV columns (ThunderSTORM)` §4.10
+
+### D
+`DBSCAN` §8.1 · `Decorrelation Analysis` §7.2 · `DeconvolutionLab2` §11, §15 · `Density filter` §4.7 · `Dendra2` §14 · `Detectors (ThunderSTORM)` §4.3 · `Difference of Gaussians filter` §4.3 · `diffraction limit` §3 · `dist (merging)` §4.6 · `DNA-PAINT` §2 · `Drift correction` §4.8 · `dSTORM` §2, §14 · `Duty Cycle` §14
+
+### E
+`Elliptical Gaussian (3D)` §4.3, §4.4 · `epsilon (DBSCAN)` §8.1 · `eSRRF` §5 · `Estimate Resolution (Decorrelation)` §7.2 · `Expansion factor` §10 · `Expansion Microscopy (ExM)` §2, §10 · `Export results (ThunderSTORM)` §4.10
+
+### F
+`fairSIM` §6, §15 · `Feature variation (SIMcheck)` §6 · `Fiducial markers (drift)` §4.8 · `Filter (ThunderSTORM)` §4.5 · `Filtering Localizations` §4.5 · `fitradius` §4.3 · `Fitting Methods` §4.3 · `Fluorophore Quick Reference` §14 · `formula (expression filter)` §4.5 · `Fourier Ring Correlation (FRC)` §7.1 · `frames_per_timepoint (SRRF)` §5 · `FRC threshold (1/7)` §3, §7.1 · `FRC (BIOP plugin)` §7.1, §15 · `FWHM` §3, §11
+
+### G
+`gainem` §4.2 · `GDSC SMLM (PeakFit)` §15 · `g(r) (cross-pair)` §9
+
+### H
+`Histogram renderer` §4.9
+
+### I
+`Image Filters (ThunderSTORM pre-processing)` §4.3 · `Import results` §4.10 · `Installation (ThunderSTORM)` §4.1 · `intensity` §4.5, §4.10 · `Integrated Gaussian` §4.3 · `isemgain` §4.2
+
+### L
+`L(r) (Ripley's L)` §8.2 · `laser power` §13 · `Local maximum detector` §4.3 · `Localization precision` §3, §13
+
+### M
+`magnification (SMLM rendering)` §4.9 · `MCR (Modulation Contrast Ratio)` §6 · `MEA buffer` §14 · `mEos3.2` §14 · `Median filter (ThunderSTORM)` §4.3 · `Merging` §4.6 · `Method Selection` §2 · `mfaenabled (multi-emitter)` §4.4 · `minPts (DBSCAN)` §8.1 · `Monte Carlo envelope` §8.2 · `Moving average filter` §4.3 · `Multi-emitter fitting analysis` §4.4
+
+### N
+`NanoJ-Core` §5 · `NanoJ-SQUIRREL` §7.3, §15 · `NanoJ-SRRF` §5, §15 · `Nearest-Neighbor Distance` §9 · `nmax (multi-emitter)` §4.4 · `Non-maximum suppression detector` §4.3 · `Normalized Gaussian renderer` §4.9 · `Nyquist (SMLM)` §3, §16
+
+### O
+`offframes (merging)` §4.6 · `offset (camera)` §4.2 · `ontimeratio (fiducial drift)` §4.8
+
+### P
+`PA-GFP / PA-mCherry` §14 · `PALM` §2, §14 · `pattern spacing (SIM)` §6 · `phases (SIM)` §6 · `Phasor localization` §4.3 · `photons2adu` §4.2 · `Photons/event` §14 · `photobleaching` §12 · `Picasso` §2 · `Plugin Installation Summary` §15 · `probe_plugin` §1 header · `Properties... (ExM calibration)` §10 · `PSF Fitting Models` §4.3 · `pvalue (multi-emitter)` §4.4
+
+### R
+`radiality_magnification` §5 · `raw SIM data` §6 · `renderer` §4.9 · `Rendering (ThunderSTORM)` §4.9 · `Resolution Estimation` §7 · `Resolution Estimation Decision` §7.3 · `Richardson-Lucy` §11 · `ring (SRRF)` §5 · `Ripley's K/L` §8.2 · `RSE map` §7.3 · `RSP (SQUIRREL)` §7.3 · `Run analysis (ThunderSTORM)` §4.4
+
+### S
+`scale (Wavelet)` §4.3 · `sensitivity (eSRRF)` §5 · `sigma (PSF width)` §4.3, §4.5 · `SIM` §2, §6 · `SIMcheck` §6, §15 · `Single-Molecule Localization Microscopy (SMLM)` §2, §4 · `SNR` §11 · `SQUIRREL` §7.3, §15 · `SR-Tesseler` §8.3 · `SRRF (NanoJ)` §5 · `SRRF Analysis` §5 · `STED` §2, §11 · `std(Wave.F1)` §4.3 · `steps (cross-corr drift)` §4.8
+
+### T
+`Temporal Color Code` §4.9 · `threed (ThunderSTORM 3D)` §4.4 · `ThunderSTORM` §4, §15 · `TRA (Temporal Radiality Average)` §5 · `Troubleshooting` §12 · `TRM (Temporal Radiality Maximum)` §5 · `TRPPM (pairwise product mean)` §5
+
+### U
+`uncertainty` §4.5, §4.10
+
+### V
+`Visualization (ThunderSTORM)` §4.9 · `Voronoi Tessellation` §8.3
+
+### W
+`Wavelet B-Spline filter` §4.3 · `Weighted Least Squares` §4.3 · `widefield reference (SQUIRREL)` §7.3 · `Wiener parameter` §6
+
+### Y
+`Yen / other thresholds` — see `imagej-gui-reference.md` §5.2
+
+### Z
+`zrange (3D rendering)` §4.9 · `z-stack vs time series (Properties)` §12
+
+---
+
+## §2 Method Selection
 
 | Method | Resolution | Live-cell? | Hardware | Key Plugin |
 |--------|-----------|-----------|----------|------------|
@@ -32,7 +140,7 @@ cluster analysis, nanoscale colocalization, expansion microscopy, and STED.
 
 ---
 
-## 2. Key Equations
+## §3 Key Equations
 
 ```
 Diffraction limit:     d = lambda / (2 * NA)           ~200 nm lateral
@@ -49,15 +157,15 @@ precision with dense sampling. Report both localization precision AND FRC resolu
 
 ---
 
-## 3. ThunderSTORM (SMLM)
+## §4 ThunderSTORM (SMLM)
 
-### 3.1 Installation
+### §4.1 Installation
 
 ```
 Help > Update... > Manage Update Sites > check "ThunderSTORM" > Apply > Restart
 ```
 
-### 3.2 Camera Setup (configure before analysis)
+### §4.2 Camera Setup (configure before analysis)
 
 ```bash
 python ij.py macro '
@@ -75,7 +183,7 @@ run("Camera setup", "offset=100 isemgain=true photons2adu=3.6 gainem=100 pixelsi
 
 Check metadata first: `python ij.py metadata`
 
-### 3.3 Detection & Fitting Options
+### §4.3 Detection & Fitting Options
 
 **Image Filters (pre-processing):**
 
@@ -109,7 +217,7 @@ Check metadata first: `python ij.py metadata`
 - `sigma`: Initial PSF width estimate (pixels). Measure from isolated molecule, or PSF_FWHM / (2.35 * pixel_size). Typically ~1.6.
 - `fitradius`: Fitting window (pixels). Typically ~2-3x sigma.
 
-### 3.4 Complete Analysis Command
+### §4.4 Complete Analysis Command
 
 ```bash
 python ij.py macro '
@@ -127,7 +235,7 @@ run("Run analysis",
 
 **For dense data (overlapping PSFs):** add `mfaenabled=true mfamethod=[Multi-emitter fitting analysis] nmax=5 pvalue=1.0E-6`.
 
-### 3.5 Filtering Localizations
+### §4.5 Filtering Localizations
 
 ```bash
 # Range filters
@@ -147,7 +255,7 @@ run("Filter", "formula=[sigma > 50 & sigma < 300 & intensity > 500 & uncertainty
 - `intensity`: Set lower bound to exclude dim false positives. Check the intensity histogram to find the noise floor.
 - `uncertainty`: Typically keep < 50 nm. Tighter = fewer but better localizations.
 
-### 3.6 Merging Duplicate Localizations
+### §4.6 Merging Duplicate Localizations
 
 Molecules blinking across consecutive frames create duplicates:
 
@@ -160,7 +268,7 @@ run("Merging", "zcoordweight=0.1 offframes=1 dist=20 framespermolecule=0");
 - `dist`: Starting point ~2x localization precision
 - `offframes`: 1-2 for fast blinking, 0 for strict merging
 
-### 3.7 Density-Based Filtering
+### §4.7 Density-Based Filtering
 
 ```bash
 python ij.py macro '
@@ -168,7 +276,7 @@ run("Density filter", "radius=50 neighbors=5");
 '
 ```
 
-### 3.8 Drift Correction
+### §4.8 Drift Correction
 
 **Cross-correlation (general purpose, no fiducials needed):**
 ```bash
@@ -185,7 +293,7 @@ run("Drift correction", "method=[Fiducial markers] ontimeratio=0.9 distance=40 s
 '
 ```
 
-### 3.9 Rendering
+### §4.9 Rendering
 
 | Method | Quality | Speed | When to Use |
 |--------|---------|-------|-------------|
@@ -204,7 +312,7 @@ run("Visualization",
 
 **Color-coded rendering:** Add `colorize=true lut=[Temporal Color Code]` to colour by frame (reveals drift). For 3D: `colorizez=true zrange=-500:500`.
 
-### 3.10 Export & Import
+### §4.10 Export & Import
 
 ```bash
 # Export CSV
@@ -228,7 +336,7 @@ run("Export results", "filepath=/path/to/protocol.txt fileformat=[Protocol]");
 
 **CSV columns:** id, frame, x [nm], y [nm], z [nm] (3D), sigma [nm], intensity [photon], offset [photon], bkgstd [photon], uncertainty [nm].
 
-### 3.11 Batch Processing
+### §4.11 Batch Processing
 
 ```bash
 python ij.py macro '
@@ -260,7 +368,7 @@ for (i = 0; i < list.length; i++) {
 
 ---
 
-## 4. NanoJ-SRRF
+## §5 NanoJ-SRRF
 
 SRRF extracts super-resolution from standard widefield/confocal time-lapses via temporal analysis of intensity fluctuations. Works with any fluorophore, no special hardware.
 
@@ -322,7 +430,7 @@ Temporal analysis modes:
 
 ---
 
-## 5. SIM Quality Assessment
+## §6 SIM Quality Assessment
 
 ### fairSIM (Reconstruction)
 
@@ -369,9 +477,9 @@ run("Reconstructed: Modulation Contrast Map");
 
 ---
 
-## 6. Resolution Estimation
+## §7 Resolution Estimation
 
-### 6.1 Fourier Ring Correlation (FRC) — Gold Standard
+### §7.1 Fourier Ring Correlation (FRC) — Gold Standard
 
 Split data into two independent halves, render each, measure correlation decay.
 
@@ -421,7 +529,7 @@ def compute_frc(image1, image2, pixel_size_nm):
     return frequencies[1:max_r], frc_values[1:max_r], None
 ```
 
-### 6.2 Decorrelation Analysis (Single Image)
+### §7.2 Decorrelation Analysis (Single Image)
 
 Estimates resolution from ONE image (no splitting needed):
 
@@ -433,7 +541,7 @@ run("Estimate Resolution (Decorrelation Analysis)");
 
 Generally agrees with FRC within ~20%. More conservative on noisy data.
 
-### 6.3 NanoJ-SQUIRREL (Quality Assessment)
+### §7.3 NanoJ-SQUIRREL (Quality Assessment)
 
 Compares SR image against diffraction-limited reference. Essential for SRRF validation.
 
@@ -466,11 +574,11 @@ run("SQUIRREL Analysis", "reference=reference super_resolution=sr");
 
 ---
 
-## 7. Cluster Analysis of Localizations
+## §8 Cluster Analysis of Localizations
 
 SMLM data is fundamentally a coordinate list. Cluster analysis reveals molecular organization.
 
-### 7.1 DBSCAN
+### §8.1 DBSCAN
 
 Groups localizations by local density without pre-specifying cluster count.
 
@@ -511,7 +619,7 @@ def run_dbscan(csv_path, epsilon_nm=50, min_pts=5):
     return pd.DataFrame(stats)
 ```
 
-### 7.2 Ripley's K/L Function
+### §8.2 Ripley's K/L Function
 
 Quantifies clustering/dispersion at multiple spatial scales vs complete spatial randomness.
 
@@ -540,13 +648,13 @@ def ripleys_l(coords, radii, area):
     return np.sqrt(k_values / np.pi) - radii
 ```
 
-### 7.3 Voronoi Tessellation
+### §8.3 Voronoi Tessellation
 
 Each localization gets a polygon; area is inversely proportional to local density. Threshold on cell area (e.g., < mean area) to segment clusters. Implemented in SR-Tesseler (Levet et al. 2015) and scipy.spatial.Voronoi.
 
 ---
 
-## 8. Nanoscale Colocalization
+## §9 Nanoscale Colocalization
 
 **Never use pixel-based methods (PCC, Manders, Coloc 2) on rendered SMLM images.** Results change with rendering pixel size and Gaussian spread creates false overlap.
 
@@ -600,7 +708,7 @@ def nn_colocalization(ch1_coords, ch2_coords, max_dist_nm=200):
 
 ---
 
-## 9. Expansion Microscopy
+## §10 Expansion Microscopy
 
 Physical sample expansion (~4x standard, up to ~20x iterative) achieves effective SR on a standard microscope.
 
@@ -626,7 +734,7 @@ run("Properties...", "pixel_width=" + (pw/expansion_factor) + " pixel_height=" +
 
 ---
 
-## 10. STED Image Analysis
+## §11 STED Image Analysis
 
 STED produces direct SR images — no localization fitting or reconstruction needed. Typically benefits from deconvolution (Richardson-Lucy) since the STED PSF is well-defined.
 
@@ -649,7 +757,7 @@ Measure resolution via line profiles across sub-resolution structures (FWHM) or 
 
 ---
 
-## 11. Troubleshooting
+## §12 Troubleshooting
 
 ### SMLM
 
@@ -679,7 +787,7 @@ Measure resolution via line profiles across sub-resolution structures (FWHM) or 
 
 ---
 
-## 12. Publication & Reporting
+## §13 Publication & Reporting
 
 ### Minimum Reporting Checklist
 
@@ -731,7 +839,7 @@ Measure resolution via line profiles across sub-resolution structures (FWHM) or 
 
 ---
 
-## 13. Fluorophore Quick Reference
+## §14 Fluorophore Quick Reference
 
 ### dSTORM
 
@@ -762,7 +870,7 @@ pH 7.5-8.5. Seal chamber. Use within 2-4 hours.
 
 ---
 
-## 14. Plugin Installation Summary
+## §15 Plugin Installation Summary
 
 | Plugin | Update Site | Purpose |
 |--------|------------|---------|
@@ -779,7 +887,7 @@ Install: `Help > Update... > Manage Update Sites > check "[name]" > Apply > Rest
 
 ---
 
-## 15. Gotchas
+## §16 Gotchas
 
 - **Never enhance contrast** on rendered SR images for quantitative work. Use `setMinAndMax()` for display only.
 - **Save both rendered image AND localization CSV** — the CSV is the actual data.

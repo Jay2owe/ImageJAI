@@ -1,10 +1,129 @@
 # Large Dataset Optimization Reference
 
-Efficient processing, storage, and analysis of large microscopy datasets in ImageJ/Fiji, Python, and distributed systems.
+Efficient processing, storage, and analysis of large microscopy datasets in ImageJ/Fiji, Python, and distributed systems. Covers JVM memory tuning (`-Xmx`, G1GC), `setBatchMode`, virtual stacks, BigDataViewer, OME-TIFF/N5/OME-Zarr formats, CLIJ2 GPU acceleration, Dask/tifffile Python out-of-core, Bio-Formats series iteration, headless mode, SLURM/Nextflow distributed processing, and OMERO.
+
+Sources: Fiji Jaunch launcher docs (`jvm.cfg`), ImageJ macro language (`imagej.net/ij/developer/macro/functions.html`), CLIJ2 reference (`clij.github.io/clij2-docs/`), Bio-Formats docs (`bio-formats.readthedocs.io`), OME-Zarr spec (`ngff.openmicroscopy.org`), BigDataViewer (`imagej.net/plugins/bdv/`), OMERO (`omero.readthedocs.io`), Dask (`docs.dask.org`), tifffile, bioformats2raw/raw2ometiff pipelines. Use `python probe_plugin.py "Plugin..."` to discover any installed plugin's parameters at runtime.
+
+Invoke from the agent:
+`python ij.py macro '<code>'` — run ImageJ macro (.ijm) code.
+`python ij.py script '<code>'` — run Groovy (default), Jython, or JavaScript.
 
 ---
 
-## Quick Start: Batch Template
+## §0 Lookup Map — "How do I find X?"
+
+| Question | Where to look |
+|---|---|
+| "What's a self-contained batch template?" | §2 |
+| "How much `-Xmx` / which GC should I set?" | §3.1 |
+| "How much memory will a 16-bit z-stack use?" | §3.2 |
+| "How do I force garbage collection in a loop?" | §3.3 |
+| "How do I close all images except the active one?" | §3.4 |
+| "What does `setBatchMode(true)` do?" | §4 |
+| "How do I process in chunks to avoid OOM?" | §4.1 |
+| "How do I open a terabyte file without loading it?" | §5, §10 |
+| "What's BigDataViewer for?" | §5.2 |
+| "OME-TIFF vs N5 vs OME-Zarr — which do I pick?" | §6, §6.1, §15.3 |
+| "How do I convert to N5 or OME-TIFF?" | §6.2 |
+| "When is GPU worth it? What's the CLIJ2 pattern?" | §7, §7.1 |
+| "How do I free GPU memory?" | §7.2 |
+| "Which CLIJ2 function does segmentation/morphology?" | §7.3 |
+| "What macro patterns are fastest?" | §8.1, §8.2 |
+| "How do I process data that doesn't fit in RAM in Python?" | §9.1 |
+| "Memory-mapped TIFF access in Python?" | §9.2 |
+| "How do I parallelise per-image processing in Python?" | §9.3 |
+| "How do I open one series of a multi-series .lif/.nd2?" | §10 |
+| "How do I iterate every series in a file?" | §10.1 |
+| "How do I run Fiji headless on a cluster?" | §11, §12.1 |
+| "Script @-parameters for headless CLI args?" | §11.1 |
+| "How do I tile a whole-slide image?" | §13 |
+| "What are the TCP server's limits for large jobs?" | §14.1 |
+| "Recommended agent workflow for big datasets?" | §14.2 |
+| "Decision tree for strategy/memory/format" | §15, §15.1, §15.2, §15.3 |
+| "Checklist before I run a big batch" | §16 |
+| "Why did my macro fail / leak memory?" | §17, §17.1 |
+
+---
+
+## §1 Term Index (A–Z)
+
+Alphabetical pointer to the section containing each term, flag, plugin, or technique. Use `grep -n` to jump.
+
+### A
+`Apply LUT` (referenced via §7.3) · `Analyze Particles` (via batch template §2) · `Average (Z Project)` §7.3
+
+### B
+`BDV N5 Viewer` §5.2 · `BDV XML/HDF5` §5.2, §15.3 · `.bfmemo` (Bio-Formats memo cache) §10, §17 · `BigDataViewer` §5.2, §15.3 · `BigTIFF` §9.2, §17 · `Bio-Formats Exporter` §6.2 · `Bio-Formats Importer` §5, §10 · `Bio-Formats Macro Extensions` §10.1, §13 · `bioformats2raw` §6.2 · `Batch Mode` §4, §4.1, §7.4, §8.1 · `blocksize` (N5) §6.2
+
+### C
+`call("java.lang.System.gc")` §3.3 · `CellProfiler` §12.2, §15.1 · `chunkSize` §4.1 · `CLIJ2` §7, §7.1, §7.2, §7.3, §7.4, §15.1, §17 · `CLIJ2_clear` §7.2 · `CLIJ2_push` §7.1 · `CLIJ2_pull` §7.1 · `CLIJ2_release` §7.1, §7.2 · `CLIJ2_reportMemory` §7.2, §17 · `cl_device` §7.1 · `close("\\Others")` §3.4 · `close("*")` §3.4 · `close("temp_*")` §3.4 · `Collect Garbage` §2, §3.3, §4.1, §10.1, §13, §16, §17 · `Compression` (format comparison) §6 · `Convert to Mask` (via batch) §2 · `connectedComponentsLabelingBox` (CLIJ2) §7.1, §7.3, §7.4 · `Crop on import` (Bio-Formats) §10
+
+### D
+`Dask` §9.1, §15.1, §15.2, §15.3 · `Decision Trees` §15, §15.1, §15.2, §15.3 · `dilateBox` (CLIJ2) §7.3 · `Distributed processing` §12, §15.1 · `Duplicate` §5.1
+
+### E
+`erodeBox` (CLIJ2) §7.3 · `Ext.setId` §10.1, §13 · `Ext.openSubImage` §13 · `Ext.getSeriesCount` §10.1 · `Ext.getSizeX / getSizeY` §13 · `Export Current Image as XML/HDF5` §5.2 · `Export N5` §6.2
+
+### F
+`File format comparison` §6, §6.1, §15.3 · `Fiji bug #819` §3.3 · `from_zarr` (Dask) §9.1
+
+### G
+`Garbage Collection` §3.3, §17 · `gaussianBlur2D/3D` (CLIJ2) §7.1, §7.3, §7.4 · `G1GC` (`-XX:+UseG1GC`) §3.1 · `getFileList` §2, §4.1, §7.4, §14.2 · `GPU acceleration` §7, §15.1 · `GPU memory` §7.2, §17 · `gzip` (N5 compression) §6.2
+
+### H
+`HDF5` §5.2, §6, §15.3 · `Headless Mode` §11, §11.1, §12.1, §16 · `Hyperstack` (Bio-Formats view) §5, §10, §10.1
+
+### I
+`IJ.currentMemory` §3.1, §17.1 · `IJ.maxMemory` §3.1 · `IJ.pad` §5.1 · `ImageJ-linux64` §11, §12.1 · `Image Memory Footprint` §3.2 · `Image Sequence...` §5 · `Incremental GC` (`-Xincgc`) §3.1 · `Input directory` (script param) §11.1
+
+### J
+`Jaunch launcher` §3.1 · `jvm.cfg` §3.1
+
+### L
+`Lazy loading` §5, §9.1 · `LZW` (TIFF compression) §6.2, §9.2
+
+### M
+`map_blocks` (Dask) §9.1 · `maximumZProjection` (CLIJ2) §7.3 · `Max memory` (`-Xmx`) §3.1, §16, §17 · `mean2DBox` (CLIJ2) §7.3 · `meanZProjection` (CLIJ2) §7.3 · `median2DBox` (CLIJ2) §7.3 · `memmap` (tifffile) §9.2 · `Memo files` §10, §17 · `Memory leak detection` §17.1 · `Memory Management` §3, §3.1, §3.2, §3.3, §3.4, §15.2 · `Multi Measure` §8.2 · `Multiprocessing` (Python) §9.3
+
+### N
+`N5` §5.2, §6, §6.2, §15.3 · `Network drive` §17 · `Nextflow` §12.2, §15.1 · `nResults` §2, §4.1, §8.2
+
+### O
+`OME-TIFF` §6, §6.1, §6.2, §15.3 · `OME-Zarr` §6, §6.1, §15.3, §16 · `OMERO` §12.2 · `Open / Opening images (virtual)` §5, §5.1, §10 · `open_all_series` §10 · `OutOfMemoryError` §17 · `Out-of-core processing` §9.1, §15.2, §16 · `Overlap` (tiled processing) §13
+
+### P
+`Performance Hierarchy` §8.1 · `pool.map` §9.3 · `probe_plugin.py` (header) · `Process Virtual Stack Pattern` §5.1 · `Progress` (`showProgress`) §2, §5.1, §14.1 · `Pyramidal` (OME-TIFF) §6 · `Python Large Data Processing` §9, §9.1, §9.2, §9.3
+
+### Q
+`QuPath` §12.2, §15.1
+
+### R
+`raw2ometiff` §6.2 · `regionprops_table` §9.3 · `ROI Manager` §4, §8.2, §17.1 · `Rolling ball` (Subtract Background) §2
+
+### S
+`saveAs("Results", ...)` §2, §4.1, §14.2 · `saveAs("Tiff", ...)` §2, §5.1 · `SCIFIO` §3.3, §17 · `Script Parameters` (`#@`) §11.1 · `Series iteration` §10.1 · `series_N` §10 · `setBatchMode` §2, §4, §4.1, §5.1, §7.4, §8.1, §10.1, §13, §14.2, §16 · `setSlice` §5.1 · `Skimage` (gaussian, threshold_otsu, label, regionprops_table) §9.3 · `SLURM` §12.1, §15.1 · `Snakemake` §12.2 · `Split Channels` §3.4 · `Stack.getDimensions` (referenced via §5.1) · `statisticsOfLabelledPixels` (CLIJ2) §7.1, §7.3, §7.4 · `stack_order=XYCZT` §5, §10, §10.1 · `Standard sizes` §6.1 · `subtractImages` (CLIJ2) §7.3 · `Subtract Background` §2
+
+### T
+`Table (Results)` §2, §8.2, §14.1, §17, §17.1 · `TCP Server Limitations` §14.1 · `thresholdOtsu` (CLIJ2) §7.1, §7.3, §7.4 · `tifffile` §9.1, §9.2, §9.3 · `Tiled BigTIFF` §9.2 · `Tiled / Tiling` §6, §13, §15.2, §15.3 · `tile` (tifffile) §9.2 · `TIFF format` §6, §6.1, §15.3 · `topHatBox` (CLIJ2) §7.1, §7.3 · `Troubleshooting` §17, §17.1
+
+### U
+`use_virtual_stack` §5, §10, §17
+
+### V
+`Virtual stacks` §5, §5.1, §10, §15.1, §15.2, §16 · `view=Hyperstack` §5, §10, §10.1 · `voronoiOtsuLabeling` (CLIJ2) §7.3
+
+### W
+`Whole-slide / Tiled Processing` §13, §15.1 · `Workstation GPU` §7
+
+### X
+`Xmx` (`-Xmx`) §3.1, §16, §17 · `Xincgc` (`-Xincgc`) §3.1 · `Xvfb` §11, §17
+
+### Z
+`Zarr` §6, §6.1, §6.2, §9.1, §15.3 · `Z Project` (via CLIJ2 projection ops) §7.3
+
+---
+
+## §2 Quick Start: Batch Template
 
 ```javascript
 setBatchMode(true);
@@ -39,9 +158,9 @@ python ij.py results
 
 ---
 
-## Memory Management
+## §3 Memory Management
 
-### Configuration
+### §3.1 Configuration
 
 | Setting | Recommendation |
 |---------|---------------|
@@ -59,7 +178,7 @@ maxMB = parseInt(IJ.maxMemory()) / (1024 * 1024);
 print("Used: " + d2s(usedMB, 0) + "/" + d2s(maxMB, 0) + " MB");
 ```
 
-### Image Memory Footprint
+### §3.2 Image Memory Footprint
 
 | Image Type | Dimensions | Memory |
 |-----------|-----------|--------|
@@ -73,7 +192,7 @@ print("Used: " + d2s(usedMB, 0) + "/" + d2s(maxMB, 0) + " MB");
 
 Compressed files (JPEG, LZW-TIFF) decompress to full size in memory.
 
-### Garbage Collection
+### §3.3 Garbage Collection
 
 ```javascript
 run("Collect Garbage");            // force GC
@@ -88,7 +207,7 @@ if (i % 10 == 0) run("Collect Garbage");
 - SCIFIO can prevent memory release in batch mode -- disable if not needed
 - `close()` does not always release memory in batch mode
 
-### Closing Images
+### §3.4 Closing Images
 
 ```javascript
 close("temp_*");           // wildcard
@@ -104,7 +223,7 @@ close("C2-" + title);
 
 ---
 
-## Batch Mode
+## §4 Batch Mode
 
 ```javascript
 setBatchMode(true);                    // ~10-20x faster, no display
@@ -119,7 +238,7 @@ setBatchMode(false);                   // exit
 - Error dialogs may be hidden -- check for silent failures
 - `setBatchMode(true)` must come BEFORE opening images
 
-### Chunked Processing (avoid memory exhaustion)
+### §4.1 Chunked Processing (avoid memory exhaustion)
 
 ```javascript
 setBatchMode(true);
@@ -144,7 +263,7 @@ setBatchMode(false);
 
 ---
 
-## Virtual Stacks and Lazy Loading
+## §5 Virtual Stacks and Lazy Loading
 
 Virtual stacks load only the displayed slice into memory.
 
@@ -158,7 +277,7 @@ run("Bio-Formats Importer", "open=/path/to/file.nd2 view=Hyperstack stack_order=
 
 **Limitations:** read-only, cannot crop directly, some operations fail.
 
-### Process Virtual Stack Pattern
+### §5.1 Process Virtual Stack Pattern
 
 ```javascript
 id = getImageID();
@@ -175,7 +294,7 @@ for (i = 1; i <= n; i++) {
 setBatchMode(false);
 ```
 
-### BigDataViewer
+### §5.2 BigDataViewer
 
 Handles terabyte-scale data via multi-resolution pyramids and lazy loading.
 
@@ -186,7 +305,7 @@ run("Export Current Image as XML/HDF5", "output=/path/to/output");
 
 ---
 
-## File Format Comparison
+## §6 File Format Comparison
 
 | Format | Compression | Chunked | Cloud-Ready | Multi-Resolution |
 |--------|------------|---------|-------------|-----------------|
@@ -196,7 +315,7 @@ run("Export Current Image as XML/HDF5", "output=/path/to/output");
 | N5 | Configurable | Yes | Yes | Yes |
 | OME-Zarr | Configurable | Yes | Yes | Yes |
 
-### When to Use Which
+### §6.1 When to Use Which
 
 | Scenario | Format |
 |----------|--------|
@@ -207,7 +326,7 @@ run("Export Current Image as XML/HDF5", "output=/path/to/output");
 | Python + Dask | Zarr |
 | Sharing with collaborators | OME-TIFF |
 
-### Converting Formats
+### §6.2 Converting Formats
 
 ```javascript
 // Export to OME-TIFF
@@ -234,7 +353,7 @@ z[:] = img
 
 ---
 
-## GPU Acceleration with CLIJ2
+## §7 GPU Acceleration with CLIJ2
 
 | Scenario | Typical Speedup |
 |----------|----------------|
@@ -243,7 +362,7 @@ z[:] = img
 | Optimised CLIJ2 pipeline | up to 100x |
 | Small images (<10 MB) | Not worth it (push/pull overhead) |
 
-### Basic Pattern
+### §7.1 Basic Pattern
 
 ```javascript
 run("CLIJ2 Macro Extensions", "cl_device=");
@@ -271,7 +390,7 @@ Ext.CLIJ2_pull(labels);
 Ext.CLIJ2_release(labels);
 ```
 
-### CLIJ2 Memory Management
+### §7.2 CLIJ2 Memory Management
 
 ```javascript
 Ext.CLIJ2_reportMemory();         // check GPU memory
@@ -284,7 +403,7 @@ Ext.CLIJ2_clear();                // release ALL (do at end of macro)
 - Keep pipeline on GPU -- minimize push/pull (each is slow)
 - Always call `Ext.CLIJ2_clear()` at end
 
-### Key CLIJ2 Operations
+### §7.3 Key CLIJ2 Operations
 
 | Category | Functions |
 |----------|----------|
@@ -297,7 +416,7 @@ Ext.CLIJ2_clear();                // release ALL (do at end of macro)
 | Projection | `maximumZProjection`, `meanZProjection` |
 | Transform | `scale2D/3D`, `rotate2D/3D`, `affineTransform2D/3D` |
 
-### CLIJ2 Batch Processing
+### §7.4 CLIJ2 Batch Processing
 
 ```javascript
 run("CLIJ2 Macro Extensions", "cl_device=");
@@ -327,9 +446,9 @@ Ext.CLIJ2_clear();
 
 ---
 
-## Macro Optimization
+## §8 Macro Optimization
 
-### Performance Hierarchy (fastest to slowest)
+### §8.1 Performance Hierarchy (fastest to slowest)
 
 1. CLIJ2 GPU pipeline
 2. `setBatchMode(true)` (~10-20x)
@@ -337,7 +456,7 @@ Ext.CLIJ2_clear();
 4. Pixel array access (`getLine()`)
 5. Per-pixel `getPixel`/`setPixel` (slowest)
 
-### Tips
+### §8.2 Tips
 
 ```javascript
 // Measure all ROIs at once (fast) vs one-by-one (slow)
@@ -356,9 +475,9 @@ if (nResults > 1000) {
 
 ---
 
-## Python Large Data Processing
+## §9 Python Large Data Processing
 
-### Dask for Out-of-Core
+### §9.1 Dask for Out-of-Core
 
 ```python
 import dask.array as da
@@ -371,7 +490,7 @@ filtered = data.map_blocks(lambda block: gaussian_filter(block, sigma=2), dtype=
 filtered.to_zarr("filtered_output.zarr")   # processes chunk by chunk
 ```
 
-### tifffile for Large TIFFs
+### §9.2 tifffile for Large TIFFs
 
 ```python
 import tifffile
@@ -383,7 +502,7 @@ data = tifffile.memmap("large_image.tif")
 tifffile.imwrite("output.tif", data, tile=(256, 256), compression="lzw", bigtiff=True)
 ```
 
-### Multiprocessing for Independent Images
+### §9.3 Multiprocessing for Independent Images
 
 ```python
 from multiprocessing import Pool
@@ -411,7 +530,7 @@ pd.concat(results).to_csv("batch_results.csv", index=False)
 
 ---
 
-## Bio-Formats for Large Files
+## §10 Bio-Formats for Large Files
 
 ```javascript
 // Virtual stack
@@ -427,7 +546,7 @@ run("Bio-Formats Importer", "open=/path/to/file.lif view=Hyperstack stack_order=
 run("Bio-Formats Importer", "open=/path/to/file.lif view=Hyperstack stack_order=XYCZT open_all_series");
 ```
 
-### Series Iteration
+### §10.1 Series Iteration
 
 ```javascript
 run("Bio-Formats Macro Extensions");
@@ -448,7 +567,7 @@ setBatchMode(false);
 
 ---
 
-## Headless Mode
+## §11 Headless Mode
 
 ```bash
 # Run macro headless
@@ -459,7 +578,7 @@ setBatchMode(false);
 ./ImageJ-linux64 --ij2 --headless --console --run script.groovy
 ```
 
-### Script Parameters (work both as GUI dialog and CLI args)
+### §11.1 Script Parameters (work both as GUI dialog and CLI args)
 
 ```javascript
 #@ File (label = "Input directory", style = "directory") input
@@ -473,9 +592,9 @@ processFolder(input);
 
 ---
 
-## Distributed / Cluster Processing
+## §12 Distributed / Cluster Processing
 
-### SLURM + Fiji
+### §12.1 SLURM + Fiji
 
 ```bash
 #!/bin/bash
@@ -490,7 +609,7 @@ FILE=${FILES[$SLURM_ARRAY_TASK_ID]}
     --run /path/to/process_single.ijm "input='${FILE}',output='${OUTPUT_DIR}'"
 ```
 
-### Other Tools
+### §12.2 Other Tools
 
 | Tool | Best For |
 |------|----------|
@@ -501,7 +620,7 @@ FILE=${FILES[$SLURM_ARRAY_TASK_ID]}
 
 ---
 
-## Whole-Slide / Tiled Processing
+## §13 Whole-Slide / Tiled Processing
 
 ```javascript
 run("Bio-Formats Macro Extensions");
@@ -528,9 +647,9 @@ setBatchMode(false);
 
 ---
 
-## Agent-Specific Optimization
+## §14 Agent-Specific Optimization
 
-### TCP Server Limitations
+### §14.1 TCP Server Limitations
 
 | Limitation | Workaround |
 |-----------|------------|
@@ -539,7 +658,7 @@ setBatchMode(false);
 | No streaming results | Save results periodically within macro |
 | 1 MB message limit | Save to file, read from file |
 
-### Agent Workflow for Large Datasets
+### §14.2 Agent Workflow for Large Datasets
 
 1. **Discover:** `python ij.py macro 'list=getFileList("/path/"); print(list.length+" files");'`
 2. **Test on 1:** open, check info/histogram/capture, develop pipeline
@@ -555,9 +674,9 @@ setBatchMode(false);
 
 ---
 
-## Decision Trees
+## §15 Decision Trees
 
-### Processing Strategy
+### §15.1 Processing Strategy
 
 ```
 How many images?
@@ -570,7 +689,7 @@ How many images?
 +-- 10000+: Distributed (Nextflow, SLURM + Fiji, Dask)
 ```
 
-### Memory Strategy
+### §15.2 Memory Strategy
 
 ```
 Image fits in RAM?
@@ -586,7 +705,7 @@ Image fits in RAM?
     +-- Distribute across cluster nodes
 ```
 
-### File Format
+### §15.3 File Format
 
 ```
 +-- Simple archival: OME-TIFF
@@ -598,33 +717,7 @@ Image fits in RAM?
 
 ---
 
-## Troubleshooting
-
-| Problem | Cause | Solution |
-|---------|-------|----------|
-| OutOfMemoryError | Images exceed RAM | Increase `-Xmx`, use virtual stacks, or chunk |
-| Memory not released | Java GC lag / SCIFIO | `run("Collect Garbage")`; disable SCIFIO |
-| Batch mode slow | Plugin not batch-compatible | Test if plugin needs visible window |
-| Results table extremely slow | >50k rows | Save and clear every ~1000 rows |
-| Bio-Formats import hangs | Corrupt file / memo cache | Delete `.bfmemo`; try `use_virtual_stack` |
-| CLIJ2 out of GPU memory | GPU VRAM full | Release intermediates; `Ext.CLIJ2_reportMemory()` |
-| Fiji crashes on large files | >4 GB TIFF / insufficient heap | Use BigTIFF; increase `-Xmx` |
-| Network drive very slow | I/O bottleneck | Copy data to local SSD |
-| Headless plugin errors | Plugin requires display | Use `Xvfb` on Linux |
-
-### Memory Leak Detection
-
-```javascript
-startMem = parseInt(IJ.currentMemory()) / (1024 * 1024);
-// ... processing ...
-endMem = parseInt(IJ.currentMemory()) / (1024 * 1024);
-print("Leaked: " + d2s(endMem - startMem, 0) + " MB");
-// Common causes: unclosed images, growing Results table, ROI Manager accumulation
-```
-
----
-
-## Optimization Checklist
+## §16 Optimization Checklist
 
 - [ ] Set Fiji memory to typically 75% of system RAM
 - [ ] Copy data to local SSD
@@ -638,3 +731,29 @@ print("Leaked: " + d2s(endMem - startMem, 0) + " MB");
 - [ ] Consider Dask/Python for out-of-core processing
 - [ ] Use OME-Zarr/N5 for datasets >50 GB
 - [ ] Use headless mode for server/cluster
+
+---
+
+## §17 Troubleshooting
+
+| Problem | Cause | Solution |
+|---------|-------|----------|
+| OutOfMemoryError | Images exceed RAM | Increase `-Xmx`, use virtual stacks, or chunk |
+| Memory not released | Java GC lag / SCIFIO | `run("Collect Garbage")`; disable SCIFIO |
+| Batch mode slow | Plugin not batch-compatible | Test if plugin needs visible window |
+| Results table extremely slow | >50k rows | Save and clear every ~1000 rows |
+| Bio-Formats import hangs | Corrupt file / memo cache | Delete `.bfmemo`; try `use_virtual_stack` |
+| CLIJ2 out of GPU memory | GPU VRAM full | Release intermediates; `Ext.CLIJ2_reportMemory()` |
+| Fiji crashes on large files | >4 GB TIFF / insufficient heap | Use BigTIFF; increase `-Xmx` |
+| Network drive very slow | I/O bottleneck | Copy data to local SSD |
+| Headless plugin errors | Plugin requires display | Use `Xvfb` on Linux |
+
+### §17.1 Memory Leak Detection
+
+```javascript
+startMem = parseInt(IJ.currentMemory()) / (1024 * 1024);
+// ... processing ...
+endMem = parseInt(IJ.currentMemory()) / (1024 * 1024);
+print("Leaked: " + d2s(endMem - startMem, 0) + " MB");
+// Common causes: unclosed images, growing Results table, ROI Manager accumulation
+```

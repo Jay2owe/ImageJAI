@@ -1,10 +1,129 @@
 # Immunofluorescence Image Post-Processing Reference
 
-Filtering, thresholding, deconvolution, and processing pipelines for IF images in Fiji/ImageJ.
+IF postprocessing = immunofluorescence post-processing workflows: filtering,
+thresholding, deconvolution, and processing pipelines for IF images in
+Fiji/ImageJ. Covers filter comparison, auto-threshold methods (global and
+local), PSF generation, DeconvolutionLab2 / Iterative Deconvolve 3D,
+complete pipelines (quant intensity, cell counting, colocalization,
+publication figures, z-stacks), pitfalls, and decision trees.
+
+Sources: `imagej.net/plugins/rolling-ball-background-subtraction`,
+`imagej.net/plugins/auto-threshold`, `imagej.net/plugins/auto-local-threshold`,
+`bigwww.epfl.ch/deconvolution/deconvolutionlab2/`,
+`imagej.net/plugins/iterative-deconvolve-3d`, `imagej.net/plugins/diffraction-psf-3d`,
+`clij.github.io/clij2-docs/reference__filter`, BaSiC (Nature Comms 2017),
+Nature Portfolio image integrity guidelines, `bioimagebook.github.io`,
+Pete Bankhead ImageJ intro, `wsr.imagej.net/developer/macro/functions.html`.
+Full list in §Sources at end.
+
+Invoke from the agent:
+`python ij.py macro '<code>'` — run ImageJ macro (.ijm) code.
+`python ij.py script '<code>'` — run Groovy (default), Jython, or JavaScript.
+`python probe_plugin.py "Plugin..."` — discover any installed plugin's
+parameters at runtime.
 
 ---
 
-## 0. Quick Start
+## §0 Lookup Map — "How do I find X?"
+
+| Question | Where to look |
+|---|---|
+| "Which filter should I use for denoising?" | §3 filter comparison table, §8 decision tree |
+| "How do I pick a threshold method?" | §4.1 method guide, §4.2 scenarios, §8 decision tree |
+| "When should I deconvolve?" | §5 when-to-deconvolve table, §8 decision tree |
+| "How do I generate a PSF?" | §5 PSF generation |
+| "What algorithm codes does DeconvolutionLab2 take?" | §5 algorithm table |
+| "How do I correct uneven illumination?" | §3 BaSiC flat-field correction |
+| "How do I use CLIJ2 GPU filters?" | §3 CLIJ2 GPU filters |
+| "What order should I process in?" | §3 filter order, §8 order of operations |
+| "How do I measure IF intensity quantitatively?" | §6.1 quantitative intensity pipeline |
+| "How do I count cells?" | §6.2 cell counting pipeline |
+| "How do I do colocalization?" | §6.3 colocalization pipeline |
+| "How do I prepare a publication figure?" | §6.4 publication figures |
+| "What operations destroy quantitative data?" | §9 destroys vs preserves table |
+| "What IF plugins are installed?" | §8 installed IF processing plugins |
+| "Quick-start example?" | §2 quick start |
+| "Why did my deconvolution ring / over-sharpen?" | §5 deconvolution artifacts |
+
+---
+
+## §1 Term Index (A–Z)
+
+Alphabetical pointer to the section containing each term. Use
+`grep -n '<term>' if-postprocessing-reference.md` to jump.
+
+### A
+`Analyze Particles` §2, §6.1, §6.2 · `Auto Local Threshold` §4.2 · `Auto Threshold (Try all)` §4.1, §8 · `autofluorescence (FFPE)` §4.1
+
+### B
+`Bandpass Filter` §3, §8 · `BaSiC` §3, §8 · `Bernsen` §4.2 · `Bio-Formats` §8 · `Brightness/Contrast` §9
+
+### C
+`Cellpose` §8 · `CLIJ2` §3, §8 · `CLIJ2_clear` §3 · `CLIJ2_differenceOfGaussian3D` §3 · `CLIJ2_gaussianBlur3D` §3 · `CLIJ2_median3DBox` §3 · `CLIJ2_push` §3 · `CLIJ2_subtractGaussianBackground` §3 · `CLIJ2_topHatBox` §3 · `CLIJx_bilateral` §3 · `CLIJx_nonLocalMeans` §3 · `Coloc 2` §6.3, §8 · `colocalization` §6.3 · `Contrast (local threshold)` §4.2 · `Convert to Mask` §2, §4.1, §6.1, §6.2, §9 · `CTCF` §9
+
+### D
+`dark background (fluorescence)` §4.1 · `dark frame` §3, §8 · `DeconvolutionLab2` §5 · `Default / IsoData` §4.1 · `Despeckle` §3 · `Diffraction PSF 3D` §5, §8 · `Difference of Gaussians (DoG)` §3, §4.1, §8 · `Dilate (grayscale)` §3 · `Duplicate` §6.4, §9
+
+### E
+`Enhance Contrast` §6.4, §9 · `Erode (grayscale)` §3
+
+### F
+`FISTA` §5 · `flat-field` §3, §6.1, §8 · `Flatten` §6.4 · `flatfield correction` §3, §6.1, §6.5, §8
+
+### G
+`Gaussian Blur` §3, §6.2, §8 · `Gaussian Blur 3D` §3, §6.5 · `getThreshold` §4.1 · `Green LUT` §6.4
+
+### H
+`Huang` §4.1 · `Hyperstack` (see Stack) — §3
+
+### I
+`ICTM` §5 · `imageCalculator` §3 · `Intermodes / Minimum (threshold)` §4.1 · `Iterative Deconvolve 3D` §5, §8
+
+### J
+`JACoP` §8 · `journal guidelines` §9
+
+### L
+`lambda (RLTV / Tikhonov / FISTA)` §5 · `Landweber (LW)` §5 · `Li (threshold)` §4.1, §8 · `light (rolling ball flag)` §3 · `LUT` §6.4, §9
+
+### M
+`Magenta LUT` §6.4 · `MaxEntropy` §4.1 · `Maximum` §3 · `Mean (filter)` §3 · `Mean (local threshold)` §4.2 · `Measured PSF` §5 · `Median` §3, §8 · `Median 3D` §3 · `Median (local threshold)` §4.2 · `Merge Channels` §6.4 · `MidGrey (local threshold)` §4.2 · `MinError(I)` §4.1 · `Minimum` §3 · `Moments` §4.1 · `MorphoLibJ` §8 · `Multi Otsu Threshold` §4.1, §8
+
+### N
+`NA correction` §5 · `Naive Inverse (NIF)` §5 · `Niblack` §4.2 · `NNLS` §5 · `Non-Local Means Denoising` §3, §8
+
+### O
+`Otsu` §2, §4.1, §6.1 · `Otsu (local)` §4.2 · `order of operations` §3, §8
+
+### P
+`Phansalkar` §4.1, §4.2, §8 · `probe_plugin` §5 · `PSF Generator (Gibson-Lanni)` §8 · `Publication Figures` §6.4
+
+### R
+`rank filters` §3 · `red/green overlays (avoid)` §9 · `Regularized Inverse (RIF)` §5 · `Remove Outliers` §3 · `RenyiEntropy` §4.1 · `Richardson-Lucy (RL)` §5, §8 · `Richardson-Lucy Total Variation (RLTV)` §5, §8 · `rolling ball` §3, §6.1, §6.2, §6.3, §6.5, §9 · `rolling (parameter)` §3
+
+### S
+`Sauvola` §4.2 · `Scale Bar` §6.4 · `Set Measurements` §2, §6.1 · `setAutoThreshold` §2, §4.1 · `setMinAndMax` §6.4, §9 · `setThreshold` §4.3 · `Shanbhag` §4.1 · `sigma (Gaussian)` §3 · `sliding paraboloid` §3 · `Split Channels` §2 · `StarDist 2D/3D` §8 · `Subtract Background` §2, §3, §6.1, §6.2, §6.3, §6.5, §9 · `Sum Slices (Z Project)` §6.5, §9
+
+### T
+`Theoretical PSF` §5 · `Tikhonov-Miller (TM)` §5 · `Triangle` §4.1, §6.2, §8
+
+### U
+`Ultimate Points` (see macro-reference) — cross-ref, not in this doc · `Unsharp Mask` §3
+
+### V
+`Variance` §3
+
+### W
+`Watershed` §2, §6.1, §6.2 · `Weka Segmentation` §8 · `widefield z-stack` §5, §8 · `Wiener` §5
+
+### Y
+`Yen` — (see macro-reference / imagej-gui-reference; not enumerated here)
+
+### Z
+`Z Project` §6.5, §9 · `z-stack processing` §5, §6.5
+
+---
+
+## §2 Quick Start
 
 ```javascript
 open("/path/to/your/IF_image.tif");
@@ -21,7 +140,7 @@ run("Analyze Particles...", "size=50-Infinity display summarize");
 
 ---
 
-## 1. Filtering
+## §3 Filtering
 
 ### Filter Comparison Table
 
@@ -131,9 +250,9 @@ Never filter after thresholding a binary mask.
 
 ---
 
-## 2. Thresholding
+## §4 Thresholding
 
-### Global Auto-Threshold Methods
+### §4.1 Global Auto-Threshold Methods
 
 ```javascript
 setAutoThreshold("METHOD dark");       // always add "dark" for fluorescence
@@ -180,7 +299,7 @@ run("Auto Threshold", "method=[Try all] white");
 | Puncta / spots | MaxEntropy, RenyiEntropy; DoG first | Good for small bright features |
 | Multiple intensity populations | Multi Otsu (`run("Multi Otsu Threshold", "levels=3");`) | — |
 
-### Local/Adaptive Threshold Methods
+### §4.2 Local/Adaptive Threshold Methods
 
 Use when background varies across the field of view.
 
@@ -204,7 +323,7 @@ run("Auto Local Threshold", "method=[Try all] radius=15 parameter_1=0 parameter_
 
 **Use global** when background is uniform. **Use local** when illumination is uneven or autofluorescence varies spatially.
 
-### Manual/Fixed Thresholding
+### §4.3 Manual/Fixed Thresholding
 
 For consistent thresholds across an experiment:
 ```javascript
@@ -214,7 +333,7 @@ run("Convert to Mask");
 
 ---
 
-## 3. Deconvolution
+## §5 Deconvolution
 
 ### When to Deconvolve
 
@@ -315,9 +434,9 @@ Better to slightly under-deconvolve than over-deconvolve.
 
 ---
 
-## 4. Complete IF Processing Pipelines
+## §6 Complete IF Processing Pipelines
 
-### 4.1 Quantitative Intensity Measurement
+### §6.1 Quantitative Intensity Measurement
 
 ```
 RAW → Flatfield correction → Background subtraction → [Minimal filter] → Segment on DAPI → Measure on bg-subtracted image
@@ -334,7 +453,7 @@ run("Set Measurements...", "area mean integrated redirect=C2-marker decimal=3");
 run("Analyze Particles...", "size=50-Infinity display");
 ```
 
-### 4.2 Cell Counting
+### §6.2 Cell Counting
 
 ```javascript
 run("Subtract Background...", "rolling=50");
@@ -345,7 +464,7 @@ run("Watershed");
 run("Analyze Particles...", "size=50-Infinity circularity=0.3-1.0 show=Outlines display summarize");
 ```
 
-### 4.3 Colocalization
+### §6.3 Colocalization
 
 ```javascript
 // Per channel: background subtraction only — DO NOT filter (inflates coloc)
@@ -359,7 +478,7 @@ run("Coloc 2", "channel_1=C1 channel_2=C2 roi_or_mask=<None>" +
     " psf=3 costes_randomisations=10");
 ```
 
-### 4.4 Publication Figures
+### §6.4 Publication Figures
 
 ```javascript
 // After all measurements, work on a COPY
@@ -372,7 +491,7 @@ run("Flatten");
 saveAs("Tiff", "/path/to/figure_panel.tif");
 ```
 
-### 4.5 Z-Stack Processing
+### §6.5 Z-Stack Processing
 
 ```javascript
 // Deconvolve first (see Section 3), then:
@@ -384,53 +503,7 @@ run("Z Project...", "projection=[Max Intensity]");      // display
 
 ---
 
-## 5. Best Practices and Pitfalls
-
-### Operations That DESTROY vs PRESERVE Data
-
-| Destroys Data | Preserves Data |
-|---------------|---------------|
-| `run("Enhance Contrast", "normalize")` | `setMinAndMax(low, high)` |
-| `run("Apply LUT")` | `run("Brightness/Contrast...")` without Apply |
-| `run("Convert to Mask")` | ROI creation/manipulation |
-| `run("8-bit")` (precision lost) | `run("Duplicate...")` |
-| Any filter (Gaussian, median, etc.) | Zooming, scrolling |
-| `run("Subtract Background...")` | — |
-
-### Common Mistakes
-
-1. **Filtering before bg subtraction** — spreads background into foreground
-2. **Enhance Contrast normalize** — permanently destroys quantitative data; use `setMinAndMax()`
-3. **Different processing per condition** — all images must be processed identically
-4. **Otsu on sparse cells** — use Triangle instead (designed for skewed histograms)
-5. **Not checking for saturation** — saturated pixels have no quantitative info
-6. **Deconvolving after filtering** — deconvolution needs raw noise statistics
-7. **Red/green overlays** — ~8% of men are red-green colorblind; use green/magenta
-8. **Measuring on MIP** — use Sum Slices for intensity quantification
-9. **No bg subtraction for CTCF** — CTCF requires local background measurement
-
-### Journal Guidelines Summary
-
-All major journals require:
-- Processing applied uniformly to entire image and equally to controls
-- No selective enhancement/obscuring of features
-- Linear adjustments (brightness/contrast) acceptable if uniform and documented
-- Non-linear adjustments (gamma) must be disclosed
-- Original unprocessed data retained and available on request
-- Methods must state: software + version, all processing steps and parameters
-
-**Methods template:**
-```
-Images were processed in Fiji (ImageJ v[X.Y.Z]). Background was subtracted
-using rolling ball algorithm (radius=[N] pixels). [Optional: Gaussian/median
-filter (sigma/radius=[N]) applied for noise reduction.] Thresholding used the
-[method] algorithm. Display adjustments applied identically across all panels.
-No non-linear adjustments were made.
-```
-
----
-
-## 6. Quick Decision Trees
+## §7 Quick Decision Trees
 
 ### Choosing a Filter
 
@@ -480,7 +553,7 @@ Ringing artifacts? → Check PSF, reduce iterations, try RLTV
 
 ---
 
-## 7. Integration with ImageJAI Agent
+## §8 Integration with ImageJAI Agent
 
 ### Installed IF Processing Plugins
 
@@ -503,6 +576,52 @@ Ringing artifacts? → Check PSF, reduce iterations, try RLTV
 - `domain-reference.md` — modalities, deconvolution theory, QC
 - `macro-reference.md` — complete macro command reference
 - `deconvolution-reference.md` — full deconvolution deep-dive
+
+---
+
+## §9 Best Practices and Pitfalls
+
+### Operations That DESTROY vs PRESERVE Data
+
+| Destroys Data | Preserves Data |
+|---------------|---------------|
+| `run("Enhance Contrast", "normalize")` | `setMinAndMax(low, high)` |
+| `run("Apply LUT")` | `run("Brightness/Contrast...")` without Apply |
+| `run("Convert to Mask")` | ROI creation/manipulation |
+| `run("8-bit")` (precision lost) | `run("Duplicate...")` |
+| Any filter (Gaussian, median, etc.) | Zooming, scrolling |
+| `run("Subtract Background...")` | — |
+
+### Common Mistakes
+
+1. **Filtering before bg subtraction** — spreads background into foreground
+2. **Enhance Contrast normalize** — permanently destroys quantitative data; use `setMinAndMax()`
+3. **Different processing per condition** — all images must be processed identically
+4. **Otsu on sparse cells** — use Triangle instead (designed for skewed histograms)
+5. **Not checking for saturation** — saturated pixels have no quantitative info
+6. **Deconvolving after filtering** — deconvolution needs raw noise statistics
+7. **Red/green overlays** — ~8% of men are red-green colorblind; use green/magenta
+8. **Measuring on MIP** — use Sum Slices for intensity quantification
+9. **No bg subtraction for CTCF** — CTCF requires local background measurement
+
+### Journal Guidelines Summary
+
+All major journals require:
+- Processing applied uniformly to entire image and equally to controls
+- No selective enhancement/obscuring of features
+- Linear adjustments (brightness/contrast) acceptable if uniform and documented
+- Non-linear adjustments (gamma) must be disclosed
+- Original unprocessed data retained and available on request
+- Methods must state: software + version, all processing steps and parameters
+
+**Methods template:**
+```
+Images were processed in Fiji (ImageJ v[X.Y.Z]). Background was subtracted
+using rolling ball algorithm (radius=[N] pixels). [Optional: Gaussian/median
+filter (sigma/radius=[N]) applied for noise reduction.] Thresholding used the
+[method] algorithm. Display adjustments applied identically across all panels.
+No non-linear adjustments were made.
+```
 
 ---
 

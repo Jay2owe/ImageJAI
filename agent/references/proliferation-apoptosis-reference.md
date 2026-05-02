@@ -1,8 +1,149 @@
 # Cell Proliferation, Apoptosis & Cell Cycle Analysis Reference
 
+Agent-oriented reference for scoring proliferation markers (Ki67, EdU, BrdU,
+PCNA, pHH3, FUCCI), apoptosis markers (TUNEL, Cleaved Caspase-3 / CC3,
+Annexin V, morphological), colony assays, DNA-content cell cycle, multi-marker
+classification, high-content screening, and IHC chromogenic scoring.
+
+Sources: Ki67 / MIB-1 literature and clinical pathology cutoffs; EdU vs BrdU
+click-chemistry comparisons; TUNEL and Cleaved Caspase-3 (CC3) apoptosis
+detection guidelines; Dean-Jett-Fox DNA-content fitting; Z-factor and SSMD
+screening statistics; `imagej.net` StarDist and Colour Deconvolution
+documentation.
+
+Invoke from the agent:
+`python ij.py macro '<code>'` — run ImageJ macro (.ijm) code.
+`python ij.py script '<code>'` — run Groovy (default), Jython, or JavaScript.
+Use `python probe_plugin.py "Plugin..."` to discover any installed plugin's
+parameters at runtime.
+
 ---
 
-## 1. Key Formulas & Counting Standards
+## §0 Lookup Map — "How do I find X?"
+
+| Question | Where to look |
+|---|---|
+| "Formula for proliferation / apoptotic / mitotic index?" | §2 |
+| "How many cells do I need to count?" | §2 |
+| "Which marker should I use — Ki67, EdU, BrdU, PCNA, pHH3, FUCCI?" | §3 |
+| "Cell cycle timeline / decision tree for marker choice?" | §3 |
+| "Generic workflow for any marker-positive scoring?" | §4 |
+| "StarDist nuclear segmentation macro?" | §4 |
+| "How do I pick the intensity threshold?" | §4 |
+| "Marker-specific notes (Ki67 hot-spot, EdU/BrdU pulse, PCNA texture, pHH3, FUCCI)?" | §5 |
+| "How do I detect apoptosis (TUNEL / CC3 / Annexin V / morphology)?" | §6 |
+| "Annexin V / PI quadrant analysis?" | §6 |
+| "Morphological apoptosis from DAPI alone?" | §6 |
+| "Colony formation / plating efficiency / surviving fraction?" | §7 |
+| "Cell cycle from DNA content (IntDen, Dean-Jett-Fox)?" | §8 |
+| "Doublet discrimination?" | §8 |
+| "Double-labeling interpretation (EdU+Ki67, Ki67+CC3, pHH3+Ki67)?" | §9 |
+| "Spectral bleedthrough correction?" | §9 |
+| "Batch processing a plate, Z-factor / SSMD, normalization?" | §10 |
+| "IHC colour deconvolution (H DAB) / H-score / area fraction?" | §11 |
+| "Which statistical test do I use? Unit of replication?" | §12 |
+| "What does a standard agent scoring session look like?" | §13 |
+| "Why did my index / fit / count look wrong?" | §14 gotchas |
+
+---
+
+## §1 Term Index (A–Z)
+
+Alphabetical pointer to the section where each marker, assay, or concept is
+defined. Use `grep -n '<term>' proliferation-apoptosis-reference.md` to jump.
+
+### A
+`Analyze Particles` §5.3, §7.1, §11.1 · `Annexin V / PI` §6.1, §6.4 ·
+`Apoptotic Index` §2 · `Apoptosis` §6 · `area fraction (IHC)` §11.2 ·
+`autofluorescence` §14 ·
+
+### B
+`B-score` §10.3 · `background-based threshold` §4.3 ·
+`batch processing` §10.1 · `bleedthrough` §9.3 · `BrdU` §3, §5.2 ·
+
+### C
+`Calcein-AM` §6.1, §6.5 · `Cellpose` §14 · `cell cycle (DNA content)` §8 ·
+`cell cycle timeline` §3.1 · `chromatin margination` §6.6 ·
+`Chi-squared` §12.2 · `circularity filter` §7.2 · `clinical cutoffs (Ki67)` §5.1 ·
+`Cleaved Caspase-3 (CC3)` §6.1, §6.3 · `click chemistry` §3, §5.2 ·
+`Colony Formation Assay` §7 · `ColonyArea plugin` §7.3 ·
+`Colour Deconvolution` §11.1 · `cumulative labeling` §5.2 ·
+
+### D
+`DAB` §11.1, §11.4 · `DAPI segmentation` §4.1 ·
+`Dean-Jett-Fox` §8.3 · `Decision tree (marker choice)` §3.2 ·
+`denaturation (BrdU)` §5.2 · `DNA content` §8 · `doublet discrimination` §8.5 ·
+`dual-pulse` §5.2 · `Dunn's post-hoc` §12.2 ·
+
+### E
+`EdU` §3, §5.2 · `edge effect` §10.4 · `EthD-1` §6.5 ·
+
+### F
+`Fisher's exact` §12.2 · `FUCCI` §3, §5.5 · `focus quality filter` §14.2 ·
+`fragment clustering` §14.3 ·
+
+### G
+`G0 / G1 / S / G2 / M` §3.1, §8.1 · `G1 CV` §8.4 · `G2/G1 ratio` §8.4 ·
+
+### H
+`H DAB vectors` §11.1, §11.4 · `Hematoxylin` §11.1 · `hot-spot counting (Ki67)` §5.1 ·
+`H-score` §14.1 ·
+
+### I
+`IC50 / EC50` §12.2 · `IHC (chromogenic)` §11 · `IHC Profiler` §11.5 ·
+`IntDen (integrated density)` §8.2 · `isotype control` §14 ·
+
+### K
+`karyorrhexis` §6.6 · `Ki67` §3, §5.1 · `Kruskal-Wallis` §12.2 ·
+
+### L
+`live/dead viability` §6.5 ·
+
+### M
+`Mann-Whitney U` §12.2 · `MIB-1` §3 · `Mitotic Index` §2, §5.4 ·
+`mixture model` §4.3 · `morphological apoptosis` §6.1, §6.6 ·
+`multi-marker classification` §9 ·
+
+### N
+`negative control` §4.3 · `nmsThresh` §4.1, §14 · `normalization` §10.3 ·
+
+### O
+`Otsu` §4.3, §11.1 ·
+
+### P
+`paired t-test` §12.2 · `PCNA` §3, §5.3 · `percent activity` §10.3 ·
+`percent of control` §10.3 · `pHH3` §3, §5.4 · `plating efficiency` §7 ·
+`probThresh` §4.1, §14 · `Proliferation Index` §2 · `pulse-chase` §5.2 ·
+`pyknosis` §6.6 ·
+
+### Q
+`quadrant analysis (Annexin V / PI)` §6.4 ·
+
+### R
+`replication (unit of)` §12.1 · `reporting checklist` §12.3 ·
+`robust Z-score` §10.3 ·
+
+### S
+`saturation check` §8.2 · `S-phase` §3, §5.2, §8 · `sensitivity analysis` §14.1 ·
+`spectral bleedthrough` §9.3 · `SSMD` §10.2 · `StarDist` §4.1, §14 ·
+`statistical tests` §12.2 · `sub-G1` §8.1, §8.4 ·
+
+### T
+`texture (StdDev)` §5.3 · `Triangle threshold` §5.4, §11.1 ·
+`TUNEL` §6.1, §6.2 ·
+
+### V
+`viability` §6.5 ·
+
+### W
+`Watershed` §7.1 ·
+
+### Z
+`Z-factor (Z')` §10.2 · `Z-score` §10.3 ·
+
+---
+
+## §2 Key Formulas & Counting Standards
 
 ```
 Proliferation Index (%) = (marker-positive nuclei / total nuclei) x 100
@@ -21,7 +162,7 @@ Mitotic Index (%)       = (mitotic figures / total nuclei) x 100
 
 ---
 
-## 2. Proliferation Marker Comparison
+## §3 Proliferation Marker Comparison
 
 | Marker | Phase Detected | Detection | Advantages | Limitations |
 |--------|---------------|-----------|------------|-------------|
@@ -32,7 +173,7 @@ Mitotic Index (%)       = (mitotic figures / total nuclei) x 100
 | **pHH3** (Ser10) | M-phase only | IF or IHC | Highly specific for mitosis; bright signal | Rare events (1-5%); needs large areas |
 | **FUCCI** | G1 (red) vs S/G2/M (green) | Live fluorescence | Real-time phase tracking | Requires transgenic/transfected cells |
 
-### Cell cycle timeline with markers
+### §3.1 Cell cycle timeline with markers
 ```
   G0 (quiescent)  →  G1  →  S  →  G2  →  M  →  G1
 Ki67:  -            ++++++  ++++++  ++++++  ++++++
@@ -42,7 +183,7 @@ pHH3:  -               -      -      -   ++++++
 FUCCI: -            red→→→  →green  green  green
 ```
 
-### Decision tree: which marker to use
+### §3.2 Decision tree: which marker to use
 ```
 Fixed tissue?
 ├── YES → Need phase info?
@@ -55,7 +196,7 @@ Fixed tissue?
 
 ---
 
-## 3. General Workflow: Marker-Positive Scoring (Fluorescence)
+## §4 General Workflow: Marker-Positive Scoring (Fluorescence)
 
 All proliferation/apoptosis markers follow the same pattern:
 1. Segment nuclei from DAPI (StarDist recommended)
@@ -64,7 +205,7 @@ All proliferation/apoptosis markers follow the same pattern:
 4. Classify positive/negative using threshold
 5. Calculate index
 
-### StarDist nuclear segmentation (reusable for all markers)
+### §4.1 StarDist nuclear segmentation (reusable for all markers)
 
 ```javascript
 // Segment nuclei — adjust probThresh and nmsThresh per image quality
@@ -88,7 +229,7 @@ run("Command From Macro", "command=[de.csbdresden.stardist.StarDist2D], " +
 nNuclei = roiManager("count");
 ```
 
-### Measure marker and classify
+### §4.2 Measure marker and classify
 
 ```javascript
 // Measure marker intensity per nucleus
@@ -108,7 +249,7 @@ index = (nPositive / nNuclei) * 100;
 print("Index: " + d2s(index, 1) + "%");
 ```
 
-### How to choose the intensity threshold
+### §4.3 How to choose the intensity threshold
 
 | Strategy | When to use | Method |
 |----------|------------|--------|
@@ -120,16 +261,16 @@ print("Index: " + d2s(index, 1) + "%");
 
 ---
 
-## 4. Marker-Specific Notes
+## §5 Marker-Specific Notes
 
-### Ki67
+### §5.1 Ki67
 
 - Heterogeneous intensity: dim in early G1, bright in M-phase
 - Clinical cutoffs vary by tissue (breast cancer typically 14-20%)
 - For hot-spot counting (clinical pathology): scan in tiles, find tiles with highest mean Ki67 intensity, count in top 3-5 tiles
 - Consider H-score for semi-quantitative grading (see Section 10)
 
-### EdU vs BrdU
+### §5.2 EdU vs BrdU
 
 | Feature | EdU | BrdU |
 |---------|-----|------|
@@ -144,7 +285,7 @@ print("Index: " + d2s(index, 1) + "%");
 - Pulse-chase: cell cycle transit times, labeled mitoses
 - Dual-pulse (EdU then BrdU): replication dynamics
 
-### PCNA
+### §5.3 PCNA
 
 PCNA is harder to threshold — intensity is continuous, not bimodal. Use **both intensity AND texture** (StdDev) to identify S-phase cells:
 - S-phase: high mean AND high StdDev (punctate replication foci)
@@ -163,7 +304,7 @@ for (i = 0; i < nResults; i++) {
 }
 ```
 
-### pHH3 (Mitotic Index)
+### §5.4 pHH3 (Mitotic Index)
 
 pHH3+ cells are typically 5-20x brighter than background. Two approaches:
 
@@ -180,7 +321,7 @@ run("Analyze Particles...", "size=50-2000 circularity=0.3-1.00 show=Nothing summ
 **Approach B — Intensity scoring within DAPI nuclei** (better when nuclei overlap):
 Score pHH3 mean intensity per DAPI-defined nucleus; pHH3+ nuclei will have very high values.
 
-### FUCCI
+### §5.5 FUCCI
 
 ```javascript
 // FUCCI classification per cell per timepoint
@@ -204,9 +345,9 @@ For tracking FUCCI over time, consider TrackMate (LoG or StarDist detector, Simp
 
 ---
 
-## 5. Apoptosis Detection
+## §6 Apoptosis Detection
 
-### Marker comparison
+### §6.1 Marker comparison
 
 | Marker | Detects | Specificity | Notes |
 |--------|---------|-------------|-------|
@@ -216,12 +357,12 @@ For tracking FUCCI over time, consider TrackMate (LoG or StarDist detector, Simp
 | **Morphological** | Pyknosis, karyorrhexis | Variable — needs validation | DAPI-only; no additional staining needed |
 | **Calcein-AM / PI** | Live vs dead (viability) | Good | Not specific to apoptosis vs necrosis |
 
-### TUNEL considerations
+### §6.2 TUNEL considerations
 - Lower StarDist probThresh (0.3-0.4) to catch fragmented apoptotic nuclei
 - TUNEL signal is typically strongly bimodal — positive cells are much brighter
 - Not 100% specific for apoptosis — always correlate with morphology or second marker
 
-### Cleaved Caspase-3 (CC3)
+### §6.3 Cleaved Caspase-3 (CC3)
 - Staining can be nuclear AND cytoplasmic — consider expanding ROIs slightly:
 ```javascript
 for (i = 0; i < totalNuclei; i++) {
@@ -231,7 +372,7 @@ for (i = 0; i < totalNuclei; i++) {
 }
 ```
 
-### Annexin V / PI quadrant analysis
+### §6.4 Annexin V / PI quadrant analysis
 
 ```
                   PI-negative          PI-positive
@@ -242,7 +383,7 @@ Annexin V-pos  │ EARLY APOPTOTIC    │ LATE APOPTOTIC /       │
 
 Segment cells from combined fluorescence, measure each marker per cell, classify into quadrants using thresholds from unstained control.
 
-### Live/Dead viability (Calcein-AM + PI/EthD-1)
+### §6.5 Live/Dead viability (Calcein-AM + PI/EthD-1)
 
 | Dye | Stains | Mechanism | Color |
 |-----|--------|-----------|-------|
@@ -255,7 +396,7 @@ Viability (%) = calcein+ cells / (calcein+ + dead+ cells) x 100
 
 Threshold and count each channel separately. Check for double-positive cells (compromised/dying).
 
-### Morphological apoptosis detection (DAPI-only)
+### §6.6 Morphological apoptosis detection (DAPI-only)
 
 | Feature | Measurement |
 |---------|-------------|
@@ -282,14 +423,14 @@ for (i = 0; i < n; i++) {
 
 ---
 
-## 6. Colony Formation Assay
+## §7 Colony Formation Assay
 
 ```
 Plating Efficiency (PE) = colonies counted / cells seeded
 Surviving Fraction (SF) = colonies after treatment / (cells seeded x PE_control)
 ```
 
-### Workflow
+### §7.1 Workflow
 ```javascript
 // Input: grayscale/RGB image of a single well
 run("8-bit");
@@ -304,24 +445,24 @@ run("Analyze Particles...", "size=100-Infinity circularity=0.10-1.00 " +
     "show=Outlines display summarize add");
 ```
 
-### Handling touching colonies
+### §7.2 Handling touching colonies
 - **Watershed on distance map:** `run("Distance Map"); run("Find Maxima...", "prominence=10 output=[Segmented Particles]");`
 - **Size filter:** Reject objects >5x mean colony area as likely merged
 - **Circularity filter:** Merged colonies typically have circularity <0.3
 
-### ColonyArea plugin
+### §7.3 ColonyArea plugin
 Install via Help > Update > Manage Update Sites > ColonyArea. Processes scanned multi-well plates automatically.
 
 ---
 
-## 7. Cell Cycle from DNA Content
+## §8 Cell Cycle from DNA Content
 
-### Principle
+### §8.1 Principle
 DAPI integrated density is proportional to DNA content:
 - G0/G1 peak at 2N, S-phase between 2N-4N, G2/M peak at 4N
 - Sub-G1 = apoptotic (fragmented DNA), >4N = polyploid or doublets
 
-### Critical requirements
+### §8.2 Critical requirements
 - Measure **IntDen** (integrated density), NOT mean — total fluorescence = DNA content
 - No saturation — check max pixel value before measuring
 - Consistent DAPI staining (same concentration, time)
@@ -339,7 +480,7 @@ roiManager("Measure");
 // Export IntDen column for Python histogram fitting
 ```
 
-### Python: Dean-Jett-Fox cell cycle fitting
+### §8.3 Python: Dean-Jett-Fox cell cycle fitting
 
 ```python
 import numpy as np
@@ -407,7 +548,7 @@ if __name__ == '__main__':
         for k, v in results.items(): print(f"  {k}: {v:.1f}")
 ```
 
-### Quality control
+### §8.4 Quality control
 
 | Check | Good | Bad | Action |
 |-------|------|-----|--------|
@@ -416,14 +557,14 @@ if __name__ == '__main__':
 | Sub-G1 | <5% (normal) | >20% (unexpected) | May be apoptosis or debris |
 | Super-G2 | <3% | >10% | Doublets — filter by Area vs IntDen |
 
-### Doublet discrimination
+### §8.5 Doublet discrimination
 G2/M nuclei have same area as G1 but 2x IntDen. Doublets have 2x area AND 2x IntDen. Exclude nuclei with Area >1.5x median AND IntDen >1.5x median.
 
 ---
 
-## 8. Multi-Marker Classification
+## §9 Multi-Marker Classification
 
-### Double-labeling interpretation matrices
+### §9.1 Double-labeling interpretation matrices
 
 **EdU + Ki67:**
 
@@ -446,7 +587,7 @@ G2/M nuclei have same area as G1 but 2x IntDen. Doublets have 2x area AND 2x Int
 | **Ki67+** | In mitosis | Cycling (G1/S/G2) |
 | **Ki67-** | Rare (artifact) | Quiescent |
 
-### Multi-marker scoring pattern
+### §9.2 Multi-marker scoring pattern
 
 ```javascript
 // General pattern: measure N markers per nucleus, classify by thresholds
@@ -461,7 +602,7 @@ for (ch = 0; ch < nMarkers; ch++) {
 // Classify each nucleus based on marker combination
 ```
 
-### Spectral bleedthrough correction
+### §9.3 Spectral bleedthrough correction
 If X% of channel A bleeds into channel B: `Corrected_B = Raw_B - (X/100) * Raw_A`
 
 Recommended well-separated fluorophore combinations:
@@ -470,9 +611,9 @@ Recommended well-separated fluorophore combinations:
 
 ---
 
-## 9. High-Content Screening
+## §10 High-Content Screening
 
-### Batch processing pattern
+### §10.1 Batch processing pattern
 
 ```javascript
 inputDir = "/path/to/plate_images/";
@@ -493,7 +634,7 @@ for (f = 0; f < list.length; f++) {
 saveAs("Results", outputDir + "plate_summary.csv");
 ```
 
-### Assay quality: Z-factor
+### §10.2 Assay quality: Z-factor
 
 ```
 Z' = 1 - (3*SD_pos + 3*SD_neg) / |mean_pos - mean_neg|
@@ -515,7 +656,7 @@ def ssmd(pos_values, neg_values):
            np.sqrt(np.var(pos_values, ddof=1) + np.var(neg_values, ddof=1))
 ```
 
-### Normalization methods
+### §10.3 Normalization methods
 
 | Method | Formula | Use case |
 |--------|---------|----------|
@@ -525,67 +666,14 @@ def ssmd(pos_values, neg_values):
 | Robust Z-score | (sample - median_plate) / MAD_plate | Resistant to outliers |
 | B-score | Median polish residuals | Corrects row/column effects |
 
-### Edge effect detection
+### §10.4 Edge effect detection
 Compare edge wells to interior wells. If difference >10%, consider B-score normalization or excluding edge wells.
 
 ---
 
-## 10. Common Problems & Solutions
+## §11 IHC-Specific Methods (Chromogenic)
 
-| Problem | Solutions |
-|---------|----------|
-| **Threshold sensitivity** | Use negative control; report sensitivity at threshold +/-20%; consider H-score or mixture model |
-| **Variable staining across sections** | Local (per-tile) thresholds; marker/DAPI ratio; batch correction slides |
-| **Nuclear overlap (dense tissue)** | StarDist with higher nmsThresh (0.5-0.6); Cellpose cyto2; single Z-slice instead of projection |
-| **Autofluorescence** | Image unstained control; use far-red fluorophores (AF647+); Sudan Black B for lipofuscin; subtract autofluorescence channel |
-| **Over-counting apoptotic fragments** | Size filter (<25% median area); cluster fragments within a radius; use CC3 (whole-cell marker) |
-| **Non-specific staining** | Isotype/secondary-only control; rolling ball background subtraction; SNR-based threshold |
-| **Mixed cell populations** | Add cell-type marker channel; score marker only within cell-type+ cells |
-| **Focus/illumination artifacts** | Variance filter to exclude low-contrast regions; flat-field correction; tile-based thresholds |
-
-### H-score (semi-quantitative, reduces threshold sensitivity)
-
-```
-H-score = 1*(% weak) + 2*(% moderate) + 3*(% strong)    Range: 0-300
-```
-
-```javascript
-// Define intensity bins from negative control or visual calibration
-t1 = 30; t2 = 80; t3 = 150;  // Starting points — adjust per experiment
-nNeg = 0; nWeak = 0; nMod = 0; nStrong = 0;
-for (i = 0; i < nResults; i++) {
-    m = getResult("Mean", i);
-    if (m < t1) nNeg++;
-    else if (m < t2) nWeak++;
-    else if (m < t3) nMod++;
-    else nStrong++;
-}
-total = nNeg + nWeak + nMod + nStrong;
-hScore = 1*(nWeak*100.0/total) + 2*(nMod*100.0/total) + 3*(nStrong*100.0/total);
-```
-
-### Focus quality filter
-
-```javascript
-run("Duplicate...", "title=focus_map");
-run("Variance...", "radius=5");
-// Measure per nucleus — exclude those with low variance (out of focus)
-```
-
-### Apoptotic fragment clustering
-
-```javascript
-// Cluster TUNEL+ objects within a radius into single events
-// Adjust clusterRadius based on magnification (typically 15-25 pixels)
-clusterRadius = 20;
-// Simple greedy: for each unvisited object, mark all neighbours within radius as same cluster
-```
-
----
-
-## 11. IHC-Specific Methods (Chromogenic)
-
-### Colour deconvolution
+### §11.1 Colour deconvolution
 
 ```javascript
 // Standard IHC Ki67-DAB workflow
@@ -612,7 +700,7 @@ run("Analyze Particles...", "size=50-2000 circularity=0.3-1.00 show=Nothing summ
 dabPositive = roiManager("count");
 ```
 
-### Area fraction method (when individual nuclei are hard to segment)
+### §11.2 Area fraction method (when individual nuclei are hard to segment)
 
 ```javascript
 // Measure % tissue area that is DAB-positive (relative comparisons only)
@@ -624,7 +712,7 @@ run("Set Measurements...", "area area_fraction redirect=None decimal=3");
 run("Measure");
 ```
 
-### Common vector sets
+### §11.3 Common vector sets
 
 | Vector set | Use for |
 |-----------|---------|
@@ -634,14 +722,14 @@ run("Measure");
 | FastRed FastBlue DAB | Triple chromogenic |
 | User values | Lab-specific optimization (measure OD from single-stain regions) |
 
-### IHC Profiler plugin
+### §11.4 IHC Profiler plugin
 Automated IHC scoring — provides H-score and percentage breakdown. Install via update sites.
 
 ---
 
-## 12. Statistical Considerations
+## §12 Statistical Considerations
 
-### Unit of replication (critical)
+### §12.1 Unit of replication (critical)
 
 The biological replicate is the independent experimental unit, NOT individual cells.
 
@@ -653,7 +741,7 @@ The biological replicate is the independent experimental unit, NOT individual ce
 
 Calculate index per biological replicate, then use replicate-level values for statistics.
 
-### Test selection
+### §12.2 Test selection
 
 | Comparison | Test |
 |-----------|------|
@@ -667,7 +755,7 @@ Calculate index per biological replicate, then use replicate-level values for st
 | Dose-response | 4-parameter logistic (IC50/EC50) |
 | Proportions with covariates | Logistic regression |
 
-### Reporting checklist
+### §12.3 Reporting checklist
 1. Marker and antibody details (clone, supplier, dilution)
 2. Detection method (IF, IHC-DAB, click chemistry)
 3. Segmentation method (StarDist model, threshold method)
@@ -680,7 +768,7 @@ Calculate index per biological replicate, then use replicate-level values for st
 
 ---
 
-## 13. Agent Workflow Summary
+## §13 Agent Workflow Summary
 
 ```bash
 # Standard marker-scoring workflow (Ki67/EdU/TUNEL/CC3 — same pattern)
@@ -710,4 +798,57 @@ python ij.py capture marker_overlay
 
 # Audit
 python auditor.py
+```
+
+---
+
+## §14 Common Problems & Solutions
+
+| Problem | Solutions |
+|---------|----------|
+| **Threshold sensitivity** | Use negative control; report sensitivity at threshold +/-20%; consider H-score or mixture model |
+| **Variable staining across sections** | Local (per-tile) thresholds; marker/DAPI ratio; batch correction slides |
+| **Nuclear overlap (dense tissue)** | StarDist with higher nmsThresh (0.5-0.6); Cellpose cyto2; single Z-slice instead of projection |
+| **Autofluorescence** | Image unstained control; use far-red fluorophores (AF647+); Sudan Black B for lipofuscin; subtract autofluorescence channel |
+| **Over-counting apoptotic fragments** | Size filter (<25% median area); cluster fragments within a radius; use CC3 (whole-cell marker) |
+| **Non-specific staining** | Isotype/secondary-only control; rolling ball background subtraction; SNR-based threshold |
+| **Mixed cell populations** | Add cell-type marker channel; score marker only within cell-type+ cells |
+| **Focus/illumination artifacts** | Variance filter to exclude low-contrast regions; flat-field correction; tile-based thresholds |
+
+### §14.1 H-score (semi-quantitative, reduces threshold sensitivity)
+
+```
+H-score = 1*(% weak) + 2*(% moderate) + 3*(% strong)    Range: 0-300
+```
+
+```javascript
+// Define intensity bins from negative control or visual calibration
+t1 = 30; t2 = 80; t3 = 150;  // Starting points — adjust per experiment
+nNeg = 0; nWeak = 0; nMod = 0; nStrong = 0;
+for (i = 0; i < nResults; i++) {
+    m = getResult("Mean", i);
+    if (m < t1) nNeg++;
+    else if (m < t2) nWeak++;
+    else if (m < t3) nMod++;
+    else nStrong++;
+}
+total = nNeg + nWeak + nMod + nStrong;
+hScore = 1*(nWeak*100.0/total) + 2*(nMod*100.0/total) + 3*(nStrong*100.0/total);
+```
+
+### §14.2 Focus quality filter
+
+```javascript
+run("Duplicate...", "title=focus_map");
+run("Variance...", "radius=5");
+// Measure per nucleus — exclude those with low variance (out of focus)
+```
+
+### §14.3 Apoptotic fragment clustering
+
+```javascript
+// Cluster TUNEL+ objects within a radius into single events
+// Adjust clusterRadius based on magnification (typically 15-25 pixels)
+clusterRadius = 20;
+// Simple greedy: for each unvisited object, mark all neighbours within radius as same cluster
 ```
