@@ -3,9 +3,178 @@
 Standards for microscopy image integrity: journal policies, allowed/forbidden
 manipulations, detection methods, reproducibility, and agent workflows.
 
+Sources: Nature, JCB (RUP), Cell Press, Science, eLife, PLOS author policies;
+JCB screening guidelines (Rossner & Yamada 2004); QUAREP-LiMi checklists
+(Jambor et al., Nature Methods 2023); REMBI metadata framework (Sarkans et al.,
+Nature Methods 2021); OME-TIFF / OME-Zarr / Bio-Formats specifications;
+ORI forensic guidance; Proofig AI / Imagetwin detection tooling.
+
+Invoke from the agent:
+`python ij.py macro '<code>'` — run ImageJ macro (.ijm) code.
+`python ij.py histogram` / `python ij.py metadata` / `python ij.py capture`
+— integrity checks before, during, and after processing.
+
 ---
 
-## 1. Journal Policies Summary
+## §0 Lookup Map — "How do I find X?"
+
+| Question | Where to look |
+|---|---|
+| "What does Nature / JCB / Cell Press / Science / eLife / PLOS require?" | §2 |
+| "Is linear B/C adjustment allowed? With what conditions?" | §3 allowed |
+| "Is Enhance Contrast (normalize) forbidden on quantitative data?" | §3 forbidden, §6 |
+| "Is selective region enhancement / clone stamp / splicing allowed?" | §3 forbidden |
+| "Is JPEG allowed for microscopy?" | §3 forbidden, §6, §11 |
+| "Are AI-generated images allowed?" | §3 forbidden |
+| "What integrity checks should I run when opening an image?" | §4 |
+| "How do I detect JPEG compression / saturation / histogram gaps / prior Enhance Contrast?" | §4 detection signatures |
+| "Macro to detect histogram gaps?" | §4 histogram gap detection macro |
+| "How do I check bit depth safely?" | §4 bit depth check |
+| "What acquisition settings must match across conditions?" | §5 acquisition consistency |
+| "What controls does an IF / live imaging / FRET / calcium / colocalization experiment need?" | §5 required controls |
+| "Rules for raw data?" | §5 raw data rules |
+| "What triggers journal rejection?" | §6 |
+| "How do I prevent red/green overlays / missing scale bars / inconsistent processing?" | §6 |
+| "What is QUAREP-LiMi / REMBI / FAIR / OME?" | §7 |
+| "What do I report in Methods for acquisition / processing?" | §8 |
+| "Figure preparation checklist?" | §8 figure preparation checklist |
+| "What forensic tools do journals use?" | §9 journal-side |
+| "Pre-submission self-check?" | §9 pre-submission self-check |
+| "Full integrity-check macro?" | §10 |
+| "Agent workflow before / during / after processing?" | §11 |
+| "Documentation template for Methods?" | §11 documentation template |
+| "The three non-negotiable rules?" | Three Golden Rules (footer) |
+| "Journal's fundamental test for manipulation?" | §3 (JCB test) |
+
+---
+
+## §1 Term Index (A–Z)
+
+Alphabetical pointer to the section containing each term. Use
+`grep -n '<term>' image-integrity-reference.md` to jump.
+
+### A
+
+`acquisition consistency` §5 · `acquisition reporting` §8 · `AI-generated images` §3 forbidden ·
+`Analyze Particles (see macro section)` §10 · `auto-exposure / auto-gain` §5 ·
+
+### B
+
+`background subtraction` §3 allowed, §8 · `binning` §5 · `Bio-Formats` §7 OME standards ·
+`BioImage Archive` §7 FAIR, §7 REMBI · `bit depth` §4 bit depth check, §5 · `black clipping` §4 ·
+`brightness/contrast (B/C)` §2, §3 allowed, §6 · `Brightness & Contrast between conditions` §6 ·
+
+### C
+
+`calcium imaging controls` §5 · `calibration` §4, §10 · `Cell Press policy` §2 ·
+`channel labels` §6, §8 · `channel merging` §3 allowed · `clone stamp / healing / erasing` §3 forbidden ·
+`colocalization controls` §5 · `colorblind-safe palettes` §3 allowed, §6, §8 ·
+`comb pattern (histogram)` §4 detection · `compositing / montage` §3 allowed, §8 ·
+`cropping` §3 allowed, §6 ·
+
+### D
+
+`deconvolution` §3 allowed, §8 · `detection signatures` §4 · `display range` §6, §8, §11 ·
+`documentation template` §11 · `drug treatment controls` §5 · `duplicate image detection` §6, §9 ·
+`dynamic range` §4 detection, §10 ·
+
+### E
+
+`eLife policy` §2 · `Enhance Contrast (normalize)` §3 forbidden, §6, §11 · `equipment documentation` §2, §8 ·
+`excitation power` §5 · `exposure` §5 · `extension check (.jpg/.jpeg)` §4 detection, §10 ·
+
+### F
+
+`FAIR principles` §7 · `figure preparation checklist` §8 · `filter specs` §8 · `flipping` §8 ·
+`forensic tools` §9 · `FRET controls` §5 ·
+
+### G
+
+`gain` §5, §8 · `gamma` §3 forbidden, §4 detection · `Gaussian filter` §3 allowed ·
+`getHistogram` §4 · `getPixelSize` §10 · `getRawStatistics` §10 · `Golden Rules` footer ·
+
+### H
+
+`histogram equalization` §3 forbidden, §4 detection · `histogram gaps` §4, §10 ·
+`histogram gap detection macro` §4 · `histogram saturation spike` §4 ·
+
+### I
+
+`IF controls` §5 · `Imagetwin` §9 · `immersion` §8 · `integrity verification macro` §10 ·
+`intensity data validity (saturation)` §4 · `isotype control` §5 ·
+
+### J
+
+`Jambor et al. 2023` §7 · `JCB policy / RUP` §2, §3, §9 · `JCB test ("is the result still accurate?")` §3 ·
+`journal policies` §2 · `JPEG compression` §3 forbidden, §4 detection, §6, §9 ·
+
+### L
+
+`laser wavelengths/power` §8 · `light source` §8 · `linear adjustments` §2, §3 allowed, §8 ·
+`linear intensity-concentration relationship` §6 · `live imaging controls` §5 ·
+`low dynamic range` §4 detection · `LUT (pseudo-coloring)` §3 allowed ·
+
+### M
+
+`Magenta/Green` §6, §8 · `median filter` §3 allowed · `metadata (REMBI)` §7 · `methods reporting` §8 ·
+`microscope manufacturer/model` §8 · `MIP / Max Intensity / Sum / Average / Median projection` §3 allowed, §8 ·
+`mounting medium` §5 ·
+
+### N
+
+`Nature policy` §2 · `no-primary control` §5 · `non-linear adjustments` §2, §3 forbidden, §8 ·
+`non-representative images` §6 · `non-transfected control` §5 ·
+
+### O
+
+`objective (mag/NA/immersion)` §5, §8 · `OME-TIFF / OME-Zarr` §5, §7 · `ORI Forensic Droplets` §9 ·
+`Otsu / thresholding (reporting)` §8 · `overlays (red/green)` §6, §8 ·
+
+### P
+
+`panel labels` §11 · `PLOS policy` §2 · `pinhole` §5, §8 · `pixel size` §5, §10 ·
+`Proofig AI` §2, §9 · `pre-submission self-check` §9 · `pseudo-coloring` §3 allowed ·
+`PSF (deconvolution)` §3 allowed, §8 ·
+
+### Q
+
+`QUAREP-LiMi` §7 · `quantification data (Enhance Contrast forbidden)` §3 forbidden, §6 ·
+`quantification controls` §5 ·
+
+### R
+
+`raw data preservation` §2, §5, §7 · `red/green overlays` §6, §8 · `REMBI` §7 ·
+`reusing same field in different figures` §6 · `rotation` §3 allowed · `rolling ball background` §3 allowed ·
+`Rossner & Yamada (JCB test)` §3 ·
+
+### S
+
+`saturation` §4 detection, §5, §10 · `Sarkans et al. 2021` §7 · `scale bar` §2, §6, §8, §9 ·
+`Science policy` §2 · `secondary-only control` §5 · `selective cropping` §6 ·
+`selective region enhancement` §3 forbidden · `setMinAndMax` §3 allowed, §6, §11 ·
+`single-labeled control (bleed-through)` §5 · `splicing without demarcation` §3 forbidden ·
+`splicing with demarcation` §3 allowed, §6 · `stitching` §6, §7 · `supplement (custom code)` §8 ·
+
+### T
+
+`TIFF (archival / export)` §5, §6, §8, §9, §11 · `thresholding reporting` §8 ·
+`time-lapse (intervals, duration)` §8 · `troubleshooting rejection` §6 ·
+
+### U
+
+`uniform adjustments` §2, §3 allowed, §6 · `universal requirements` §2 ·
+
+### V
+
+`vehicle-only control` §5 · `visibility boundaries (composite)` §8 ·
+
+### Z
+
+`Z-projection / Z-stack / z-step` §3 allowed, §5, §8 · `Zero controls (Rmin/Rmax)` §5 ·
+
+---
+
+## §2 Journal Policies Summary
 
 | Journal | Key Rules | Screening |
 |---|---|---|
@@ -21,7 +190,7 @@ identical processing across compared conditions.
 
 ---
 
-## 2. Allowed vs Forbidden Manipulations
+## §3 Allowed vs Forbidden Manipulations
 
 ### Allowed (with disclosure)
 
@@ -56,7 +225,7 @@ representation of the original data?"
 
 ---
 
-## 3. Integrity Checks the Agent Should Perform
+## §4 Integrity Checks the Agent Should Perform
 
 ### On every image open
 
@@ -99,7 +268,7 @@ if (bd == 24) print("WARNING: RGB -- not suitable for quantification");
 
 ---
 
-## 4. Best Practices for Quantitative Microscopy
+## §5 Best Practices for Quantitative Microscopy
 
 ### Acquisition consistency
 
@@ -132,7 +301,7 @@ sample and signal visible on dimmest. Acquire all conditions in same session.
 
 ---
 
-## 5. Common Mistakes That Trigger Rejection
+## §6 Common Mistakes That Trigger Rejection
 
 | Mistake | Why caught | Prevention |
 |---|---|---|
@@ -150,7 +319,7 @@ sample and signal visible on dimmest. Acquire all conditions in same session.
 
 ---
 
-## 6. Reproducibility Standards
+## §7 Reproducibility Standards
 
 ### QUAREP-LiMi
 
@@ -180,7 +349,7 @@ image, processing, analysis. Used by BioImage Archive (EMBL-EBI).
 
 ---
 
-## 7. Methods Reporting Checklists
+## §8 Methods Reporting Checklists
 
 ### Acquisition (report ALL)
 
@@ -214,7 +383,7 @@ image, processing, analysis. Used by BioImage Archive (EMBL-EBI).
 
 ---
 
-## 8. Forensic Tools
+## §9 Forensic Tools
 
 ### Journal-side
 
@@ -237,7 +406,7 @@ image, processing, analysis. Used by BioImage Archive (EMBL-EBI).
 
 ---
 
-## 9. Integrity Verification Macro
+## §10 Integrity Verification Macro
 
 ```javascript
 macro "Image Integrity Check" {
@@ -288,7 +457,7 @@ macro "Image Integrity Check" {
 
 ---
 
-## 10. Agent Integrity Workflow
+## §11 Agent Integrity Workflow
 
 ### Before processing
 ```bash

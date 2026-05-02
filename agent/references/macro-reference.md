@@ -10,7 +10,7 @@ macros can't do (Swing, Java APIs), use `python ij.py script ...`.
 
 ---
 
-## 0. Lookup Map — "How do I find X?"
+## §0 Lookup Map — "How do I find X?"
 
 | Question | Where to look |
 |---|---|
@@ -23,7 +23,7 @@ macros can't do (Swing, Java APIs), use `python ij.py script ...`.
 
 ---
 
-## 1. Function Index (A–Z)
+## §1 Function Index (A–Z)
 
 Alphabetical pointer to the category section containing the full signature.
 Use `grep -n` inside that section for the exact overload.
@@ -113,7 +113,7 @@ Use `grep -n` inside that section for the exact overload.
 
 ---
 
-## 2. `run(...)` — Running ImageJ Commands
+## §2 `run(...)` — Running ImageJ Commands
 
 `run()` is the workhorse; it invokes any menu command or plugin.
 
@@ -130,7 +130,7 @@ Options syntax:
 Command names are case-sensitive. Discover unknown plugin args with
 `python probe_plugin.py "Plugin Name..."`.
 
-### 2.1 Image I/O
+### §2.1 Image I/O
 ```ijm
 run("Bio-Formats Importer", "open=/path/file.nd2");
 run("Duplicate...", "title=copy");
@@ -140,7 +140,7 @@ run("Canvas Size...", "width=1024 height=1024 position=Center");
 run("Crop");
 ```
 
-### 2.2 Filters
+### §2.2 Filters
 ```ijm
 run("Gaussian Blur...",      "sigma=2");
 run("Gaussian Blur 3D...",   "x=2 y=2 z=1");
@@ -163,7 +163,7 @@ run("Find Maxima...",        "prominence=10 output=[Single Points]");
 run("FFT");   run("Inverse FFT");
 ```
 
-### 2.3 Threshold and binary
+### §2.3 Threshold and binary
 ```ijm
 setThreshold(lower, upper);
 setThreshold(lower, upper, "raw");          // raw pixel values, ignore calibration
@@ -207,7 +207,7 @@ Threshold methods (from `getList("threshold.methods")`):
 Rules of thumb: `Otsu` bimodal general; `Li` fluorescence; `MaxEntropy` faint objects;
 `Triangle` small foreground; `Huang` fuzzy edges.
 
-### 2.4 Math / pixel ops / Image Calculator
+### §2.4 Math / pixel ops / Image Calculator
 ```ijm
 run("Add...",       "value=50");
 run("Subtract...",  "value=50");
@@ -233,14 +233,14 @@ imageCalculator("Subtract create 32-bit", "img1.tif", "img2.tif");
 // Modifiers: "create" (new image) · "stack" (all slices) · "32-bit" (float result)
 ```
 
-### 2.5 Enhance contrast — **caution**
+### §2.5 Enhance contrast — **caution**
 ```ijm
 run("Enhance Contrast...", "saturated=0.35");              // display only — SAFE
 run("Enhance Contrast...", "saturated=0.35 normalize");    // REWRITES PIXELS — never on measurement data
 setMinAndMax(0, 200);                                       // display-only, preferred
 ```
 
-### 2.6 Stacks and hyperstacks
+### §2.6 Stacks and hyperstacks
 ```ijm
 run("Z Project...", "projection=[Max Intensity]");         // also Sum, Min, Mean, Median, Standard Deviation
 run("Z Project...", "start=1 stop=10 projection=[Max Intensity]");
@@ -253,7 +253,7 @@ run("Reslice [/]...", "output=1.0 start=Top");
 run("3D Project...", "projection=[Brightest Point] axis=Y-Axis slice=1 initial=0 total=360 rotation=10");
 ```
 
-### 2.7 Measurements
+### §2.7 Measurements
 ```ijm
 run("Set Measurements...",
     "area mean standard modal min centroid center perimeter bounding fit shape feret integrated median skewness kurtosis area_fraction stack display redirect=None decimal=3");
@@ -271,7 +271,7 @@ Full column list: `area mean standard modal min max center centroid perimeter
 bounding fit shape feret's integrated median skewness kurtosis area_fraction
 stack limit display invert slice`.
 
-### 2.8 Color / LUT / bit depth
+### §2.8 Color / LUT / bit depth
 ```ijm
 run("8-bit");                   // grayscale 0..255
 run("16-bit");                  // 0..65535
@@ -286,7 +286,7 @@ run("Green"); run("Red"); run("Blue"); run("Cyan"); run("Magenta"); run("Yellow"
 // getList("LUTs") returns the full installed set.
 ```
 
-### 2.9 Drawing / overlay burn-in
+### §2.9 Drawing / overlay burn-in
 ```ijm
 run("Scale Bar...", "width=50 height=5 font=18 color=White background=None location=[Lower Right] bold");
 run("Calibration Bar...", "location=[Upper Right] fill=White label=Black number=5 decimal=0 font=12 zoom=1");
@@ -296,7 +296,7 @@ run("Draw");                    // draws selection outline into pixels
 run("Fill");                    // fills selection with foreground
 ```
 
-### 2.10 Menu tree (discovery — for command names you don't already know)
+### §2.10 Menu tree (discovery — for command names you don't already know)
 
 ```
 File     Open... · Open Next · Open Sequence... · Open Recent · Close · Close All ·
@@ -360,11 +360,11 @@ Plugins  Bio-Formats > [Importer, Exporter, ...]
 
 ---
 
-## 3. Built-in Functions by Category
+## §3 Built-in Functions by Category
 
 Signatures and overloads preserved verbatim from the official function index.
 
-### 3.1 Image I/O and Window Management
+### §3.1 Image I/O and Window Management
 
 | Function | Purpose |
 |---|---|
@@ -397,7 +397,7 @@ Signatures and overloads preserved verbatim from the official function index.
 | `getDisplayedArea(x, y, w, h)` | Visible canvas region |
 | `getZoom()` | Magnification factor |
 
-### 3.2 Geometry, Dimensions, Calibration
+### §3.2 Geometry, Dimensions, Calibration
 
 | Function | Purpose |
 |---|---|
@@ -411,7 +411,7 @@ Signatures and overloads preserved verbatim from the official function index.
 | `toScaled(x, y)` / `toUnscaled(x, y)` | Pixel ↔ calibrated coords |
 | `toBinary(string)` | Convert string to 8-bit binary image |
 
-### 3.3 Pixel Access and Display Range
+### §3.3 Pixel Access and Display Range
 
 | Function | Purpose |
 |---|---|
@@ -431,7 +431,7 @@ Signatures and overloads preserved verbatim from the official function index.
 
 Bulk pixel work: prefer TCP `get_pixels` + numpy.
 
-### 3.4 Selections (ROIs)
+### §3.4 Selections (ROIs)
 
 **Create:**
 | Function | Selection |
@@ -475,7 +475,7 @@ Bulk pixel work: prefer TCP `get_pixels` + numpy.
 | `Roi.getDefaultColor / getStrokeColor / getFillColor` | Colors |
 | `is("area")` / `is("line")` | Selection-type checks |
 
-### 3.5 ROI Manager
+### §3.5 ROI Manager
 
 ```ijm
 roiManager("Add");
@@ -501,7 +501,7 @@ roiManager("Set Line Width", 2);
 roiManager("UseNames", "true");
 ```
 
-### 3.6 Stacks and Hyperstacks — `Stack.*`
+### §3.6 Stacks and Hyperstacks — `Stack.*`
 
 | Function | Purpose |
 |---|---|
@@ -532,7 +532,7 @@ roiManager("UseNames", "true");
 | `getSliceNumber()` | Current slice (1-based) |
 | `nSlices` | Slice count |
 
-### 3.7 Overlay — `Overlay.*`
+### §3.7 Overlay — `Overlay.*`
 
 Non-destructive vector layer over the image.
 
@@ -572,7 +572,7 @@ Non-destructive vector layer over the image.
 | `Overlay.cropAndSave(dir, format)` | Save each item as cropped image |
 | `Overlay.xor(indexArray)` | XOR selected items |
 
-### 3.8 Drawing on the Image (Destructive)
+### §3.8 Drawing on the Image (Destructive)
 
 | Function | Purpose |
 |---|---|
@@ -590,7 +590,7 @@ Non-destructive vector layer over the image.
 | `getStringWidth(text)` | Pixel width of text |
 | `setPasteMode(mode)` | `"Copy"`, `"Blend"`, `"Average"`, `"Difference"`, `"Transparent"`, `"AND"`, `"OR"`, `"XOR"`, `"Add"`, `"Subtract"`, `"Multiply"`, `"Divide"` |
 
-### 3.9 Color — `Color.*`
+### §3.9 Color — `Color.*`
 
 | Function | Purpose |
 |---|---|
@@ -610,7 +610,7 @@ Non-destructive vector layer over the image.
 Names: `black white red green blue yellow cyan magenta orange pink gray darkGray lightGray`.
 Hex: `"#rrggbb"` or `"#aarrggbb"`.
 
-### 3.10 Math — `Math.*` (and top-level aliases)
+### §3.10 Math — `Math.*` (and top-level aliases)
 
 Top-level forms (unprefixed) are identical to the `Math.*` version where both
 exist: `abs acos asin atan atan2 cos exp floor log pow round sin sqrt tan`.
@@ -644,7 +644,7 @@ exist: `abs acos asin atan atan2 cos exp floor log pow round sin sqrt tan`.
 | `isNaN(n)` | Test NaN |
 | `NaN` / `PI` | Constants |
 
-### 3.11 Arrays — `Array.*`
+### §3.11 Arrays — `Array.*`
 
 ```ijm
 a = newArray(5);                        // zero-filled length 5
@@ -681,7 +681,7 @@ setOption("ExpandableArrays", true);    // allow a[a.length] = x
 
 `a[-1]` is NOT valid — use `a[a.length-1]`.
 
-### 3.12 Strings
+### §3.12 Strings
 
 | Function | Purpose |
 |---|---|
@@ -701,7 +701,7 @@ setOption("ExpandableArrays", true);    // allow a[a.length] = x
 
 `"..."` only; no single quotes. Concatenation with `+`. `==` is case-sensitive.
 
-### 3.13 Results Table
+### §3.13 Results Table
 
 ```ijm
 run("Measure");                          // active selection / whole image
@@ -731,7 +731,7 @@ getHistogram(values, counts, nBins, histMin, histMax);  // custom histogram
 `"image.size"`, `"font.size"`, `"font.height"`, `"color.foreground"`,
 `"color.background"`, `"rgb.foreground"`, `"rgb.background"`.
 
-### 3.14 Tables — `Table.*`
+### §3.14 Tables — `Table.*`
 
 Works with the Results window or any named table. Omit the title argument to
 target the active table.
@@ -760,7 +760,7 @@ Table.showRowNumbers(true);
 Table.showArrays("Combined", a1, a2, a3);
 ```
 
-### 3.15 Dialogs and User Input
+### §3.15 Dialogs and User Input
 
 **One-shot prompts:**
 ```ijm
@@ -815,7 +815,7 @@ waitForUser("Title", "Multi-line\nmessage");
 | `Dialog.show()` | Display (blocks) |
 | `Dialog.getString / getNumber / getCheckbox / getChoice / getRadioButton / getImageChoice` | Read in add-order |
 
-### 3.16 File I/O — `File.*`
+### §3.16 File I/O — `File.*`
 
 | Function | Purpose |
 |---|---|
@@ -846,7 +846,7 @@ waitForUser("Title", "Multi-line\nmessage");
 | `File.openSequence(dir, "virtual filter=.tif")` | Open dir images as stack |
 | `File.openDialog(title)` | Show open dialog |
 
-### 3.17 Plots — `Plot.*`
+### §3.17 Plots — `Plot.*`
 
 ```ijm
 Plot.create("Title", "x label", "y label", xArr, yArr);
@@ -893,7 +893,7 @@ profile = getProfile();                                   // array along line se
 | `Plot.removeNaNs()` | Drop NaNs |
 | `Plot.enableLive(boolean)` | Live mode |
 
-### 3.18 Curve Fitting — `Fit.*`
+### §3.18 Curve Fitting — `Fit.*`
 
 | Function | Purpose |
 |---|---|
@@ -916,7 +916,7 @@ Built-in equation names: `"Straight Line"`, `"Polynomial (2nd)"`…`"Polynomial 
 `"Gaussian"`, `"Gaussian (no offset)"`, `"Rodbard"`, `"Rodbard (NIH Image)"`,
 `"Gamma Variate"`, `"Log"`, `"Log2"`, `"Chapman-Richards"`, `"Error Function"`.
 
-### 3.19 In-memory Map — `List.*`
+### §3.19 In-memory Map — `List.*`
 
 Not to be confused with arrays.
 
@@ -935,7 +935,7 @@ Not to be confused with arrays.
 | `List.toArrays(keys, values)` / `List.fromArrays(keys, values)` | Array interop |
 | `List.indexOf(key)` | Alphabetic position |
 
-### 3.20 Image Properties / Metadata — `Property.*`
+### §3.20 Image Properties / Metadata — `Property.*`
 
 Per-image key/value store, persisted in TIFF.
 
@@ -953,7 +953,7 @@ Per-image key/value store, persisted in TIFF.
 | `getMetadata("Info" \| "Label")` | Whole-image or per-slice |
 | `setMetadata("Info" \| "Label", value)` | Write |
 
-### 3.21 Introspection
+### §3.21 Introspection
 
 **Booleans — `is(flag)`:**
 ```
@@ -987,7 +987,7 @@ Also: `getInfo(anyJavaSystemProperty)`.
 | `getDateAndTime(year, month, dow, dom, h, m, s, ms)` | By reference |
 | `getTime()` | ms since epoch |
 
-### 3.22 Macro Control and Cross-Language — `IJ.*`, etc.
+### §3.22 Macro Control and Cross-Language — `IJ.*`, etc.
 
 | Function | Purpose |
 |---|---|
@@ -1014,7 +1014,7 @@ Also: `getInfo(anyJavaSystemProperty)`.
 | `IJ.pad(n, width)` | Zero-pad string |
 | `IJ.checksum("MD5 string", s)` / `IJ.checksum("MD5 file", path)` | Hash |
 
-### 3.23 Plugin-Contributed — `Ext.*`
+### §3.23 Plugin-Contributed — `Ext.*`
 
 Plugins exposing `MacroExtension` register functions under `Ext.`. Example
 (Serial Macro Extensions):
@@ -1027,7 +1027,7 @@ Discover via plugin docs or `dump()`.
 
 ---
 
-## 4. Batch Mode and Performance
+## §4 Batch Mode and Performance
 
 ```ijm
 setBatchMode(true);                         // hide all new images; 10-100× faster
@@ -1045,7 +1045,7 @@ Rules:
 
 ---
 
-## 5. Logging, Messages, Windows, Tools
+## §5 Logging, Messages, Windows, Tools
 
 | Function | Purpose |
 |---|---|
@@ -1060,9 +1060,9 @@ Rules:
 
 ---
 
-## 6. Recipes
+## §6 Recipes
 
-### 6.1 Cell counting (2D fluorescence)
+### §6.1 Cell counting (2D fluorescence)
 ```ijm
 run("Duplicate...", "title=mask");
 run("Gaussian Blur...", "sigma=1");
@@ -1074,7 +1074,7 @@ run("Set Measurements...", "area mean integrated display redirect=None decimal=3
 run("Analyze Particles...", "size=50-5000 circularity=0.5-1.0 show=Outlines display summarize exclude");
 ```
 
-### 6.2 CTCF (corrected total cell fluorescence)
+### §6.2 CTCF (corrected total cell fluorescence)
 ```ijm
 roiManager("Select", cellIdx); run("Measure");
 intDen = getResult("IntDen", nResults-1);
@@ -1086,7 +1086,7 @@ setResult("CTCF", nResults-1, ctcf);
 updateResults();
 ```
 
-### 6.3 Batch process a folder
+### §6.3 Batch process a folder
 ```ijm
 dir   = getDirectory("Input folder");
 out   = dir + "processed" + File.separator;
@@ -1103,13 +1103,13 @@ for (i = 0; i < list.length; i++) {
 setBatchMode(false);
 ```
 
-### 6.4 Z-max projection (skip if 2D)
+### §6.4 Z-max projection (skip if 2D)
 ```ijm
 Stack.getDimensions(w, h, c, sl, fr);
 if (sl > 1) run("Z Project...", "projection=[Max Intensity]");
 ```
 
-### 6.5 Per-ROI intensity over time
+### §6.5 Per-ROI intensity over time
 ```ijm
 n = roiManager("Count");
 Stack.getDimensions(w, h, c, sl, fr);
@@ -1126,7 +1126,7 @@ for (t = 1; t <= fr; t++) {
 Table.update;
 ```
 
-### 6.6 Colocalization mask (intersection of two thresholded channels)
+### §6.6 Colocalization mask (intersection of two thresholded channels)
 ```ijm
 selectImage("C1.tif"); run("Duplicate...", "title=m1");
 setAutoThreshold("Otsu dark"); run("Convert to Mask");
@@ -1136,7 +1136,7 @@ imageCalculator("AND create", "m1", "m2");
 rename("colocalized_mask");
 ```
 
-### 6.7 Macro argument passing
+### §6.7 Macro argument passing
 ```ijm
 // runMacro("/path/tool.ijm", "sigma=2,method=Li");
 args = getArgument();
@@ -1150,7 +1150,7 @@ for (i = 0; i < parts.length; i++) {
 
 ---
 
-## 7. Gotchas and Best Practices
+## §7 Gotchas and Best Practices
 
 1. **Check state before acting.** Use `nImages` and `isOpen(title)` — never assume.
 2. **Calibrate before measuring.** Uncalibrated → pixel units. `run("Set Scale...", ...)` or inherit from Bio-Formats.
@@ -1175,7 +1175,7 @@ for (i = 0; i < parts.length; i++) {
 
 ---
 
-## 8. Agent-Specific Tips (ImageJAI)
+## §8 Agent-Specific Tips (ImageJAI)
 
 - `python ij.py macro '<code>'` — single quotes outside, double inside. Escape `\n` as `\\n` in shell.
 - `python ij.py probe "Plugin Name..."` reveals every parameter of any GenericDialog plugin.
@@ -1187,7 +1187,7 @@ for (i = 0; i < parts.length; i++) {
 
 ---
 
-## 9. Language Fundamentals
+## §9 Language Fundamentals
 
 | Feature | Syntax / Rule |
 |---|---|

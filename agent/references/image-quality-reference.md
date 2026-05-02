@@ -6,9 +6,113 @@ problems. All code is ImageJ macro language executable via `python ij.py macro`.
 Sources: QUAREP-LiMi, Nature Methods checklists (2023), Cromey "Avoiding Twisted Pixels",
 MetroloJ_QC, NanoJ-SQUIRREL, NoiSee, JCB/Nature/Cell image integrity guidelines.
 
+Related QC protocol references: `troubleshooting-quality-reference.md` (diagnostic
+flowcharts), `fluorescence-microscopy-reference.md` (acquisition-side QC),
+`method-validation-reference.md` (pipeline validation), `statistics-reference.md`
+(outlier detection). Invoke from the agent:
+`python ij.py macro '<code>'` — run ImageJ macro (.ijm) code.
+`python ij.py script '<code>'` — run Groovy / Jython / JavaScript.
+`python ij.py histogram` — quick histogram snapshot.
+
 ---
 
-## 1. Quick QC Protocol
+## §0 Lookup Map — "How do I find X?"
+
+| Question | Where to look |
+|---|---|
+| "Is this image good enough to analyse?" | §2.1 master QC macro, §9.1 flowchart |
+| "How do I measure focus?" | §3 focus metrics (Laplacian, Brenner, Tenengrad, Vollath, entropy) |
+| "Is this image saturated / underexposed?" | §4.1 thresholds, §4.2 dynamic range macro |
+| "What SNR does my image have?" | §5.1 Rose criterion, §5.2 auto-threshold SNR |
+| "Is the illumination uneven / vignetted?" | §6.1 tile CV, §6.2 shading, §6.3-6.5 correction |
+| "What are the common artifacts and how do I detect them?" | §7.1 optics, §7.2 acquisition, §7.3 staining, §7.4 processing |
+| "Is my staining any good?" | §8.1 bimodality, §8.2 SBR, §8.3 criteria, §8.4 batch EMD |
+| "Which correction do I apply for problem X?" | §9.2 correction mapping, §9.3 order of operations |
+| "What image manipulations are allowed for publication?" | §10.1 allowed table, §10.2 journal notes, §10.3 detection |
+| "How do I QC a whole folder of images?" | §11.1 batch macro, §11.2 outliers, §11.3 scoring |
+| "What's the PASS/WARN/FAIL cutoff for metric X?" | §12 quick reference card |
+| "What should I do before / during / after acquisition?" | §13 checklist, §14 tools, §15 common failures |
+| "Which plugin measures PSF / flat-field / SNR?" | §14 MetroloJ, BaSiC, NoiSee, NanoJ-SQUIRREL, SIMcheck |
+
+---
+
+## §1 Term Index (A–Z)
+
+Alphabetical pointer to the section containing each QC metric, artifact, or
+concept. Use `grep -n '`<term>`' image-quality-reference.md` to jump.
+
+### A
+`Air bubbles` §7.3 · `AND-mask (autofluorescence)` §7.3 · `Auto-threshold SNR` §5.2 · `Autofluorescence` §7.3
+
+### B
+`BaSiC` §6.3, §6.5, §14 · `Batch QC macro` §11.1 · `Best focus slice` §3.8 · `Bidirectional offset` §7.2 · `Bimodality Coefficient (BC)` §8.1, §8.3 · `Bit depth conversion` §7.4 · `Bit depth detection (12-in-16)` §4.3 · `Bleach Correction` §7.3, §9.2, §14 · `Bleed-through` §7.2, §15 · `Brenner Gradient` §3.1, §3.4
+
+### C
+`Channel saturation (per-channel)` §4.4 · `Chromatic aberration` §7.1, §9.2 · `Clipping (contrast)` §7.4 · `Contrast (Weber)` §4.5, §12 · `CV (tile)` §2.1, §6.1
+
+### D
+`Dark frame subtraction` §9.3 · `Dead pixels` §7.1 · `Decision tree (pre-analysis)` §9.1 · `Defective pixel detection` §7.1 · `Deconvolution (order)` §9.3 · `Detector noise` §5.6 · `Dynamic range` §2.1, §4.2, §12
+
+### E
+`Effective bits` §2.1, §4.2, §12 · `EMD (histogram, batch)` §8.4 · `Enhance Contrast (forbidden)` §9.3, §10.1, §13 · `Entropy (focus)` §3.1, §3.7
+
+### F
+`Field illumination (MetroloJ)` §14 · `Find Focused Slices` §14 · `Flat-field correction` §6.3, §6.4, §6.5, §9.3 · `Focus metrics` §3.1 · `Freeze artifacts` §7.3
+
+### G
+`Gaussian pseudo-flat-field` §6.5 · `Go/no-go (quick QC)` §2.2
+
+### H
+`HF Ratio` §3.1, §3.7 · `HiLo LUT` §4.6 · `Histogram gaps (posterization)` §7.4, §10.3 · `Homogeneous tile (noise)` §5.4 · `Hot pixels` §7.1, §12, §15
+
+### I
+`Illumination uniformity` §2.1, §6, §12 · `Image integrity standards` §10 · `Individual metric one-liners` §2.3 · `IQR outlier detection` §11.2
+
+### J
+`JCB guidelines` §10.2 · `JPEG artifacts` §7.2, §10.1, §12, §15 · `Journal policies` §10.2
+
+### L
+`Lamp fluctuations` §7.1 · `Laplacian Variance` §2.1, §3.1, §3.2, §3.3, §12 · `Line noise (confocal)` §7.2 · `Linear unmixing` §7.2
+
+### M
+`Master QC macro` §2.1 · `Measurement frequency (MetroloJ)` §14 · `MetroloJ / MetroloJ_QC` §14 · `Microscope Focus Quality` §14 · `Mounting crystals` §7.3
+
+### N
+`NanoJ-SQUIRREL` §14 · `Nature Portfolio (integrity)` §10.2 · `Noise estimation (Laplacian)` §5.3 · `NoiSee` §14 · `Non-linear processing detection` §10.3 · `Non-specific staining` §7.3 · `Normalised Variance` §3.1, §3.7
+
+### O
+`Order of corrections` §9.3 · `Otsu (SNR basis)` §2.1, §5.2 · `Outlier detection (IQR)` §11.2 · `Over-denoising` §7.4 · `Over-sharpening` §7.4
+
+### P
+`Paraffin chatter` §7.3 · `Per-channel saturation` §4.4 · `Photobleaching` §7.3, §12, §15 · `Pre-analysis QC flowchart` §9.1 · `PSF (MetroloJ)` §14
+
+### Q
+`QUAREP-LiMi` (sources) · `Quality Score` §11.3 · `Quick QC one-liner` §2.2
+
+### R
+`Reporting template` §13 · `Retrospective flat-field` §6.5 · `RGB (warning)` §7.4 · `Rolling ball` §6.3, §6.5, §9.2 · `Rose Criterion` §5.1 · `Rotation padding` §7.4
+
+### S
+`Saturation` §2.1, §2.3, §4.1, §4.2, §12, §15 · `Shading assessment` §6.2 · `Signal-to-Background Ratio (SBR)` §8.2, §8.3, §12 · `SIMcheck` §14 · `SNR` §2.1, §5, §12 · `Spherical aberration` §7.1 · `Staining quality` §8 · `Stitching seams` §7.2
+
+### T
+`Tenengrad (Sobel)` §3.1, §3.5 · `Tile CV` §2.1, §2.3, §6.1 · `Tilt detection` §3.9 · `Tissue folds` §7.3, §15 · `Two-image noise method` §5.5
+
+### U
+`Underexposure` §7.2, §15 · `Uniformity (corners)` §2.1, §6.1, §12 · `Uniform processing verification` §10.3
+
+### V
+`Vignetting` §2.1, §7.1 · `Visual saturation check (HiLo)` §4.6 · `Vollath F4` §3.1, §3.6
+
+### W
+`Weber Contrast` §4.5, §12
+
+### Z
+`Z-drift detection` §3.10 · `Z-stack best focus` §3.8
+
+---
+
+## §2 Quick QC Protocol
 
 Run on every image before analysis. Prints PASS/WARN/FAIL for each metric.
 
@@ -23,7 +127,7 @@ Step 7: Staining -> bimodality coefficient (if applicable)
 -> PASS / WARN (proceed with caveats) / FAIL (reject or correct first)
 ```
 
-### 1.1 Master QC Macro
+### §2.1 Master QC Macro
 
 ```javascript
 // Run on any open image. Returns "PASS", "WARN", or "FAIL".
@@ -131,7 +235,7 @@ function imageQC() {
 result = imageQC();
 ```
 
-### 1.2 Quick Go/No-Go (One-Liner)
+### §2.2 Quick Go/No-Go (One-Liner)
 
 ```javascript
 function quickQC() {
@@ -148,7 +252,7 @@ function quickQC() {
 }
 ```
 
-### 1.3 Individual Metric One-Liners (Parseable Output)
+### §2.3 Individual Metric One-Liners (Parseable Output)
 
 **Focus:**
 ```javascript
@@ -181,9 +285,9 @@ print("QC_TILE_CV=" + d2s(gs/gm*100, 1));
 
 ---
 
-## 2. Focus Quality Metrics
+## §3 Focus Quality Metrics
 
-### 2.1 Metric Comparison
+### §3.1 Metric Comparison
 
 | Metric | Speed | Noise Robust | Sparse Images | Best For |
 |--------|-------|-------------|---------------|----------|
@@ -198,7 +302,7 @@ print("QC_TILE_CV=" + d2s(gs/gm*100, 1));
 **Recommendation:** Use Laplacian Variance as the primary metric. Add Vollath F4
 for noisy images. For z-stacks, use per-slice Laplacian Variance.
 
-### 2.2 Laplacian Variance Thresholds (8-bit normalised)
+### §3.2 Laplacian Variance Thresholds (8-bit normalised)
 
 | Value | Interpretation |
 |-------|---------------|
@@ -210,7 +314,7 @@ for noisy images. For z-stacks, use per-slice Laplacian Variance.
 NOTE: Scale 16-bit values by dividing by (65535/255)^2. Sparse fluorescence
 images naturally have lower values than dense tissue.
 
-### 2.3 Laplacian Variance
+### §3.3 Laplacian Variance
 
 ```javascript
 function laplacianVariance() {
@@ -221,7 +325,7 @@ function laplacianVariance() {
 }
 ```
 
-### 2.4 Brenner Gradient (Fast)
+### §3.4 Brenner Gradient (Fast)
 
 ```javascript
 function brennerGradientFast() {
@@ -237,7 +341,7 @@ function brennerGradientFast() {
 }
 ```
 
-### 2.5 Tenengrad (Sobel)
+### §3.5 Tenengrad (Sobel)
 
 ```javascript
 function tenengrad() {
@@ -257,7 +361,7 @@ function tenengrad() {
 }
 ```
 
-### 2.6 Vollath F4 (Noise-Robust Autocorrelation)
+### §3.6 Vollath F4 (Noise-Robust Autocorrelation)
 
 ```javascript
 function vollathF4() {
@@ -278,7 +382,7 @@ function vollathF4() {
 }
 ```
 
-### 2.7 Normalised Variance / Entropy / HF Ratio
+### §3.7 Normalised Variance / Entropy / HF Ratio
 
 ```javascript
 function normalisedVariance() {
@@ -307,7 +411,7 @@ function hfRatioFast() {
 }
 ```
 
-### 2.8 Best Focus Slice (Z-Stack)
+### §3.8 Best Focus Slice (Z-Stack)
 
 ```javascript
 function findBestFocusSlice() {
@@ -327,7 +431,7 @@ function findBestFocusSlice() {
 }
 ```
 
-### 2.9 Tilt / Partial Focus Detection
+### §3.9 Tilt / Partial Focus Detection
 
 ```javascript
 function detectTilt() {
@@ -352,7 +456,7 @@ function detectTilt() {
 }
 ```
 
-### 2.10 Z-Drift Detection (Time-Lapse)
+### §3.10 Z-Drift Detection (Time-Lapse)
 
 ```javascript
 nFrames = nSlices();
@@ -373,9 +477,9 @@ if (nFrames >= 3) {
 
 ---
 
-## 3. Saturation & Dynamic Range
+## §4 Saturation & Dynamic Range
 
-### 3.1 Saturation Thresholds
+### §4.1 Saturation Thresholds
 
 | Saturation % | Verdict | Action |
 |-------------|---------|--------|
@@ -387,7 +491,7 @@ if (nFrames >= 3) {
 
 For zero-value pixels: up to 30-50% is normal for sparse fluorescence.
 
-### 3.2 Dynamic Range Assessment
+### §4.2 Dynamic Range Assessment
 
 ```javascript
 function dynamicRangeAssessment() {
@@ -408,7 +512,7 @@ function dynamicRangeAssessment() {
 }
 ```
 
-### 3.3 12-Bit in 16-Bit Container Detection
+### §4.3 12-Bit in 16-Bit Container Detection
 
 ```javascript
 function detectActualBitDepth() {
@@ -421,7 +525,7 @@ function detectActualBitDepth() {
 }
 ```
 
-### 3.4 Per-Channel Saturation
+### §4.4 Per-Channel Saturation
 
 ```javascript
 function checkChannelSaturation() {
@@ -439,7 +543,7 @@ function checkChannelSaturation() {
 }
 ```
 
-### 3.5 Weber Contrast
+### §4.5 Weber Contrast
 
 ```javascript
 function weberContrast() {
@@ -456,7 +560,7 @@ function weberContrast() {
 }
 ```
 
-### 3.6 Visual Saturation Check
+### §4.6 Visual Saturation Check
 
 ```javascript
 run("HiLo");  // Blue=0 (underexposed), Red=max (saturated). Display only.
@@ -464,9 +568,9 @@ run("HiLo");  // Blue=0 (underexposed), Red=max (saturated). Display only.
 
 ---
 
-## 4. Signal-to-Noise Ratio
+## §5 Signal-to-Noise Ratio
 
-### 4.1 SNR Interpretation (Rose Criterion)
+### §5.1 SNR Interpretation (Rose Criterion)
 
 | SNR | Interpretation | Measurement CV |
 |-----|---------------|---------------|
@@ -476,7 +580,7 @@ run("HiLo");  // Blue=0 (underexposed), Red=max (saturated). Display only.
 | 3-5 | Marginal | 20-33% |
 | < 3 | Reject for quantitative analysis | > 33% |
 
-### 4.2 Auto-Threshold SNR
+### §5.2 Auto-Threshold SNR
 
 ```javascript
 function estimateSNR_auto() {
@@ -495,7 +599,7 @@ function estimateSNR_auto() {
 }
 ```
 
-### 4.3 Noise Estimation (Laplacian, No ROI Needed)
+### §5.3 Noise Estimation (Laplacian, No ROI Needed)
 
 ```javascript
 function estimateNoise() {
@@ -507,7 +611,7 @@ function estimateNoise() {
 }
 ```
 
-### 4.4 Homogeneous Tile Method
+### §5.4 Homogeneous Tile Method
 
 ```javascript
 function noiseFromHomogeneousTile() {
@@ -524,7 +628,7 @@ function noiseFromHomogeneousTile() {
 }
 ```
 
-### 4.5 Two-Image Method
+### §5.5 Two-Image Method
 
 If two sequential acquisitions of the same field are available:
 ```
@@ -532,7 +636,7 @@ sigma_noise = sqrt(Var(I1 - I2) / 2)
 SNR = mean(I) / sigma_noise
 ```
 
-### 4.6 Detector Noise Characterisation
+### §5.6 Detector Noise Characterisation
 
 ```javascript
 function characterizeNoise() {
@@ -551,9 +655,9 @@ function characterizeNoise() {
 
 ---
 
-## 5. Background & Illumination Uniformity
+## §6 Background & Illumination Uniformity
 
-### 5.1 Tile-Based CV
+### §6.1 Tile-Based CV
 
 ```javascript
 function backgroundUniformity() {
@@ -578,7 +682,7 @@ function backgroundUniformity() {
 }
 ```
 
-### 5.2 Shading Assessment
+### §6.2 Shading Assessment
 
 ```javascript
 function shadingAssessment() {
@@ -595,7 +699,7 @@ function shadingAssessment() {
 }
 ```
 
-### 5.3 Background Correction Methods
+### §6.3 Background Correction Methods
 
 | Method | When to Use | Command | Preserves Intensity? |
 |--------|------------|---------|---------------------|
@@ -607,7 +711,7 @@ function shadingAssessment() {
 
 **Rolling ball radius:** `radius > 2 * largest_object_diameter`
 
-### 5.4 Flat-Field Correction
+### §6.4 Flat-Field Correction
 
 ```javascript
 // Corrected = (Raw - Dark) / (Flat - Dark) * mean(Flat - Dark)
@@ -622,7 +726,7 @@ run("Multiply...", "value=" + flatMean);
 // Clean up originals
 ```
 
-### 5.5 Retrospective Flat-Field (No References)
+### §6.5 Retrospective Flat-Field (No References)
 
 ```javascript
 // Method 1: BaSiC (best for tile scans)
@@ -642,9 +746,9 @@ run("Subtract Background...", "rolling=200 sliding");
 
 ---
 
-## 6. Artifact Catalogue
+## §7 Artifact Catalogue
 
-### 6.1 Illumination & Optics Artifacts
+### §7.1 Illumination & Optics Artifacts
 
 | Artifact | Appearance | Detection | Fix |
 |----------|-----------|-----------|-----|
@@ -674,7 +778,7 @@ function detectDefectivePixels(threshold) {
 }
 ```
 
-### 6.2 Acquisition Artifacts
+### §7.2 Acquisition Artifacts
 
 | Artifact | Appearance | Detection | Fix |
 |----------|-----------|-----------|-----|
@@ -740,7 +844,7 @@ function detectJPEGArtifacts() {
 }
 ```
 
-### 6.3 Staining & Sample Artifacts
+### §7.3 Staining & Sample Artifacts
 
 | Artifact | Appearance | Detection | Fix |
 |----------|-----------|-----------|-----|
@@ -795,7 +899,7 @@ function measureBleaching() {
 // run("Bleach Correction", "correction=[Histogram Matching]");              // for segmentation only
 ```
 
-### 6.4 Digital Processing Artifacts
+### §7.4 Digital Processing Artifacts
 
 | Artifact | Appearance | Detection | Fix |
 |----------|-----------|-----------|-----|
@@ -840,9 +944,9 @@ function detectContrastClipping() {
 
 ---
 
-## 7. Staining Quality
+## §8 Staining Quality
 
-### 7.1 Bimodality Coefficient
+### §8.1 Bimodality Coefficient
 
 Good staining produces a bimodal histogram. BC > 0.555 suggests bimodality.
 
@@ -868,7 +972,7 @@ function bimodalityCheck() {
 }
 ```
 
-### 7.2 Signal-to-Background Ratio
+### §8.2 Signal-to-Background Ratio
 
 ```javascript
 function measureSBR() {
@@ -884,7 +988,7 @@ function measureSBR() {
 }
 ```
 
-### 7.3 Staining Quality Criteria
+### §8.3 Staining Quality Criteria
 
 | Metric | Good | Marginal | Poor |
 |--------|------|----------|------|
@@ -893,7 +997,7 @@ function measureSBR() {
 | Signal Area Fraction | 5-60% | 1-5% or 60-80% | < 1% or > 80% |
 | Histogram EMD (vs reference) | < 5 | 5-15 | > 15 |
 
-### 7.4 Batch Staining Consistency (EMD)
+### §8.4 Batch Staining Consistency (EMD)
 
 ```javascript
 function histogramEMD(counts1, counts2, nBins) {
@@ -910,9 +1014,9 @@ function histogramEMD(counts1, counts2, nBins) {
 
 ---
 
-## 8. Decision Trees
+## §9 Decision Trees
 
-### 8.1 Pre-Analysis QC Flowchart
+### §9.1 Pre-Analysis QC Flowchart
 
 ```
 Image arrives
@@ -940,7 +1044,7 @@ Image arrives
     Yes -> FAIL      No -> PASS
 ```
 
-### 8.2 Which Correction to Apply?
+### §9.2 Which Correction to Apply?
 
 ```
 Problem -> Correction
@@ -954,7 +1058,7 @@ High background -> Rolling Ball (radius = 2-5x largest feature)
 Over/under exposure -> CANNOT FIX. Re-acquire.
 ```
 
-### 8.3 Order of Corrections
+### §9.3 Order of Corrections
 
 ```
 1. Dark frame subtraction
@@ -972,9 +1076,9 @@ NEVER: Apply Enhance Contrast (normalize), change bit depth carelessly, save as 
 
 ---
 
-## 9. Image Integrity Standards
+## §10 Image Integrity Standards
 
-### 9.1 Allowed vs Forbidden Manipulations
+### §10.1 Allowed vs Forbidden Manipulations
 
 | Operation | Allowed? | Disclosure |
 |-----------|----------|------------|
@@ -992,7 +1096,7 @@ NEVER: Apply Enhance Contrast (normalize), change bit depth carelessly, save as 
 | Splicing without visible lines | No | Boundaries required |
 | JPEG for quantitative data | No | Lossy compression corrupts data |
 
-### 9.2 Journal-Specific Notes
+### §10.2 Journal-Specific Notes
 
 - **Nature Portfolio:** All processing in Methods; non-linear adjustments in figure legends; raw data on editor request
 - **JCB:** Pioneer in screening (since 2002); "Is the image an accurate representation of the original data?"
@@ -1000,7 +1104,7 @@ NEVER: Apply Enhance Contrast (normalize), change bit depth carelessly, save as 
 - **Science/AAAS:** Proofig AI screening; lines required between panels from different images
 - **eLife:** Routine screening since ~2020; checks duplication, processing, splicing
 
-### 9.3 Integrity Detection Macros
+### §10.3 Integrity Detection Macros
 
 **Non-linear processing (histogram gaps):**
 ```javascript
@@ -1024,9 +1128,9 @@ print("CHECK: All display ranges should be identical for valid comparison");
 
 ---
 
-## 10. Batch QC
+## §11 Batch QC
 
-### 10.1 Batch QC Macro
+### §11.1 Batch QC Macro
 
 ```javascript
 dir = getDirectory("Choose image directory");
@@ -1070,7 +1174,7 @@ for (i = 0; i < list.length; i++) {
 updateResults();
 ```
 
-### 10.2 Outlier Detection (IQR Method)
+### §11.2 Outlier Detection (IQR Method)
 
 ```javascript
 function flagOutliers(metricColumn) {
@@ -1087,7 +1191,7 @@ function flagOutliers(metricColumn) {
 flagOutliers("LapVar"); flagOutliers("Sat%"); flagOutliers("BgCV%");
 ```
 
-### 10.3 Quality Score
+### §11.3 Quality Score
 
 | Score | Rating |
 |-------|--------|
@@ -1099,7 +1203,7 @@ flagOutliers("LapVar"); flagOutliers("Sat%"); flagOutliers("BgCV%");
 
 ---
 
-## 11. QC Metrics Quick Reference Card
+## §12 QC Metrics Quick Reference Card
 
 | Metric | Formula | PASS | WARN | FAIL |
 |--------|---------|------|------|------|
@@ -1122,7 +1226,7 @@ NOTE: All thresholds are guidelines. Calibrate for your specific instrument and 
 
 ---
 
-## 12. Best Practices Checklist
+## §13 Best Practices Checklist
 
 ### Pre-Acquisition
 - [ ] Calibrate microscope with stage micrometer
@@ -1170,7 +1274,7 @@ Processed using Fiji/ImageJ (v[X.Y.Z]). [Background subtracted using [method]
 
 ---
 
-## 13. QC Tools and Plugins
+## §14 QC Tools and Plugins
 
 | Tool | Purpose | Key Metrics |
 |------|---------|-------------|
@@ -1194,7 +1298,7 @@ Processed using Fiji/ImageJ (v[X.Y.Z]). [Background subtracted using [method]
 
 ---
 
-## 14. Common Failures Quick Reference
+## §15 Common Failures Quick Reference
 
 | Problem | Detection | Fix |
 |---------|-----------|-----|

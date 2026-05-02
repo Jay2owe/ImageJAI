@@ -1,9 +1,117 @@
 # 3Dscript Animation Reference
 
+Agent-oriented reference for 3Dscript, the animation language for Fiji's
+Batch Animation / Interactive Animation renderers. Covers syntax, camera /
+transform keywords, per-channel and global rendering properties, animation
+patterns (rotation, tumble, zoom, reveal, Z-slice peel, 4D sweep), script
+functions, tuple syntax, and gotchas.
+
 Sources: [Wiki](https://github.com/bene51/3Dscript/wiki/The-animation-language),
 [KeywordFactory.java](https://github.com/bene51/3Dscript/blob/master/3D_Animation/src/main/java/animation3d/renderer3d/KeywordFactory.java)
 
-## Running from Agent
+Invoke from the agent:
+`python ij.py macro '<code>'` — run ImageJ macro (.ijm) code that writes an
+animation text file and calls `run("Batch Animation", ...)`.
+
+---
+
+## §0 Lookup Map — "How do I find X?"
+
+| Question | Where to look |
+|---|---|
+| "How do I run 3Dscript from the agent?" | §2 |
+| "What's the difference between Batch and Interactive Animation?" | §2 |
+| "What's the syntax for a keyframe / transition / easing?" | §3 |
+| "How do I rotate, zoom, or translate the view?" | §4 |
+| "How do I change lighting / colour / alpha / intensity per channel?" | §5.1 |
+| "How do I hide the bounding box, scalebar, or background?" | §5.2 |
+| "What rendering algorithms are available?" | §5.2 |
+| "How do I write a simple rotation animation?" | §6.1 |
+| "How do I make a tumbling / gyroscope orbit?" | §6.2 |
+| "How do I zoom into a region of interest?" | §6.3 |
+| "How do I hide or fade a channel during the animation?" | §6.4 |
+| "How do I peel away Z-slices over time?" | §6.5 |
+| "How do I sweep through timepoints in a 4D stack?" | §6.6 |
+| "How do I use a math expression (sin / cos) for motion?" | §7 |
+| "What's the order inside a tuple like `intensity to (...)`?" | §8 |
+| "Why does my animation only have 101 frames / look striped / hidden?" | §9 |
+
+---
+
+## §1 Term Index (A–Z)
+
+Alphabetical pointer to the section containing each 3Dscript term. Use
+`grep -n '`<term>`' 3dscript-reference.md` to jump.
+
+### A
+`alpha` §5.1 · `alpha gamma` §5.1 · `algorithm (rendering)` §5.2 · `all channels'` §5.1, §6.1 · `At frame N` §3, §6.1 · `AVI` §2
+
+### B
+`Batch Animation` §2, §9 · `background color` §5.2 · `bounding box` §5.1, §5.2, §6.3, §6.5 · `bounding box visibility` §5.2, §6.1 · `bounding box min/max x/y/z` §5.1, §6.3, §6.5
+
+### C
+`channel N` §5.1 · `change ...` §5.1, §5.2 · `clipping (front)` §5.1, §6.4, §9 · `color` §5.1, §5.2 · `colors (named)` §5.2 · `combined transparency` §5.2 · `cos` §7 · `custom axis rotate` §4
+
+### D
+`diffuse` §5.1 · `degrees` §4
+
+### E
+`ease-in` §3 · `ease-in-out` §3, §6.2, §6.3 · `ease-out` §3, §6.2
+
+### F
+`factor (zoom)` §4, §6.3 · `frame` §3 · `From frame A to frame B` §3, §6.1 · `front clipping` §5.1, §6.4, §9
+
+### G
+`gamma (alpha)` §5.1 · `gamma (intensity)` §5.1 · `global properties` §5.2
+
+### H
+`horizontally (rotate)` §4, §6.1 · `horizontally (translate)` §4, §6.3
+
+### I
+`independent transparency` §5.2 · `Interactive Animation` §2 · `intensity` §5.1, §8 · `intensity gamma` §5.1
+
+### K
+`KeywordFactory.java` (source) header
+
+### L
+`light (tuple)` §8 · `lighting` §5.1, §6.1 · `Lissajous orbit` §6.2 · `looping (multiple of 360)` §6.2
+
+### M
+`maximum intensity projection` §5.2
+
+### O
+`object light` §5.1, §6.1 · `on/off (lighting)` §5.1
+
+### P
+`PI` §7 · `pixels (translate)` §4 · `per-channel properties` §5.1
+
+### R
+`reset transformation` §4 · `rendering algorithm` §5.2 · `rotate by N degrees` §4, §6.1, §6.2 · `(R,G,B)` §5.1, §5.2, §8
+
+### S
+`scalebar visibility` §5.2, §6.1 · `script function` §7 · `shininess` §5.1, §8 · `simultaneous rotations` §4, §6.2 · `sin` §7 · `specular` §5.1, §8 · `syntax (block / transition / instant)` §3
+
+### T
+`t (script parameter)` §7 · `timepoint` §5.2, §6.6 · `translate horizontally/vertically` §4, §6.3 · `tumble` §6.2 · `tuple syntax` §8
+
+### V
+`vertically (rotate)` §4, §6.2, §6.6 · `vertically (translate)` §4
+
+### W
+`weight (visibility)` §5.1, §6.4
+
+### X
+`X-axis tilt` §4, §6.2
+
+### Y
+`Y-axis (horizontal rotate)` §4
+
+### Z
+`Z-axis roll` §6.2 · `zoom by a factor of N` §4, §6.3 · `Z-interpolation (avoid)` §9 · `Z-slice peeling` §6.5
+
+---
+
+## §2 Running from Agent
 
 ```bash
 echo 'From frame 0 to frame 100 rotate by 360 degrees horizontally' > .tmp/rotate.animation.txt
@@ -17,7 +125,7 @@ python ij.py macro 'selectWindow("img"); run("Batch Animation", "animation=[/pat
 
 ---
 
-## Syntax
+## §3 Syntax
 
 ```
 At frame N [action]                           # instantaneous
@@ -32,7 +140,7 @@ From frame A to frame B [action] ease-in-out  # with easing
 
 ---
 
-## Camera / Transform
+## §4 Camera / Transform
 
 ```
 rotate by N degrees horizontally              # Y-axis (left-right)
@@ -48,9 +156,9 @@ Negative degrees reverse direction. Multiple rotations compose simultaneously.
 
 ---
 
-## Rendering Properties
+## §5 Rendering Properties
 
-### Per-Channel (use "channel N" or "all channels'")
+### §5.1 Per-Channel (use "channel N" or "all channels'")
 
 | Property | Syntax | Range |
 |----------|--------|-------|
@@ -70,7 +178,7 @@ Negative degrees reverse direction. Multiple rotations compose simultaneously.
 
 **Front clipping**: large negative = show all, 0 = clip at z-origin, large positive = hidden.
 
-### Global
+### §5.2 Global
 
 | Property | Syntax |
 |----------|--------|
@@ -86,9 +194,9 @@ Negative degrees reverse direction. Multiple rotations compose simultaneously.
 
 ---
 
-## Animation Patterns
+## §6 Animation Patterns
 
-### 1. Simple Rotation
+### §6.1 Simple Rotation
 
 ```
 At frame 0:
@@ -99,7 +207,7 @@ At frame 0:
 From frame 0 to frame 100 rotate by 360 degrees horizontally
 ```
 
-### 2. Tumble (gyroscope orbit)
+### §6.2 Tumble (gyroscope orbit)
 
 Three simultaneous layers: horizontal spin + X-axis tilt oscillation + Z-axis roll oscillation.
 
@@ -122,7 +230,7 @@ From frame 90 to frame 270 rotate by -45 degrees around (0,0,1) ease-in-out
 
 Key: X and Z oscillations are quarter-period out of phase (Lissajous orbit). For looping: TOTAL_FRAMES should be multiple of 360.
 
-### 3. Zoom to Object
+### §6.3 Zoom to Object
 
 ```
 From frame 400 to frame 500:
@@ -132,7 +240,7 @@ From frame 400 to frame 500:
 - change all channels' bounding box max x to 840
 ```
 
-### 4. Channel Reveal (hide/show)
+### §6.4 Channel Reveal (hide/show)
 
 ```
 # Hide via clipping
@@ -144,7 +252,7 @@ From frame 80 to frame 90:
 - change channel 2 weight to 0
 ```
 
-### 5. Z-Slice Peeling
+### §6.5 Z-Slice Peeling
 
 ```
 At frame 0:
@@ -153,7 +261,7 @@ From frame 90 to frame 450:
 - change all channels' bounding box max z to 0
 ```
 
-### 6. Time-Lapse Sweep (4D)
+### §6.6 Time-Lapse Sweep (4D)
 
 ```
 From frame 0 to frame 560: change timepoint to 480
@@ -162,7 +270,7 @@ From frame 200 to frame 520: rotate by -360 degrees vertically
 
 ---
 
-## Script Functions
+## §7 Script Functions
 
 Custom math for parametric animations:
 
@@ -175,7 +283,7 @@ Available: `sin`, `cos`, `abs`, `PI`, arithmetic. Parameter `t` = current frame.
 
 ---
 
-## Tuple Syntax
+## §8 Tuple Syntax
 
 ```
 change channel 1 intensity to (130.0, 2000.0, 0.2)     # (min, max, gamma)
@@ -185,7 +293,7 @@ change channel 1 color to (255, 0, 0)                    # (R, G, B)
 
 ---
 
-## Tips
+## §9 Tips
 
 - Batch Animation outputs 101 frames — frame numbers are proportional
 - Scale XY before rendering (output size = input size)

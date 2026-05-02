@@ -3,9 +3,121 @@
 Reference for EM image analysis in ImageJ/Fiji: TEM/SEM processing, organelle segmentation,
 particle analysis, stereology, serial section reconstruction, and CLEM workflows.
 
+Sources: TEM (Transmission Electron Microscopy) and SEM (Scanning Electron Microscopy)
+best practice from `imagej.net/plugins/`, TrakEM2 documentation
+(`imagej.net/plugins/trakem2/`), BigWarp / CLEM (Correlative Light-Electron Microscopy)
+workflow notes, Bio-Formats readers for `.dm3/.dm4/.mrc/.ser`, MorphoLibJ and
+AnalyzeSkeleton plugin docs. Use `python probe_plugin.py "Plugin..."` to discover
+any installed plugin's parameters at runtime.
+
+Invoke from the agent:
+`python ij.py macro '<code>'` — run ImageJ macro (.ijm) code.
+`python ij.py script '<code>'` — run Groovy (default), Jython, or JavaScript.
+
 ---
 
-## 1. Quick Start
+## §0 Lookup Map — "How do I find X?"
+
+| Question | Where to look |
+|---|---|
+| "How do I open a .dm3 / .mrc / .ser file?" | §2, §3.4 |
+| "What does a mitochondrion / vesicle / ribosome look like in TEM?" | §3.2 |
+| "How do I calibrate pixel size from a burned-in scale bar?" | §4 |
+| "Which filter should I use for membranes vs vesicles vs gold?" | §5 |
+| "How do I segment mitochondria / ER / vesicles / synapses / nuclei?" | §6 |
+| "How do I compute myelin G-ratio?" | §6.6 |
+| "How do I measure ER-mitochondria contact sites?" | §7 |
+| "How do I count immunogold particles and compute density?" | §8.1, §8.2 |
+| "How do I classify double-labelled gold by size?" | §8.1 |
+| "How do I do point counting for volume fraction?" | §9 |
+| "Which tool for serial section reconstruction?" | §10 |
+| "How do I align serial sections (StackReg / bUnwarpJ / TrakEM2)?" | §10 |
+| "How do I register fluorescence to EM (CLEM)?" | §11 |
+| "How do I measure porosity / fibre diameter on SEM?" | §12 |
+| "Can I use ImageJ for cryo-EM?" | §13 |
+| "Which segmentation / threshold / registration method should I pick?" | §15 |
+| "Macro one-liner for CLAHE / watershed / distance map?" | §16 |
+| "Why is my threshold / staining uneven / knife marks ruining the image?" | §17 |
+
+---
+
+## §1 Term Index (A–Z)
+
+Alphabetical pointer to the section containing each term. Use
+`grep -n '`<term>`' electron-microscopy-reference.md` to jump.
+
+### A
+`AnalyzeSkeleton` §6.2, §16 · `Analyze Particles` §2, §6.1, §6.3, §7, §8.1, §8.4, §12, §16 · `anisotropic diffusion` §5 · `array tomography` §10 · `aspect ratio (mito)` §6.1 · `astigmatism (CTF)` §13 · `Auto Local Threshold` §16, §17 · `autophagosome` §6.3
+
+### B
+`backscattered electron (BSE)` §3.1 · `Bandpass Filter` §5, §8.1, §16, §17 · `beam damage` §3.5, §17 · `BigWarp` §11, §16 · `Bio-Formats Importer` §2, §3.4, §13, §16 · `bUnwarpJ` §10, §15, §16
+
+### C
+`CATMAID` §10, §15 · `charging (SEM)` §3.5, §17 · `Clark-Evans R` §8.2 · `CLAHE` §5, §6.1, §6.2, §8.4, §12, §16, §17 · `class average montage` §13 · `classifier (Weka)` §6.1 · `clathrin-coated vesicle` §6.3 · `CLEM` §11 · `Close-` §6.2, §16 · `collagen banding` §4 · `compression (cutting)` §17 · `contact sites (ER-mito)` §7 · `contamination` §17 · `Convert to Mask` §2, §6, §7, §8, §12, §16 · `Correlative Light-Electron Microscopy` §11 · `cristae density` §6.1 · `Crop` §4 · `cryo-EM` §13 · `CTF (Thon rings)` §13
+
+### D
+`dark=signal` §2, §5 · `deformation (CLEM)` §11 · `DiameterJ` §12, §16 · `disector` §9 · `Distance Map` §6.1, §7, §12, §16 · `DigitalMicrograph (.dm3/.dm4)` §3.4 · `docked vesicles` §6.4 · `double labeling (gold)` §8.1 · `drift` §3.5 · `Duplicate` §5, §16
+
+### E
+`early endosome` §6.3 · `EDX` §3.1 · `elastic registration` §10, §11 · `EMAN2` §13 · `Enhance Local Contrast` §5, §6.1, §6.2, §8.4, §12 · `ER network` §6.2 · `ER-mitochondria contact sites (MAMs)` §7 · `euchromatin` §6.5
+
+### F
+`FeatureJ Edges` §6.2 · `Feret diameter` §6.1, §8.1 · `FFT` §13 · `FIB-SEM` §10 · `fiber diameter` §12 · `fiducial markers` §11 · `Fill Holes` §6.1, §6.3, §16 · `filter selection` §5 · `flat-field correction` §5, §17 · `fluorescence vs EM` §3.1 · `fracture surface texture` §12
+
+### G
+`Gatan DigitalMicrograph` §3.4 · `Gaussian Blur` §2, §5, §6, §8.4, §12, §16 · `G-ratio (myelin)` §6.6 · `getPixelSize` §4, §7, §11, §16 · `grid bars (calibration)` §4 · `Grid (overlay)` §9, §16 · `gold particles` §4, §5, §8.1, §8.3
+
+### H
+`HDF5` §3.4 · `heavy metal stain` §3.1 · `heterochromatin fraction` §6.5 · `horizontal banding` §3.5
+
+### I
+`ilastik` §10, §15 · `imageCalculator` §5, §7, §12, §17 · `Image Sequence` §10 · `IMOD` §15 · `immunogold` §3.2, §8.1 · `Invert` §5, §6.3, §7, §8.1, §16
+
+### K
+`knife marks` §17
+
+### L
+`lamella (myelin)` §6.6 · `latex spheres` §4 · `late endosome / MVB` §6.3 · `local thresholding` §6, §17 · `lysosome` §6.3
+
+### M
+`MAMs (mitochondria-associated membranes)` §7 · `Make Montage` §13 · `MaxEntropy` §6.3, §8.1 · `Median` §5, §16 · `membranes (TEM)` §3.2, §5 · `micrograph inspection` §13 · `mitochondria` §3.2, §6.1 · `MorphoLibJ` §16 · `MRC/CCP4` §3.4 · `Multi-point tool` §9 · `myelin` §3.2, §6.6
+
+### N
+`nanoparticle size distribution` §8.4 · `nearest-neighbor (NN)` §8.2 · `Non-local Means Denoising` §5 · `nuclei (EM)` §3.2, §6.5 · `numerical density (Nv)` §9
+
+### O
+`Open (morphological)` §6.1, §16 · `organelle association (gold)` §8.3 · `Otsu` §2, §6, §8.4, §12, §15 · `Outline` §7, §16
+
+### P
+`particle analysis` §8 · `physical disector` §9 · `pixel size` §4 · `point counting` §9 · `polydispersity index (PDI)` §8.4 · `porosity` §12 · `presynaptic vesicles` §6.4 · `probe_plugin` sourcing header · `PSD (postsynaptic density)` §6.4 · `pseudo-flat-field` §5
+
+### R
+`Register Virtual Stack Slices` §10, §15 · `RELION` §13, §15 · `Remove Outliers` §16, §17 · `resolution limit (CTF)` §13 · `ribosomes` §3.2 · `rolling ball` §5, §12, §17 · `roughness (surface)` §12
+
+### S
+`SBF-SEM` §10 · `scale bar (burned-in)` §4, §17 · `scan noise` §3.5 · `secondary electron (SE)` §3.1 · `Section folds` §17 · `Segmented line` §6.4 · `Serial section TEM` §10 · `Set Measurements` §2, §6.1, §6.3, §8.1, §16 · `Set Scale` §2, §4, §16 · `setAutoThreshold` §2, §6, §7, §8, §12, §16 · `setMinAndMax` §5 · `setThreshold` §7, §12 · `shot noise` §3.5 · `Skeletonize` §6.2, §12, §16 · `SPA (single particle analysis)` §15 · `StackReg` §10, §15, §16 · `stereology` §9 · `Subtract Background` §5, §12, §16, §17 · `surface density (Sv)` §9 · `synapses` §6.4 · `synaptic vesicle` §6.3, §6.4
+
+### T
+`TEM appearance (structures)` §3.2 · `TEM vs SEM vs Fluorescence` §3.1 · `TetraSpeck beads` §11 · `Thon rings` §13 · `threshold selection` §15 · `TIFF` §3.4 · `tomogram navigation` §13 · `Trainable Weka Segmentation` §6, §6.1, §15 · `TrakEM2` §10, §15, §16 · `Triangle (threshold)` §6.5, §15 · `TurboReg` §16
+
+### U
+`uneven staining` §5, §17
+
+### V
+`Variance (local)` §12, §16 · `vesicles` §3.2, §6.3 · `virtual stack` §3.4, §10 · `voxel depth / calibration` §10 · `volume density (Vv)` §9
+
+### W
+`Watershed` §6.1, §6.3, §8.1, §8.4, §16 · `WebKnossos` §10, §15 · `Weka segmentation` §6, §6.1, §15
+
+### X
+`Xlib` §5
+
+### 3
+`3D Objects Counter` §10, §16 · `3Dscript` (pointer only — see `references/3dscript-reference.md`)
+
+---
+
+## §2 Quick Start
 
 ```bash
 # Open EM image (Bio-Formats handles .dm3/.dm4/.mrc/.ser)
@@ -28,9 +140,9 @@ python ij.py results
 
 ---
 
-## 2. EM Image Characteristics
+## §3 EM Image Characteristics
 
-### TEM vs SEM vs Fluorescence
+### §3.1 TEM vs SEM vs Fluorescence
 
 | Property | TEM | SEM | Fluorescence |
 |----------|-----|-----|-------------|
@@ -40,7 +152,7 @@ python ij.py results
 | Contrast | Heavy metal stain (dark=dense) | Surface topology / composition | Bright=signal |
 | Typical depth | 8-16 bit | 8-bit | 12-16 bit |
 
-### TEM Structure Appearance
+### §3.2 TEM Structure Appearance
 
 | Structure | TEM Appearance | Typical Size |
 |-----------|---------------|-------------|
@@ -52,7 +164,7 @@ python ij.py results
 | Immunogold | Very electron-dense round particles | 5-20 nm |
 | Myelin | Concentric dark/light layers | ~12 nm period |
 
-### SEM Signal Types
+### §3.3 SEM Signal Types
 
 | Detector | Information |
 |----------|------------|
@@ -60,7 +172,7 @@ python ij.py results
 | Backscattered electron (BSE) | Atomic number contrast (heavier=brighter) |
 | EDX | Elemental composition |
 
-### File Formats
+### §3.4 File Formats
 
 | Format | Extension | Bio-Formats |
 |--------|-----------|-------------|
@@ -74,7 +186,7 @@ python ij.py results
 python ij.py macro 'run("Bio-Formats Importer", "open=/path/to/large.dm4 color_mode=Grayscale use_virtual_stack");'
 ```
 
-### Noise Types
+### §3.5 Noise Types
 
 | Type | Appearance | Mitigation |
 |------|-----------|-----------|
@@ -86,7 +198,7 @@ python ij.py macro 'run("Bio-Formats Importer", "open=/path/to/large.dm4 color_m
 
 ---
 
-## 3. Scale Calibration
+## §4 Scale Calibration
 
 ### From Metadata
 ```bash
@@ -137,7 +249,7 @@ python ij.py macro '
 
 ---
 
-## 4. Image Enhancement for EM
+## §5 Image Enhancement for EM
 
 **Critical:** Always work on a duplicate. Never modify the original for quantification.
 
@@ -197,7 +309,7 @@ Do NOT invert when: using "dark background" threshold option, or structures are 
 
 ---
 
-## 5. Organelle Segmentation
+## §6 Organelle Segmentation
 
 ### Approach Hierarchy
 
@@ -207,7 +319,7 @@ Do NOT invert when: using "dark background" threshold option, or structures are 
 4. **Trainable Weka Segmentation** — complex cases
 5. **Manual tracing** — structures that defy automation
 
-### 5.1 Mitochondria
+### §6.1 Mitochondria
 
 **Key metrics:** Area (typically 0.1-2 um^2), Circularity (0.2-0.9), Aspect Ratio (1-5), Feret diameter (0.3-3 um), Cristae density.
 
@@ -244,7 +356,7 @@ python ij.py macro '
 
 **Cristae density:** Threshold within individual mitochondria ROI using CLAHE + "Mean dark", skeletonize, count skeleton pixels. Cristae density = skeleton length / mitochondria area.
 
-### 5.2 ER Network
+### §6.2 ER Network
 
 ```bash
 python ij.py macro '
@@ -260,7 +372,7 @@ python ij.py macro '
 '
 ```
 
-### 5.3 Vesicles
+### §6.3 Vesicles
 
 | Vesicle Type | Typical Diameter | Characteristics |
 |-------------|------------------|----------------|
@@ -286,7 +398,7 @@ python ij.py macro '
 '
 ```
 
-### 5.4 Synapses
+### §6.4 Synapses
 
 | Feature | Measurement Method |
 |---------|-------------------|
@@ -295,7 +407,7 @@ python ij.py macro '
 | Presynaptic vesicle count | Find Maxima in terminal ROI, or threshold + count |
 | Docked vesicles | Manual count at membrane |
 
-### 5.5 Nuclei — Heterochromatin Fraction
+### §6.5 Nuclei — Heterochromatin Fraction
 
 ```bash
 python ij.py macro '
@@ -309,7 +421,7 @@ python ij.py macro '
 '
 ```
 
-### 5.6 Myelin G-ratio
+### §6.6 Myelin G-ratio
 
 G-ratio = inner diameter (axon) / outer diameter (axon+myelin). Typical: ~0.6-0.7 CNS, ~0.7-0.8 PNS. Higher = thinner myelin.
 
@@ -317,7 +429,7 @@ Measure by drawing lines across outer and inner myelin boundaries. For lamella c
 
 ---
 
-## 6. Membrane Distance Measurements
+## §7 Membrane Distance Measurements
 
 ### ER-Mitochondria Contact Sites
 
@@ -369,9 +481,9 @@ python ij.py macro '
 
 ---
 
-## 7. Particle Analysis
+## §8 Particle Analysis
 
-### 7.1 Immunogold Detection
+### §8.1 Immunogold Detection
 
 | Gold Size | Typical Use |
 |-----------|------------|
@@ -403,7 +515,7 @@ python ij.py results
 
 **Double labeling:** Classify by Feret diameter — set boundary midpoint between the two gold sizes.
 
-### 7.2 Nearest-Neighbor & Clustering (Clark-Evans)
+### §8.2 Nearest-Neighbor & Clustering (Clark-Evans)
 
 ```bash
 python ij.py macro '
@@ -430,7 +542,7 @@ python ij.py macro '
 '
 ```
 
-### 7.3 Gold-Organelle Association
+### §8.3 Gold-Organelle Association
 
 ```bash
 python ij.py macro '
@@ -445,7 +557,7 @@ python ij.py macro '
 '
 ```
 
-### 7.4 Nanoparticle Size Distribution
+### §8.4 Nanoparticle Size Distribution
 
 ```bash
 python ij.py macro '
@@ -464,7 +576,7 @@ python ij.py macro '
 
 ---
 
-## 8. Stereology
+## §9 Stereology
 
 ### Key Parameters
 
@@ -510,7 +622,7 @@ python ij.py macro 'run("Combine...", "stack1=reference stack2=lookup");'
 
 ---
 
-## 9. Serial Section Analysis
+## §10 Serial Section Analysis
 
 ### Methods Comparison
 
@@ -590,7 +702,7 @@ python ij.py macro '
 
 ---
 
-## 10. CLEM (Correlative Light-Electron Microscopy)
+## §11 CLEM (Correlative Light-Electron Microscopy)
 
 ### Challenges
 
@@ -643,7 +755,7 @@ python ij.py macro '
 
 ---
 
-## 11. SEM-Specific Analysis
+## §12 SEM-Specific Analysis
 
 ### Porosity
 
@@ -711,7 +823,7 @@ python ij.py macro '
 
 ---
 
-## 12. Cryo-EM Considerations
+## §13 Cryo-EM Considerations
 
 Most cryo-EM processing uses RELION, cryoSPARC, or EMAN2 — **not ImageJ**. ImageJ is useful for:
 
@@ -742,49 +854,7 @@ python ij.py macro '
 
 ---
 
-## 13. Common Problems and Artifacts
-
-| Problem | Cause | Solution |
-|---------|-------|---------|
-| Uneven staining | Section thickness variation | Background subtraction, CLAHE, local thresholding, flat-field correction |
-| Knife marks | Ultramicrotome blade | Directional bandpass filter (suppress Horizontal/Vertical in FFT) |
-| Compression | Cutting deformation | Scale in cutting direction by 1/compressionRatio |
-| Charging (SEM) | Non-conductive areas | Remove Outliers (bright), or mask out and exclude |
-| Beam damage | Electron dose | Cannot correct; detect by comparing center vs edge contrast SD |
-| Scale bar mismatch | Metadata/label disagreement | Draw line along scale bar, measure, compare to label |
-| Section folds | Pickup artifact | Detect dark regions with heavy blur + threshold, create exclusion mask |
-| Contamination | Hydrocarbon deposition | Remove Outliers (dark) |
-
-### Uneven Staining Solutions
-
-```bash
-# Background subtraction
-python ij.py macro 'run("Subtract Background...", "rolling=100");'
-
-# Local thresholding (when global fails)
-python ij.py macro 'run("Auto Local Threshold", "method=Phansalkar radius=25 parameter_1=0 parameter_2=0 white");'
-
-# Flat-field correction
-python ij.py macro '
-  run("Duplicate...", "title=bg");
-  run("Gaussian Blur...", "sigma=100");
-  imageCalculator("Divide create 32-bit", "original", "bg");
-  close("bg");
-'
-```
-
-### Knife Mark Removal
-
-```bash
-python ij.py macro '
-  run("Bandpass Filter...", "filter_large=500 filter_small=2 suppress=Horizontal tolerance=5 autoscale saturate");
-  // "Horizontal" or "Vertical" depending on knife mark orientation
-'
-```
-
----
-
-## 14. Decision Trees
+## §14 Decision Trees
 
 ### Segmentation Approach
 
@@ -838,7 +908,7 @@ Task?
 
 ---
 
-## 15. Macro Quick Reference
+## §15 Macro Quick Reference
 
 | Task | Macro |
 |------|-------|
@@ -886,3 +956,45 @@ Task?
 | DiameterJ | Nanofiber diameter | DiameterJ |
 | Auto Local Threshold | Adaptive thresholding | Built-in |
 | Bio-Formats | .dm3/.dm4/.mrc/.ser reader | Built-in |
+
+---
+
+## §16 Common Problems and Artifacts
+
+| Problem | Cause | Solution |
+|---------|-------|---------|
+| Uneven staining | Section thickness variation | Background subtraction, CLAHE, local thresholding, flat-field correction |
+| Knife marks | Ultramicrotome blade | Directional bandpass filter (suppress Horizontal/Vertical in FFT) |
+| Compression | Cutting deformation | Scale in cutting direction by 1/compressionRatio |
+| Charging (SEM) | Non-conductive areas | Remove Outliers (bright), or mask out and exclude |
+| Beam damage | Electron dose | Cannot correct; detect by comparing center vs edge contrast SD |
+| Scale bar mismatch | Metadata/label disagreement | Draw line along scale bar, measure, compare to label |
+| Section folds | Pickup artifact | Detect dark regions with heavy blur + threshold, create exclusion mask |
+| Contamination | Hydrocarbon deposition | Remove Outliers (dark) |
+
+### Uneven Staining Solutions
+
+```bash
+# Background subtraction
+python ij.py macro 'run("Subtract Background...", "rolling=100");'
+
+# Local thresholding (when global fails)
+python ij.py macro 'run("Auto Local Threshold", "method=Phansalkar radius=25 parameter_1=0 parameter_2=0 white");'
+
+# Flat-field correction
+python ij.py macro '
+  run("Duplicate...", "title=bg");
+  run("Gaussian Blur...", "sigma=100");
+  imageCalculator("Divide create 32-bit", "original", "bg");
+  close("bg");
+'
+```
+
+### Knife Mark Removal
+
+```bash
+python ij.py macro '
+  run("Bandpass Filter...", "filter_large=500 filter_small=2 suppress=Horizontal tolerance=5 autoscale saturate");
+  // "Horizontal" or "Vertical" depending on knife mark orientation
+'
+```

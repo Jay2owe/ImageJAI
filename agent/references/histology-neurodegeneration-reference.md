@@ -4,11 +4,202 @@ Actionable reference for an ImageJ/Fiji agent processing IHC/IF images of
 neurodegenerative disease tissue. Antibody tables, staging systems, DAB
 analysis commands, brain regions, mouse models, quantification standards.
 
+Staging systems covered: Braak NFT stages (AT8 tau), CERAD neuritic plaque
+density (Bielschowsky/ThioS), Thal amyloid phases (6E10/4G8), Braak PD
+stages (alpha-synuclein), McKeith (DLB), Vonsattel (HD), LATE-NC, McKee
+(CTE), and FTLD-TDP types A–E. Combined NIA-AA "ABC" score integrates
+Thal + Braak + CERAD.
+
+Invoke from the agent:
+`python ij.py macro '<code>'` — run ImageJ macro (.ijm) code.
+`python probe_plugin.py "Plugin..."` — discover plugin parameters at runtime.
+
 ---
 
-## 1. Antibody & Marker Tables
+## §0 Lookup Map — "How do I find X?"
 
-### 1.1 Amyloid-Beta Detection
+| Question | Where to look |
+|---|---|
+| "Which antibody for plaques / tangles / Lewy bodies / TDP-43?" | §2.1–§2.4, §12 "Which Stain?" |
+| "What's the Braak / CERAD / Thal staging scheme?" | §6.1–§6.3 |
+| "How do I quantify DAB area fraction?" | §8.1, §8.4 |
+| "Which threshold method for DAB?" | §13.4, §12 "Which DAB Threshold?" |
+| "What mouse model has plaques + tangles?" | §9.1 |
+| "Which regions for AD / PD / FTD ROIs?" | §7.1–§7.4 |
+| "How do I retrieve Abeta / aSyn / PrP antigens?" | §13.1 |
+| "Why is my IF background awful in aged tissue?" | §13.2 lipofuscin |
+| "What's the NIA-AA ABC score?" | §6.1 |
+| "Antibody dilution / catalogue quick lookup?" | §11 |
+
+---
+
+## §1 Term Index (A–Z)
+
+Alphabetical pointer to the section containing each term. Use
+`grep -n '<term>' histology-neurodegeneration-reference.md` to jump.
+
+### A
+`4G8` §2.1, §11 · `5G4` §2.3 · `5xFAD` §9.1 · `6E10` §2.1, §11 · `82E1` §9.1 ·
+`ABC score (NIA-AA)` §6.1 · `Abeta / amyloid-beta` §2.1, §5.1, §9.1, §11, §13.1 ·
+`Abeta40 / Abeta42` §2.1 · `ALDH1L1` §2.6 · `ALS` §5.5, §7.1, §9.1 ·
+`alpha-synuclein` §2.3, §5.2, §6.4, §11 · `Alzheimer's disease` §5.1, §6.1–§6.3, §7.1 ·
+`amoeboid microglia` §2.6, §8.5 · `amygdala` §5.5, §6.4, §7.1 ·
+`Analyze Particles` §8.1, §8.2, §8.3 · `anti-HTT (MW8, EM48)` §2.9, §11 ·
+`antibody controls` §13.3 · `antigen retrieval` §13.1 ·
+`APP/PS1` §9.1 · `area fraction` §8.1, §8.4 · `astrocytes` §2.6, §8.4 ·
+`AT8` §2.2, §6.3, §8.3, §11 · `AT100 / AT180` §9.1 · `autofluorescence` §13.2
+
+### B
+`ballooned neurons` §5.4 · `batch processing` §8.9 · `BBB (blood-brain barrier)` §2.8 ·
+`Betz cells` §5.5, §7.1, §7.3 · `Bielschowsky silver` §3, §6.1, §12 ·
+`Bio-Formats` §13.7 · `biological vs technical replicates` §10.3 ·
+`Braak NFT stages` §6.3 · `Braak PD stages` §6.4 · `brainstem` §7.4 ·
+`bvFTD` §5.3, §7.1
+
+### C
+`C3 (astrocyte)` §2.6 · `C9orf72` §5.3 · `CA1 / CA2 / CA3` §5.1, §7.2 ·
+`CAA (cerebral amyloid angiopathy)` §2.1, §2.8, §5.1 · `Campbell-Switzer` §3 ·
+`caudate` §7.1 · `CBD` §2.2, §5.4 · `CD31 (PECAM-1)` §2.8, §11 ·
+`CD68` §2.6, §11 · `cell counter plugin` §8.3 · `cell counting` §8.7 ·
+`CERAD` §6.1 · `ChAT` §9.1 · `circadian phase` §13.8 · `ChAT` §9.1 ·
+`Claudin-5` §2.8 · `Cellpose / StarDist` §8.7 · `Cell morphology (microglia)` §2.6, §8.5 ·
+`CE (coefficient of error)` §10.1 · `cerebellum` §6.2, §7.1 · `cingulate` §7.1 ·
+`coefficient of error (CE)` §10.1 · `Colour Deconvolution` §8.1, §8.4 ·
+`collagen IV` §2.8, §11 · `Congo Red` §2.1, §5.1, §12 · `controls (IHC)` §13.3 ·
+`co-pathology` §13.6 · `cortical layers` §7.3 · `cortical LB` §5.2 ·
+`CP13` §2.2 · `Cresyl Violet (Nissl)` §2.5, §12 · `CTE` §5.5, §6.5 ·
+`cytoplasmic inclusions (TDP-43)` §2.4
+
+### D
+`DAB quantification` §8.1, §8.4, §13.4 · `DAB threshold selection` §13.4, §12 ·
+`DAM (disease-associated microglia)` §2.6 · `DAPI` §8.7 · `DAT` §9.1 ·
+`DA neurons (dopaminergic)` §7.4, §9.1, §11 · `dentate gyrus` §5.4, §7.2 ·
+`DLB` §5.2, §6.5, §7.1 · `DMV (dorsal motor nucleus vagus)` §6.4, §7.4 ·
+`digital pathology / WSI` §13.7 · `diffuse plaques` §5.1, §8.2 ·
+`dopaminergic neurons` §7.4, §9.1 · `dystrophic neurites` §5.3
+
+### E
+`EDTA retrieval (Tris-EDTA pH 9.0)` §13.1 · `EM48` §2.9, §11 ·
+`endothelial cells` §2.8 · `entorhinal cortex` §6.3, §7.1, §7.2 ·
+`EP1536Y` §2.3, §11, §12 · `epilepsy (mossy fibre sprouting)` §7.2 ·
+`excitatory synapses` §2.7
+
+### F
+`fibrinogen` §2.8, §11 · `FITC filter (ThioS)` §2.1 · `florid plaques (vCJD)` §5.5 ·
+`Fluoro-Jade B/C` §2.5, §4, §12 · `formic acid retrieval` §2.1, §2.3, §13.1 ·
+`4G8` §2.1, §11 · `4R tau` §2.2, §3, §5.4 · `FracLac` §8.5 · `FTLD-tau` §5.4 ·
+`FTLD-TDP` §5.3
+
+### G
+`Gallyas silver` §3, §5.4 · `GFAP` §2.6, §8.4, §11 · `ghost tangles` §2.2, §8.3 ·
+`globose NFTs` §5.4 · `globus pallidus` §7.1 · `grain (FTLD-TDP type E)` §5.3 ·
+`granulovacuolar degeneration` §5.1 · `grey matter astrocytes` §2.6 ·
+`GRN` §5.3 · `guard zones (stereology)` §10.1
+
+### H
+`H&E` §12 · `H-DAB vectors` §8.1 · `HD (Huntington's)` §2.9, §5.5, §6.5, §7.1 ·
+`hemosiderin` §4 · `HIER (heat-induced epitope retrieval)` §13.1 ·
+`Hirano bodies` §5.1 · `hippocampus / CA subfields` §5.1, §7.1, §7.2 ·
+`HT7` §9.1, §9.3 · `huntingtin` §2.9, §11 · `hypertrophic microglia` §2.6
+
+### I
+`Iba1 (AIF1)` §2.6, §8.5, §11 · `IBMPFD` §5.3 · `IHC reporting standards` §10.4 ·
+`immunoreactive area` §8.4 · `inferior olivary neurons (NeuN negative)` §2.5 ·
+`inhibitory synapses` §2.7 · `insula` §7.1 · `IsoData threshold` §13.4, §12
+
+### K
+`KP1 (CD68 clone)` §11
+
+### L
+`Labkit / Weka` §13.7 · `LATE` §5.5, §6.5 · `Lewy body (LB)` §5.2 ·
+`Lewy neurite` §5.2, §7.2 · `lipofuscin` §2.1, §13.2 · `Li threshold` §13.4, §12 ·
+`LB509` §2.3 · `locus coeruleus` §6.4, §7.4 · `LFB (Luxol Fast Blue)` §4, §12 ·
+`lysosomal marker (CD68)` §2.6
+
+### M
+`MAP2` §2.5, §8.6, §11 · `MBP` §2.6, §11, §12 · `MC1` §2.2, §9.1 ·
+`McKee (CTE)` §6.5 · `McKeith (DLB)` §6.5 · `medium spiny neurons` §5.5, §7.1 ·
+`Meynert (nucleus basalis)` §7.4 · `microglia` §2.6, §8.5, §11 ·
+`microhaemorrhages` §4 · `MOAB-2` §9.1 · `Moments threshold` §13.4, §12 ·
+`motor neurons` §7.1, §9.1 · `motor cortex` §7.1 · `mouse models` §9 ·
+`MW8` §2.9, §11 · `multiplex IF (TSA / OPAL)` §13.5 · `myelin` §2.6, §4
+
+### N
+`NCI (neuronal cytoplasmic inclusion)` §5.3 · `NeuN (RBFOX3)` §2.5, §8.7, §11 ·
+`neocortex` §5.2, §6.2, §6.3, §6.4, §7.1 · `neuritic plaques` §2.1, §5.1, §8.2, §12 ·
+`neuroinflammation` §8.4 · `neuromelanin` §7.4 · `neuropil threads` §3, §5.1 ·
+`neuronal loss` §9.1, §12 · `newCAST` §10.1 · `nfvPPA` §5.3 · `NFTs` §2.2, §3, §5.1, §6.3, §8.3 ·
+`NIA-AA ABC score` §6.1 · `NG2` §2.6 · `NII (neuronal intranuclear inclusion)` §2.9, §5.3 ·
+`NPY / NISSL` §2.5
+
+### O
+`OD (optical density)` §2.7, §8.1 · `oligodendrocytes` §2.6 · `Olig2` §2.6, §11 ·
+`olfactory bulb` §6.4, §7.1 · `OPAL (TSA)` §13.5 · `optical disector` §10.1 ·
+`optical fractionator` §10.1 · `Otsu threshold` §8.3, §13.4, §12 · `orbitofrontal` §7.1
+
+### P
+`P2RY12` §2.6, §13.5 · `p62/SQSTM1` §2.9, §5.5 · `PAS` §4 · `PDGFR-beta` §2.8 ·
+`PD (Parkinson's)` §5.2, §6.4, §7.1 · `pericytes` §2.8 · `perivascular tau` §5.5, §6.5 ·
+`PET tracer (SV2A)` §2.7 · `PFF (preformed fibril)` §9.1 · `PHF-1` §2.2, §9.1, §11 ·
+`Pick bodies` §2.2, §3, §5.4, §7.2 · `Pick's disease` §5.4 · `plaques` §2.1, §5.1, §8.2, §12 ·
+`polarised light (Congo red)` §2.1 · `positive control` §13.3 · `pre-amyloid` §5.1 ·
+`pretangles` §2.2, §8.3 · `PrP (prion protein)` §2.9, §11 · `prion disease` §5.5, §7.1 ·
+`proteinase K (PK)` §2.9, §13.1 · `Prussian Blue` §4 · `PSD-95` §2.7, §8.6, §11 ·
+`PS19` §9.1 · `pSer129-alphaSyn` §2.3, §5.2, §11, §12 · `pTau` §2.2, §8.4, §12 ·
+`pTDP-43` §2.4, §11, §12 · `PSP` §2.2, §5.4 · `putamen` §7.1 · `pyramidal neurons` §2.5
+
+### Q
+`QuPath` §13.7
+
+### R
+`ramified microglia` §2.6, §8.5 · `RD3` §2.2, §5.4 · `RD4` §2.2, §5.4 ·
+`reactive astrocytes` §2.6, §8.4 · `reference trap (stereology)` §10.2 ·
+`replicates (biological vs technical)` §10.3 · `reporting standards` §10.4 ·
+`ROI analysis` §8.8 · `RRID` §10.4 · `rTg4510` §9.1
+
+### S
+`S100beta` §2.6 · `sCJD` §5.5 · `section thickness (stereology)` §10.1 ·
+`sensor / sensory cortex` §6.3 · `Sholl analysis` §8.5 · `silver stains` §3 ·
+`skeletonize` §8.5 · `SMI-32` §2.5, §11 · `SN (substantia nigra)` §5.2, §6.4, §7.1, §7.4 ·
+`SOD1-G93A` §9.1 · `SOX10` §2.6 · `species-specific antibodies` §9.3 ·
+`spectral unmixing` §13.2 · `spheroid/synapse colocalization` §8.6 ·
+`spinal anterior horn` §7.1 · `Spongiform change` §5.5 · `StarDist` §8.7 ·
+`stereology` §10.1 · `Stereo Investigator` §10.1 · `stratum / striatum` §5.5, §6.2, §7.1 ·
+`subiculum` §7.1, §7.2 · `SUB / subpopulation (Iba1 states)` §2.6, §8.5 ·
+`substantia nigra` §5.2, §6.4, §7.4 · `Sudan Black B` §13.2 · `SURS` §10.1 ·
+`SV2A` §2.7 · `svPPA` §5.3 · `synapses / synaptic density` §2.7, §8.6 ·
+`Synaptophysin` §2.7, §8.6, §11
+
+### T
+`tangles (NFTs)` §2.2, §5.1, §6.3, §8.3 · `tau isoforms (3R / 4R)` §2.2, §3, §5.4 ·
+`TDP-43` §2.4, §5.3, §6.5, §11 · `temporal cortex` §5.4, §7.1 ·
+`TH (tyrosine hydroxylase)` §9.1, §11 · `Thal phases` §6.2 · `Thio S / ThioS` §2.1, §5.1, §12 ·
+`3R tau` §2.2, §3, §5.4 · `3xTg-AD` §9.1 · `TMEM119` §2.6, §13.5 · `total TDP-43` §2.4 ·
+`Triangle threshold` §8.1, §13.4, §12 · `TREM2` §2.6 · `trueBlack (Biotium)` §13.2 ·
+`tufted astrocytes` §5.4 · `TSA / OPAL` §13.5 · `TUNEL` §4, §12
+
+### U
+`Ubiquitin` §2.9, §5.5 · `update sites / Fiji plugins` §13.7
+
+### V
+`VCP` §5.3 · `vCJD` §5.5 · `VGAT` §2.7 · `VGLUT1/2` §2.7 ·
+`Vonsattel (HD)` §6.5 · `vulnerability (hippocampal subfields)` §7.2
+
+### W
+`Watershed` §8.1, §8.2 · `Weka (Trainable Segmentation)` §13.7 · `WSI` §13.7 ·
+`white matter astrocytes` §2.6
+
+### Y
+`Yen threshold` §3, §13.4, §12
+
+### Z
+`ZT (zeitgeber time)` §13.8
+
+---
+
+## §2. Antibody & Marker Tables
+
+### §2.1 Amyloid-Beta Detection
 
 | Antibody/Stain | Target | Notes |
 |----------------|--------|-------|
@@ -21,7 +212,7 @@ analysis commands, brain regions, mouse models, quantification standards.
 
 6E10 detects more plaque deposition than Gallyas or ThioS because it binds all Abeta conformations including diffuse (non-fibrillar).
 
-### 1.2 Tau / Neurofibrillary Tangle Detection
+### §2.2 Tau / Neurofibrillary Tangle Detection
 
 | Antibody | Epitope | Best For |
 |----------|---------|----------|
@@ -34,7 +225,7 @@ analysis commands, brain regions, mouse models, quantification standards.
 
 **Tangle maturity (AT8 vs PHF-1):** Pretangles: AT8+++/PHF-1+. Mature: AT8+++/PHF-1+++. Ghost: AT8+/PHF-1++.
 
-### 1.3 Alpha-Synuclein Detection
+### §2.3 Alpha-Synuclein Detection
 
 | Antibody | Target | Notes |
 |----------|--------|-------|
@@ -42,7 +233,7 @@ analysis commands, brain regions, mouse models, quantification standards.
 | **LB509** | aSyn 115-122 | Human-specific. Less sensitive than pSer129. |
 | **5G4** | Aggregation-specific | Conformation-specific for aggregated aSyn. |
 
-### 1.4 TDP-43 Detection
+### §2.4 TDP-43 Detection
 
 | Antibody | Target | Notes |
 |----------|--------|-------|
@@ -51,7 +242,7 @@ analysis commands, brain regions, mouse models, quantification standards.
 
 **Key diagnostic feature:** Loss of normal nuclear TDP-43 + cytoplasmic inclusions. Assess both.
 
-### 1.5 Neuronal Markers
+### §2.5 Neuronal Markers
 
 | Marker | Target | Notes |
 |--------|--------|-------|
@@ -61,7 +252,7 @@ analysis commands, brain regions, mouse models, quantification standards.
 | **Cresyl Violet (Nissl)** | Rough ER | Histochemical. Neuronal counts and cytoarchitecture. |
 | **Fluoro-Jade B/C** | Degenerating neurons | Green fluorescence. More sensitive than H&E. |
 
-### 1.6 Glial Markers
+### §2.6 Glial Markers
 
 **Astrocytes:**
 
@@ -86,7 +277,7 @@ analysis commands, brain regions, mouse models, quantification standards.
 
 **Oligodendrocytes:** Olig2 (lineage), MBP (myelin sheaths), SOX10 (pan-lineage), NG2 (OPC-specific).
 
-### 1.7 Synaptic Markers
+### §2.7 Synaptic Markers
 
 | Marker | Compartment | Notes |
 |--------|------------|-------|
@@ -98,7 +289,7 @@ analysis commands, brain regions, mouse models, quantification standards.
 
 Quantify by optical density/mean grey value in neuropil, NOT puncta counting (too small for light microscopy).
 
-### 1.8 Vascular Markers
+### §2.8 Vascular Markers
 
 | Marker | Target | Notes |
 |--------|--------|-------|
@@ -108,7 +299,7 @@ Quantify by optical density/mean grey value in neuropil, NOT puncta counting (to
 | **Fibrinogen** | Plasma protein | Extravascular = BBB leakage. |
 | **PDGFR-beta** | Pericytes | Pericyte loss = BBB breakdown. |
 
-### 1.9 Other Markers
+### §2.9 Other Markers
 
 | Marker | Target | Notes |
 |--------|--------|-------|
@@ -119,7 +310,7 @@ Quantify by optical density/mean grey value in neuropil, NOT puncta counting (to
 
 ---
 
-## 2. Silver Stains
+## §3. Silver Stains
 
 | Method | Targets | Key Properties |
 |--------|---------|---------------|
@@ -133,7 +324,7 @@ ImageJ: Silver-stained structures are dark brown/black on light background. Use 
 
 ---
 
-## 3. Special Stains
+## §4. Special Stains
 
 | Stain | Target | Use |
 |-------|--------|-----|
@@ -145,9 +336,9 @@ ImageJ: Silver-stained structures are dark brown/black on light background. Use 
 
 ---
 
-## 4. Pathological Features by Disease (Summary)
+## §5. Pathological Features by Disease (Summary)
 
-### 4.1 Alzheimer's Disease
+### §5.1 Alzheimer's Disease
 
 **Plaque types:**
 
@@ -159,7 +350,7 @@ ImageJ: Silver-stained structures are dark brown/black on light background. Use 
 
 **Other AD pathology:** Neuropil threads (AT8+), CAA (Abeta in vessel walls — type 1: capillary + arterioles; type 2: arterioles only), granulovacuolar degeneration (CA1/CA2, 2-4 um vacuoles), Hirano bodies (eosinophilic rods in CA1).
 
-### 4.2 PD / DLB
+### §5.2 PD / DLB
 
 | Type | Location | Morphology |
 |------|----------|-----------|
@@ -167,7 +358,7 @@ ImageJ: Silver-stained structures are dark brown/black on light background. Use 
 | Cortical LB | Neocortex, limbic | Less defined, often requires IHC. pSer129+ |
 | Lewy neurites | Neuropil | Thread-like pSer129+. Often more numerous than LBs. |
 
-### 4.3 FTLD-TDP Subtypes
+### §5.3 FTLD-TDP Subtypes
 
 | Type | Morphology | Clinical | Genetics |
 |------|-----------|---------|----------|
@@ -177,13 +368,13 @@ ImageJ: Silver-stained structures are dark brown/black on light background. Use 
 | D | Neuronal intranuclear inclusions | IBMPFD | VCP |
 | E | Granulofilamentous NCIs, grains | Rapid FTD | Rare |
 
-### 4.4 FTLD-Tau
+### §5.4 FTLD-Tau
 
 - **Pick bodies:** Round cytoplasmic inclusions. 3R tau (RD3+). Gallyas-. Dentate gyrus, frontal/temporal cortex.
 - **CBD:** Astrocytic plaques, ballooned neurons. 4R tau (RD4+). Gallyas+.
 - **PSP:** Tufted astrocytes, globose NFTs in brainstem/basal ganglia. 4R tau. Gallyas+.
 
-### 4.5 Other Diseases
+### §5.5 Other Diseases
 
 - **Huntington's:** Striatal neuronal loss (Vonsattel grade 0-4). NIIs (anti-huntingtin, ubiquitin, p62). Medium spiny neurons most vulnerable.
 - **Prion:** Spongiform change + neuronal loss + gliosis. PrP deposition patterns vary by subtype (synaptic in sCJD, florid plaques in vCJD).
@@ -192,9 +383,9 @@ ImageJ: Silver-stained structures are dark brown/black on light background. Use 
 
 ---
 
-## 5. Staging Systems
+## §6. Staging Systems
 
-### 5.1 NIA-AA "ABC" Score (Alzheimer's)
+### §6.1 NIA-AA "ABC" Score (Alzheimer's)
 
 | Score | Assessment | Method |
 |-------|-----------|--------|
@@ -204,7 +395,7 @@ ImageJ: Silver-stained structures are dark brown/black on light background. Use 
 
 **Combined:** Not / Low / Intermediate / High AD neuropathological change. "Intermediate" or "High" sufficient explanation for dementia.
 
-### 5.2 Thal Amyloid Phases
+### §6.2 Thal Amyloid Phases
 
 | Phase | Distribution |
 |-------|-------------|
@@ -214,7 +405,7 @@ ImageJ: Silver-stained structures are dark brown/black on light background. Use 
 | 4 | + Brainstem |
 | 5 | + Cerebellum |
 
-### 5.3 Braak NFT Stages (AT8)
+### §6.3 Braak NFT Stages (AT8)
 
 | Stage | Distribution | Clinical |
 |-------|-------------|---------|
@@ -222,7 +413,7 @@ ImageJ: Silver-stained structures are dark brown/black on light background. Use 
 | III-IV | Hippocampus, amygdala, inferior temporal | MCI |
 | V-VI | Association cortex -> primary sensory/motor | Dementia |
 
-### 5.4 Braak PD Stages (Alpha-Synuclein)
+### §6.4 Braak PD Stages (Alpha-Synuclein)
 
 | Stage | Distribution |
 |-------|-------------|
@@ -230,7 +421,7 @@ ImageJ: Silver-stained structures are dark brown/black on light background. Use 
 | 3-4 | SN, amygdala, temporal mesocortex (motor symptoms) |
 | 5-6 | Neocortex (cognitive decline) |
 
-### 5.5 Other Staging Systems
+### §6.5 Other Staging Systems
 
 | System | Disease | Scale |
 |--------|---------|-------|
@@ -242,9 +433,9 @@ ImageJ: Silver-stained structures are dark brown/black on light background. Use 
 
 ---
 
-## 6. Brain Anatomy for ROI Selection
+## §7. Brain Anatomy for ROI Selection
 
-### 6.1 Regions Affected by Disease
+### §7.1 Regions Affected by Disease
 
 | Disease | Primary Regions | Secondary |
 |---------|----------------|-----------|
@@ -256,7 +447,7 @@ ImageJ: Silver-stained structures are dark brown/black on light background. Use 
 | HD | Caudate, putamen (medium spiny neurons) | Globus pallidus, cortex layers III/V-VI |
 | Prion | Cortex, striatum, thalamus, cerebellum | Variable by subtype |
 
-### 6.2 Hippocampal Subfield Vulnerability
+### §7.2 Hippocampal Subfield Vulnerability
 
 | Subfield | Vulnerability | Key Pathology |
 |----------|-------------|---------------|
@@ -267,7 +458,7 @@ ImageJ: Silver-stained structures are dark brown/black on light background. Use 
 | **Subiculum** | High (AD) | NFTs, neuronal loss |
 | **Entorhinal Cortex** | Very high (AD) | Layer II stellate neurons: earliest NFTs |
 
-### 6.3 Cortical Layer Vulnerability
+### §7.3 Cortical Layer Vulnerability
 
 | Layer | Vulnerability |
 |-------|---------------|
@@ -276,7 +467,7 @@ ImageJ: Silver-stained structures are dark brown/black on light background. Use 
 | V | ALS (Betz cells), HD, AD (late), CTE |
 | V-VI | HD huntingtin inclusions |
 
-### 6.4 Key Brainstem Structures
+### §7.4 Key Brainstem Structures
 
 - **SN pars compacta:** Dopaminergic + neuromelanin. Primary PD target.
 - **Locus coeruleus:** Noradrenergic. Early in AD and PD.
@@ -285,9 +476,9 @@ ImageJ: Silver-stained structures are dark brown/black on light background. Use 
 
 ---
 
-## 7. ImageJ Analysis Pipelines
+## §8. ImageJ Analysis Pipelines
 
-### 7.1 DAB Quantification (Colour Deconvolution)
+### §8.1 DAB Quantification (Colour Deconvolution)
 
 ```
 // Colour Deconvolution for H-DAB
@@ -314,7 +505,7 @@ run("Analyze Particles...", "size=100-Infinity circularity=0.2-1.0 show=Outlines
 - **DAB intensity is NOT quantitative for antigen expression** (non-linear, depends on section thickness, incubation time). Use area fraction instead.
 - Optical density: `OD = log10(255 / mean_grey_value)`
 
-### 7.2 Plaque Counting and Sizing
+### §8.2 Plaque Counting and Sizing
 
 ```
 // After colour deconvolution + threshold (see 7.1):
@@ -327,7 +518,7 @@ run("Analyze Particles...", "size=100-100000 circularity=0.3-1.0 show=[Overlay O
 
 Typical sizes: Diffuse 20-100 um, Neuritic 30-80 um, Core 10-30 um.
 
-### 7.3 Tangle Counting (AT8)
+### §8.3 Tangle Counting (AT8)
 
 ```
 // Semi-automated (manual review recommended):
@@ -339,7 +530,7 @@ run("Analyze Particles...", "size=50-5000 circularity=0.1-0.8 show=Outlines disp
 
 For precision: use Cell Counter plugin. Separate counter types for pretangles, mature tangles, ghost tangles.
 
-### 7.4 Area Fraction (% Immunoreactive Area)
+### §8.4 Area Fraction (% Immunoreactive Area)
 
 ```
 run("Colour Deconvolution", "vectors=[H DAB]");
@@ -352,7 +543,7 @@ run("Measure");
 
 Typical values (very approximate): Abeta in severe AD cortex 5-20%. pTau (AT8) in AD cortex 1-10%. GFAP in reactive astrogliosis 10-40%. Iba1 in normal cortex 2-5%, neuroinflammation 5-20%.
 
-### 7.5 Microglial Morphology Analysis
+### §8.5 Microglial Morphology Analysis
 
 ```
 // 1. Isolate individual Iba1+ microglia (threshold + particle analysis)
@@ -365,7 +556,7 @@ Typical values (very approximate): Abeta in severe AD cortex 5-20%. pTau (AT8) i
 
 Reference values: Ramified soma ~50-100 um2 (low circularity), Activated ~150-400 um2 (higher circularity), Amoeboid ~200-400+ um2 (circularity ~1.0).
 
-### 7.6 Synapse Density (Puncta Colocalization)
+### §8.6 Synapse Density (Puncta Colocalization)
 
 ```
 // Multi-channel (e.g., synaptophysin + PSD-95):
@@ -380,7 +571,7 @@ run("Analyze Particles...", "size=0.05-2.0 summarize");
 // Normalize per area or per dendrite length (MAP2 channel)
 ```
 
-### 7.7 Cell Counting
+### §8.7 Cell Counting
 
 ```
 // StarDist (best for round nuclei like NeuN, DAPI):
@@ -390,7 +581,7 @@ run("StarDist 2D", "model=[Versatile (fluorescent nuclei)] probThresh=0.5 nmsThr
 // Validate against manual counts (F1 > 0.85).
 ```
 
-### 7.8 ROI Analysis by Brain Region
+### §8.8 ROI Analysis by Brain Region
 
 ```
 roiManager("Open", "/path/to/ROI_set.zip");
@@ -402,7 +593,7 @@ for (i = 0; i < roiManager("count"); i++) {
 
 Naming convention: `CA1_left`, `DG_granular`, `EC_layer_II`, `SN_pars_compacta`.
 
-### 7.9 Batch Processing Template
+### §8.9 Batch Processing Template
 
 ```
 input = "/path/to/input/";
@@ -426,9 +617,9 @@ saveAs("Results", output + "batch_results.csv");
 
 ---
 
-## 8. Mouse Models
+## §9. Mouse Models
 
-### 8.1 Key Models Summary
+### §9.1 Key Models Summary
 
 | Model | Type | Onset | Plaques | Tangles | Neuronal Loss | Key Antibodies |
 |-------|------|-------|---------|---------|--------------|----------------|
@@ -440,7 +631,7 @@ saveAs("Results", output + "batch_results.csv");
 | aSyn PFF (WT) | Synuclein | 1-2 mo | No | No | ~30% DA (6 mo) | pSer129, TH, DAT |
 | SOD1-G93A | ALS | 8 wk | No | No | ~50% MN (end) | ChAT, GFAP, Iba1 |
 
-### 8.2 Mouse vs Human Differences
+### §9.2 Mouse vs Human Differences
 
 | Feature | Mouse Models | Human Disease |
 |---------|-------------|---------------|
@@ -450,7 +641,7 @@ saveAs("Results", output + "batch_results.csv");
 | Time course | Weeks to months | Decades |
 | Genetic basis | Familial mutations overexpressed | >95% sporadic |
 
-### 8.3 Species-Specific Antibody Notes
+### §9.3 Species-Specific Antibody Notes
 
 - **6E10, 4G8, HT7:** Human-specific. Only work in mice with human transgene.
 - **Iba1, GFAP, AT8, NeuN, Synaptophysin, PSD-95:** Work in both mouse and human.
@@ -459,9 +650,9 @@ saveAs("Results", output + "batch_results.csv");
 
 ---
 
-## 9. Quantitative Standards
+## §10. Quantitative Standards
 
-### 9.1 Stereology (Unbiased Cell Counting)
+### §10.1 Stereology (Unbiased Cell Counting)
 
 **Optical fractionator:** Gold standard. Systematic uniform random sampling (SURS) + optical disector rules.
 
@@ -477,17 +668,17 @@ Total count = sum(cells counted) x 1/ssf x 1/asf x 1/tsf
 
 **ImageJ:** Grid overlay (Analyze > Tools > Grid) for systematic sampling. Cell Counter for counting. Not a dedicated stereology platform — for full stereology use Stereo Investigator (MBF) or newCAST.
 
-### 9.2 The Reference Trap
+### §10.2 The Reference Trap
 
 If a brain region atrophies, cell density (cells/mm2) can INCREASE even when total cells DECREASE. Always report total counts (fractionator) or measure and report reference volume alongside density.
 
-### 9.3 Statistical Gotchas
+### §10.3 Statistical Gotchas
 
 - **Biological vs technical replicates:** Multiple sections from same animal are technical replicates. Average per animal before group comparison. Treating sections as independent n inflates significance.
 - **Typical n:** 5-12 animals per group.
 - **Tests:** 2 groups: t-test or Mann-Whitney. Multiple groups: ANOVA + Tukey. Braak stages: non-parametric (ordinal).
 
-### 9.4 Reporting Standards
+### §10.4 Reporting Standards
 
 **Minimum for IHC publication:**
 - Antibody: target, host, clone, manufacturer, catalogue #, RRID, dilution
@@ -502,76 +693,7 @@ If a brain region atrophies, cell density (cells/mm2) can INCREASE even when tot
 
 ---
 
-## 10. Best Practices and Pitfalls
-
-### 10.1 Antigen Retrieval
-
-| Method | Agent | Best For |
-|--------|-------|----------|
-| HIER - Citrate pH 6.0 | 10 mM citrate, 95-100C, 10-30 min | **Default.** Most antigens (tau, GFAP, Iba1, NeuN). |
-| HIER - Tris-EDTA pH 9.0 | 10 mM Tris + 1 mM EDTA, 95-100C | More aggressive. Some antigens respond better. |
-| Formic acid | 70-98%, RT, 5-20 min | **Essential for Abeta.** Also aSyn. Disrupts beta-sheets. |
-| Proteinase K | 10-20 ug/mL, 37C, 5-15 min | Aggregated aSyn, PrP. Reduces normal protein background. |
-
-**Combinations:** Abeta: FA 88% 5 min -> HIER citrate. aSyn: FA 80% 5 min -> citrate (or PK 20 ug/mL 10 min). PrP: FA 98% -> autoclave -> PK. Old formalin tissue: PK -> autoclave EDTA -> FA.
-
-### 10.2 Lipofuscin Autofluorescence (Aged Brain)
-
-Lipofuscin autofluoresces across broad spectrum (green > red > far-red). Major problem for IF in aged tissue.
-
-| Solution | Effectiveness |
-|----------|-------------|
-| **TrueBlack (Biotium)** | Excellent. Apply after IF, 30 sec-5 min in 70% ethanol. |
-| **Sudan Black B** | Good for green/red. Adds far-red background. |
-| **Spectral unmixing** | Good. Requires spectral/lambda-scan confocal. |
-| **DAB instead of IF** | Eliminates problem. Loses multiplexing. |
-
-ImageJ workaround: Image unstained section, use Image Calculator > Subtract.
-
-### 10.3 Controls
-
-| Control | Purpose |
-|---------|---------|
-| Positive tissue | Confirms antibody works (e.g., AD brain for Abeta/tau) |
-| No primary antibody | Non-specific secondary binding |
-| Isotype control | Non-specific primary binding |
-| Known negative tissue | Confirms specificity (e.g., young normal brain) |
-
-### 10.4 DAB Threshold Method Selection
-
-| Staining Quality | Recommended Threshold |
-|-----------------|----------------------|
-| Strong, clear, low background | Otsu |
-| Variable intensity, gradual transition | **Triangle (default)** |
-| Weak signal, need sensitivity | Moments or Yen |
-| Very clean, bimodal | Li or IsoData |
-| Batch (consistency critical) | Fixed manual threshold |
-
-### 10.5 Multiplex IF Panels
-
-**TSA/OPAL system:** Up to 8 markers per section. Primary -> HRP-secondary -> TSA fluorophore (covalent) -> strip -> repeat. Same-species primaries OK.
-
-Common panels: Abeta + pTau + NeuN + GFAP + Iba1 + Olig2. pTau + pSer129 + pTDP-43 (co-pathology). GFAP + Iba1 + CD68 + TMEM119 + P2RY12 (glial states).
-
-### 10.6 Co-Pathology
-
-"Pure" single proteinopathy is the exception. AD + Lewy bodies: 30-50%. AD + TDP-43 (LATE): 30-57%. Must characterize ALL proteinopathies, not just the "primary" one.
-
-### 10.7 WSI / Digital Pathology
-
-- **QuPath:** Leading open-source for WSI. DAB quantification, cell detection, pixel classification, batch processing.
-- **Fiji:** Bio-Formats imports .svs/.ndpi/.scn. Use virtual stacks for large images.
-- **Trainable Weka Segmentation:** Pixel classification when colour deconvolution alone insufficient.
-
-### 10.8 Circadian Considerations
-
-- Clock protein expression varies with time of day — record time of death for post-mortem tissue.
-- Microglial morphology varies with circadian phase — sacrifice at consistent ZT.
-- When comparing groups, ensure tissue collected at same circadian time or account statistically.
-
----
-
-## 11. Common Antibody Quick Reference
+## §11. Common Antibody Quick Reference
 
 | Target | Clone | Cat# (example) | Dilution | Retrieval |
 |--------|-------|----------------|----------|-----------|
@@ -599,7 +721,7 @@ Common panels: Abeta + pTau + NeuN + GFAP + Iba1 + Olig2. pTau + pSer129 + pTDP-
 
 ---
 
-## 12. Decision Trees
+## §12. Decision Trees
 
 ### Which Stain?
 
@@ -629,3 +751,72 @@ Weak signal                   -> Moments or Yen
 Clean bimodal                 -> Li or IsoData
 Batch consistency             -> Fixed manual threshold
 ```
+
+---
+
+## §13. Best Practices and Pitfalls
+
+### §13.1 Antigen Retrieval
+
+| Method | Agent | Best For |
+|--------|-------|----------|
+| HIER - Citrate pH 6.0 | 10 mM citrate, 95-100C, 10-30 min | **Default.** Most antigens (tau, GFAP, Iba1, NeuN). |
+| HIER - Tris-EDTA pH 9.0 | 10 mM Tris + 1 mM EDTA, 95-100C | More aggressive. Some antigens respond better. |
+| Formic acid | 70-98%, RT, 5-20 min | **Essential for Abeta.** Also aSyn. Disrupts beta-sheets. |
+| Proteinase K | 10-20 ug/mL, 37C, 5-15 min | Aggregated aSyn, PrP. Reduces normal protein background. |
+
+**Combinations:** Abeta: FA 88% 5 min -> HIER citrate. aSyn: FA 80% 5 min -> citrate (or PK 20 ug/mL 10 min). PrP: FA 98% -> autoclave -> PK. Old formalin tissue: PK -> autoclave EDTA -> FA.
+
+### §13.2 Lipofuscin Autofluorescence (Aged Brain)
+
+Lipofuscin autofluoresces across broad spectrum (green > red > far-red). Major problem for IF in aged tissue.
+
+| Solution | Effectiveness |
+|----------|-------------|
+| **TrueBlack (Biotium)** | Excellent. Apply after IF, 30 sec-5 min in 70% ethanol. |
+| **Sudan Black B** | Good for green/red. Adds far-red background. |
+| **Spectral unmixing** | Good. Requires spectral/lambda-scan confocal. |
+| **DAB instead of IF** | Eliminates problem. Loses multiplexing. |
+
+ImageJ workaround: Image unstained section, use Image Calculator > Subtract.
+
+### §13.3 Controls
+
+| Control | Purpose |
+|---------|---------|
+| Positive tissue | Confirms antibody works (e.g., AD brain for Abeta/tau) |
+| No primary antibody | Non-specific secondary binding |
+| Isotype control | Non-specific primary binding |
+| Known negative tissue | Confirms specificity (e.g., young normal brain) |
+
+### §13.4 DAB Threshold Method Selection
+
+| Staining Quality | Recommended Threshold |
+|-----------------|----------------------|
+| Strong, clear, low background | Otsu |
+| Variable intensity, gradual transition | **Triangle (default)** |
+| Weak signal, need sensitivity | Moments or Yen |
+| Very clean, bimodal | Li or IsoData |
+| Batch (consistency critical) | Fixed manual threshold |
+
+### §13.5 Multiplex IF Panels
+
+**TSA/OPAL system:** Up to 8 markers per section. Primary -> HRP-secondary -> TSA fluorophore (covalent) -> strip -> repeat. Same-species primaries OK.
+
+Common panels: Abeta + pTau + NeuN + GFAP + Iba1 + Olig2. pTau + pSer129 + pTDP-43 (co-pathology). GFAP + Iba1 + CD68 + TMEM119 + P2RY12 (glial states).
+
+### §13.6 Co-Pathology
+
+"Pure" single proteinopathy is the exception. AD + Lewy bodies: 30-50%. AD + TDP-43 (LATE): 30-57%. Must characterize ALL proteinopathies, not just the "primary" one.
+
+### §13.7 WSI / Digital Pathology
+
+- **QuPath:** Leading open-source for WSI. DAB quantification, cell detection, pixel classification, batch processing.
+- **Fiji:** Bio-Formats imports .svs/.ndpi/.scn. Use virtual stacks for large images.
+- **Trainable Weka Segmentation:** Pixel classification when colour deconvolution alone insufficient.
+
+### §13.8 Circadian Considerations
+
+- Clock protein expression varies with time of day — record time of death for post-mortem tissue.
+- Microglial morphology varies with circadian phase — sacrifice at consistent ZT.
+- When comparing groups, ensure tissue collected at same circadian time or account statistically.

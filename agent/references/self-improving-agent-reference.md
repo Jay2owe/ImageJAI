@@ -1,6 +1,149 @@
 # Self-Improving ImageJ Agent — Technical Reference
 
-## 1. Plugin Ecosystem
+Agent-oriented reference for the self-improving ImageJ/Fiji agent
+architecture: plugin ecosystem inventory, scripting language choice,
+recipe database schema, verification and error-recovery tables,
+benchmark images, segmentation method selection, CPU vs GPU filter
+timings, and the self-evaluation pipeline.
+
+Sources: `imagej.net/ij/docs/`, `imagej.net/plugins/`, Fiji wiki
+(`imagej.net/software/fiji`), CLIJ2 reference
+(`clij.github.io/clij2-docs/`). Use `python probe_plugin.py "Plugin..."`
+to discover any installed plugin's parameters at runtime, and
+`python scan_plugins.py` to enumerate installed commands.
+
+Invoke from the agent:
+`python ij.py macro '<code>'` — run ImageJ macro (.ijm) code.
+`python ij.py script '<code>'` — run Groovy (default), Jython, or JavaScript.
+`python scan_plugins.py` — dump installed commands + update sites.
+`python probe_plugin.py "Plugin Name"` — discover plugin parameters.
+
+---
+
+## §0 Lookup Map — "How do I find X?"
+
+| Question | Where to look |
+|---|---|
+| "How do I enumerate installed plugins / commands?" | §2 |
+| "Which plugins are macro-recordable / headless-capable?" | §2 |
+| "What plugin API patterns exist (GenericDialog, MacroExtension, call, eval)?" | §2 |
+| "Should I use IJ Macro, Groovy, or Jython?" | §3 |
+| "How do I open .nd2 / .lif / .czi with Bio-Formats?" | §3 |
+| "What does a recipe YAML look like?" | §4 |
+| "How do I verify a given analysis type?" | §4 |
+| "How do I tune plugin parameters automatically?" | §4 |
+| "What auto-fix applies to common macro errors?" | §4 |
+| "Which built-in benchmark images should I test on?" | §4 |
+| "Which segmentation method fits my scenario?" | §4 |
+| "How much faster is CLIJ2 vs CPU filtering?" | §4 |
+| "How do I self-evaluate a pipeline result?" | §5 |
+
+---
+
+## §1 Term Index (A–Z)
+
+Alphabetical pointer to the section containing each term. Use
+`grep -n '`<term>`' self-improving-agent-reference.md` to jump.
+
+### A
+
+`ABBA` §2 · `AnalyzeSkeleton` §2 · `Analyze Particles` §4 · `Auto-Fix table` §4
+
+### B
+
+`Bat Cochlea Volume` §4 · `Batch Mode` §3 · `Bayesian optimization` §4 · `Benchmark Images` §4 · `Bio-Formats` §2, §3 · `Blobs (25K)` §4
+
+### C
+
+`call()` §2 · `Cellpose` §2, §4 · `circularity distribution` §4 · `CLIJ2` §2, §4 · `Coloc 2` §2 · `commands.md` §2 · `Convert to Mask` §3, §4 · `cross-validation` §5 · `.czi (Zeiss)` §3
+
+### D
+
+`Dialog appears` §4 · `Dialog handling` §4
+
+### E
+
+`Embryos` §4 · `Error Recovery` §4 · `eval()` §2 · `explore_thresholds` §4 · `Ext.CLIJ2_gaussianBlur3D` §2
+
+### F
+
+`failure_indicators` §4 · `Fluorescent Cells` §4 · `foreground fraction` §4
+
+### G
+
+`Gaussian Blur` §4 · `GenericDialog` §2 · `Grid search` §4 · `GPU filter speedup` §4
+
+### H
+
+`Headless` §2 · `histogram check` §5 · `hyperstack` §3
+
+### I
+
+`IJ Macro` §3 · `intensity verification` §4
+
+### J
+
+`Jython` §3
+
+### K
+
+`Key Installed Plugins` §2
+
+### L
+
+`Labkit` §2 · `.lif (Leica)` §3
+
+### M
+
+`MacroExtension` §2 · `macro-recordable` §2 · `Macro execution timed out` §4 · `measurement sanity` §5 · `Median` §4 · `MorphoLibJ` §2
+
+### N
+
+`.nd2 (Nikon)` §3 · `No image open` §4 · `noise detected` §4 · `Not a binary image` §4
+
+### O
+
+`Optuna` §4 · `Otsu` §4 · `object counting` §4
+
+### P
+
+`Parameter Optimization` §4 · `Plugin API Patterns` §2 · `Plugin Ecosystem` §2 · `probe_plugin` §2 · `probe_plugin.py` §2
+
+### R
+
+`recipe YAML` §4 · `Recipe Database` §4 · `Rolling Ball BG` §4 · `run("Plugin", ...)` §2
+
+### S
+
+`saturation check` §5 · `scan_plugins.py` §2 · `scikit-optimize` §4 · `segmentation` §4, §5 · `Segmentation Method Selection` §4 · `Selection required` §4 · `Self-Evaluation Pipeline` §5 · `Self-Improvement Architecture` §4 · `series_N` §3 · `StarDist 2D/3D` §2, §4 · `Stitching` §2 · `Subtract Background` §4
+
+### T
+
+`T1 Head (2.4M)` §4 · `threshold_method` §4 · `thresholding fraction` §4 · `TrackMate` §2 · `Triangle` §4
+
+### U
+
+`Unknown command` §4 · `update sites` §2 · `use_virtual_stack` §3
+
+### V
+
+`validation` §4 · `verification by analysis type` §4 · `virtual stack` §3 · `visual inspection` §5
+
+### W
+
+`Watershed` §4 · `Weka Segmentation` §2
+
+### Y
+
+`Yen` §4
+
+### Z
+
+`3D ImageJ Suite` §2 · `3D Objects Counter` §4 · `3D stack` §4
+
+---
+
+## §2 Plugin Ecosystem
 
 ~330 update sites (22 enabled), 1966 installed commands. Discover with:
 ```bash
@@ -36,7 +179,7 @@ Discovery: `python probe_plugin.py "Plugin Name"` (opens dialog, reads all field
 
 ---
 
-## 2. Scripting Language Comparison
+## §3 Scripting Language Comparison
 
 | Feature | IJ Macro | Groovy | Jython |
 |---------|----------|--------|--------|
@@ -63,7 +206,7 @@ run("Bio-Formats Importer", "open=/path/to/file.nd2 use_virtual_stack");  // mem
 
 ---
 
-## 3. Self-Improvement Architecture
+## §4 Self-Improvement Architecture
 
 ### Recipe Database (YAML)
 
@@ -144,7 +287,7 @@ CLIJ2: 10-30x speedup per operation, 15-33x for full pipelines kept on GPU.
 
 ---
 
-## 4. Self-Evaluation Pipeline
+## §5 Self-Evaluation Pipeline
 
 1. **Segmentation**: Count objects (1 = under-segmented, >10000 = noise)
 2. **Measurement sanity**: Cell area typically 100-5000px, circularity 0.3-0.9

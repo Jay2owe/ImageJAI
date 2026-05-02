@@ -1,11 +1,121 @@
 # Color Science for Microscopy Reference
 
 Reference for LUT selection, composites, colorblind accessibility, display vs data,
-calibration bars, RGB conversion, and journal color requirements.
+calibration bars, RGB conversion, and journal color requirements. Covers built-in
+and Fiji-extra LUTs (Grays, Fire, mpl-viridis/inferno/magma/plasma, HiLo, glasbey,
+blue_orange_icb, phase), colourblind-safe palette combinations, display-range
+commands, composite/RGB conversion, pseudocolor + calibration bars, CLAHE/gamma,
+and publication requirements for Nature, JCB, Cell, eLife, PLOS, Science.
+
+Invoke from the agent:
+`python ij.py macro '<code>'` — run ImageJ macro (.ijm) code.
+`python ij.py script '<code>'` — run Groovy (default), Jython, or JavaScript.
 
 ---
 
-## 1. Display vs Data
+## §0 Lookup Map — "How do I find X?"
+
+| Question | Where to look |
+|---|---|
+| "Is this operation safe or destructive?" | §2, §11.2 |
+| "Which LUT should I use for intensity / composites / labels?" | §3, §11.1 |
+| "What built-in and Fiji-extra LUTs exist?" | §3 |
+| "How do I pick colourblind-safe channel combinations?" | §4 |
+| "How do I simulate deuteranopia / protanopia?" | §4, §12.6 |
+| "How do I build and navigate a multi-channel composite?" | §5, §12.3 |
+| "How do I convert composite to RGB for export?" | §6, §12.4 |
+| "How do I add a calibration bar to a pseudocolor image?" | §7, §12.5 |
+| "How do I make a ratio or fold-change map?" | §7 |
+| "How do I color objects by a measurement?" | §7 |
+| "What's safe vs destructive for brightness/contrast?" | §8 |
+| "What does Nature / JCB / Cell / eLife / PLOS / Science require?" | §9 |
+| "What are the common colour-science mistakes?" | §10 |
+| "How do I convert to HSB / Lab / deconvolve stains?" | §12.5 |
+
+---
+
+## §1 Term Index (A–Z)
+
+Alphabetical pointer to the section containing each term. Use
+`grep -n '`<term>`' color-science-reference.md` to jump.
+
+### A
+`Apply LUT` §2, §8, §10, §11.2 · `area_map` §7
+
+### B
+`Bit depth` §2 · `blue_orange_icb` §3, §7, §11.1 · `Brightness and contrast` §8
+
+### C
+`Calibration Bar` §7, §12.5 · `CLAHE` §8 · `Colour Deconvolution` §12.5 ·
+`Composite (mode)` §5, §11.2, §12.3 · `Composite vs RGB` §5 ·
+`CVD simulation` §4, §12.6 · `Cyan` §3 · `Cyan Hot` §3 ·
+`Custom LUTs` §3
+
+### D
+`DAPI` §3, §4 · `Depth colour coding` §7 · `Deuteranopia` §4, §12.6 ·
+`Display range` §2, §8, §11.2, §12.2 · `Destructive operations` §2, §11.2
+
+### E
+`edges` §3 · `Enhance Contrast` §2, §8, §10, §11.2 · `Export (RGB)` §6, §12.4
+
+### F
+`Fire` §3, §10, §11.1 · `FITC` §3 · `Flatten` §2, §6, §11.2 ·
+`Fold-change` §7, §11.1
+
+### G
+`Gamma` §8 · `gem` §3 · `glasbey` §3, §11.1 · `glasbey_on_dark` §3, §11.1 ·
+`glow` §3 · `Grays` §3, §11.1 · `Green` §3, §4 · `Green Fire Blue` §3
+
+### H
+`Histogram (saturation check)` §10 · `HiLo` §3, §10, §11.1 · `Hoechst` §3 ·
+`HSB Stack` §12.5
+
+### I
+`ICA / ICA2 / ICA3` §3 · `Invert LUT` §3, §11.2, §12.2
+
+### J
+`JCB` §9 · `JPEG (avoid)` §2, §9, §10 · `Journal requirements` §9
+
+### L
+`Label maps` §3, §11.1 · `Lab Stack` §12.5 · `LUTs (built-in)` §3 ·
+`LUTs (Fiji extras)` §3 · `Linear adjustments` §9
+
+### M
+`Magenta` §3, §4 · `Magenta Hot` §3 · `Make Composite` §5, §12.3 ·
+`Measurement maps` §7 · `Merge Channels` §5, §12.3 · `Methods section template` §9 ·
+`mpl-inferno` §3, §11.1 · `mpl-magma` §3, §11.1 · `mpl-plasma` §3 ·
+`mpl-viridis` §3, §7, §11.1
+
+### O
+`Orange Hot` §3 · `Overlay.addSelection` §2
+
+### P
+`phase (LUT)` §3, §11.1 · `physics (LUT)` §3 · `Protanopia` §4, §12.6 ·
+`Pseudocolor` §7, §11.1
+
+### R
+`Rainbow RGB (avoid)` §3, §10 · `Ratio images` §7 · `Red` §3, §4, §10 ·
+`Red Hot` §3 · `resetMinAndMax` §2, §8, §11.2, §12.2 · `RGB Color` §2, §6, §11.2, §12.4 ·
+`royal` §3
+
+### S
+`Safe operations` §2, §11.2 · `saveAs("Jpeg")` §2, §10, §11.2 ·
+`saveAs("Tiff")` §10 · `Saturation check` §10 · `Sequential LUTs` §3 ·
+`setLut` §3, §12.2 · `setMinAndMax` §2, §7, §8, §11.2, §12.2 · `sepia` §3 ·
+`Simulate Color Blindness` §4, §12.6 · `Split Channels` §5, §6, §12.3 ·
+`Stack.setChannel` §5, §12.3 · `Stack.setDisplayMode` §2, §5, §12.3 ·
+`Stack.setActiveChannels` §5, §12.3 · `Summary rules` §14
+
+### T
+`Temporal-Color Code` §7, §12.5 · `Texas Red` §3 · `thal / thallium` §3 ·
+`Thermal` §3 · `Tritanopia` §4
+
+### Y
+`Yellow` §3 · `Yellow Hot` §3
+
+---
+
+## §2 Display vs Data
 
 A LUT maps pixel values to screen colors. Changing the LUT changes the display; the
 numbers stay the same.
@@ -59,7 +169,7 @@ setMinAndMax(min, max);  // Display-only: shows full dynamic range
 
 ---
 
-## 2. Lookup Tables (LUTs)
+## §3 Lookup Tables (LUTs)
 
 ### Built-in LUTs
 
@@ -130,7 +240,7 @@ run("Invert LUT");
 
 ---
 
-## 3. Colorblind-Safe Microscopy
+## §4 Colorblind-Safe Microscopy
 
 Approximately 8% of males have red-green color vision deficiency. Traditional
 red-green overlays are indistinguishable to these viewers.
@@ -172,7 +282,7 @@ in the simulation, choose different LUTs.
 
 ---
 
-## 4. Channel Composites
+## §5 Channel Composites
 
 ### Composite vs RGB
 
@@ -228,7 +338,7 @@ run("Split Channels");  // Creates C1-title, C2-title, C3-title, ...
 
 ---
 
-## 5. RGB Conversion
+## §6 RGB Conversion
 
 RGB is appropriate for figure export, presentations, and web display.
 RGB is NOT appropriate for quantitative analysis or further processing.
@@ -263,7 +373,7 @@ gives 8-bit display approximations, not original data.
 
 ---
 
-## 6. Pseudocolor and Calibration Bars
+## §7 Pseudocolor and Calibration Bars
 
 ### Calibration Bars
 
@@ -338,7 +448,7 @@ run("Calibration Bar...", "location=[Upper Right] fill=Black label=White number=
 
 ---
 
-## 7. Brightness and Contrast
+## §8 Brightness and Contrast
 
 ### Display Range (Non-Destructive)
 
@@ -393,7 +503,7 @@ run("Enhance Local Contrast (CLAHE)", "blocksize=127 histogram=256 maximum=3 mas
 
 ---
 
-## 8. Journal Requirements
+## §9 Journal Requirements
 
 ### Universal Requirements
 
@@ -441,7 +551,7 @@ Scale bars indicate [X] micrometers.
 
 ---
 
-## 9. Common Mistakes
+## §10 Common Mistakes
 
 | Mistake | Problem | Fix |
 |---------|---------|-----|
@@ -471,9 +581,9 @@ run("HiLo");  // Visual QC: blue=zero, red=saturated
 
 ---
 
-## 10. Quick Decision Trees
+## §11 Quick Decision Trees
 
-### Which LUT?
+### §11.1 Which LUT?
 
 ```
 Single-channel intensity?
@@ -493,7 +603,7 @@ Phase/cyclic data? → phase
 Default → mpl-viridis
 ```
 
-### Is This Operation Safe?
+### §11.2 Is This Operation Safe?
 
 ```
 SAFE (display only):
@@ -507,9 +617,9 @@ DESTRUCTIVE:
 
 ---
 
-## 11. Macro Command Reference
+## §12 Macro Command Reference
 
-### LUT Commands
+### §12.1 LUT Commands
 
 ```javascript
 // Built-in
@@ -529,7 +639,7 @@ run("Invert LUT");                   // Invert display
 open("/path/to/custom.lut");         // Load file
 ```
 
-### Display Range
+### §12.2 Display Range
 
 ```javascript
 setMinAndMax(lower, upper);                              // Non-destructive
@@ -540,7 +650,7 @@ run("Enhance Contrast...", "saturated=0.35");            // Auto-range (safe)
 // DESTRUCTIVE: run("Apply LUT");
 ```
 
-### Composite and Channel
+### §12.3 Composite and Channel
 
 ```javascript
 run("Make Composite");
@@ -551,7 +661,7 @@ run("Merge Channels...", "c1=[img1] c2=[img2] c3=[img3] create");
 run("Split Channels");
 ```
 
-### RGB and Export
+### §12.4 RGB and Export
 
 ```javascript
 run("RGB Color");                    // Composite → RGB (no overlays)
@@ -559,7 +669,7 @@ run("Flatten");                      // Composite → RGB (with overlays)
 run("Split Channels");               // RGB → R, G, B (8-bit each)
 ```
 
-### Pseudocolor
+### §12.5 Pseudocolor
 
 ```javascript
 run("Temporal-Color Code", "lut=mpl-viridis start=1 end=100");
@@ -575,7 +685,7 @@ run("Lab Stack");                    // RGB → L*/a*/b*
 run("Colour Deconvolution", "vectors=[H DAB]");  // Histology stain separation
 ```
 
-### CVD Simulation
+### §12.6 CVD Simulation
 
 ```javascript
 run("Simulate Color Blindness", "type=Deuteranopia");
@@ -584,7 +694,7 @@ run("Simulate Color Blindness", "type=Protanopia");
 
 ---
 
-## Agent Notes
+## §13 Agent Notes
 
 - No macro function to get LUT name. Read arrays with `getLut()` and compare patterns.
 - LUTs apply to entire stacks automatically — no need to iterate slices.
@@ -596,7 +706,7 @@ run("Simulate Color Blindness", "type=Protanopia");
 
 ---
 
-## Summary Rules
+## §14 Summary Rules
 
 1. LUT changes and `setMinAndMax()` are safe. `Apply LUT`, `normalize`, `RGB Color`,
    `Flatten`, `saveAs("Jpeg")` are destructive.

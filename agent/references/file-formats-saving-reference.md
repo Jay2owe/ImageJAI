@@ -1,10 +1,170 @@
 # File Formats & Saving Reference
 
-Every macro below works with: `python ij.py macro 'CODE_HERE'`
+Agent-oriented reference for image and data file formats in ImageJ/Fiji.
+Covers native formats (TIFF, ZIP, JPEG, PNG, GIF, BMP, Raw, AVI, FITS, PGM,
+Text Image), Bio-Formats (163 microscopy formats: ND2, LIF, CZI, LSM,
+Olympus, DeltaVision, MetaMorph, Micro-Manager, Imaris, OME-TIFF), modern
+chunked formats (HDF5, N5, OME-Zarr), `saveAs()` syntax, `File.*` macro
+functions, non-image data (Results, ROIs, Overlays, LUTs, Log), Bio-Formats
+Exporter, batch save patterns, TIFF internals, data integrity rules,
+format decision tree, pitfalls, journal submission, and the Java/Groovy
+save API.
+
+Sources: `imagej.net/formats/`, `imagej.net/formats/tiff`,
+`imagej.net/ij/docs/menus/file.html`, `wsr.imagej.net/developer/macro/functions.html`,
+Bio-Formats docs (`bio-formats.readthedocs.io`), TIFF 6.0 specification,
+`imagej.net/libs/n5`, OME-Zarr (Nature Methods 2021),
+`imagej.net/imaging/detect-information-loss`.
+
+Invoke from the agent:
+`python ij.py macro '<code>'` — run ImageJ macro (.ijm) code.
+`python ij.py script '<code>'` — run Groovy (default), Jython, or JavaScript.
 
 ---
 
-## 1. Native Formats (Read & Write)
+## §0 Lookup Map — "How do I find X?"
+
+| Question | Where to look |
+|---|---|
+| "How do I save a multi-channel TIFF?" | §2, §5, §10 |
+| "What formats support metadata (calibration, ROIs)?" | §2, §10.2, §11 |
+| "How do I open a .nd2 / .lif / .czi file?" | §3 |
+| "What options does `saveAs()` accept?" | §5 |
+| "How do I write a file in Groovy?" | §16 |
+| "How do I save an OME-TIFF with compression?" | §8 |
+| "What format should I use for >4 GB data?" | §10.4, §12, §13 |
+| "How do I save ROIs / overlays / Results?" | §7 |
+| "How do I batch-save a folder of images?" | §9 |
+| "Why is my saved file blank / corrupt / 8-bit?" | §10.2, §14 |
+| "What format should I use for a journal figure?" | §15 |
+| "How do I save to disk next to the source image?" | §17 |
+| "What's the difference between ImageJ TIFF and OME-TIFF?" | §10.1 |
+| "Does PNG preserve 16-bit pixel values?" | §10.2, §14 |
+| "Where do I write outputs from the agent?" | §17 |
+
+---
+
+## §1 Term Index (A–Z)
+
+Alphabetical pointer to the section containing each term. Use
+`grep -n '`<term>`' file-formats-saving-reference.md` to jump.
+
+### A
+`AI_output` §17 · `autoscale` §3, §14 · `AVI` §2, §5, §12, §13
+
+### B
+`Bio-Formats Exporter` §8, §10.4 · `Bio-Formats Importer` §3 ·
+`Bio-Formats (Windowless)` §3 · `Bio-Formats Macro Extensions` §3 ·
+`BigTIFF` §8, §10.1, §10.4, §13 · `BMP` §2, §5, §10.2 ·
+`batch` §9 · `byte[] serialize` §16
+
+### C
+`calibration` §2, §10.2, §11 · `CellH5` §3 ·
+`checkpoints (batch)` §9 · `CHRONOS naming` §17 ·
+`color_mode` §3 · `compression` §2, §8, §10.3 ·
+`concatenate_series` §3 · `CSV` §7, §12 · `CZI` §3
+
+### D
+`DICOM` §2, §3 · `decision tree` §13 · `DeltaVision` §3 ·
+`Deflate (ZIP)` §2
+
+### E
+`endsWith` §9 · `EPS` §3, §15 · `Export Current Image as XML/HDF5` §4 ·
+`Export Current Image as XML/N5` §4 · `Ext.close` §3 ·
+`Ext.getSeriesCount` §3 · `Ext.getSizeC / SizeT / SizeX / SizeY / SizeZ` §3 ·
+`Ext.getMetadataValue` §3 · `Ext.getPixelsPhysicalSizeX` §3 ·
+`Ext.getSeriesName` §3 · `Ext.setId` §3 · `Ext.setSeries` §3
+
+### F
+`File.append` §6 · `File.close` §6 · `File.copy` §6 ·
+`File.dateLastModified` §6 · `File.delete` §6 · `File.directory` §6 ·
+`File.exists` §6, §9, §14 · `File.getDirectory` §6 ·
+`File.getName` §6 · `File.getNameWithoutExtension` §6, §9 ·
+`File.getParent` §6 · `File.isDirectory` §6 · `File.isFile` §6 ·
+`File.lastModified` §6 · `File.length` §6, §14, §17 ·
+`File.makeDirectory` §6, §9, §17 · `File.name` §6 ·
+`File.nameWithoutExtension` §6 · `File.open` §6 ·
+`File.openAsRawString` §6 · `File.openAsString` §6 ·
+`File.openDialog` §6 · `File.openSequence` §6 ·
+`File.openUrlAsString` §6 · `File.rename` §6 ·
+`File.saveString` §6, §7 · `File.separator` §6 ·
+`File.setDefaultDir` §6 · `FileSaver` §16 · `FITS` §2, §5 ·
+`Flatten` §7, §14 · `forward slashes` §9, §14
+
+### G
+`GIF` §2, §5, §10.2, §12, §13 · `getInfo("image.directory")` §17 ·
+`getInfo("log")` §7 · `getMinAndMax` §14
+
+### H
+`HDF5` §4, §10.2, §11, §12, §13 · `Hyperstack` §2, §3
+
+### I
+`ICS` §3 · `IJ.save` §16 · `IJ.saveAs` §16 · `IJ.saveAsTiff` §16 ·
+`IJ.saveString` §16 · `ImageDescription tag` §2 ·
+`Image Sequence` §5, §14 · `Imaris (.ims)` §3 ·
+`Incucyte` §17 · `Input/Output (configure)` §7
+
+### J
+`J2K` §8 · `JPEG` §2, §3, §5, §8, §10.2, §10.3, §14 ·
+`JPEG-2000` §3, §8 · `journal submission` §15
+
+### L
+`Leica LIF` §3, §17 · `Log window save` §7 · `LSM (Zeiss)` §3 ·
+`LUT save` §5, §7, §16 · `LZW` §2, §8, §9, §10.3, §12
+
+### M
+`measurements save` §7, §12 · `MetaMorph` §3 · `Micro-Manager` §3
+
+### N
+`N5` §4, §11, §12, §13 · `ND2 (Nikon)` §3, §9, §17 · `NRRD` §3 ·
+`Nuance` §3
+
+### O
+`OME-TIFF` §3, §8, §10.1, §11, §12, §13 · `OME-XML` §3 ·
+`OME-Zarr` §4, §12, §13 · `OME-NGFF` §4 · `Olympus (.oib/.oif/.oir)` §3 ·
+`open_all_series` §3 · `overlays save` §7, §14 ·
+`overwrite protection` §9
+
+### P
+`PCX` §3 · `PICT` §3 · `PGM` §2, §5 · `PNG` §2, §3, §5, §10.2, §12, §13, §14 ·
+`path separators` §9, §14 · `private tags (TIFF)` §10.1, §10.2
+
+### Q
+`QuickTime` §3 · `quiet (Bio-Formats)` §3
+
+### R
+`Raw` §2, §5, §11 · `rename` §14 · `Results save` §5, §7, §12 ·
+`ResultsTable.save` §16 · `ROI save` §5, §7, §12, §13 ·
+`roiManager("Open")` §7 · `roiManager("Save")` §7, §17 ·
+`RoiManager.getInstance().save` §16
+
+### S
+`save` §5 · `saveAs` §5, §9, §14 · `Selection save` §5, §7 ·
+`series_N` §3 · `setBatchMode` §9 · `setJpegQuality` §16 ·
+`SlideBook 7` §3 · `split_channels` §3 · `split_focal` §3 ·
+`split_timepoints` §3 · `stack_order` §3 · `Standard TIFF` §10.1 ·
+`Summary save` §7
+
+### T
+`Text` §5 · `Text Image` §2, §5, §12, §13 ·
+`TIFF` §2, §5, §10, §11, §12, §13, §15 ·
+`TIFF ImageDescription` §2
+
+### U
+`Uncompressed` §2, §8 · `use_virtual_stack` §3, §10.4
+
+### V
+`view=Hyperstack` §3 · `virtual stack` §3, §6, §10.4
+
+### X
+`XML/HDF5` §4, §12 · `XML/N5` §4, §12
+
+### Z
+`Zarr` §4 · `Zeiss LSM / CZI` §3 · `zlib` §8, §10.3 · `ZIP` §2, §5, §10.3, §11, §12
+
+---
+
+## §2 Native Formats (Read & Write)
 
 | Format | Ext | Bit Depths | Stacks | Calibration | Compression | Notes |
 |--------|-----|-----------|--------|-------------|-------------|-------|
@@ -36,7 +196,7 @@ run("AVI... ", "compression=Uncompressed frame=10");  // or JPEG or PNG
 
 ---
 
-## 2. Bio-Formats (163 Formats)
+## §3 Bio-Formats (163 Formats)
 
 ### Key Microscopy Formats
 
@@ -94,7 +254,7 @@ Ext.close();
 
 ---
 
-## 3. Modern Chunked Formats
+## §4 Modern Chunked Formats
 
 | Feature | HDF5 | N5 | OME-Zarr |
 |---------|------|-----|----------|
@@ -116,7 +276,7 @@ run("Export Current Image as XML/N5");    // BigDataViewer
 
 ---
 
-## 4. saveAs() -- Complete Reference
+## §5 saveAs() -- Complete Reference
 
 ```javascript
 saveAs(format, path)    // Save to specific path
@@ -152,7 +312,7 @@ run("Image Sequence... ", "format=TIFF name=slice_ start=0 digits=4 dir=/path/to
 
 ---
 
-## 5. File.* Macro Functions
+## §6 File.* Macro Functions
 
 ### Writing
 
@@ -205,7 +365,7 @@ dir = File.directory;  name = File.name;  nameNoExt = File.nameWithoutExtension;
 
 ---
 
-## 6. Saving Non-Image Data
+## §7 Saving Non-Image Data
 
 ### Results Table
 
@@ -245,7 +405,7 @@ selectWindow("Log"); saveAs("Text", "/path/to/log.txt");
 
 ---
 
-## 7. Bio-Formats Exporter
+## §8 Bio-Formats Exporter
 
 ```javascript
 // OME-TIFF (basic / LZW / zlib / JPEG / JPEG-2000)
@@ -270,7 +430,7 @@ run("Bio-Formats Exporter", "save=/path/to/out.ome.tif write_each_channel compre
 
 ---
 
-## 8. Batch Save Patterns
+## §9 Batch Save Patterns
 
 ```javascript
 // Basic batch
@@ -308,9 +468,9 @@ saveAs("Tiff", "C:/Users/data/output.tif");  // CORRECT
 
 ---
 
-## 9. TIFF Deep Dive
+## §10 TIFF Deep Dive
 
-### Standard vs ImageJ vs OME-TIFF vs BigTIFF
+### §10.1 Standard vs ImageJ vs OME-TIFF vs BigTIFF
 
 | Feature | Standard TIFF | ImageJ TIFF | OME-TIFF | BigTIFF |
 |---------|--------------|-------------|----------|---------|
@@ -322,15 +482,15 @@ saveAs("Tiff", "C:/Users/data/output.tif");  // CORRECT
 | Compression (write) | Various | **None** (native) | LZW/zlib/JPEG/None | Same as base |
 | Interoperability | Universal | ImageJ/Fiji only | Any Bio-Formats app | Bio-Formats, libTIFF |
 
-### What ImageJ TIFF Private Tags Store
+### §10.2 What ImageJ TIFF Private Tags Store
 Active ROI, overlay ROIs, per-channel LUTs, slice labels, plot data, custom properties, display ranges.
 
-### Compression Strategies
+### §10.3 Compression Strategies
 - **Native `saveAs("Tiff")`**: always uncompressed
 - **`saveAs("ZIP")`**: TIFF inside ZIP container
 - **Bio-Formats**: `compression=LZW` or `compression=zlib`
 
-### Large Files (>4 GB)
+### §10.4 Large Files (>4 GB)
 1. ImageJ non-standard extension (may not open elsewhere)
 2. BigTIFF via Bio-Formats (`.btf`/`.ome.btf`) — widely compatible
 3. Virtual stacks for disk-resident processing
@@ -338,7 +498,7 @@ Active ROI, overlay ROIs, per-channel LUTs, slice labels, plot data, custom prop
 
 ---
 
-## 10. Data Integrity
+## §11 Data Integrity
 
 ### Lossless Formats
 
@@ -379,7 +539,7 @@ Active ROI, overlay ROIs, per-channel LUTs, slice labels, plot data, custom prop
 
 ---
 
-## 11. Format Comparison — When to Use What
+## §12 Format Comparison — When to Use What
 
 | Use Case | Format | Why |
 |----------|--------|-----|
@@ -398,7 +558,7 @@ Active ROI, overlay ROIs, per-channel LUTs, slice labels, plot data, custom prop
 
 ---
 
-## 12. Quick Decision Tree
+## §13 Quick Decision Tree
 
 ```
 Save scientific image data?
@@ -417,7 +577,7 @@ Save scientific image data?
 
 ---
 
-## 13. Common Pitfalls
+## §14 Common Pitfalls
 
 | Pitfall | Problem | Fix |
 |---------|---------|-----|
@@ -434,7 +594,7 @@ Save scientific image data?
 
 ---
 
-## 14. Journal Submission
+## §15 Journal Submission
 
 | Requirement | Value |
 |-------------|-------|
@@ -452,7 +612,7 @@ saveAs("Tiff", "/path/to/figure.tif");
 
 ---
 
-## 15. Java/Groovy Save API (run_script)
+## §16 Java/Groovy Save API (run_script)
 
 ### FileSaver
 
@@ -484,7 +644,7 @@ RoiManager.getInstance().save("/path/to/rois.zip")
 
 ---
 
-## 16. Agent Integration
+## §17 Agent Integration
 
 ```javascript
 // Save deliverables NEXT TO source image (not in .tmp/)
@@ -511,7 +671,7 @@ run("Bio-Formats Importer", "open=[C:/Users/Owner/UK Dementia Research Institute
 
 ---
 
-## Sources
+## §18 Sources
 
 - [ImageJ Formats](https://imagej.net/formats/) | [TIFF Format](https://imagej.net/formats/tiff)
 - [ImageJ File Menu](https://imagej.net/ij/docs/menus/file.html) | [Macro Functions](https://wsr.imagej.net/developer/macro/functions.html)

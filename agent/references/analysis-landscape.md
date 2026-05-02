@@ -1,10 +1,116 @@
 # ImageJ/Fiji Analysis Landscape — Reference
 
 Catalog of analysis domains, tasks, workflows, and automation opportunities.
+Cross-domain overview: this document maps biological/materials analysis
+problems to ImageJ/Fiji tools and plugins, and flags which tasks have the
+highest automation value for agent workflows. Pairs with the method-specific
+references in `references/` (colocalization, neurite-tracing, calcium-imaging,
+wound-healing-migration, trackmate, 3d-visualisation, histology, etc.).
+
+Sources: `imagej.net/plugins/`, `imagej.net/software/fiji`, Fiji update-site
+catalogue, plus domain-specific plugin docs (SNT, TrackMate, Coloc 2, BoneJ,
+AnalyzeSkeleton, CLIJ2, StarDist, Cellpose). Use
+`python probe_plugin.py "Plugin..."` to discover installed-plugin parameters
+at runtime.
 
 ---
 
-## 1. Cell Biology & General Microscopy
+## §0 Lookup Map — "How do I find X?"
+
+| Question | Where to look |
+|---|---|
+| "What's the workflow for counting cells?" | §2 cell biology |
+| "How do I quantify IHC / H&E?" | §4 histology |
+| "Which plugin handles colocalization / FRET / FRAP?" | §5 fluorescence |
+| "How do I track moving cells or build a kymograph?" | §6 tracking |
+| "What 3D analysis options exist?" | §7 3D |
+| "Western blot / dot blot / colony counting?" | §8 gel & blot |
+| "Grain size / porosity / fibre orientation?" | §10 materials |
+| "Bone microarchitecture metrics?" | §11 bone & skeletal |
+| "How do I batch process a folder of images?" | §13 batch processing |
+| "Which ML/DL plugins are installed?" | §14 ML & deep learning |
+| "Which tasks should the agent automate first?" | §15 automation priority |
+| "What does the agent already cover?" | §17 agent coverage checklist |
+
+---
+
+## §1 Term Index (A–Z)
+
+Alphabetical pointer to the section containing each domain, method, or
+concept. Use `grep -n '<term>' analysis-landscape.md` to jump.
+
+### A
+`ABBA` §3 · `Allred` §4 · `Analyze Particles` §2, §4, §8, §9 · `AnalyzeSkeleton` §3, §11 · `Atlas Registration` §3 · `Automation Priority` §15
+
+### B
+`Batch Mode` §13 · `Bio-Formats Macro Extensions` §13 · `Bleach Correction` §5 · `BoneJ` §11 · `BV/TV` §11
+
+### C
+`Calcium Imaging` §3 · `Cell Counting` §2 · `Cell Size Distribution` §2 · `Cellpose` §2, §14 · `CLIJ2` §14 · `Coloc 2` §5, §7 · `Colocalization` §5 · `Colony Counting` §8 · `Colour Deconvolution` §4 · `Community Pain Points` §16 · `CTCF` §2
+
+### D
+`DAPI` §2 · `Dendritic Spines` §3 · `DiAna` §7 · `DiameterJ` §10 · `Dot Blot` §8
+
+### E
+`EdU` §2 · `Exponential bleach correction` §5
+
+### F
+`Fiber Analysis` §10 · `Fibrosis` §4 · `Figure preparation` §12, §15 · `FracLac` §3 · `FRAP` §5 · `FRET` §5
+
+### G
+`Grain Size` §10
+
+### H
+`H&E Morphometry` §4 · `H-DAB` §4 · `H-score` §4 · `Hematoxylin threshold` §4 · `High Priority Next` §17 · `Histogram matching` §5
+
+### I
+`IHC Profiler` §4 · `IHC Quantification` §4 · `IHC Scoring` §15 · `Implemented` §17
+
+### J
+`JACoP` §5, §7
+
+### K
+`Ki67` §2 · `Kymograph` §6 · `KymographBuilder` §6
+
+### L
+`Labkit` §14 · `LAP (linking)` §6 · `Leaf Area` §9 · `LoG detector` §6 · `LUT` §12
+
+### M
+`Manders+Costes` §5 · `Materials Science` §10 · `Medium Priority` §17 · `Microglia Morphology` §3 · `Mitosis Detection` §6 · `Montage` §12 · `Morphometry` §2 · `Movie Export` §12 · `MSD` §6 · `Multi Kymograph` §6
+
+### N
+`NeuronJ` §3 · `Neurite Tracing` §3 · `Neuroscience` §3
+
+### O
+`OrientationJ` §10 · `Overlay Annotations` §12
+
+### P
+`PCC` §5 · `Plant Biology` §9 · `Porosity` §10 · `Proliferation` §2 · `Publication` §12
+
+### Q
+`QuPath` §3
+
+### R
+`Ratiometric` §5 · `Rose plot` §6 · `Root Architecture` §9
+
+### S
+`Scale Bar` §12 · `Sholl Analysis` §3 · `Sirius Red` §4 · `Skeleton analysis` §11 · `Skeletonize` §3, §11 · `SmartRoot` §9 · `SMI` §11 · `SNT` §3 · `SpineJ` §3 · `StackReg` §3 · `StarDist` §2, §14 · `Stomatal Counting` §9 · `Suite2p` §3
+
+### T
+`Tb.Sp` §11 · `Tb.Th` §11 · `TACI` §3 · `Time-Lapse` §6 · `TrackMate` §6 · `TrackMate-Oneat` §6 · `Trichrome` §4
+
+### V
+`Vessel Density` §4 · `Vessel Morphometry` §9
+
+### W
+`Wand (Allen CCFv3)` §3 · `Watershed` §2 · `WEKA` §14 · `Western Blot` §8 · `Wound Healing` §2
+
+### Z
+`Z Project` §7
+
+---
+
+## §2 Cell Biology & General Microscopy
 
 | Task | Workflow Summary | Key Commands/Plugins | Automation Value |
 |------|-----------------|---------------------|-----------------|
@@ -17,7 +123,7 @@ Catalog of analysis domains, tasks, workflows, and automation opportunities.
 
 ---
 
-## 2. Neuroscience
+## §3 Neuroscience
 
 | Task | Workflow Summary | Key Plugins | Automation Value |
 |------|-----------------|-------------|-----------------|
@@ -30,7 +136,7 @@ Catalog of analysis domains, tasks, workflows, and automation opportunities.
 
 ---
 
-## 3. Histology & Pathology
+## §4 Histology & Pathology
 
 | Task | Workflow Summary | Key Plugins | Automation Value |
 |------|-----------------|-------------|-----------------|
@@ -43,7 +149,7 @@ Catalog of analysis domains, tasks, workflows, and automation opportunities.
 
 ---
 
-## 4. Fluorescence & Advanced Microscopy
+## §5 Fluorescence & Advanced Microscopy
 
 | Task | Workflow Summary | Key Plugins |
 |------|-----------------|-------------|
@@ -55,7 +161,7 @@ Catalog of analysis domains, tasks, workflows, and automation opportunities.
 
 ---
 
-## 5. Tracking & Time-Lapse
+## §6 Tracking & Time-Lapse
 
 | Task | Workflow Summary | Key Plugins |
 |------|-----------------|-------------|
@@ -67,7 +173,7 @@ Catalog of analysis domains, tasks, workflows, and automation opportunities.
 
 ---
 
-## 6. 3D Analysis
+## §7 3D Analysis
 
 | Task | Workflow Summary | Key Plugins |
 |------|-----------------|-------------|
@@ -79,7 +185,7 @@ Catalog of analysis domains, tasks, workflows, and automation opportunities.
 
 ---
 
-## 7. Gel & Blot Analysis
+## §8 Gel & Blot Analysis
 
 | Task | Workflow Summary | Automation Value |
 |------|-----------------|-----------------|
@@ -89,7 +195,7 @@ Catalog of analysis domains, tasks, workflows, and automation opportunities.
 
 ---
 
-## 8. Plant Biology
+## §9 Plant Biology
 
 | Task | Workflow |
 |------|---------|
@@ -100,7 +206,7 @@ Catalog of analysis domains, tasks, workflows, and automation opportunities.
 
 ---
 
-## 9. Materials Science
+## §10 Materials Science
 
 | Task | Workflow |
 |------|---------|
@@ -110,7 +216,7 @@ Catalog of analysis domains, tasks, workflows, and automation opportunities.
 
 ---
 
-## 10. Bone & Skeletal
+## §11 Bone & Skeletal
 
 **BoneJ** provides: Tb.Th, Tb.Sp, BV/TV, connectivity density, SMI, anisotropy.
 
@@ -118,7 +224,7 @@ Catalog of analysis domains, tasks, workflows, and automation opportunities.
 
 ---
 
-## 11. Publication & Visualization
+## §12 Publication & Visualization
 
 | Task | Key Commands |
 |------|-------------|
@@ -130,7 +236,7 @@ Catalog of analysis domains, tasks, workflows, and automation opportunities.
 
 ---
 
-## 12. Batch Processing
+## §13 Batch Processing
 
 ```javascript
 // Standard batch pattern
@@ -156,7 +262,7 @@ Ext.getSeriesCount(seriesCount);
 
 ---
 
-## 13. ML & Deep Learning
+## §14 ML & Deep Learning
 
 | Tool | Type | Status |
 |------|------|--------|
@@ -168,7 +274,7 @@ Ext.getSeriesCount(seriesCount);
 
 ---
 
-## Automation Priority
+## §15 Automation Priority
 
 | Rank | Task | Impact | Reason |
 |------|------|--------|--------|
@@ -183,7 +289,7 @@ Ext.getSeriesCount(seriesCount);
 
 ---
 
-## Community Pain Points → Agent Opportunities
+## §16 Community Pain Points → Agent Opportunities
 
 | Pain Point | Agent Solution |
 |------------|---------------|
@@ -198,7 +304,7 @@ Ext.getSeriesCount(seriesCount);
 
 ---
 
-## Agent Coverage Checklist
+## §17 Agent Coverage Checklist
 
 ### Implemented
 Cell counting, morphometry, threshold exploration, Z-projection, 3D rendering, 3D isolation, scale bars, LUTs, figures, state inspection, visual feedback, skeleton analysis, plugin discovery/probing, results parsing, macro linting.

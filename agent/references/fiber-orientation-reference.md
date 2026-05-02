@@ -4,9 +4,148 @@ Orientation, alignment, and morphometry of fibrillar structures in ImageJ/Fiji.
 Covers OrientationJ (structure tensor), Directionality (FFT), FibrilTool,
 AnalyzeSkeleton, DiameterJ, circular statistics, and agent workflows.
 
+Invoke from the agent:
+`python ij.py macro '<code>'` — run ImageJ macro (.ijm) code.
+`python ij.py script '<code>'` — run Groovy (default), Jython, or JavaScript.
+Probe any plugin's dialog with `python probe_plugin.py "Plugin Name..."`.
+
 ---
 
-## 1. Tool Selection
+## §0 Lookup Map — "How do I find X?"
+
+| Question | Where to look |
+|---|---|
+| "Which tool should I use for direction / alignment / diameter?" | §2 |
+| "What does `tensor=` (sigma) do in OrientationJ?" | §3.2 |
+| "What gradient index should I pass to OrientationJ?" | §3.3 |
+| "What's the macro syntax for `OrientationJ Analysis` / `Distribution` / `Measure` / `Vector Field` / `Dominant Direction` / `Corner Harris`?" | §3.4 |
+| "What coherency value counts as 'aligned'?" | §3.5 |
+| "How do I run OrientationJ on a z-stack?" | §3.6 |
+| "How do I run `Directionality` from a macro?" | §4 |
+| "FibrilTool vs OrientationJ — which per-ROI tool?" | §5 |
+| "How do I measure fiber diameter and length?" | §7 |
+| "How do I compute tortuosity, fiber density, inter-fiber spacing?" | §7 |
+| "Which alignment metric should I report (coherency, nematic S, dispersion…)?" | §8 |
+| "Preprocessing decision tree / colour deconvolution for histology" | §9 |
+| "End-to-end agent workflow for fiber orientation" | §10 |
+| "How do I batch OrientationJ over a folder?" | §11 |
+| "Why can't I use linear mean on angles?" | §12 |
+| "Rayleigh / Watson-Williams / von Mises test code" | §12 |
+| "SHG-specific analysis notes and TACS classification" | §13 |
+| "What do I need to put in the methods section?" | §14 |
+| "Feature-by-feature comparison of all five tools" | §15 |
+| "Copy-paste macro snippets for every plugin" | §16 |
+| "Sigma lookup by structure and magnification" | §16 |
+| "Before / parameters / after checklist" | §17 |
+| "Background dominates histogram / coherency looks like edge detection / etc." | §18 |
+| "Real argument keys for an installed plugin" | `python probe_plugin.py "Plugin Name..."` — not here |
+
+---
+
+## §1 Term Index (A–Z)
+
+Alphabetical pointer to the section containing each term. Use
+`grep -n '`<term>`' fiber-orientation-reference.md` to jump.
+
+### A
+
+`alignment metrics` §8 · `AnalyzeSkeleton` §7 · `Analyze Particles` §10 · `angle (axial)` §12 · `anisotropy` §3.1, §5, §8 · `astropy.stats` §12 · `axial data conversion` §12
+
+### B
+
+`Batch OrientationJ` §11 · `BIG-EPFL (update site)` §3, §18 · `Boudaoud` §5 · `branch length` §7 · `branching` §8, §15
+
+### C
+
+`circular mean / SD / variance` §12 · `circular statistics` §12 · `CLAHE` §18 · `coherency (definition)` §3.1 · `coherency (interpretation)` §3.5 · `coherency (comparing groups)` §12 · `coherency map` §3.4, §15 · `colour deconvolution` §9 · `collagen` §3.2, §13, §15, §16 · `color survey` §3.4, §14 · `Corner Harris` §3.4 · `CT-FIRE` §13 · `cubic spline (gradient)` §3.3 · `CurveAlign` §13
+
+### D
+
+`decision tree (preprocessing)` §9 · `decision tree (tool selection)` §15 · `DiameterJ` §6, §15 · `diameter (fiber)` §7, §8, §15 · `Directionality` §4, §15 · `dispersion` §4, §8 · `display_table` §4, §18 · `Distance Map` §7 · `Dominant Direction` §3.4 · `Duplicate` §10
+
+### E
+
+`electrospun nanofibers` §3.2 · `Enhance Local Contrast` §18 · `energy (definition)` §3.1 · `energy map (masking)` §9 · `Euclidean distance` §7 · `exclude edges` §9
+
+### F
+
+`FFT (Fourier components)` §4 · `fiber density` §7, §8 · `fiber diameter` §7, §8, §15 · `fiber length` §7, §8, §15 · `FibrilTool` §5, §15 · `figure guidelines` §14 · `finite difference (gradient)` §3.3 · `FIRE` §13 · `Fourier (gradient)` §3.3
+
+### G
+
+`Gaussian Blur` §7, §9 · `gradient methods` §3.3 · `goodness of fit (R-squared)` §4
+
+### H
+
+`H&E` §9 · `harris-index` §3.4 · `histogram entropy` §8 · `histogram (orientation)` §3.4, §4, §14 · `hue / sat / bri` §3.4 · `hypothesis tests (circular)` §12
+
+### I
+
+`installation (OrientationJ)` §3 · `installation (DiameterJ)` §6 · `intersection density` §6, §15 · `inter-fiber spacing` §7, §8, §15 · `Invert` §9 · `isotropic` §3.1, §3.5, §8
+
+### J
+
+`junctions` §7, §8
+
+### K
+
+`kappa (von Mises)` §12 · `Kuiper's V` §12
+
+### L
+
+`Local gradient orientation` §4 · `Local Thickness` §2, §6, §7, §8, §10 · `Longest Shortest Path` §7
+
+### M
+
+`magnification (sigma lookup)` §16 · `Masson Trichrome` §9 · `Measure (OrientationJ)` §3.4 · `Median` §9 · `methods section checklist` §14 · `microtubules` §3.2 · `min-coherency` §3.4, §18 · `min-energy` §3.4, §18 · `morphology metrics` §8 · `muscle fibers` §3.2, §15
+
+### N
+
+`nanofiber` §3.2, §6, §15 · `nbins` §4 · `nematic order S` §8 · `nematic tensor` §5
+
+### O
+
+`OJ-Coherency-1 / OJ-Orientation-1 / OJ-Energy-1 / OJ-Color-survey-1` §3.4 · `Open (binary)` §7 · `orientation (definition)` §3.1 · `OrientationJ` §3, §15 · `OrientationJ Analysis` §3.4 · `OrientationJ Corner Harris` §3.4 · `OrientationJ Distribution` §3.4 · `OrientationJ Dominant Direction` §3.4 · `OrientationJ Measure` §3.4 · `OrientationJ Vector Field` §3.4 · `Otsu` §7, §9
+
+### P
+
+`per-branch table` §7 · `per-skeleton table` §7 · `pore analysis` §6, §15 · `prune` §7 · `pycircstat2` §12
+
+### Q
+
+`Quick Macro Reference` §16 · `quick start (coherency map)` §2 · `quick start (diameter / length)` §2 · `quick start (orientation histogram)` §2
+
+### R
+
+`R-bar (mean resultant length)` §12 · `Rayleigh test` §12 · `reporting standards` §14 · `Riesz (gradient)` §3.3 · `ROI (edge exclusion)` §9 · `roiManager` §3.4 · `R-squared (goodness)` §4
+
+### S
+
+`s-color-survey / s-distribution / s-mask` §3.4 · `scipy.stats` §12 · `SEM` §3.2 · `Set Measurements` §3.4, §7 · `SHG (second harmonic generation)` §13 · `Shapiro-Wilk` §12 · `sigma (choosing)` §3.2 · `sigma lookup table` §16 · `Skeletonize` §2, §7 · `SNR` §2, §9, §18 · `Split Channels` §9 · `stacks (OrientationJ)` §3.6 · `stress fibers` §3.2, §16 · `structure tensor` §3, §3.1 · `Subtract Background` §7, §9
+
+### T
+
+`TACS` §13 · `tendons` §3.5 · `tensor=` §3.4 · `tortuosity` §7, §8, §15 · `Triple/Quadruple points` §7 · `tumor boundary` §13
+
+### U
+
+`update site (BIG-EPFL)` §3 · `update site (DiameterJ)` §6
+
+### V
+
+`Vector Field` §3.4, §14 · `vector-color / vector-grid / vector-scale / vector-type` §3.4 · `vectors=[Masson Trichrome]` §9 · `von Mises` §4, §12
+
+### W
+
+`Watson's U-squared` §12 · `Watson-Williams F-test` §12 · `white matter tracts` §3.2 · `wound healing` §15
+
+### Z
+
+`z-stacks` §3.6
+
+---
+
+## §2 Tool Selection
 
 | Question | Tool |
 |----------|------|
@@ -54,11 +193,11 @@ python ij.py results
 
 ---
 
-## 2. OrientationJ Complete Reference
+## §3 OrientationJ Complete Reference
 
 **Installation:** Fiji > Help > Update > Manage Update Sites > check "BIG-EPFL" > Apply > Restart.
 
-### 2.1 Structure tensor outputs
+### §3.1 Structure tensor outputs
 
 OrientationJ computes the structure tensor at each pixel using a Gaussian window (sigma parameter):
 
@@ -68,7 +207,7 @@ OrientationJ computes the structure tensor at each pixel using a Gaussian window
 | Coherency | 0 to 1 | Anisotropy: 0=isotropic, 1=perfectly aligned |
 | Energy | 0+ | Gradient magnitude: high=structure, low=background |
 
-### 2.2 Choosing sigma (critical)
+### §3.2 Choosing sigma (critical)
 
 Sigma controls the Gaussian window size. Set it to approximately the fiber width in pixels.
 
@@ -92,7 +231,7 @@ Sigma controls the Gaussian window size. Set it to approximately the fiber width
 | Electrospun nanofibers (SEM) | 5-20 | 5-10 |
 | White matter tracts | 10-30 | 10-15 |
 
-### 2.3 Gradient methods
+### §3.3 Gradient methods
 
 | Index | Method | When to use |
 |-------|--------|-------------|
@@ -102,7 +241,7 @@ Sigma controls the Gaussian window size. Set it to approximately the fiber width
 | 3 | Riesz | Isotropic gradient |
 | 4 | Gaussian | Noisy images |
 
-### 2.4 All OrientationJ plugins — macro syntax
+### §3.4 All OrientationJ plugins — macro syntax
 
 #### OrientationJ Analysis
 
@@ -208,7 +347,7 @@ run("OrientationJ Corner Harris",
     + "harris-index=0.05 min-coherency=MIN_COH min-energy=MIN_EN ");
 ```
 
-### 2.5 Interpreting coherency values
+### §3.5 Interpreting coherency values
 
 | Coherency | Interpretation |
 |-----------|---------------|
@@ -218,7 +357,7 @@ run("OrientationJ Corner Harris",
 | 0.5 - 0.7 | Strong alignment |
 | 0.7 - 1.0 | Very strong (tendons, aligned scaffolds) |
 
-### 2.6 Stacks
+### §3.6 Stacks
 
 OrientationJ is 2D only. For z-stacks, either project first or iterate slices:
 
@@ -235,7 +374,7 @@ python ij.py log
 
 ---
 
-## 3. Directionality Plugin
+## §4 Directionality Plugin
 
 **Menu:** Analyze > Directionality (bundled with Fiji)
 
@@ -279,7 +418,7 @@ Consider using both: OrientationJ for spatial maps, Directionality for fitted su
 
 ---
 
-## 4. FibrilTool
+## §5 FibrilTool
 
 Nematic tensor method giving one orientation + anisotropy per ROI. No parameters to tune (no sigma). Originally for plant cellulose microfibrils (Boudaoud et al., Nature Protocols 2014).
 
@@ -295,7 +434,7 @@ Not available via update sites — download from the Nature Protocols supplement
 
 ---
 
-## 5. DiameterJ
+## §6 DiameterJ
 
 NIST-validated nanofiber characterization plugin. Measures fiber diameter, orientation, intersection density, pore size, porosity.
 
@@ -316,7 +455,7 @@ python ij.py macro '
 
 ---
 
-## 6. Fiber Morphometry with AnalyzeSkeleton
+## §7 Fiber Morphometry with AnalyzeSkeleton
 
 **Menu:** Analyze > Skeleton > Analyze Skeleton (2D/3D) (bundled with Fiji)
 
@@ -388,7 +527,7 @@ python ij.py macro '
 
 ---
 
-## 7. Fiber Metrics Summary
+## §8 Fiber Metrics Summary
 
 ### Alignment metrics
 
@@ -413,7 +552,7 @@ python ij.py macro '
 
 ---
 
-## 8. Preprocessing
+## §9 Preprocessing
 
 ### Decision tree
 
@@ -474,7 +613,7 @@ python ij.py macro '
 
 ---
 
-## 9. Agent Workflow: Fiber Orientation Analysis
+## §10 Agent Workflow: Fiber Orientation Analysis
 
 ```
 # 1. Open and inspect
@@ -563,7 +702,7 @@ python ij.py results
 
 ---
 
-## 10. Batch Processing
+## §11 Batch Processing
 
 ### Batch OrientationJ
 
@@ -599,7 +738,7 @@ python ij.py macro 'saveAs("Results", "/path/to/output/all_results.csv");'
 
 ---
 
-## 11. Circular Statistics for Orientation Data
+## §12 Circular Statistics for Orientation Data
 
 ### Why circular statistics?
 
@@ -698,7 +837,7 @@ t, p = stats.ttest_ind(coherency_control, coherency_treated)
 
 ---
 
-## 12. SHG Image Analysis Notes
+## §13 SHG Image Analysis Notes
 
 SHG (second harmonic generation) images of collagen are inherently fibrillar with clean signal (no autofluorescence, no photobleaching). Typically need minimal preprocessing:
 
@@ -719,26 +858,7 @@ python ij.py macro '
 
 ---
 
-## 13. Common Problems and Solutions
-
-| Problem | Cause | Fix |
-|---------|-------|-----|
-| Background dominates histogram | Too many background pixels counted | Increase min-coherency (20-30) and min-energy (10-20), or mask fibers using energy map |
-| Coherency map looks like edge detection | Sigma too small | Increase sigma to match fiber width |
-| Coherency map uniformly smooth | Sigma too large | Decrease sigma |
-| Edge artifacts in coherency | Gaussian window at border | Shrink ROI by 2-3x sigma from edges |
-| Low coherency at fiber crossings | Structure tensor averages crossing populations | Expected. Report mean coherency, or check histogram for multiple peaks |
-| Low contrast fibers, noisy results | Insufficient SNR | Consider CLAHE (`run("Enhance Local Contrast (CLAHE)", "blocksize=127 histogram=256 maximum=3 mask=*None*")`) — changes pixel values, only for orientation, not intensity measurement |
-| Color histology image | OrientationJ needs grayscale | Colour deconvolution first |
-| 3D fiber orientation needed | OrientationJ is 2D | Slice-by-slice analysis, or max projection, or 3D ImageJ Suite |
-| OrientationJ not found | Plugin not installed | Enable BIG-EPFL update site |
-| Directionality no results | Missing argument | Include `display_table` in macro; ensure 8-bit |
-| Vector Field overlay empty | Known macro bug | Probe with `probe_plugin.py`, or try interactively |
-| Fiber-like artifacts | JPEG compression, deconvolution ringing | Work from raw TIFF data |
-
----
-
-## 14. Reporting Standards
+## §14 Reporting Standards
 
 ### Methods section checklist
 
@@ -768,7 +888,7 @@ python ij.py macro '
 
 ---
 
-## 15. Feature Comparison
+## §15 Feature Comparison
 
 | Feature | OrientationJ | Directionality | FibrilTool | DiameterJ | AnalyzeSkeleton |
 |---------|-------------|---------------|-----------|----------|----------------|
@@ -824,7 +944,7 @@ SPATIAL variation
 
 ---
 
-## Appendix: Quick Macro Reference
+## §16 Appendix: Quick Macro Reference
 
 ```
 // === OrientationJ ===
@@ -867,7 +987,7 @@ If fibers are < 2 px wide, structure tensor cannot reliably determine orientatio
 
 ---
 
-## Appendix: Analysis Checklist
+## §17 Appendix: Analysis Checklist
 
 **Before:**
 - [ ] Single-channel grayscale
@@ -889,3 +1009,22 @@ If fibers are < 2 px wide, structure tensor cannot reliably determine orientatio
 - [ ] Same parameters for all images in experiment
 - [ ] Circular statistics for angles, linear for coherency
 - [ ] Results exported and saved
+
+---
+
+## §18 Common Problems and Solutions
+
+| Problem | Cause | Fix |
+|---------|-------|-----|
+| Background dominates histogram | Too many background pixels counted | Increase min-coherency (20-30) and min-energy (10-20), or mask fibers using energy map |
+| Coherency map looks like edge detection | Sigma too small | Increase sigma to match fiber width |
+| Coherency map uniformly smooth | Sigma too large | Decrease sigma |
+| Edge artifacts in coherency | Gaussian window at border | Shrink ROI by 2-3x sigma from edges |
+| Low coherency at fiber crossings | Structure tensor averages crossing populations | Expected. Report mean coherency, or check histogram for multiple peaks |
+| Low contrast fibers, noisy results | Insufficient SNR | Consider CLAHE (`run("Enhance Local Contrast (CLAHE)", "blocksize=127 histogram=256 maximum=3 mask=*None*")`) — changes pixel values, only for orientation, not intensity measurement |
+| Color histology image | OrientationJ needs grayscale | Colour deconvolution first |
+| 3D fiber orientation needed | OrientationJ is 2D | Slice-by-slice analysis, or max projection, or 3D ImageJ Suite |
+| OrientationJ not found | Plugin not installed | Enable BIG-EPFL update site |
+| Directionality no results | Missing argument | Include `display_table` in macro; ensure 8-bit |
+| Vector Field overlay empty | Known macro bug | Probe with `probe_plugin.py`, or try interactively |
+| Fiber-like artifacts | JPEG compression, deconvolution ringing | Work from raw TIFF data |

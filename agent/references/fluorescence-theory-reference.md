@@ -3,9 +3,114 @@
 Reference for an AI agent controlling ImageJ/Fiji: fluorophore properties, resolution,
 SNR, spectral overlap, and quantitative methods.
 
+Sources: FPbase (`fpbase.org`) for fluorescent protein spectra and properties;
+Pawley, *Handbook of Biological Confocal Microscopy* (3rd ed., Springer) for PSF,
+sampling, and SNR theory; Abbe / Rayleigh resolution theory; Axelrod (FRAP) and
+Förster (FRET) original formulations; Grynkiewicz for ratiometric Ca2+.
+
+Invoke from the agent:
+`python ij.py macro '<code>'` — run ImageJ macro (.ijm) code.
+`python ij.py script '<code>'` — run Groovy (default), Jython, or JavaScript.
+
 ---
 
-## 1. Key Fluorescence Concepts
+## §0 Lookup Map — "How do I find X?"
+
+| Question | Where to look |
+|---|---|
+| "What's the brightness of Alexa 488?" | §1 term index → §2.3 |
+| "Which red FP should I use for a new construct?" | §2.4 |
+| "What's the Abbe / Rayleigh / Nyquist formula?" | §3.1 |
+| "What pixel size do I need for a 63x/1.4 NA?" | §3.2 |
+| "How do I estimate SNR from an image?" | §4.4 |
+| "Which fluorophore pairs have zero bleed-through?" | §5.1, §5.4 |
+| "How do I compute CTCF / FRAP / FRET / ratiometric?" | §6.1–§6.4 |
+| "How do I pick a fluorophore for green IF?" | §7 agent quick reference |
+| "Why does my red FP look dim under 2P?" | §2.6 |
+| "What's the gotcha with Alexa 555?" | §8, §2.3 |
+
+---
+
+## §1 Term Index (A–Z)
+
+Alphabetical pointer to the section containing each fluorophore, formula, or concept.
+Use `grep -n '<term>' fluorescence-theory-reference.md` to jump.
+
+### A
+`Abbe limit` §3.1 · `acceptor photobleaching (FRET)` §6.3 · `Alexa 488` §2.3, §5.3, §5.4 · `Alexa 546` §2.3, §6.3 · `Alexa 555` §2.3, §7, §8 · `Alexa 568` §2.3, §5.3 · `Alexa 594` §2.3, §5.3 · `Alexa 647` §2.3, §5.1, §5.3, §5.4 · `Annexin V` §2.7 · `anti-fade media` §1 · `Apoptosis dyes` §2.7 · `Axelrod (FRAP)` §6.2 · `axial resolution` §3.1, §3.3
+
+### B
+`BCECF` §6.4 · `Bleach Correction` §1, §7 · `bleed-through` §5.1 · `brightness` §1, §2 · `BrdU` §2.7
+
+### C
+`calcein AM` §2.7 · `calcium indicators` §2.5 · `Caspase 3/7` §2.7 · `CellMask` §2.7 · `CFP/YFP (FRET)` §6.3 · `circularity / circular spot (FRAP)` §6.2 · `click azide (EdU)` §2.7 · `colocalization (SNR / panels)` §4.4, §5.3 · `confocal (axial)` §3.1, §3.3 · `CTCF` §6.1 · `cross-section (sigma2)` §2.6 · `Cy3` §2.2 · `Cy5` §2.2 · `cytoplasmic GFP (D)` §6.2
+
+### D
+`DAPI` §2.1, §5.1, §5.3 · `dark current` §4.1 · `DiI / DiO` §2.7 · `diffusion coefficient (D)` §6.2 · `DRAQ5` §2.1, §7 · `dSTORM` §2.3
+
+### E
+`EdU` §2.7 · `EGFP` §2.4, §2.6, §7-unit-conversions · `emission peak` §1 · `energy (eV from nm)` §7 · `EthD-1` §2.7 · `excitation peak` §1 · `extinction coefficient (e)` §1, §2.3
+
+### F
+`far-red nuclear` §2.1, §7 · `FITC` §2.2, §5.4 · `flat-field correction` §7 · `Fluo-4` §2.5 · `fluorescent proteins` §2.4 · `fold change` §6.5 · `Förster / FRET` §6.3 · `FRAP` §6.2 · `FRET` §6.3 · `Fura-2` §2.5, §6.4
+
+### G
+`GCaMP6s / GCaMP6f` §2.5, §2.6 · `GECI` §2.5 · `GFP (spectral overlap)` §5.1 · `GFP/mCherry (FRET)` §6.3 · `Grynkiewicz equation` §6.4
+
+### H
+`Hoechst 33342` §2.1, §7
+
+### I
+`IntDen (CTCF)` §6.1 · `image calculator (ratio)` §6.4
+
+### J
+`jGCaMP8s / jGCaMP8f` §2.5 · `jRGECO1a` §2.5
+
+### K
+`Kd (calcium)` §2.5, §6.4 · `Ki-67` §2.7
+
+### L
+`lateral resolution` §3.1, §3.2, §3.3 · `LIVE/DEAD kit` §2.7
+
+### M
+`mCherry` §2.4, §2.6, §6.3, §7 · `membrane dyes` §2.7 · `membrane protein (D)` §6.2 · `mNeonGreen` §2.4 · `mScarlet` §2.4, §7 · `mTurquoise2` §2.4, §6.3
+
+### N
+`NA (numerical aperture)` §3.1, §3.2, §3.3 · `noise sources` §4.1 · `Nyquist pixel` §3.1, §3.2, §7
+
+### O
+`oversampling` §3.4
+
+### P
+`panels (recommended)` §5.3 · `photobleaching` §1, §4.3 · `photon count` §4.1, §4.2 · `pH-sensitive (FITC)` §2.2 · `pixel size from camera` §3.4, §7 · `Propidium iodide` §2.1, §5.4 · `ProLong Gold` §1 · `PSF` §3.4 · `proliferation dyes` §2.7
+
+### Q
+`QY (quantum yield)` §1, §2.3
+
+### R
+`ratiometric imaging` §6.4 · `Rayleigh` §3.1 · `read noise` §4.1 · `refractive index (n)` §3.1, §3.3 · `roGFP` §6.4
+
+### S
+`sampling (Nyquist)` §3.1, §3.2, §3.4 · `sequential acquisition` §5.2, §5.3 · `shot noise` §4.1 · `sigma2 (2P cross-section)` §2.6 · `SNR` §4, §4.2, §4.4 · `spectral overlap` §5 · `Stokes shift` §1 · `SYTOX Green` §2.1
+
+### T
+`tdTomato` §2.4, §2.6 · `Texas Red` §2.2, §5.4 · `three-channel panel` §5.3 · `TIRF (100x/1.49)` §3.2 · `TO-PRO-3` §2.1 · `TRITC channel (DiI)` §2.7 · `TUNEL` §2.7 · `two-photon (2P)` §2.6, §3.3
+
+### U
+`undersampling` §3.4 · `unit conversions` §7
+
+### V
+`Vectashield` §1 · `Venus` §2.4, §6.3
+
+### W
+`widefield (axial)` §3.1, §3.3
+
+### Y
+`YFP (GFP/YFP overlap)` §5.1, §5.4 · `YFP (Venus)` §2.4
+
+---
+
+## §2. Key Fluorescence Concepts
 
 **Quantum yield (QY)**: photons emitted / photons absorbed. Higher = brighter per molecule.
 
@@ -20,9 +125,9 @@ In ImageJ: Bleach Correction plugin for time-lapse correction.
 
 ---
 
-## 2. Fluorophore Encyclopedia
+## §3. Fluorophore Encyclopedia
 
-### 2.1 Nuclear Stains
+### §3.1 Nuclear Stains
 
 | Fluorophore | Ex/Em (nm) | Brightness | Permeant? | Use |
 |---|---|---|---|---|
@@ -33,7 +138,7 @@ In ImageJ: Bleach Correction plugin for time-lapse correction.
 | **SYTOX Green** | 504/523 | 37,500 | Dead only | Bright dead cell stain |
 | **TO-PRO-3** | 642/661 | — | Dead only | Very bright far-red dead cell stain |
 
-### 2.2 Chemical Dyes
+### §3.2 Chemical Dyes
 
 | Fluorophore | Ex/Em (nm) | Brightness | Laser | Notes |
 |---|---|---|---|---|
@@ -42,7 +147,7 @@ In ImageJ: Bleach Correction plugin for time-lapse correction.
 | **Cy5** | 649/670 | 67,500 | 633 | High e, bleaches faster than Alexa 647 |
 | **Texas Red** | 596/615 | 40,800 | 594 | Good photostability |
 
-### 2.3 Alexa Fluor Series
+### §3.3 Alexa Fluor Series
 
 | Fluorophore | Ex/Em (nm) | e (M-1cm-1) | QY | Brightness | Laser | Notes |
 |---|---|---|---|---|---|---|
@@ -56,7 +161,7 @@ In ImageJ: Bleach Correction plugin for time-lapse correction.
 **Agent rule**: Alexa 555 is inherently dim (QY=0.10). If users report weak orange signal,
 recommend Alexa 546 (5x brighter) or Alexa 568 for future experiments.
 
-### 2.4 Fluorescent Proteins
+### §3.4 Fluorescent Proteins
 
 | Protein | Ex/Em (nm) | Brightness | Oligo. | Notes |
 |---|---|---|---|---|
@@ -71,7 +176,7 @@ recommend Alexa 546 (5x brighter) or Alexa 568 for future experiments.
 **Choosing red FPs**: mScarlet for new constructs (bright, monomeric). tdTomato if brightness
 is critical and tag size is acceptable. mCherry only when existing constructs require it.
 
-### 2.5 Calcium Indicators
+### §3.5 Calcium Indicators
 
 | Indicator | Type | Ex/Em (nm) | Kd (nM) | Notes |
 |---|---|---|---|---|
@@ -86,7 +191,7 @@ is critical and tag size is acceptable. mCherry only when existing constructs re
 All GCaMPs: 488 nm (1P) or ~920 nm (2P). GCaMP6s for slow dynamics (circadian);
 jGCaMP8f for fast spike resolution.
 
-### 2.6 Two-Photon Brightness
+### §3.6 Two-Photon Brightness
 
 Two-photon brightness = cross-section (sigma2, in GM) x QY. Key values:
 
@@ -99,7 +204,7 @@ Two-photon brightness = cross-section (sigma2, in GM) x QY. Key values:
 
 2P excitation spectra are NOT simply 1P spectra shifted by 2x. Check measured spectra.
 
-### 2.7 Membrane, Viability & Proliferation Dyes
+### §3.7 Membrane, Viability & Proliferation Dyes
 
 | Category | Key Dyes | Notes |
 |---|---|---|
@@ -110,9 +215,9 @@ Two-photon brightness = cross-section (sigma2, in GM) x QY. Key values:
 
 ---
 
-## 3. Optical Resolution
+## §4. Optical Resolution
 
-### 3.1 Resolution Formulas
+### §4.1 Resolution Formulas
 
 | Formula | Equation | Use |
 |---|---|---|
@@ -127,7 +232,7 @@ Where: l = emission wavelength, NA = numerical aperture, n = refractive index of
 **Resolution depends on NA, not magnification.** A 100x/1.40 NA has identical resolution
 to a 63x/1.40 NA.
 
-### 3.2 Practical Resolution (l=520 nm green)
+### §4.2 Practical Resolution (l=520 nm green)
 
 | Objective | NA | Lateral (nm) | Nyquist pixel (nm) |
 |---|---|---|---|
@@ -137,7 +242,7 @@ to a 63x/1.40 NA.
 | 63x oil | 1.40 | 186 | <=81 |
 | 100x oil (TIRF) | 1.49 | 174 | <=76 |
 
-### 3.3 Axial vs Lateral (NA=1.40, n=1.515, l=520 nm)
+### §4.3 Axial vs Lateral (NA=1.40, n=1.515, l=520 nm)
 
 | Modality | Lateral (nm) | Axial (nm) | Ratio |
 |---|---|---|---|
@@ -147,7 +252,7 @@ to a 63x/1.40 NA.
 
 Axial is always worse (typically 2.5-4x). Objects appear elongated in z.
 
-### 3.4 PSF and Sampling
+### §4.4 PSF and Sampling
 
 - **PSF**: 3D blur function. Real image = object convolved with PSF.
 - Measured PSFs (sub-resolution beads) give better deconvolution than theoretical.
@@ -157,9 +262,9 @@ Axial is always worse (typically 2.5-4x). Objects appear elongated in z.
 
 ---
 
-## 4. Signal-to-Noise Ratio
+## §5. Signal-to-Noise Ratio
 
-### 4.1 Noise Sources
+### §5.1 Noise Sources
 
 | Source | Dominates? | Depends on | Reduce by |
 |---|---|---|---|
@@ -168,7 +273,7 @@ Axial is always worse (typically 2.5-4x). Objects appear elongated in z.
 | **Dark current** | Long exposures | Temperature | Cool camera |
 | **Background** | Thick samples | Autofluorescence | Better staining, confocal |
 
-### 4.2 SNR Formula
+### §5.2 SNR Formula
 
 ```
 SNR = S / sqrt(S + B + D*t + Nr^2)
@@ -179,7 +284,7 @@ Photon-limited: SNR ~ sqrt(S)  (when signal dominates)
 
 To double SNR: need 4x photons.
 
-### 4.3 Parameter Effects
+### §5.3 Parameter Effects
 
 | Change | SNR effect | Trade-off |
 |---|---|---|
@@ -187,7 +292,7 @@ To double SNR: need 4x photons.
 | 2x2 binning | ~2x better | 2x worse resolution |
 | N-frame average | sqrt(N) better | Nx more time/bleaching |
 
-### 4.4 Minimum SNR by Task
+### §5.4 Minimum SNR by Task
 
 | Task | Min SNR |
 |---|---|
@@ -202,9 +307,9 @@ To double SNR: need 4x photons.
 
 ---
 
-## 5. Spectral Overlap & Multi-Channel
+## §6. Spectral Overlap & Multi-Channel
 
-### 5.1 Common Bleed-Through
+### §6.1 Common Bleed-Through
 
 | From -> Into | Bleed-through | Severity |
 |---|---|---|
@@ -215,7 +320,7 @@ To double SNR: need 4x photons.
 
 If signal in channel B perfectly co-localises with strong signal in channel A, suspect bleed-through.
 
-### 5.2 Acquisition Modes
+### §6.2 Acquisition Modes
 
 | Mode | Cross-talk | Speed |
 |---|---|---|
@@ -225,7 +330,7 @@ If signal in channel B perfectly co-localises with strong signal in channel A, s
 
 Use sequential when fluorophores are <50 nm apart or for quantitative colocalization.
 
-### 5.3 Recommended Panels
+### §6.3 Recommended Panels
 
 | Channels | Recommended Panel | Notes |
 |---|---|---|
@@ -239,7 +344,7 @@ Use sequential when fluorophores are <50 nm apart or for quantitative colocaliza
 - Sample has GFP? Avoid Alexa 488; use Alexa 555/568 + Alexa 647.
 - Sample has mCherry? Avoid Alexa 594; use Alexa 488 + Alexa 647.
 
-### 5.4 Incompatible Combinations
+### §6.4 Incompatible Combinations
 
 | Combination | Problem |
 |---|---|
@@ -250,9 +355,9 @@ Use sequential when fluorophores are <50 nm apart or for quantitative colocaliza
 
 ---
 
-## 6. Quantitative Methods
+## §7. Quantitative Methods
 
-### 6.1 CTCF (Corrected Total Cell Fluorescence)
+### §7.1 CTCF (Corrected Total Cell Fluorescence)
 
 ```
 CTCF = IntDen - (Area_cell x Mean_background)
@@ -269,7 +374,7 @@ run("Set Measurements...", "area mean integrated redirect=None decimal=3");
 // CTCF = IntDen_cell - (Area_cell x Mean_bg)
 ```
 
-### 6.2 FRAP (Fluorescence Recovery After Photobleaching)
+### §7.2 FRAP (Fluorescence Recovery After Photobleaching)
 
 ```
 F(t) = F0 + (Finf - F0) x (1 - e^(-t/tau))
@@ -284,7 +389,7 @@ Diffusion: D = 0.224 x w^2 / t1/2  (Axelrod, circular spot radius w)
 | Membrane protein | 0.01-0.1 |
 | Chromatin-bound | 0.001-0.01 |
 
-### 6.3 FRET (Forster Resonance Energy Transfer)
+### §7.3 FRET (Forster Resonance Energy Transfer)
 
 ```
 E = 1 / (1 + (r/R0)^6)    R0 = distance where E = 50%
@@ -300,7 +405,7 @@ E = 1 / (1 + (r/R0)^6)    R0 = distance where E = 50%
 Measuring in ImageJ: acceptor photobleaching is simplest (bleach acceptor, measure donor
 increase). E = (D_post - D_pre) / D_post.
 
-### 6.4 Ratiometric Imaging
+### §7.4 Ratiometric Imaging
 
 Ratio = F(l1) / F(l2) cancels concentration, excitation, and path length.
 Applications: Fura-2 calcium (340/380), BCECF pH (490/440), roGFP redox.
@@ -312,7 +417,7 @@ Grynkiewicz equation for absolute [Ca2+]:
 
 In ImageJ: threshold background first, then Image Calculator > Divide.
 
-### 6.5 Fold Change
+### §7.5 Fold Change
 
 Report fold change (treated/control) rather than absolute intensity. Requirements:
 - Control and treated imaged in same session with identical settings
@@ -322,7 +427,7 @@ Report fold change (treated/control) rather than absolute intensity. Requirement
 
 ---
 
-## 7. Agent Quick Reference
+## §8. Agent Quick Reference
 
 ### Image Quality Check
 ```

@@ -3,9 +3,121 @@
 Covers SNT (Neuroanatomy Toolbox), AnalyzeSkeleton, Sholl/Strahler analysis,
 SWC files, vessel analysis, batch processing, and agent integration.
 
+Sources: SNT Groovy API (`sc.fiji.snt.*`), Sholl Analysis plugin
+(`sc.fiji.snt.analysis.sholl.*`), Strahler analysis (bottom-up order),
+AnalyzeSkeleton (`sc.fiji.analyzeSkeleton.AnalyzeSkeleton_`), SWC file
+standard (`ID TYPE X Y Z RADIUS PARENT`), NeuroMorpho.org / Allen / MouseLight
+databases. Use `python probe_plugin.py "Plugin Name..."` to discover any
+plugin's runtime parameters.
+
+Invoke from the agent:
+`python ij.py script '<groovy>'` — run Groovy inside Fiji's JVM (SNT requires this).
+`python ij.py macro '<code>'` — run ImageJ macro for AnalyzeSkeleton / Sholl From Image.
+
 ---
 
-## 1. Quick Decision Tree
+## §0 Lookup Map — "How do I find X?"
+
+| Question | Where to look |
+|---|---|
+| "Which tracing method do I pick?" | §2, §3 |
+| "How do I preprocess before tracing?" | §4 |
+| "What's the signature of `Tree.fromFile`?" | §1 → §5 |
+| "How do I measure cable length / branches / tips?" | §5.2, §8 |
+| "What are TreeStatistics metric constants?" | §14 |
+| "How do I do Sholl analysis from traces?" | §6 |
+| "How do I do Sholl analysis from a binary image?" | §6 |
+| "What is the Strahler number / bifurcation ratio?" | §7 |
+| "How do I skeletonize a binary image and get branches?" | §9 |
+| "What columns does AnalyzeSkeleton output?" | §9 |
+| "What is the SWC file format?" | §10 |
+| "How do I batch-analyse a folder of SWC files?" | §11 |
+| "How do I compare groups of neurons?" | §11 |
+| "How do I enhance vessels / tubular structures?" | §4, §12 |
+| "Which statistical test for Sholl / branch counts?" | §13 |
+| "How do I launch SNT from the agent?" | §14 |
+| "Touching neurites / low contrast / skeleton loops?" | §15 |
+| "Why does `run()` not work for SNT?" | §5, §15 |
+
+---
+
+## §1 Term Index (A–Z)
+
+Alphabetical pointer to the section containing each term. Use
+`grep -n '`<term>`' neurite-tracing-reference.md` to jump.
+
+### A
+`ACI (Axonal Complexity Index)` §8 · `AnalyzeSkeleton_` §9 · `Analyze Particles` §9 · `Angiogenesis Analyzer` §12 · `Auto Local Threshold (Phansalkar)` §15 · `axon (type code 2)` §5, §10 · `apical dendrite (type code 4)` §10 · `AUC (Sholl summary)` §6, §13
+
+### B
+`Batch Mode` §11 · `basal dendrite (type code 3)` §10 · `Bifurcation ratio` §7 · `Bio-Formats` — see main refs · `BRANCH_LENGTH` §14 · `Branch Information table` §9 · `branch points` §5, §8 · `branch length per order` §7
+
+### C
+`Cable length` §5, §8, §14 · `capillaries (multi-scale)` §12 · `Cellpose (instance segmentation)` §15 · `Connected Components Labeling` §15 · `Contraction` §5, §8, §14 · `Convert to Mask` §9 · `Convex Hull metrics` §8 · `Critical radius (rc)` §6 · `Critical value (Nm)` §6 · `CONTRACTION` §14
+
+### D
+`DCI (Dendritic Complexity Index)` §8 · `Despeckle` §9 · `Duplicate` §4 · `downSample (Tree)` §14 · `dendrite filter` §5
+
+### E
+`Enclosing radius` §6 · `End-points` §9 · `Enhance Contrast (avoid with normalize)` §4 · `extension angle` §8
+
+### F
+`File formats (SNT)` §5 · `Floyd-Warshall (shortest path)` §9 · `Fractal dimension` §8, §14 · `Frangi Vesselness` §4, §12 · `FRACTAL_DIMENSION` §14
+
+### G
+`Gaussian Blur` §4 · `getAverageBranchLength` §9 · `getBranches` §9 · `getCableLength` §5, §14 · `getEndPoints` §9 · `getGraph` §9 · `getJunctions` §9 · `getStrahlerNumber` §5, §7 · `getStrahlerBifurcationRatio` §7 · `getNBranches` §5, §14 · `getProfile (Sholl)` §6 · `Golgi stain` §4 · `GroupedTreeStatistics` §11, §14
+
+### H
+`Hessian-based tubeness` §4 · `Histogram (TreeStatistics)` §5 · `Huang threshold` §9
+
+### I
+`imageCalculator` §4, §12 · `INNER_LENGTH` §14 · `Inner branches` §8, §14 · `INTER_NODE_DISTANCE` §14 · `internode angles / distance` §8, §14 · `isValid (topology)` §5, §14 · `is3D (Tree)` §14
+
+### J
+`Junctions` §9 · `JSON (MouseLight)` §5 · `Jython` §5
+
+### K
+`k (Sholl decay)` §6
+
+### L
+`Labkit` §15 · `Li threshold` §9, §12 · `LinearProfileStats` §6, §14 · `listFromDir` §5, §14 · `listFromFile` §5, §14 · `Longest shortest path` §9 · `LUT (Ice.lut)` §5
+
+### M
+`Max create stack (imageCalculator)` §4, §12 · `MEAN_RADIUS` §14 · `Median threshold methods` §9 · `metric constants` §5, §14 · `MorphoPy` §10 · `MouseLightLoader` §10, §14 · `MouseLight (Janelia)` §10 · `Multi-scale Tubeness` §4, §12
+
+### N
+`N_BRANCH_POINTS` §14 · `N_NODES` §14 · `N_SPINES` §14 · `Navis` §10 · `NDF (NeuronJ legacy)` §5 · `NeuroM` §10 · `NeuronJ` §2, §5 · `NeuroMorpho.org` §10 · `Node radius` §8, §14 · `NODE_RADIUS` §14 · `NormalizedProfileStats` §6, §14
+
+### O
+`Otsu threshold` §9 · `Ordinal data (Mann-Whitney)` §13
+
+### P
+`Partition asymmetry` §8, §14 · `PARTITION_ASYMMETRY` §14 · `Path` §5, §14 · `PATH_CHANNEL` §14 · `PATH_FRAME` §14 · `PATH_LENGTH` §14 · `PATH_ORDER` §14 · `PathAndFillManager` §5 · `Path Order vs Strahler Order` §7 · `Phansalkar (local threshold)` §15 · `Pipeline (standard preprocessing)` §4 · `Poisson (counts stats)` §13 · `Polynomial fitting (Sholl)` §6 · `Primary branches` §8, §14 · `PRIMARY_LENGTH` §14 · `Pruning (AnalyzeSkeleton)` §9
+
+### R
+`Radius (neurite)` §8 · `Ramification index` §6 · `REMOTE_BIF_ANGLES` §14 · `restrictToSWCType` §5, §14 · `restrictToOrder` §14 · `restrictToLength` §14 · `restrictToNamePattern` §14 · `resetRestrictions` §5, §14 · `RM-ANOVA (Sholl profile)` §6, §13 · `Rolling ball radius` §4 · `Roundness / elongation (convex hull)` §8
+
+### S
+`saveAsSWC` §10, §14 · `Shortest branch (prune)` §9 · `Sholl Analysis (From Image)` §6 · `Sholl decay` §6 · `Skeletonize (2D/3D)` §9 · `Slab voxels` §9 · `SNTService` §5, §14 · `soma (type code 1)` §5, §10 · `Spines / varicosities` §8, §14 · `StackReg / TurboReg` §15 · `StarDist` §15 · `Strahler number` §5, §7, §8 · `Subtract Background` §4 · `SWC` §5, §10 · `Sum intersections` §6
+
+### T
+`Tagged skeleton colours` §9 · `TERMINAL_LENGTH` §14 · `Terminal branches` §8, §14 · `Tips` §5, §14 · `Touching neurites` §15 · `TRACES (.traces)` §5, §10 · `Tree` §5, §14 · `TreeAnalyzer` §5, §14 · `TreeColorMapper` §5, §14 · `TreeParser` §5, §6, §14 · `TreeStatistics` §5, §14 · `Triangle (threshold)` §9 · `Tubeness` §4, §12 · `Two-photon preprocessing` §4
+
+### U
+`Undefined (type code 0)` §10
+
+### V
+`VALUES (TreeStatistics)` §14 · `Vessel Enhancement` §12 · `Viewer3D` §5, §14 · `Voxel (slab/junction colours)` §9
+
+### W
+`Watson (circular statistics)` §13 · `Weka segmentation` §15
+
+### X / Y / Z
+`X_COORDINATES / Y_COORDINATES / Z_COORDINATES` §14 · `Z-stack drift` §15
+
+---
+
+## §2 Quick Decision Tree
 
 ```
 Is the neuron clearly separable from background?
@@ -19,7 +131,7 @@ Is the neuron clearly separable from background?
     └── Pre-traced SWC files → SNT scripting (TreeStatistics)
 ```
 
-## 2. Method Comparison
+## §3 Method Comparison
 
 | Method | Dims | Accuracy | Speed | Scripting | Best For |
 |--------|------|----------|-------|-----------|----------|
@@ -40,7 +152,7 @@ Is the neuron clearly separable from background?
 
 ---
 
-## 3. Preprocessing
+## §4 Preprocessing
 
 ### Choosing Filters
 
@@ -108,7 +220,7 @@ run("Tubeness", "sigma=2");
 
 ---
 
-## 4. SNT (Neuroanatomy Toolbox)
+## §5 SNT (Neuroanatomy Toolbox)
 
 **Critical: SNT cannot be driven by `run()` macros.** Use Groovy via `python ij.py script`.
 
@@ -237,7 +349,7 @@ viewer.colorCode(tree.getLabel(), TreeColorMapper.STRAHLER_NUMBER, mapper.getCol
 
 ---
 
-## 5. Sholl Analysis
+## §6 Sholl Analysis
 
 Counts neurite intersections with concentric circles/spheres at increasing radii from soma.
 
@@ -339,7 +451,7 @@ new File("/path/to/sholl_profile.csv").text = csv.toString()
 
 ---
 
-## 6. Strahler Analysis
+## §7 Strahler Analysis
 
 Classifies branches by hierarchical order: terminal branches = order 1; when two order-i children merge, parent = order i+1.
 
@@ -377,7 +489,7 @@ run("Strahler Analysis (Image)...");
 
 ---
 
-## 7. Morphometric Measurements
+## §8 Morphometric Measurements
 
 ### Complete SNT Metrics
 
@@ -405,7 +517,7 @@ run("Strahler Analysis (Image)...");
 
 ---
 
-## 8. AnalyzeSkeleton
+## §9 AnalyzeSkeleton
 
 | Criterion | AnalyzeSkeleton | SNT |
 |-----------|----------------|-----|
@@ -511,7 +623,7 @@ imp.updateAndDraw()
 
 ---
 
-## 9. SWC File Format
+## §10 SWC File Format
 
 Plain-text format: `ID TYPE X Y Z RADIUS PARENT` (one node per line, `#` for comments).
 
@@ -571,7 +683,7 @@ if (loader.isDatabaseAvailable() && loader.idExists()) {
 
 ---
 
-## 10. Batch Processing
+## §11 Batch Processing
 
 ### Batch SWC Morphometry (Groovy)
 
@@ -661,7 +773,7 @@ groupStats.getBoxPlot("No. of branches").show()
 
 ---
 
-## 11. Vessel and Filament Analysis
+## §12 Vessel and Filament Analysis
 
 Same pipeline applies: preprocess, segment, skeletonize, analyse. Key differences: vessels have loops (unlike neuronal trees), diameter matters, network topology is primary interest.
 
@@ -695,7 +807,7 @@ imageCalculator("Max create", "Result", "arteries");
 
 ---
 
-## 12. Statistics for Morphometry
+## §13 Statistics for Morphometry
 
 | Measurement | Test | Notes |
 |-------------|------|-------|
@@ -716,39 +828,7 @@ imageCalculator("Max create", "Result", "arteries");
 
 ---
 
-## 13. Common Problems and Solutions
-
-| Problem | Solutions |
-|---------|----------|
-| **Touching/overlapping neurites** | Trace separately in SNT; instance segmentation (Cellpose); intensity pruning in AnalyzeSkeleton; 3D imaging to separate in Z |
-| **Low contrast neurites** | Tubeness/Frangi preprocessing; multi-scale filtering; local threshold (Phansalkar); SNT secondary layer; deconvolution |
-| **Z-stack drift** | StackReg/TurboReg registration before tracing; SNT handles mild drift |
-| **Background neurites** | Trace in 3D (not projections); connected components labelling to isolate target |
-| **Border neurites** | Exclude or flag neurons touching image borders |
-| **Dense neuropil** | Use density metrics instead (area fraction, texture); sparse labelling; AnalyzeSkeleton for topology |
-| **Inconsistent segmentation** | Local thresholding (Phansalkar); ML segmentation (Weka/Labkit); per-image threshold exploration |
-| **Soma detection** | SNT uses point soma; segment soma separately (Cellpose/StarDist) if area needed |
-| **Skeleton loops** | Pruning; morphological opening before skeletonization; multiple AnalyzeSkeleton passes |
-
-```javascript
-// Local threshold for variable contrast
-run("Auto Local Threshold", "method=Phansalkar radius=15 parameter_1=0 parameter_2=0");
-
-// Break loops before skeletonizing
-run("Open");  // morphological opening
-run("Skeletonize (2D/3D)");
-
-// Isolate neuron by connected component
-run("Connected Components Labeling", "connectivity=26 type=[16 bits]");
-makePoint(256, 256);  // click target
-val = getPixel(256, 256);
-setThreshold(val, val);
-run("Convert to Mask");
-```
-
----
-
-## 14. Agent Integration
+## §14 Agent Integration
 
 ### SNT via `python ij.py script` (Groovy)
 
@@ -892,4 +972,36 @@ tree.rotate(axis, angle)      tree.downSample(maxDeviation)
 // Save
 tree.saveAsSWC("/path/to/output.swc")
 tree.save("/path/to/output.traces")
+```
+
+---
+
+## §15 Common Problems and Solutions
+
+| Problem | Solutions |
+|---------|----------|
+| **Touching/overlapping neurites** | Trace separately in SNT; instance segmentation (Cellpose); intensity pruning in AnalyzeSkeleton; 3D imaging to separate in Z |
+| **Low contrast neurites** | Tubeness/Frangi preprocessing; multi-scale filtering; local threshold (Phansalkar); SNT secondary layer; deconvolution |
+| **Z-stack drift** | StackReg/TurboReg registration before tracing; SNT handles mild drift |
+| **Background neurites** | Trace in 3D (not projections); connected components labelling to isolate target |
+| **Border neurites** | Exclude or flag neurons touching image borders |
+| **Dense neuropil** | Use density metrics instead (area fraction, texture); sparse labelling; AnalyzeSkeleton for topology |
+| **Inconsistent segmentation** | Local thresholding (Phansalkar); ML segmentation (Weka/Labkit); per-image threshold exploration |
+| **Soma detection** | SNT uses point soma; segment soma separately (Cellpose/StarDist) if area needed |
+| **Skeleton loops** | Pruning; morphological opening before skeletonization; multiple AnalyzeSkeleton passes |
+
+```javascript
+// Local threshold for variable contrast
+run("Auto Local Threshold", "method=Phansalkar radius=15 parameter_1=0 parameter_2=0");
+
+// Break loops before skeletonizing
+run("Open");  // morphological opening
+run("Skeletonize (2D/3D)");
+
+// Isolate neuron by connected component
+run("Connected Components Labeling", "connectivity=26 type=[16 bits]");
+makePoint(256, 256);  // click target
+val = getPixel(256, 256);
+setThreshold(val, val);
+run("Convert to Mask");
 ```

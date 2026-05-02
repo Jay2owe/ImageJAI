@@ -3,9 +3,134 @@
 Complete function reference for Dialog, Plot, Fit, Color, Ext, drawing, pixel access,
 math, strings, arrays, and automation. All work via `python ij.py macro 'CODE'`.
 
+Sources: `imagej.net/ij/developer/macro/functions.html` (built-in macro function
+reference), `imagej.net/ij/docs/` (menus and plugins), and the *Macro Reference
+Guide* PDF. Use `python probe_plugin.py "Plugin..."` to discover any installed
+plugin's parameters at runtime. For dialog widget interaction from outside a
+macro, use `python ij.py ui ...` (see `agent/CLAUDE.md`).
+
+Invoke from the agent:
+`python ij.py macro '<code>'` — run ImageJ macro (.ijm) code.
+`python ij.py script '<code>'` — run Groovy (default), Jython, or JavaScript.
+
 ---
 
-## 1. Dialog API
+## §0 Lookup Map — "How do I find X?"
+
+| Question | Where to look |
+|---|---|
+| "How do I build a modal / non-blocking dialog?" | §2 |
+| "How do I prompt the user for a yes/no / string / number?" | §3 |
+| "How do I pause the macro until the user clicks OK?" | §3 |
+| "How do I find / activate / close open windows?" | §4 |
+| "How do I draw a rectangle / oval / polygon / freehand ROI?" | §5 |
+| "What does `selectionType()` return for each ROI shape?" | §5 |
+| "How do I store many ROIs and measure them all?" | §5 |
+| "How do I add non-destructive text / shapes on top of an image?" | §6 |
+| "How do I read or write the Results table (or a custom named table)?" | §7 |
+| "How do I query image width / height / bit depth / calibration?" | §8 |
+| "How do I read a raw pixel value (and decompose an RGB int)?" | §9 |
+| "How do I burn text / lines into pixels (destructive)?" | §10 |
+| "How do I set a drawing colour or apply a custom LUT?" | §11 |
+| "How do I get image statistics (area, mean, min, max, histogram)?" | §12 |
+| "What are the available auto-threshold methods?" | §12 |
+| "How do I create a plot with a line, legend, log axis, or fixed axis range?" | §13 |
+| "How do I fit a curve (straight line, gaussian, exponential)?" | §14 |
+| "How do I speed up a macro or run OS / JS / Python from it?" | §15 |
+| "How do I use the key-value `List` store?" | §16 |
+| "How do I create, sort, filter, or take FFT of an array?" | §17 |
+| "How do I split, match, replace, or pad strings?" | §18 |
+| "How do I compute log / trig / random / rescale a number?" | §19 |
+| "How do I call Bio-Formats or CLIJ2 extension functions?" | §20 |
+| "What's the keyboard shortcut for X / how do I bind my own?" | §21 |
+
+---
+
+## §1 Term Index (A–Z)
+
+Alphabetical pointer to the section containing each term. Every identifier
+mentioned in §2+ is listed here; multi-section terms get comma-separated
+pointers. Use `grep -n '<term>'` inside this file for exact location.
+
+### A
+
+`abs` §19 · `acos` §19 · `Array.concat` §17 · `Array.copy` §17 · `Array.deleteIndex` §17 · `Array.deleteValue` §17 · `Array.fill` §17 · `Array.filter` §17 · `Array.findMaxima` §17 · `Array.findMinima` §17 · `Array.fourier` §17 · `Array.getSequence` §17 · `Array.getStatistics` §17 · `Array.rankPositions` §17 · `Array.reverse` §17 · `Array.slice` §17 · `Array.sort` §17 · `Array.trim` §17 · `arr.length` §17 · `asin` §19 · `atan2` §19
+
+### B
+
+`bar (plot type)` §13 · `bitDepth` §8 · `BlackBackground` §15 · `box (plot type)` §13 · `batch mode` §15 · `Bio-Formats (Ext)` §20
+
+### C
+
+`call` §15 · `ceil` §19 · `circle (plot type)` §13 · `CLIJ2 (Ext)` §20 · `close` §4 · `close("\\Others")` §4 · `Color.background` §11 · `Color.foreground` §11 · `Color.getLut` §11 · `Color.set` §11 · `Color.setBackground` §11 · `Color.setForeground` §11 · `Color.setForegroundValue` §11 · `Color.setLut` §11 · `Color.toArray` §11 · `Color.wavelengthToColor` §11 · `connected circle (plot type)` §13 · `cos` §19 · `cross (plot type)` §13 · `custom key shortcuts` §21
+
+### D
+
+`d2s` §18 · `Dialog.addCheckbox` §2 · `Dialog.addCheckboxGroup` §2 · `Dialog.addChoice` §2 · `Dialog.addDirectory` §2 · `Dialog.addFile` §2 · `Dialog.addHelp` §2 · `Dialog.addImageChoice` §2 · `Dialog.addMessage` §2 · `Dialog.addNumber` §2 · `Dialog.addRadioButtonGroup` §2 · `Dialog.addSlider` §2 · `Dialog.addString` §2 · `Dialog.addToSameRow` §2 · `Dialog.create` §2 · `Dialog.createNonBlocking` §2 · `Dialog.getCheckbox` §2 · `Dialog.getChoice` §2 · `Dialog.getImageChoice` §2 · `Dialog.getNumber` §2 · `Dialog.getRadioButton` §2 · `Dialog.getString` §2 · `Dialog.setInsets` §2 · `Dialog.setLocation` §2 · `Dialog.show` §2 · `diamond (plot type)` §13 · `dot (plot type)` §13 · `doCommand` §15 · `doWand` §5 · `drawLine` §10 · `drawOval` §10 · `drawRect` §10 · `drawString` §10
+
+### E
+
+`error bars (plot type)` §13 · `eval` §15 · `ExpandableArrays` §15 · `exec` §15 · `exit` §3 · `exp` §19 · `Ext.CLIJ2_gaussianBlur3D` §20 · `Ext.CLIJ2_pull` §20 · `Ext.CLIJ2_push` §20 · `Ext.getSeriesCount` §20 · `Ext.setId` §20 · `Ext.setSeries` §20
+
+### F
+
+`filled (plot type)` §13 · `fillOval` §10 · `fillRect` §10 · `Fit.doFit` §14 · `Fit.f` §14 · `Fit.logResults` §14 · `Fit.p` §14 · `Fit.plot` §14 · `Fit.rSquared` §14 · `floodFill` §10 · `floor` §19 · `Font` §10
+
+### G
+
+`getBoolean` §3 · `getDimensions` §8 · `getImageID` §4 · `getInfo` §8 · `getList` §4 · `getLocationAndSize` §4 · `getMetadata` §8 · `getNumber` §3 · `getPixel` §9 · `getRawStatistics` §12 · `getResult` §7 · `getResultString` §7 · `getSelectionBounds` §5 · `getStatistics` §12 · `getString` §3 · `getTime` §19 · `getTitle` §4 · `getValue` §9 · `getWidth` §8 · `getHeight` §8
+
+### I
+
+`IJ.deleteRows` §7 · `IJ.pad` §18 · `IJ.redirectErrorMessages` §15 · `indexOf` §18 · `isNaN` §19 · `isOpen` §4
+
+### L
+
+`lastIndexOf` §18 · `Limit to Threshold` §15 · `line (plot type)` §13 · `List.clear` §16 · `List.fromArrays` §16 · `List.get` §16 · `List.getValue` §12, §16 · `List.set` §16 · `List.setCommands` §16 · `List.setMeasurements` §12, §16 · `List.size` §16 · `List.toArrays` §16 · `log` §19
+
+### M
+
+`makeArrow` §5 · `makeLine` §5 · `makeOval` §5 · `makePoint` §5 · `makePolygon` §5 · `makeRectangle` §5 · `makeRotatedRectangle` §5 · `makeSelection` §5 · `matches` §18 · `Math.constrain` §19 · `Math.log10` §19 · `Math.map` §19 · `Math.max` §19 · `Math.min` §19 · `Math.toDegrees` §19 · `Math.toRadians` §19 · `maxOf` §19 · `minOf` §19
+
+### N
+
+`NaN` §19 · `newArray` §17 · `newImage` §8 · `nImages` §4 · `nResults` §7 · `nSlices` §8
+
+### O
+
+`Otsu` §12 · `Overlay.activateSelection` §6 · `Overlay.add` §6 · `Overlay.addSelection` §6 · `Overlay.cropAndSave` §6 · `Overlay.drawEllipse` §6 · `Overlay.drawLine` §6 · `Overlay.drawPolygon` §6 · `Overlay.drawRect` §6 · `Overlay.drawString` §6 · `Overlay.flatten` §6 · `Overlay.hide` §6 · `Overlay.lineTo` §6 · `Overlay.measure` §6 · `Overlay.moveTo` §6 · `Overlay.remove` §6 · `Overlay.removeRois` §6 · `Overlay.removeSelection` §6 · `Overlay.setFillColor` §6 · `Overlay.setFont` §6 · `Overlay.setPosition` §6 · `Overlay.setStrokeColor` §6 · `Overlay.setStrokeWidth` §6 · `Overlay.show` §6 · `Overlay.size` §6
+
+### P
+
+`parseFloat` §18 · `parseInt` §18 · `PI` §19 · `Plot.add` §13 · `Plot.addHistogram` §13 · `Plot.addText` §13 · `Plot.create` §13 · `Plot.drawLine` §13 · `Plot.getValues` §13 · `Plot.makeHighResolution` §13 · `Plot.setBackgroundColor` §13 · `Plot.setColor` §13 · `Plot.setFontSize` §13 · `Plot.setFrameSize` §13 · `Plot.setLegend` §13 · `Plot.setLimits` §13 · `Plot.setLimitsToFit` §13 · `Plot.setLineWidth` §13 · `Plot.setLogScaleX` §13 · `Plot.setLogScaleY` §13 · `Plot.setXYLabels` §13 · `Plot.show` §13 · `pow` §19 · `print` §3 · `Property.get` §8 · `Property.set` §8
+
+### R
+
+`random` §19 · `rename` §4 · `replace` §18 · `Roi.getBounds` §5 · `Roi.getContainedPoints` §5 · `Roi.getCoordinates` §5 · `Roi.getGroup` §5 · `Roi.getName` §5 · `Roi.move` §5 · `Roi.setFillColor` §5 · `Roi.setGroup` §5 · `Roi.setName` §5 · `Roi.setPosition` §5 · `Roi.setProperty` §5 · `Roi.setStrokeColor` §5 · `Roi.setStrokeWidth` §5 · `Roi.size` §5 · `roiManager("Add")` §5 · `roiManager("AND")` §5 · `roiManager("Combine")` §5 · `roiManager("Count")` §5 · `roiManager("Delete")` §5 · `roiManager("Measure")` §5 · `roiManager("Multi Measure")` §5 · `roiManager("Open")` §5 · `roiManager("Reset")` §5 · `roiManager("Save")` §5 · `roiManager("Select")` §5 · `roiManager("Set Color")` §5 · `roiManager("Set Line Width")` §5 · `roiManager("Show All")` §5 · `roiManager("Show None")` §5 · `roiManager("Translate")` §5 · `roiManager("XOR")` §5 · `round` §19 · `run` §15 · `runMacro` §15
+
+### S
+
+`ScaleConversions` §15 · `selectImage` §4 · `selectionContains` §5 · `selectionType` §5 · `selectWindow` §4 · `setBatchMode` §15 · `setColor` §10 · `setFont` §10 · `setJustification` §10 · `setLineWidth` §10 · `setOption` §15 · `setPixel` §9 · `setResult` §7 · `showMessage` §3 · `showMessageWithCancel` §3 · `showProgress` §3 · `showStatus` §3 · `sin` §19 · `split` §18 · `sqrt` §19 · `Stack.setActiveChannels` §8 · `Stack.setChannel` §8 · `Stack.setDisplayMode` §8 · `Stack.setFrame` §8 · `Stack.setSlice` §8 · `startsWith` §18 · `endsWith` §18 · `String.copy` §18 · `String.join` §18 · `String.paste` §18 · `substring` §18
+
+### T
+
+`Table.applyMacro` §7 · `Table.create` §7 · `Table.deleteColumn` §7 · `Table.deleteRows` §7 · `Table.get` §7 · `Table.getColumn` §7 · `Table.headings` §7 · `Table.open` §7 · `Table.save` §7 · `Table.set` §7 · `Table.setColumn` §7 · `Table.size` §7 · `Table.sort` §7 · `Table.title` §7 · `tan` §19 · `toLowerCase` §18 · `toUpperCase` §18 · `triangle (plot type)` §13 · `Triangle (threshold)` §12 · `String.trim` §18
+
+### U
+
+`updateResults` §7
+
+### W
+
+`WaitForCompletion` §15 · `waitForUser` §3 · `wavelengthToColor` §11
+
+### X
+
+`x (plot type)` §13
+
+---
+
+## §2 Dialog API
 
 ### Create & Show
 
@@ -50,7 +175,7 @@ Dialog.show();                       // blocks; Cancel exits macro
 
 ---
 
-## 2. User Interaction
+## §3 User Interaction
 
 | Function | Notes |
 |----------|-------|
@@ -67,7 +192,7 @@ Dialog.show();                       // blocks; Cancel exits macro
 
 ---
 
-## 3. Window Management
+## §4 Window Management
 
 | Function | Notes |
 |----------|-------|
@@ -85,7 +210,7 @@ Dialog.show();                       // blocks; Cancel exits macro
 
 ---
 
-## 4. ROI Functions
+## §5 ROI Functions
 
 ### Creation
 
@@ -143,7 +268,7 @@ Dialog.show();                       // blocks; Cancel exits macro
 
 ---
 
-## 5. Overlay Functions
+## §6 Overlay Functions
 
 ### Drawing (non-destructive)
 
@@ -177,7 +302,7 @@ Dialog.show();                       // blocks; Cancel exits macro
 
 ---
 
-## 6. Results Table
+## §7 Results Table
 
 ### Built-in Results
 
@@ -205,7 +330,7 @@ Dialog.show();                       // blocks; Cancel exits macro
 
 ---
 
-## 7. Image Properties & Navigation
+## §8 Image Properties & Navigation
 
 | Function | Notes |
 |----------|-------|
@@ -223,7 +348,7 @@ Dialog.show();                       // blocks; Cancel exits macro
 
 ---
 
-## 8. Pixel Access
+## §9 Pixel Access
 
 ```javascript
 v = getPixel(x, y);        // raw value; bilinear for non-integer
@@ -235,7 +360,7 @@ red = (v >> 16) & 0xff; green = (v >> 8) & 0xff; blue = v & 0xff;
 
 ---
 
-## 9. Drawing (Destructive)
+## §10 Drawing (Destructive)
 
 For non-destructive annotations, use Overlay instead.
 
@@ -252,7 +377,7 @@ For non-destructive annotations, use Overlay instead.
 
 ---
 
-## 10. Color API
+## §11 Color API
 
 | Function | Notes |
 |----------|-------|
@@ -267,7 +392,7 @@ For non-destructive annotations, use Overlay instead.
 
 ---
 
-## 11. Statistics & Threshold
+## §12 Statistics & Threshold
 
 ```javascript
 getStatistics(area, mean, min, max, std, histogram);  // trailing args optional
@@ -280,7 +405,7 @@ Threshold methods: Default, Huang, IsoData, Li, MaxEntropy, Mean, MinError, Mini
 
 ---
 
-## 12. Plot API
+## §13 Plot API
 
 ### Create & Add Data
 
@@ -323,7 +448,7 @@ Plot.show();
 
 ---
 
-## 13. Curve Fitting (Fit.*)
+## §14 Curve Fitting (Fit.*)
 
 ```javascript
 Fit.doFit("Straight Line", xArr, yArr);  // optional initial params
@@ -338,7 +463,7 @@ Equations: "Straight Line", "2nd/3rd/4th Degree Polynomial", "Exponential", "Pow
 
 ---
 
-## 14. Batch & Automation
+## §15 Batch & Automation
 
 | Function | Notes |
 |----------|-------|
@@ -366,7 +491,7 @@ Equations: "Straight Line", "2nd/3rd/4th Degree Polynomial", "Exponential", "Pow
 
 ---
 
-## 15. List (Key-Value Store)
+## §16 List (Key-Value Store)
 
 | Function | Notes |
 |----------|-------|
@@ -378,7 +503,7 @@ Equations: "Straight Line", "2nd/3rd/4th Degree Polynomial", "Exponential", "Pow
 
 ---
 
-## 16. Array Functions
+## §17 Array Functions
 
 | Function | Notes |
 |----------|-------|
@@ -398,7 +523,7 @@ Equations: "Straight Line", "2nd/3rd/4th Degree Polynomial", "Exponential", "Pow
 
 ---
 
-## 17. String Functions
+## §18 String Functions
 
 | Function | Notes |
 |----------|-------|
@@ -417,7 +542,7 @@ Equations: "Straight Line", "2nd/3rd/4th Degree Polynomial", "Exponential", "Pow
 
 ---
 
-## 18. Math Functions
+## §19 Math Functions
 
 | Function | Notes |
 |----------|-------|
@@ -435,7 +560,7 @@ Equations: "Straight Line", "2nd/3rd/4th Degree Polynomial", "Exponential", "Pow
 
 ---
 
-## 19. Extension Functions (Ext.*)
+## §20 Extension Functions (Ext.*)
 
 Plugins register macro extensions via MacroExtension interface.
 
@@ -453,7 +578,7 @@ Ext.CLIJ2_pull("blurred");
 
 ---
 
-## 20. Keyboard Shortcuts
+## §21 Keyboard Shortcuts
 
 ### File & Edit
 

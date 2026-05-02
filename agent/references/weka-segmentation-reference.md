@@ -9,9 +9,191 @@ Sources: [TWS wiki](https://imagej.net/plugins/tws/),
 
 Citation: Arganda-Carreras et al. (2017) doi:10.1093/bioinformatics/btx180
 
+Invoke from the agent:
+`python ij.py macro '<code>'` — run ImageJ macro (.ijm) code calling TWS via `call(...)`.
+`python ij.py script '<code>'` — run Groovy against the `WekaSegmentation` Java API.
+
 ---
 
-## 1. Quick Start
+## §0 Lookup Map — "How do I find X?"
+
+| Question | Where to look |
+|---|---|
+| "How do I call TWS from a macro?" | §6 macro `call()` interface |
+| "How do I script TWS from Groovy?" | §7 Groovy scripting API |
+| "Which features should I enable for my image?" | §5.1 feature selection by image type |
+| "What does each of the 20 features detect?" | §4 features table |
+| "How do I train from binary / multi-class label images?" | §7 (Train from Binary / Multi-Class) |
+| "How do I batch-process a folder?" | §7 (Batch Processing) |
+| "What is a probability map and how do I threshold one?" | §8 |
+| "Which classifier should I pick?" | §9.1 classifier selection |
+| "What sigma range for my structure size?" | §9.2 sigma range |
+| "How do I use TWS in 3D?" | §9.3 |
+| "How do I extract a binary mask and measure objects?" | §10 post-processing |
+| "How do I chain TWS into StarDist / Cellpose / 3D Objects Counter?" | §11 integration |
+| "TWS vs StarDist / Cellpose / Labkit / Threshold?" | §3 when to use, §12 comparison |
+| "How do I estimate / reduce memory usage?" | §13 memory management |
+| "My macro/script failed — why?" | §14 common problems |
+| "What's the full `WekaSegmentation` Java API?" | §15 quick reference |
+| "What do .model / .arff / feature stack files contain?" | §16 file formats |
+| "What do I save for reproducibility?" | §17 checklist |
+| "Quick tips before / during / batch training?" | §18 agent tips |
+
+---
+
+## §1 Term Index (A–Z)
+
+Alphabetical pointer to the section containing each term. Use
+`grep -n '`<term>`' weka-segmentation-reference.md` to jump.
+
+### A
+
+`addBinaryData` §7, §15 · `addClass` §7, §15 · `addExample` §7, §15 ·
+`addLabeledData` §15 · `addRandomBalancedBinaryData` §7, §13, §15 ·
+`addRandomBalancedLabeledData` §7, §15 · `addTrace` §6 ·
+`Anisotropic_diffusion` §4, §5.1 · `applyClassifier` §2, §7, §15 ·
+`ARFF` §2, §16 · `Attribute Selection (selectAttributes)` §5.2, §7, §14, §15
+
+### B
+
+`Batch Processing` §7 · `Bilateral` §4, §5.1 · `Binary label images` §7 ·
+`boolean[] features` (setEnabledFeatures) §7, §15
+
+### C
+
+`call()` syntax §6 · `changeClassName` §6 · `Class balancing (setDoClassBalance /
+setClassBalance)` §6, §7, §14, §15 · `Classes (addClass / setClassLabel /
+getClassLabel / getNumOfClasses)` §7, §15 · `Classification map` §2 ·
+`Classifier selection` §9.1 · `Classifier configuration` §7 ·
+`Confusion matrix (getTestConfusionMatrix)` §7, §15 ·
+`Constructors (WekaSegmentation)` §15 · `Custom features (FeatureStack /
+FeatureStackArray)` §7
+
+### D
+
+`DAB-stained IHC` §5.1 · `deleteTrace` §6 · `Derivatives` §4, §5.1, §14 ·
+`Difference_of_gaussians (DoG)` §4, §5.1 · `doClassBalance` §17 ·
+`Downscale` §13
+
+### E
+
+`EM ultrastructure` §5.1 · `Entropy` §4, §5.1 · `Evaluate classifier` §7 ·
+`Evaluation (getTrainingError / getTestError / getTestConfusionMatrix)` §7, §15
+
+### F
+
+`FastRandomForest` §7, §9.1 · `Feature counts` §4 · `Feature name strings`
+§6 · `Feature selection by image type` §5.1 · `Feature selection strategy`
+§5.2 · `FeatureStack / FeatureStackArray` §7 · `Fiber/neurite tracing` §5.1 ·
+`File formats` §16 · `Fluorescent nuclei / puncta` §5.1
+
+### G
+
+`Gabor` §4, §5.1, §13, §14 · `Gaussian_blur` §4, §5.1 · `getClassifier` §15 ·
+`getClassifiedImage` §15 · `getClassLabel` §7, §15 · `getEnabledFeatures` §15, §17 ·
+`getMaximumSigma / getMinimumSigma` §17 · `getNumOfClasses` §7, §10, §15 ·
+`getProbability` §6 · `getResult` §2, §6 · `getTestConfusionMatrix` §7, §15 ·
+`getTestError` §7, §15 · `getTrainingError` §7, §15
+
+### H
+
+`H&E histology` §5.1 · `Headless batch` §2 · `Hessian` §4, §5.1, §13
+
+### I
+
+`ImageScience update site` §4, §9.3, §14 · `Instance segmentation (limitation)`
+§3, §12 · `Integration with StarDist / Cellpose / 3D Objects Counter` §11 ·
+`I/O (saveClassifier / loadClassifier / saveData / loadTrainingData)` §7, §15, §16
+
+### J
+
+`J48` §9.1
+
+### K
+
+`Kuwahara` §4
+
+### L
+
+`Labkit` §3, §12 · `Laplacian` §4, §5.1, §14 · `launchWeka` §6 ·
+`Lipschitz` §4, §5.1 · `loadClassifier` §2, §6, §7, §15, §17 ·
+`loadData` §6 · `loadTrainingData` §15 · `Low-SNR fluorescence` §5.1
+
+### M
+
+`Macro call() reference` §6 · `Maximum` §4, §5.1 · `Mean` §4, §5.1 ·
+`Median` §4, §5.1 · `Membrane_projections` §4, §5.1 · `Memory estimation`
+§13 · `Memory reduction strategies` §13 · `Memory usage per image size`
+§13 · `Minimum` §4, §5.1 · `Multi-class label images` §7 · `Multi-class
+object extraction` §10
+
+### N
+
+`Naive Bayes` §9.1 · `Neighbors` §4, §5.2, §13, §14
+
+### O
+
+`Opacity (setOpacity)` §6 · `OOB error (getTrainingError)` §7, §15, §17 ·
+`Outputs of TWS` §2
+
+### P
+
+`Pipeline overview` §2 · `Phase contrast` §5.1 · `plotResultGraphs` §6 ·
+`Post-processing (extract mask, measure)` §10 · `Precision / recall / F1` §7 ·
+`Probability maps` §2, §6, §8, §14 · `Probe TWS window` §14
+
+### Q
+
+`Quick Start` §2
+
+### R
+
+`Random Forest (FastRandomForest)` §7, §9.1 · `Reproducibility checklist` §17 ·
+`ROC / evaluation plots (plotResultGraphs)` §6 · `Roi.addExample` §7
+
+### S
+
+`saveClassifier` §2, §6, §7, §15, §17 · `saveData` §6, §15 · `saveFeatureStack`
+§6 · `selectAttributes` §5.2, §7, §14, §15 · `setClassBalance` §6 ·
+`setClassifier` §6, §7, §15 · `setClassLabel` §7, §15 · `setDoClassBalance`
+§7, §15 · `setEnabledFeatures` §7, §15 · `setFeature` §6 · `setFeatureStackArray`
+§7 · `setMaximumSigma` §6, §7, §15 · `setMembranePatchSize` §6, §7, §15 ·
+`setMembraneThickness` §6, §7, §15 · `setMinimumSigma` §6, §7, §15 ·
+`setNumFeatures` §7 · `setNumTrees` §7 · `setMaxDepth` §7, §14 · `setOpacity`
+§6 · `setSeed` §7 · `Sigma range` §9.2 · `SMO (SVM)` §9.1 · `Sobel_filter`
+§4, §5.1 · `StarDist (integration / comparison)` §3, §11, §12 ·
+`Structure` §4, §5.1, §14
+
+### T
+
+`Tile-based processing (tilesPerDim)` §7, §13, §14, §15 · `Tissue
+classification` §5.1 · `toggleOverlay` §6 · `trainClassifier` §6, §7, §15 ·
+`Training data (addExample / addBinaryData / addLabeledData)` §7, §15 ·
+`Training from binary labels` §7 · `Training from multi-class labels` §7 ·
+`Training time` §13 · `Tile boundary artifacts` §14 · `TWS vs alternatives`
+§12
+
+### U
+
+`updateClassifier` §15 · `useAllFeatures` §15 · `Utils.getGoldenAngleLUT` §7
+
+### V
+
+`Variance` §4, §5.1
+
+### W
+
+`Weka Explorer (launchWeka)` §6 · `WekaSegmentation (class)` §2, §7, §15 ·
+`When to use TWS` §3 · `White/black names (addBinaryData)` §7, §15
+
+### X / Y / Z
+
+`3D mode (Trainable Weka Segmentation 3D)` §9.3 · `3D Objects Counter
+(integration)` §11
+
+---
+
+## §2. Quick Start
 
 ```bash
 # Open image, launch TWS, load classifier, get result
@@ -38,7 +220,7 @@ result.show()
 
 ---
 
-## 2. When to Use TWS
+## §3. When to Use TWS
 
 | Situation | Recommended Tool |
 |-----------|-----------------|
@@ -74,7 +256,7 @@ Input Image → Feature Extraction (per pixel, multiple scales)
 
 ---
 
-## 3. The 20 Training Features
+## §4. The 20 Training Features
 
 Features are extracted at multiple scales (sigma values). Default sigma range: 1-16 pixels
 (powers of 2: 1, 2, 4, 8, 16 = 5 scales).
@@ -113,9 +295,9 @@ All features enabled:                           ~200-220 features
 
 ---
 
-## 4. Feature Selection Guide
+## §5. Feature Selection Guide
 
-### By Image Type
+### §5.1 By Image Type
 
 | Image Type | Recommended Features |
 |------------|---------------------|
@@ -130,7 +312,7 @@ All features enabled:                           ~200-220 features
 | Fiber/neurite tracing | Hessian, Gabor, Structure, Sobel |
 | Low-SNR fluorescence | Gaussian, Median, Bilateral, Variance |
 
-### Selection Strategy
+### §5.2 Selection Strategy
 
 1. Start with defaults (Gaussian + Sobel + Hessian + DoG + Membrane)
 2. If results are poor, add Variance + Entropy (texture-sensitive)
@@ -142,7 +324,7 @@ All features enabled:                           ~200-220 features
 
 ---
 
-## 5. Macro Interface (call() Syntax)
+## §6. Macro Interface (call() Syntax)
 
 TWS must be open via `run("Trainable Weka Segmentation")` before calling these.
 All parameters are strings. Full class path: `trainableSegmentation.Weka_Segmentation`.
@@ -214,7 +396,7 @@ python ij.py macro '
 
 ---
 
-## 6. Scripting API (Groovy)
+## §7. Scripting API (Groovy)
 
 Direct access to `WekaSegmentation` Java class, bypassing the GUI. More powerful
 and flexible than macro `call()`. Run via `python ij.py script`.
@@ -404,7 +586,7 @@ seg.setFeatureStackArray(featuresArray)
 
 ---
 
-## 7. Probability Maps
+## §8. Probability Maps
 
 Probability maps (32-bit hyperstack, one channel per class) show per-pixel confidence
 (0.0-1.0). More informative than label images for downstream analysis.
@@ -425,9 +607,9 @@ starting at 0.5 (balanced) and adjusting based on visual inspection.
 
 ---
 
-## 8. Advanced Configuration
+## §9. Advanced Configuration
 
-### Classifier Selection
+### §9.1 Classifier Selection
 
 | Classifier | Weka Class | When to Consider |
 |-----------|------------|-----------------|
@@ -436,7 +618,7 @@ starting at 0.5 (balanced) and adjusting based on visual inspection.
 | SMO (SVM) | `weka.classifiers.functions.SMO` | Small datasets, high accuracy needed |
 | J48 (C4.5 tree) | `weka.classifiers.trees.J48` | When you need interpretable decisions |
 
-### Sigma Range
+### §9.2 Sigma Range
 
 Sigma values are powers of 2 from min to max. Guidelines for choosing:
 
@@ -447,7 +629,7 @@ Sigma values are powers of 2 from min to max. Guidelines for choosing:
 | Large (tissue regions) | 2-32 or 4-64 |
 | 3D stacks | Consider max 8 (3D convolutions are expensive) |
 
-### 3D Mode
+### §9.3 3D Mode
 
 ```bash
 python ij.py macro 'run("Trainable Weka Segmentation 3D");'
@@ -461,7 +643,7 @@ Lipschitz, Kuwahara, Entropy, Neighbors.
 
 ---
 
-## 9. Post-Processing
+## §10. Post-Processing
 
 ### Extract Binary Mask and Measure
 
@@ -496,7 +678,7 @@ for (int c = 0; c < seg.getNumOfClasses(); c++) {
 
 ---
 
-## 10. Integration with Other Tools
+## §11. Integration with Other Tools
 
 ### TWS then StarDist/Cellpose
 
@@ -529,7 +711,7 @@ python ij.py macro '
 
 ---
 
-## 11. Comparison: TWS vs Alternatives
+## §12. Comparison: TWS vs Alternatives
 
 | Criterion | TWS | StarDist | Cellpose | Labkit | Threshold |
 |-----------|-----|----------|----------|--------|-----------|
@@ -547,7 +729,7 @@ you need fine-grained feature control or extensive batch scripting via the WekaS
 
 ---
 
-## 12. Memory Management
+## §13. Memory Management
 
 ### Memory Estimation
 
@@ -581,7 +763,7 @@ Training time depends on sample count, not image size (~3s for 1000 samples, ~15
 
 ---
 
-## 13. Common Problems and Solutions
+## §14. Common Problems and Solutions
 
 | Problem | Likely Cause | Solution |
 |---------|-------------|----------|
@@ -599,7 +781,7 @@ Training time depends on sample count, not image size (~3s for 1000 samples, ~15
 
 ---
 
-## 14. WekaSegmentation API Quick Reference
+## §15. WekaSegmentation API Quick Reference
 
 ### Constructors
 
@@ -678,7 +860,7 @@ int[][] getTestConfusionMatrix(ImagePlus image, ImagePlus labels, int whiteIdx, 
 
 ---
 
-## 15. File Formats
+## §16. File Formats
 
 | Format | Extension | Contents | Portability |
 |--------|-----------|----------|-------------|
@@ -688,7 +870,7 @@ int[][] getTestConfusionMatrix(ImagePlus image, ImagePlus labels, int whiteIdx, 
 
 ---
 
-## 16. Reproducibility Checklist
+## §17. Reproducibility Checklist
 
 Save: classifier (.model), training data (.arff), probability maps. Record: feature
 settings, sigma range, classifier type/parameters, training images used, traces per
@@ -710,7 +892,7 @@ seg.getEnabledFeatures().eachWithIndex { on, i -> if (on) IJ.log("  + " + featur
 
 ---
 
-## 17. Agent Tips
+## §18. Agent Tips
 
 - **Before TWS:** Check memory (`python ij.py state`), image dims (`python ij.py info`),
   estimate memory needs. For images larger than ~2000x2000, plan tile processing.

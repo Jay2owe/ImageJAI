@@ -2,13 +2,169 @@
 
 Libraries: scikit-image 0.26, scipy.ndimage, numpy, tifffile 2025.1.10, Pillow 11.1, aicsimageio 3.3.1, matplotlib 3.10, imageio 2.37
 
+Sources: scikit-image docs (`https://scikit-image.org/docs/stable/api/api.html`),
+scipy.ndimage docs (`https://docs.scipy.org/doc/scipy/reference/ndimage.html`),
+tifffile (`https://github.com/cgohlke/tifffile`), NumPy, Pillow, aicsimageio,
+matplotlib, imageio.
+
+Run Python-side analysis from the agent with `python <script>` (e.g.
+`python pixels.py find_cells`, `python pixels.py region 100 100 50 50`). Pull
+pixels out of a running ImageJ session via `get_pixels` over TCP; read files
+directly with `tifffile.imread` when no ImageJ session is needed.
+
 ---
 
-## 1. scikit-image 0.26
+## §0 Lookup Map — "How do I find X?"
+
+| Question | Where to look |
+|---|---|
+| "How do I threshold an image in Python?" | §2.3 |
+| "What's the scikit-image equivalent of Analyze Particles?" | §2.6 (regionprops) |
+| "How do I do watershed segmentation?" | §2.4 |
+| "How do I compute PCC / Manders' / colocalization in Python?" | §8 |
+| "How do I read a multi-channel TIFF / `.nd2` / `.czi` / `.lif`?" | §5.1, §7 |
+| "How do I read ImageJ / OME metadata and pixel size?" | §5.2 |
+| "How do I write an ImageJ-compatible hyperstack TIFF?" | §5.4 |
+| "How do I register / align two images?" | §2.10 |
+| "How do I denoise / subtract background / deconvolve?" | §2.11 |
+| "How do I detect blobs / peaks / templates?" | §2.7 |
+| "How do I do FFT / power spectrum / peak finding on a 1D signal?" | §3.6 |
+| "How do I convert dtypes without destroying pixel values?" | §4.1, §14 |
+| "How do I display a multi-channel fluorescence composite?" | §8.2 |
+| "How do I transfer ROIs between Python and ImageJ?" | §11 |
+| "Should I use Python or ImageJ for this task?" | §12 |
+| "How do I get pixels from a running ImageJ session into NumPy?" | §12 |
+| "What's the full list of `regionprops` properties?" | §10 |
+| "Why did my pixel values change after `astype`/normalisation?" | §14 |
+
+---
+
+## §1 Term Index (A–Z)
+
+Alphabetical pointer to the section containing each term. Use
+`grep -n '<term>' python-image-analysis-reference.md` to jump.
+
+### A
+`adjust_gamma` §2.8 · `affine_transform` §3.4 · `aicsimageio` §7 ·
+`AICSImage` §7 · `area` §2.6, §10 · `area_opening` §2.5 ·
+`astype` §4.1, §14 · `axis_major_length` §10 · `axis_minor_length` §10
+
+### B
+`bbox` §10 · `binary_closing` §3.2 · `binary_dilation` §3.2 ·
+`binary_erosion` §3.2 · `binary_fill_holes` §3.2 · `binary_opening` §3.2 ·
+`blob_dog` §2.7 · `blob_doh` §2.7 · `blob_log` §2.7
+
+### C
+`canny` §2.3 · `center_of_mass` §3.3 · `centroid` §10 ·
+`centroid_weighted` §10 · `chan_vese` §2.4 · `CLAHE` §2.8 ·
+`clear_border` §2.4 · `clip (np.clip)` §4.1, §4.2 · `coords` §10 ·
+`coords_scaled` §2.2, §10 · `colormap (cmap)` §8.1 · `composite (multi-channel)` §8.2 ·
+`convolve` §3.1 · `corner_harris` §2.7 · `corner_peaks` §2.7
+
+### D
+`denoise_bilateral` §2.11 · `denoise_nl_means` §2.11 ·
+`denoise_tv_chambolle` §2.11 · `denoise_wavelet` §2.11 ·
+`difference_of_gaussians` §2.3 · `dilation` §2.5 · `disk` §2.5 ·
+`distance_transform_edt` §2.4, §3.2 · `dtype` §4.1, §14
+
+### E
+`eccentricity` §10 · `edge detection` §2.3 · `equalize_adapthist` §2.8 ·
+`erosion` §2.5 · `estimate_sigma` §2.11 · `expand_labels` §2.4 ·
+`exposure` §2.8 · `extra_properties` §2.6
+
+### F
+`feature` §2.7 · `felzenszwalb` §2.4 · `feret_diameter_max` §10 ·
+`fft` §3.6 · `fft2` §3.6 · `fftshift` §3.6 · `filters` §2.3 ·
+`find_contours` §2.6 · `find_objects` §3.3 · `find_peaks` §3.6 ·
+`flow (optical)` §2.10 · `fromarray (PIL)` §6 · `frangi` §2.3
+
+### G
+`gamma` §2.8 · `gaussian (filters)` §2.3 · `gaussian_filter` §3.1 ·
+`graycomatrix` §2.7 · `graycoprops` §2.7 · `graph` §2.1 ·
+`greyscale morphology` §2.5
+
+### H
+`histogram (np)` §4.3 · `histogram_matching` §2.8 · `hough_circle` §2.9 ·
+`hough_line` §2.9
+
+### I
+`imread (tifffile)` §5.1 · `imread (imageio)` §9 · `imread (PIL)` §6 ·
+`imwrite (tifffile)` §5.4 · `imwrite (imageio)` §9 ·
+`imagej_metadata` §5.2 · `imagej=True (imwrite)` §5.4 · `imshow` §8.1 ·
+`imiter` §9 · `inertia_tensor` §10 · `intensity_max` §10 ·
+`intensity_mean` §2.6, §10 · `intensity_median` §2.2, §2.6, §10 ·
+`intersection_coeff` §8 · `io (skimage)` §2.1
+
+### L
+`label` §2.4, §2.5, §3.3 · `label2rgb` §8.2 · `labeled_comprehension` §3.3 ·
+`laplace` §2.3 · `LinearSegmentedColormap` §8.1 · `LogNorm` §8.1 ·
+`LUT` §8.1
+
+### M
+`manders_coloc_coeff` §8 · `manders_overlap_coeff` §8 ·
+`map_coordinates` §3.4 · `mark_boundaries` §2.4 · `match_histograms` §2.8 ·
+`match_template` §2.7 · `matplotlib` §8 · `maximum_filter` §3.1 ·
+`median (filters)` §2.3 · `median_filter` §3.1 · `memmap (numpy)` §4.4 ·
+`memmap (tifffile)` §5.3 · `minimum_filter` §3.1 · `moments` §10 ·
+`morphology` §2.5 · `multiscale_basic_features` §2.7
+
+### N
+`nbytes` §4.4 · `ndimage` §3 · `np.clip` §4.1, §4.2 · `np.histogram` §4.3 ·
+`np.mean` §4.3 · `np.median` §4.3 · `np.percentile` §4.3 · `np.stack` §4.1 ·
+`np.std` §4.3 · `np.where` §4.2 · `normalisation` §4.3, §14
+
+### O
+`ome_metadata` §5.2 · `OME-TIFF` §5.4 · `opening` §2.5 ·
+`optical_flow_tvl1` §2.10 · `orientation` §10 · `overlay` §2.4, §8.2
+
+### P
+`pandas DataFrame` §2.6 · `peak_local_max` §2.4, §2.7 ·
+`pearson_corr_coeff` §8 · `perimeter` §10 · `phase_cross_correlation` §2.10 ·
+`Pillow (PIL)` §6 · `profile_line` §2.6 · `psd (welch)` §3.6 ·
+`pyramid_gaussian` §2.9 · `pyramid (writing)` §5.4
+
+### R
+`random_walker` §2.4 · `rank_filter` §3.1 · `rcParams` §8.3 ·
+`reconstruction` §2.5 · `regionprops` §2.6, §10 · `regionprops_table` §2.6, §10 ·
+`registration` §2.10 · `remove_small_holes` §2.5 · `remove_small_objects` §2.5 ·
+`rescale` §2.9 · `rescale_intensity` §2.8, §14 · `resize (skimage)` §2.9 ·
+`resize (PIL)` §6 · `restoration` §2.11 · `richardson_lucy` §2.11 ·
+`ROI (roifile)` §11 · `roifile` §11 · `rolling_ball` §2.11 ·
+`rotate (skimage)` §2.9 · `rotate (ndimage)` §3.4
+
+### S
+`scharr` §2.3 · `segmentation` §2.4 · `shift (ndimage)` §3.4 ·
+`skeletonize` §2.5 · `skeletonize_3d` §2.5 · `SLIC / slic` §2.4 ·
+`sobel` §2.3 · `solidity` §10 · `standard_deviation (ndimage)` §3.3 ·
+`structuring element` §2.5, §3.2
+
+### T
+`template matching` §2.7 · `TiffFile` §5.1, §5.2 ·
+`TiffWriter` §5.4 · `tifffile` §5 · `threshold_isodata` §2.3 ·
+`threshold_li` §2.3 · `threshold_local` §2.3 · `threshold_minimum` §2.3 ·
+`threshold_otsu` §2.3 · `threshold_triangle` §2.3 · `threshold_yen` §2.3 ·
+`transform` §2.9 · `transpose` §4.1 · `try_all_threshold` §2.3
+
+### U
+`unsharp_mask` §2.3 · `uniform_filter` §3.1 · `util` §2.1
+
+### V
+`value_indices` §3.3
+
+### W
+`warp` §2.9 · `watershed` §2.4 · `welch (psd)` §3.6 ·
+`white_tophat` §3.2 · `wiener` §2.11
+
+### Z
+`zarr (aszarr)` §5.3 · `zoom` §3.4
+
+---
+
+## §2. scikit-image 0.26
 
 > Docs: https://scikit-image.org/docs/stable/api/api.html
 
-### 1.1 Module Overview
+### §2.1 Module Overview
 
 | Module | Purpose |
 |--------|---------|
@@ -27,13 +183,13 @@ Libraries: scikit-image 0.26, scipy.ndimage, numpy, tifffile 2025.1.10, Pillow 1
 | `skimage.graph` | Graph-based operations |
 | `skimage.util` | dtype conversion, padding, noise |
 
-### 1.2 New in 0.26
+### §2.2 New in 0.26
 
 - `intensity_median` added to `regionprops`
 - `coords_scaled` property (uses calibration)
 - Binary morphology via `morphology.dilation()` etc. (not `binary_dilation` -- deprecated)
 
-### 1.3 Thresholding & Filters
+### §2.3 Thresholding & Filters
 
 ```python
 from skimage import filters
@@ -71,7 +227,7 @@ dog = filters.difference_of_gaussians(image, low_sigma=1, high_sigma=5)
 enhanced = filters.unsharp_mask(image, radius=5, amount=2)
 ```
 
-### 1.4 Segmentation
+### §2.4 Segmentation
 
 ```python
 from skimage.segmentation import (
@@ -94,7 +250,7 @@ expanded = expand_labels(labels, distance=5)
 overlay = mark_boundaries(image, labels, color=(1, 0, 0))
 ```
 
-### 1.5 Morphology
+### §2.5 Morphology
 
 ```python
 from skimage import morphology
@@ -122,7 +278,7 @@ from skimage.measure import label
 labels, num = label(binary, return_num=True)
 ```
 
-### 1.6 Measure (regionprops)
+### §2.6 Measure (regionprops)
 
 ```python
 from skimage.measure import regionprops, regionprops_table, label, find_contours, profile_line
@@ -149,7 +305,7 @@ contours = find_contours(binary, level=0.5)     # list of Nx2 (row,col) arrays
 profile = profile_line(image, src=(0, 0), dst=(100, 100), linewidth=3)
 ```
 
-### 1.7 Feature Detection
+### §2.7 Feature Detection
 
 ```python
 from skimage.feature import (
@@ -172,7 +328,7 @@ glcm = graycomatrix(image, distances=[1, 3], angles=[0, np.pi/4], levels=256)
 contrast = graycoprops(glcm, 'contrast')        # also: homogeneity, energy, correlation
 ```
 
-### 1.8 Exposure
+### §2.8 Exposure
 
 ```python
 from skimage import exposure
@@ -192,7 +348,7 @@ matched = exposure.match_histograms(source, reference)
 p2, p98 = np.percentile(image, (2, 98))
 ```
 
-### 1.9 Transform
+### §2.9 Transform
 
 ```python
 from skimage import transform
@@ -210,7 +366,7 @@ hough_res = transform.hough_circle(edges, np.arange(20, 50, 2))
 pyramid = list(transform.pyramid_gaussian(image, max_layer=4, downscale=2))
 ```
 
-### 1.10 Registration
+### §2.10 Registration
 
 ```python
 from skimage.registration import phase_cross_correlation, optical_flow_tvl1
@@ -222,7 +378,7 @@ registered = ndi_shift(moving, shift)
 flow = optical_flow_tvl1(reference, moving)   # flow[0]=row, flow[1]=col displacement
 ```
 
-### 1.11 Restoration
+### §2.11 Restoration
 
 ```python
 from skimage.restoration import (
@@ -241,11 +397,11 @@ deconvolved = richardson_lucy(image, psf, num_iter=30)
 
 ---
 
-## 2. scipy.ndimage
+## §3. scipy.ndimage
 
 > Docs: https://docs.scipy.org/doc/scipy/reference/ndimage.html
 
-### 2.1 Filters
+### §3.1 Filters
 
 ```python
 from scipy.ndimage import (
@@ -260,7 +416,7 @@ local_min = minimum_filter(image, size=10)
 local_max = maximum_filter(image, size=10)
 ```
 
-### 2.2 Morphology & Distance
+### §3.2 Morphology & Distance
 
 ```python
 from scipy.ndimage import (
@@ -278,7 +434,7 @@ distances = distance_transform_edt(binary)
 distances = distance_transform_edt(binary, sampling=(0.5, 0.325, 0.325))  # calibrated
 ```
 
-### 2.3 Measurements
+### §3.3 Measurements
 
 ```python
 from scipy.ndimage import (
@@ -293,7 +449,7 @@ coms = center_of_mass(image, labels, index=range(1, n_features+1))
 idx = value_indices(labels)         # dict: label -> (row_array, col_array)
 ```
 
-### 2.4 Interpolation
+### §3.4 Interpolation
 
 ```python
 from scipy.ndimage import shift, rotate, zoom, affine_transform, map_coordinates
@@ -304,7 +460,7 @@ zoomed = zoom(stack, zoom=(1, 2, 2), order=1)   # keep Z, double XY
 values = map_coordinates(image, coords, order=3)
 ```
 
-### 2.5 scipy.ndimage vs skimage
+### §3.5 scipy.ndimage vs skimage
 
 | Task | scipy.ndimage | skimage | Use |
 |------|---------------|---------|-----|
@@ -315,7 +471,7 @@ values = map_coordinates(image, coords, order=3)
 | Watershed | N/A | `segmentation.watershed` | **skimage** |
 | Simple interpolation | `shift`, `rotate`, `zoom` | `transform.warp` | scipy simple, skimage complex |
 
-### 2.6 scipy.signal & FFT
+### §3.6 scipy.signal & FFT
 
 ```python
 from scipy import signal
@@ -338,9 +494,9 @@ peaks, properties = signal.find_peaks(profile, height=100, distance=10, prominen
 
 ---
 
-## 3. NumPy for Images
+## §4. NumPy for Images
 
-### 3.1 Array Basics
+### §4.1 Array Basics
 
 ```python
 import numpy as np
@@ -357,7 +513,7 @@ stack = np.stack([img1, img2, img3], axis=0)
 channels = [stack[c] for c in range(stack.shape[0])]
 ```
 
-### 3.2 Masking
+### §4.2 Masking
 
 ```python
 mask = (image > low) & (image < high)
@@ -366,7 +522,7 @@ masked = np.where(mask, image, 0)
 clipped = np.clip(image, 100, 50000)
 ```
 
-### 3.3 Statistics
+### §4.3 Statistics
 
 ```python
 hist, bin_edges = np.histogram(image, bins=256, range=(0, 65535))
@@ -378,7 +534,7 @@ max_proj = np.max(stack, axis=0)                  # MIP along Z
 normalised = (image - image.min()) / (image.max() - image.min())
 ```
 
-### 3.4 Memory-Efficient Patterns
+### §4.4 Memory-Efficient Patterns
 
 ```python
 # Memory-mapped arrays
@@ -396,11 +552,11 @@ print(f"{image.nbytes / 1e6:.1f} MB")
 
 ---
 
-## 4. tifffile 2025.1.10
+## §5. tifffile 2025.1.10
 
 > Docs: https://github.com/cgohlke/tifffile
 
-### 4.1 Reading
+### §5.1 Reading
 
 ```python
 import tifffile
@@ -416,7 +572,7 @@ with tifffile.TiffFile('image.tif') as tif:
         data = series.asarray()
 ```
 
-### 4.2 Metadata
+### §5.2 Metadata
 
 ```python
 with tifffile.TiffFile('image.tif') as tif:
@@ -431,7 +587,7 @@ with tifffile.TiffFile('image.tif') as tif:
     pixel_size = xres[1] / xres[0]         # unit per pixel
 ```
 
-### 4.3 Memory-Mapped & Zarr
+### §5.3 Memory-Mapped & Zarr
 
 ```python
 mmap = tifffile.memmap('large.tif', mode='r')   # uncompressed only
@@ -442,7 +598,7 @@ z = zarr.open(store, mode='r')
 slice_10 = z[10]                                 # lazy read
 ```
 
-### 4.4 Writing
+### §5.4 Writing
 
 ```python
 tifffile.imwrite('output.tif', image, compression='zlib')
@@ -472,7 +628,7 @@ tifffile.imwrite('pyramid.tif', [full_res, half_res, quarter_res],
 
 ---
 
-## 5. Pillow 11.1
+## §6. Pillow 11.1
 
 ```python
 from PIL import Image, ImageDraw, ImageFont
@@ -493,7 +649,7 @@ img.save('output.png')
 
 ---
 
-## 6. aicsimageio 3.3.1
+## §7. aicsimageio 3.3.1
 
 **NOTE:** v3.3 uses STCZYX (6D). v4 uses TCZYX (5D) with xarray.
 
@@ -516,9 +672,9 @@ pixel_sizes = img.get_physical_pixel_size()  # (Z, Y, X) in microns
 
 ---
 
-## 7. matplotlib for Microscopy
+## §8. matplotlib for Microscopy
 
-### 7.1 Display
+### §8.1 Display
 
 ```python
 import matplotlib.pyplot as plt
@@ -544,7 +700,7 @@ plt.colorbar(im, ax=ax, label='Intensity (AU)', fraction=0.046, pad=0.04)
 
 Recommended cmaps: `gray`, `inferno`, `viridis`, `magma`, `cividis` (colorblind-safe)
 
-### 7.2 Multi-Channel Composite
+### §8.2 Multi-Channel Composite
 
 ```python
 def make_composite(channels, colors, vmin=None, vmax=None):
@@ -566,7 +722,7 @@ from skimage.color import label2rgb
 overlay = label2rgb(labels, image=image, bg_label=0, alpha=0.3)
 ```
 
-### 7.3 Publication Settings
+### §8.3 Publication Settings
 
 ```python
 plt.rcParams.update({
@@ -580,7 +736,7 @@ plt.savefig('figure.png', dpi=600)           # raster
 
 ---
 
-## 8. imageio 2.37
+## §9. imageio 2.37
 
 ```python
 import imageio.v3 as iio

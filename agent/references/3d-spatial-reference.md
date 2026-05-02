@@ -2,34 +2,118 @@
 
 Command reference for 3D object analysis, spatial statistics, colocalization,
 morphometry, distance analysis, and skeleton/network analysis in Fiji.
+Sources: 3D ImageJ Suite (`imagej.net/plugins/3d-imagej-suite`), MorphoLibJ
+(`imagej.net/plugins/morpholibj`), CLIJ2 (`clij.github.io`), Coloc 2
+(`imagej.net/plugins/coloc-2`), DiAna (`imagej.net/plugins/diana`),
+AnalyzeSkeleton (`imagej.net/plugins/analyze-skeleton`), SNT/Sholl
+(`imagej.net/plugins/snt`).
+
 All `run()` commands work with: `python ij.py macro 'COMMAND_HERE'`
 
 ---
 
-## Table of Contents
+## §0 Lookup Map — "How do I find X?"
 
-1. [3D Objects Counter](#1-3d-objects-counter)
-2. [3D Manager (Ext.Manager3D)](#2-3d-manager)
-3. [3D Segmentation](#3-3d-segmentation)
-4. [3D Filters](#4-3d-filters)
-5. [3D Shape & Measurement Plugins](#5-3d-shape--measurement-plugins)
-6. [3D Distances & Relationships](#6-3d-distances--relationships)
-7. [3D Spatial Statistics](#7-3d-spatial-statistics)
-8. [3D Colocalization](#8-3d-colocalization)
-9. [3D Binary Operations](#9-3d-binary-operations)
-10. [MorphoLibJ 3D](#10-morpholibj-3d)
-11. [CLIJ2 GPU-Accelerated 3D](#11-clij2-gpu-accelerated-3d)
-12. [Coloc 2](#12-coloc-2)
-13. [DiAna](#13-diana)
-14. [AnalyzeSkeleton](#14-analyzeskeleton)
-15. [SNT / Sholl Analysis](#15-snt--sholl-analysis)
-16. [Workflows](#16-workflows)
-17. [Quick Reference: Which Tool for Which Task](#17-quick-reference)
-18. [Plugin Availability](#18-plugin-availability)
+| Question | Where to look |
+|---|---|
+| "How do I count and measure 3D objects?" | §2 3D Objects Counter |
+| "How do I manage a list of 3D ROIs and measure them in batch?" | §3 3D Manager |
+| "Which segmentation method should I use for touching nuclei?" | §4 3D Segmentation, §11 MorphoLibJ watershed |
+| "Which 3D filter should I use (CPU vs GPU)?" | §5 3D Filters |
+| "How do I measure 3D volume, surface, shape?" | §6 3D Shape & Measurement |
+| "How do I compute nearest-neighbour or border-to-border distance?" | §7 3D Distances, §17.2 NND workflow |
+| "Are my objects randomly distributed, clustered, or regular?" | §8 3D Spatial Statistics |
+| "How do I quantify 3D colocalization (pixel or object)?" | §9 Colocalization, §13 Coloc 2, §14 DiAna |
+| "How do I run fast GPU pipelines?" | §12 CLIJ2, §17.2 CLIJ2 pipeline |
+| "How do I analyse skeleton / vasculature / neurite branches?" | §15 AnalyzeSkeleton, §16 Sholl |
+| "Which tool is best for task X?" | §18 Quick Reference |
+| "Is plugin X installed?" | §19 Plugin Availability |
+| "Why did my 3D analysis give wrong numbers?" | §20 Gotchas |
 
 ---
 
-## 1. 3D Objects Counter
+## §1 Term Index (A–Z)
+
+Terms prefixed `3D ...` are bucketed by the first significant word after `3D`.
+
+### 3
+`3D Manager` §3 · `3D Objects Counter` §2 · `3D OC Options` §2 · `3D Viewer` §18, §19
+
+### A
+`adja` §14 · `Adaptive` (filter) §5 · `affineTransform3D` §12 · `AnalyzeSkeleton` §15 · `Analyze Regions 3D` §6 · `Analyze Skeleton (2D/3D)` §15 · `anisotropy` §5, §20 · `averageDistanceOfNClosestNeighborsMap` §12
+
+### B
+`3D Binary Interpolate` §10 · `BIOP JACoP` §9 · `BX / BY / BZ` §2 · `Ball` (element) §5 · `BlackTopHat` §5 · `Borgefors` §7, §11 · `Bounding3D` §3 · `bounding_box` §2
+
+### C
+`3D Centroid` §6 · `3D Close Labels` §10 · `3D Compactness` §6 · `3D ConvexHull` §10 · `C6` (Euler connectivity) §6 · `CLIJ2` §12 · `CLIJ2 Macro Extensions` §12 · `Chamfer Distance Map 3D` §7 · `Classic Watershed` §11 · `Close` (filter) §5 · `Closest` (3D Manager) §3 · `ClosestK` §3 · `Coloc` (3D Manager batch) §3 · `Coloc 2` §13 · `Coloc2` (3D Manager pairwise) §3 · `Colocalization Threshold` §9 · `Compactness` §3, §6 · `Connected Components Labeling` §11 · `connectedComponentsLabelingBox` §12 · `connectedComponentsLabelingDiamond` §12 · `Costes` §13 · `Crofton` §6 · `crop3D` §12 · `Cube` (element) §5 · `centroid` §2 · `centroidsOfLabels` §12 · `centre_of_mass` §2 · `cc` (distance type) §3, §7 · `c1b2 / c2b1` §3, §7
+
+### D
+`3D Density Filter` §10 · `3D Distance Contour` §6 · `3D Distance Map` §7, §17.4 · `3D Distance Map EVF` §7, §10 · `3D Distances` §7 · `DCMax` §3, §6 · `DCMean` §3 · `DCMin` §3, §6 · `DCSD` §3 · `DCAvg` §6 · `DiAna` §14 · `DiAna_Analyse` §14 · `DiAna_Segment` §14 · `Dice coefficient` §12 · `differenceOfGaussian3D` §5, §12 · `Dilation` §5, §11 · `dilateLabels` §12 · `Distance Transform Watershed 3D` §11 · `Dist2` §3 · `distanceMap` §12 · `dista` §14 · `distc` §14 · `dynamic` §11 · `dots_size` §2
+
+### E
+`3D Edge and Symmetry Filter` §5 · `3D Ellipsoid` §6 · `3D Ellipsoid Fitting` §6 · `3D Exclude Edges` §10 · `EDT` §7, §17.4 · `Elli.Center.X/Y/Z` §6 · `Elli.Phi/Theta/Psi` §6 · `Elli.Radius1/2/3` §6 · `Elon1 / Elon2` §3 · `Elongation` §6 · `Erosion` §5, §11 · `erodeLabels` §12 · `Euler angles` §6 · `Exact Euclidean Distance Transform (3D)` §7 · `excludeLabelsOnEdges` §12 · `excludeLabelsOutsideSizeRange` §12 · `ex1c2 / ex2c1` §7 · `Extended Min & Max 3D` §11 · `extendLabelingViaVoronoi` §12 · `extensionRatioMap` §12
+
+### F
+`3D Fast Filters` §5 · `3D Feret` §6 · `3D Fill Holes` §10 · `Feret` §3, §6 · `Feret1` §3 · `Feret2` §3 · `FillStack` §3 · `Fill Holes (Binary/Gray)` §11 · `Flatness` §3, §6
+
+### G
+`G-function` §8 · `Gaussian Blur 3D` §5, §17.1 · `gaussianBlur3D` §5, §12 · `generateDistanceMatrix` §12 · `generateJaccardIndexMatrix` §12 · `generateNNearestNeighborsMatrix` §12 · `generateTouchMatrix` §12 · `Geodesic Distance Map 3D` §7, §17.4 · `Gradient` §5
+
+### H
+`3D Hysteresis Segmentation` §4 · `H-function` §8 · `hardcore_distance` §8 · `Hausdorff` §7
+
+### I
+`3D Intensity Measure` §6 · `3D Interactions` §7 · `3D Iterative Segmentation` §4 · `IntDen` §2, §3 · `Intermodes` §12 · `IsoData` §12
+
+### J
+`jaccardIndex` §12 · `JACoP` §9
+
+### K
+`kclosest` §14 · `Keep Largest Region` §11 · `Kill Borders` §11
+
+### L
+`3D Layers` §8 · `Laplacian` §5 · `Li` §12 · `Li ICQ` §13 · `Load` (Manager3D) §3
+
+### M
+`3D Maxima Finder` §4 · `3D Merge Labels` §10 · `3D Mereotopology` §7 · `3D Mesh Measure (slow)` §6 · `3D MultiColoc` §9 · `M1 / M2` (Manders) §13 · `MaxEntropy` §12 · `Maximum` §5 · `MaximumLocal` §5, §4 · `Maximum 3D...` §5 · `Manager3D` §3 · `Manager3D_AddImage` §3, §17.2 · `Manager3D_Bounding3D` §3 · `Manager3D_Centroid3D` §3, §17.2 · `Manager3D_Close` §3 · `Manager3D_Closest` §3, §17.2 · `Manager3D_ClosestK` §3 · `Manager3D_Coloc` §3, §9 · `Manager3D_Coloc2` §3, §9 · `Manager3D_Count` §3 · `Manager3D_Delete` §3 · `Manager3D_DeselectAll` §3 · `Manager3D_Dist2` §3, §17.2 · `Manager3D_Distance` §3 · `Manager3D_Erase` §3 · `Manager3D_Feret1` §3 · `Manager3D_Feret2` §3 · `Manager3D_FillStack` §3 · `Manager3D_GetName` §3 · `Manager3D_Load` §3 · `Manager3D_MassCenter3D` §3 · `Manager3D_Measure` §3, §17.1 · `Manager3D_Measure3D` §3 · `Manager3D_MonoSelect` §3 · `Manager3D_MultiSelect` §3 · `Manager3D_Quantif` §3, §17.1 · `Manager3D_Quantif3D` §3 · `Manager3D_Rename` §3 · `Manager3D_Reset` §3 · `Manager3D_Save` §3 · `Manager3D_SaveResult` §3, §17.1 · `Manager3D_CloseResult` §3 · `Manager3D_Segment` §3, §17.1 · `Manager3D_Select` §3 · `Manager3D_SelectAll` §3, §17.1 · `Mean` (filter) §5 · `Mean 3D...` §5 · `mean3DBox` §5, §12 · `mean3DSphere` §5, §12 · `meanIntensityMap` §12 · `Measure3D` §3 · `Median` §5 · `Median 3D...` §5 · `median3DBox` §5, §12 · `Minimum` §5 · `Minimum 3D...` §5 · `minimum3DBox` §5, §12 · `Morphological Filters (3D)` §5 · `MorphoLibJ` §11 · `MosaicIA` §8 · `min.` / `max.` (3D OC) §2
+
+### N
+`3D Nuclei Segmentation` §4 · `3D Numbering` §7 · `NbVox` §3 · `Neighbor Analysis` §8 · `nearest neighbour` §7, §17.2 · `nb_evaluations` §8 · `nb_random` §8 · `nb_of_obj._voxels` §2
+
+### O
+`Opening` §5 · `Otsu` §12, §17.1 · `objects` (3D OC flag) §2
+
+### P
+`Pearson's r` §13 · `pattern` (spatial) §8 · `peaks` (DiAna) §14 · `Percentile` §12 · `pixelCountMap` §12 · `pullLabelsToROIManager` §12 · `push` (CLIJ2) §12, §17.2 · `pull` (CLIJ2) §12, §17.2 · `psf` §13
+
+### Q
+`Quantif3D` §3
+
+### R
+`3D Radial` §8 · `3D RDAR` §6 · `RatioVolEll` §3 · `radiusxy / radiusz` §4 · `radius_x_pix / radius_y_pix / radius_z_pix` §5 · `redirect_to` §2 · `Regional Maxima 3D` §5, §11 · `Regional Min & Max 3D` §11 · `Remove Largest Region` §11 · `RenyiEntropy` §12 · `rotate3D` §12 · `r1c2 / r2c1` §3, §7
+
+### S
+`3D Shape` §6 · `3D Simple Segmentation` §4 · `3D SpatialStatistics` §8 · `3D Spots Segmentation` §4 · `3D Surface` §6 · `SDI` §8 · `Shanbhag` §12 · `Sholl Analysis (From Image)...` §16 · `Size Opening 2D/3D` §11 · `Skeletonize (2D/3D)` §15, §17.5 · `Sobel` §5 · `sorensenDiceCoefficient` §12 · `Sphericity` §6 · `Spareness` §6 · `StarDist 3D` §4, §19 · `statisticsOfLabelledPixels` §12 · `Surf` §3 · `SurfaceArea` §6 · `SurfaceAreaSmooth` §6 · `seeds_threshold` §4 · `spots` (DiAna) §14 · `surfaces` (3D OC flag) §2
+
+### T
+`tM1 / tM2` §13 · `thresholdOtsu` (CLIJ2) §12, §17.2 · `TopHat` §5 · `touchingNeighborCountMap` §12 · `Triangle` §12 · `tortuosity` §15
+
+### V
+`3D Volume` §6 · `Variance` §5 · `Variance 3D...` §5 · `Vol` §3, §17.2 · `Volume` §2, §6 · `voronoiOtsuLabeling` §4, §12 · `voxel size` §17.6, §20
+
+### W
+`Watershed` §4, §11 · `WhiteTopHat` §5
+
+### X
+`XM / YM / ZM` §2
+
+### Y
+`Yen` §12
+
+---
+
+## §2 3D Objects Counter
 
 `Plugins > 3D Objects Counter` — counts and measures 3D connected objects.
 
@@ -72,7 +156,7 @@ run("3D Objects Counter", "threshold=128 slice=25 "
 
 ---
 
-## 2. 3D Manager
+## §3 3D Manager
 
 `Plugins > 3D Manager` — central tool for 3D ROI management and measurements.
 Uses `Ext.Manager3D_*()` macro extensions. Call `run("3D Manager");` first.
@@ -191,7 +275,7 @@ for (i = 0; i < nb; i++) {
 
 ---
 
-## 3. 3D Segmentation
+## §4 3D Segmentation
 
 ### 3D ImageJ Suite Segmentation Plugins
 
@@ -232,7 +316,7 @@ run("3D Watershed", "seeds_threshold=10 image_threshold=50 image=raw seeds=seeds
 
 ---
 
-## 4. 3D Filters
+## §5 3D Filters
 
 ### Filter Comparison by Implementation
 
@@ -277,7 +361,7 @@ Elements: `Ball`, `Cube`
 
 ---
 
-## 5. 3D Shape & Measurement Plugins
+## §6 3D Shape & Measurement Plugins
 
 ### 3D ImageJ Suite Standalone Measurement Commands
 
@@ -316,7 +400,7 @@ run("Analyze Regions 3D", "volume surface_area sphericity "
 
 ---
 
-## 6. 3D Distances & Relationships
+## §7 3D Distances & Relationships
 
 ### 3D Distances Plugin
 
@@ -362,7 +446,7 @@ When image_a = image_b: Distance_1 = 0 (self), Distance_2 = nearest neighbor.
 
 ---
 
-## 7. 3D Spatial Statistics
+## §8 3D Spatial Statistics
 
 ### 3D SpatialStatistics
 
@@ -393,7 +477,7 @@ run("3D SpatialStatistics", "pattern=objects reference=mask "
 
 ---
 
-## 8. 3D Colocalization
+## §9 3D Colocalization
 
 ### Object-Based: 3D MultiColoc
 
@@ -422,7 +506,7 @@ Ext.Manager3D_Coloc2(obj1, obj2, pctA, pctB, surfContact);  // specific pair
 
 ---
 
-## 9. 3D Binary Operations
+## §10 3D Binary Operations
 
 | Command | Description |
 |---------|-------------|
@@ -437,7 +521,7 @@ Ext.Manager3D_Coloc2(obj1, obj2, pctA, pctB, surfContact);  // specific pair
 
 ---
 
-## 10. MorphoLibJ 3D
+## §11 MorphoLibJ 3D
 
 ### Connected Components Labeling
 
@@ -478,7 +562,7 @@ run("Extended Min & Max 3D", "operation=[Extended Maxima] dynamic=10 connectivit
 
 ---
 
-## 11. CLIJ2 GPU-Accelerated 3D
+## §12 CLIJ2 GPU-Accelerated 3D
 
 All use `Ext.CLIJ2_*()` syntax. Initialize with:
 ```javascript
@@ -583,7 +667,7 @@ Ext.CLIJ2_clear();
 
 ---
 
-## 12. Coloc 2
+## §13 Coloc 2
 
 `Analyze > Colocalization Analysis > Coloc 2` — pixel-based colocalization on 2D or 3D stacks.
 
@@ -606,7 +690,7 @@ run("Coloc 2", "channel_1=C1-image channel_2=C2-image "
 
 ---
 
-## 13. DiAna
+## §14 DiAna
 
 Object-based 3D colocalization and distance analysis (part of 3D ImageJ Suite).
 
@@ -638,7 +722,7 @@ run("DiAna_Analyse", "img1=C1.tif img2=C2.tif lab1=C1_seg.tif lab2=C2_seg.tif "
 
 ---
 
-## 14. AnalyzeSkeleton
+## §15 AnalyzeSkeleton
 
 `Analyze > Skeleton > Analyze Skeleton (2D/3D)` — analyzes skeleton images for branch/junction metrics.
 
@@ -677,7 +761,7 @@ run("Analyze Skeleton (2D/3D)", "prune=[shortest branch] show display");
 
 ---
 
-## 15. SNT / Sholl Analysis
+## §16 SNT / Sholl Analysis
 
 `Plugins > Neuroanatomy > Sholl` — spherical sampling shells in 3D.
 
@@ -699,9 +783,9 @@ run("Sholl Analysis (From Image)...",
 
 ---
 
-## 16. Workflows
+## §17 Workflows
 
-### Workflow: Segment → Label → Measure → Export
+### §17.1 Workflow: Segment → Label → Measure → Export
 
 ```javascript
 // 1. Pre-process
@@ -726,7 +810,7 @@ Ext.Manager3D_SaveResult("M", "/path/to/geometry.csv");
 Ext.Manager3D_SaveResult("Q", "/path/to/intensity.csv");
 ```
 
-### Workflow: Nearest-Neighbor Distance
+### §17.2 Workflow: Nearest-Neighbor Distance
 
 ```javascript
 run("3D Manager");
@@ -748,7 +832,7 @@ for (i = 0; i < nb; i++) {
 File.close(f);
 ```
 
-### Workflow: Two-Channel Cross-Analysis (DiAna)
+### §17.3 Workflow: Two-Channel Cross-Analysis (DiAna)
 
 ```javascript
 run("DiAna_Segment", "img=C1.tif filter=median rad=1.0 thr=500-100-50000-true-false");
@@ -757,7 +841,7 @@ run("DiAna_Analyse", "img1=C1.tif img2=C2.tif lab1=C1_seg.tif lab2=C2_seg.tif "
   + "coloc distc=1.0 kclosest=3 dista=5.0 measure");
 ```
 
-### Workflow: Cell-to-Surface Distance
+### §17.4 Workflow: Cell-to-Surface Distance
 
 ```javascript
 // 1. Create binary mask of reference surface
@@ -785,7 +869,7 @@ For distance following tissue geometry (around folds), use geodesic distance:
 run("Geodesic Distance Map 3D", "marker=boundary mask=tissue distances=[Borgefors (3,4,5)] output=[32 bits] normalize");
 ```
 
-### Workflow: Skeleton Analysis (Vasculature/Neurites)
+### §17.5 Workflow: Skeleton Analysis (Vasculature/Neurites)
 
 ```javascript
 run("Skeletonize (2D/3D)");
@@ -793,7 +877,7 @@ run("Analyze Skeleton (2D/3D)", "prune=[shortest branch] show display");
 // For neurites: add Sholl analysis from soma center point
 ```
 
-### Workflow: Spatial Randomness Test
+### §17.6 Workflow: Spatial Randomness Test
 
 ```javascript
 // Input: binary mask of reference structure + binary spots of objects
@@ -802,7 +886,7 @@ run("3D SpatialStatistics", "pattern=objects_binary reference=tissue_mask "
 // SDI > 1 = clustered, SDI < 1 = regular
 ```
 
-### Pattern: Check Calibration Before 3D Analysis
+### §17.7 Pattern: Check Calibration Before 3D Analysis
 
 ```javascript
 getVoxelSize(vx, vy, vz, unit);
@@ -814,7 +898,7 @@ run("Properties...", "pixel_width=0.325 pixel_height=0.325 voxel_depth=1.0 unit=
 
 ---
 
-## 17. Quick Reference
+## §18 Quick Reference
 
 | Task | Best Tool | Alternative |
 |------|-----------|-------------|
@@ -836,7 +920,7 @@ run("Properties...", "pixel_width=0.325 pixel_height=0.325 voxel_depth=1.0 unit=
 
 ---
 
-## 18. Plugin Availability
+## §19 Plugin Availability
 
 ### Confirmed Installed
 
@@ -863,20 +947,20 @@ Check availability: `grep -i "diana\|spatial stat" .tmp/commands.md`
 
 ---
 
-## Key Gotchas
+## §20 Key Gotchas
 
-- **Calibration:** Always verify with `getVoxelSize()` before 3D analysis. Wrong calibration invalidates all volume and distance measurements.
-- **Anisotropy:** Set Z filter radii proportional to Z/XY voxel ratio. Typical confocal has 2-5x larger Z steps.
-- **3D Objects Counter self-distance:** When using same image for both A and B, Distance_1 = 0 (self). Use Distance_2 for NND.
-- **3D Manager indexing:** 0-based. Call `run("3D Manager")` before any `Ext.Manager3D_*` functions.
-- **Label image bit depth:** Use 16-bit for up to 65535 objects; 32-bit for more.
-- **CLIJ2 memory:** Always `Ext.CLIJ2_clear()` after GPU processing to free VRAM.
-- **Coloc 2 time series:** Not supported directly; analyze frame by frame.
+- **Calibration:** Always verify with `getVoxelSize()` before 3D analysis. Wrong calibration invalidates all volume and distance measurements (§17.7).
+- **Anisotropy:** Set Z filter radii proportional to Z/XY voxel ratio. Typical confocal has 2-5x larger Z steps (§5).
+- **3D Objects Counter self-distance:** When using same image for both A and B, Distance_1 = 0 (self). Use Distance_2 for NND (§7).
+- **3D Manager indexing:** 0-based. Call `run("3D Manager")` before any `Ext.Manager3D_*` functions (§3).
+- **Label image bit depth:** Use 16-bit for up to 65535 objects; 32-bit for more (§11).
+- **CLIJ2 memory:** Always `Ext.CLIJ2_clear()` after GPU processing to free VRAM (§12).
+- **Coloc 2 time series:** Not supported directly; analyze frame by frame (§13).
 - **Feret computation:** Can be slow for large objects (computes all pairwise distances).
 
 ---
 
-## References
+## §21 References
 
 - Ollion J. et al. (2013). TANGO. Bioinformatics 29(14):1840-1.
 - Gilles J.F. et al. (2017). DiAna. Methods 115:55-64.

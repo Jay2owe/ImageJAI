@@ -3,9 +3,125 @@
 Time-lapse preprocessing, dynamic measurements (FRAP, kymographs, ratiometric),
 event detection (division, death, confluency), tracking, video export.
 
+Covers drift correction (StackReg, HyperStackReg, Correct 3D Drift, SIFT,
+Fast4DReg, Template Matching, Manual), bleach correction (Histogram Matching,
+Simple Ratio, Exponential Fit), FRAP normalization and recovery-curve fitting,
+kymograph generation (Reslice, KymoResliceWide, Multi Kymograph) and velocity
+extraction, TrackMate detectors/trackers, division/death/confluency detection,
+ratiometric and FRET imaging, phototoxicity, multi-position Bio-Formats
+navigation, and annotated video export.
+
+Invoke from the agent:
+`python ij.py macro '<code>'` — run ImageJ macro (.ijm) code.
+`python ij.py script '<code>'` — run Groovy (default), Jython, or JavaScript.
+`python probe_plugin.py "Plugin..."` — discover installed plugin parameters.
+
 ---
 
-## 1. Quick Start
+## §0 Lookup Map — "How do I find X?"
+
+| Question | Where to look |
+|---|---|
+| "Which drift correction method should I pick?" | §3.1 |
+| "How do I do bleach correction?" | §3.2 |
+| "How do I subtract background from a time-lapse?" | §3.3 |
+| "Full preprocessing pipeline in one macro?" | §3.4 |
+| "How do I compute FRAP mobile fraction / t1/2 / D?" | §4 |
+| "Double-normalization formula for FRAP traces?" | §4 |
+| "How do I generate a kymograph and measure velocity?" | §5 |
+| "TrackMate detectors / trackers — which to use?" | §6 |
+| "How do I run TrackMate from a Groovy script?" | §6 |
+| "How do I detect cell division by morphology?" | §7 |
+| "FUCCI phase colour table?" | §7 |
+| "How do I detect cell death (PI/SYTOX)?" | §8 |
+| "How do I measure confluency over time?" | §9 |
+| "How do I extract a single-ROI intensity trace?" | §10 |
+| "How do I compute dF/F0 per pixel?" | §10 |
+| "How do I generate a ratio image / FRET E_FRET?" | §11 |
+| "Signs of phototoxicity and how to minimise?" | §12 |
+| "Nyquist temporal sampling table?" | §12 |
+| "How do I iterate Bio-Formats series (multi-position)?" | §13 |
+| "How do I export an annotated MP4 / AVI?" | §14 |
+| "What's the exact macro command for StackReg / HyperStackReg?" | §15 |
+| "How do I convert a stack to a hyperstack / swap dims?" | §16 |
+| "Why did my macro fail / my data get destroyed?" | §17 |
+
+---
+
+## §1 Term Index (A–Z)
+
+Alphabetical pointer to the section containing each term. Use
+`grep -n '`<term>`' live-cell-timelapse-reference.md` to jump.
+
+### A
+`Analyze Particles` §7, §8, §9 · `Anaphase` §7 · `Annotations (Time Stamper, Scale Bar)` §14, §15 · `Apoptosis` §8 · `AVI export` §14, §15
+
+### B
+`Background subtraction` §3.3, §3.4, §11 · `Batch all positions` §13 · `BIC (model comparison)` §4 · `Bio-Formats Importer` §13 · `Bio-Formats Macro Extensions` §13 · `Bleach Correction` §3.2, §3.4, §15, §17 · `Bleaching severity diagnosis` §17 · `Blebbing` §8, §12
+
+### C
+`Calcium ratiometric (Fura-2)` §11 · `Cellpose (TrackMate detector)` §6 · `Circularity (division indicator)` §7 · `Circularity (phototoxicity indicator)` §12 · `Condensation` §12, §17 · `Confluency` §9 · `Confinement ratio` §6 · `Correct 3D Drift` §3.1, §15 · `Cytokinesis` §7
+
+### D
+`dF/F0 (relative fluorescence)` §10 · `Decision tree` §2 · `Descriptor-based registration` §3.1 · `Detector (TrackMate)` §6 · `Diffusion coefficient (D)` §4 · `Displacement (track)` §6 · `Division detection` §2, §7 · `DoG (TrackMate detector)` §6 · `Doubling time` §9 · `Drift correction` §3.1, §15 · `Duplicate (before StackReg)` §3.1, §17
+
+### E
+`E_FRET` §11 · `Exponential Fit (bleach)` §3.2, §15 · `Exporting TrackMate results` §6
+
+### F
+`F_double / F_fullscale / F_norm` §4 · `Fast4DReg` §3.1, §15 · `FFmpeg (post-processing)` §14 · `FFT frequency analysis` §10 · `Find best focus per timepoint` §17 · `Flatten overlay` §14 · `Focus drift` §17 · `FRAP` §2, §4, §15 · `FRAP Tools plugin` §4, §15 · `Frame interval (Stack.setFrameInterval)` §2 · `FRET` §11, §15 · `FUCCI reporters` §7
+
+### G
+`Gap closing (tracker)` §6
+
+### H
+`Half-time (t1/2)` §4 · `Histogram Matching (bleach)` §3.2, §3.4, §15, §17 · `HyperStackReg` §3.1, §15 · `Hyperstack (Stack to Hyperstack)` §2, §16, §17
+
+### I
+`Image Sequence export` §15 · `Initial checks` §2 · `Intensity fluctuations` §17
+
+### K
+`Kalman (tracker)` §6 · `Kymograph` §2, §5, §15 · `KymoResliceWide` §5, §15
+
+### L
+`LAP (Jaqaman) tracker` §6 · `LINKING_MAX_DISTANCE` §6 · `LoG (TrackMate detector)` §6 · `LUT (Fire / mpl-inferno)` §10, §11
+
+### M
+`Manual Drift Correction` §3.1, §15 · `Manual Tracking` §15 · `Mask (TrackMate detector)` §6 · `MAX_FRAME_GAP` §6 · `Metaphase` §7 · `Mobile fraction (Mf)` §4 · `MP4 (FFmpeg)` §14, §15 · `MRI Wound Healing Tool` §9 · `MSD (mean squared displacement)` §6 · `MTrackJ` §15 · `Multi Kymograph` §5, §15 · `Multi Measure (ROI Manager)` §16 · `Multi-position` §13 · `Multi-ROI traces` §10
+
+### N
+`Nearest Neighbor (tracker)` §6 · `Necrosis` §8 · `Normalization formulas (FRAP)` §4 · `Nyquist temporal sampling` §12
+
+### O
+`Optimized (Phase-Corr) drift` §3.1 · `Otsu threshold (confluency / death)` §8, §9 · `Overlap (tracker)` §6
+
+### P
+`Peak detection` §10 · `Per-frame ROI background` §3.3 · `Phototoxicity` §12 · `PI / SYTOX` §8 · `Plot Z-axis Profile` §10 · `Plugin Quick Reference` §15 · `Preprocessing pipeline (complete)` §3.4 · `Probing plugins` §3.1 · `Prometaphase` §7 · `Python curve fitting (scipy)` §4 · `Python trace analysis utilities` §16
+
+### Q
+`Quick Start` §2
+
+### R
+`Ratio image generation` §11 · `Ratio Profiler` §15 · `Ratiometric imaging` §11 · `Recovery curve models (FRAP)` §4 · `Reference region correction` §3.2 · `Re-order Hyperstack` §16 · `Reslice` §5, §15 · `RGB Color (side-by-side)` §14 · `RiFRET` §11, §15 · `Rolling ball` §3.3 · `Rounding (mitotic)` §7, §12
+
+### S
+`Scale Bar` §14, §15 · `scipy curve_fit` §4 · `Side-by-side comparison` §14 · `SIFT Alignment` §3.1, §15 · `Simple LAP (tracker)` §6 · `Simple Ratio (bleach)` §3.2, §15, §17 · `Sliding paraboloid` §3.3 · `Soumpasis (D formula)` §4 · `SPLITTING_MAX_DISTANCE` §7 · `Stack to Hyperstack` §2, §16 · `Stack.setFrameInterval` §2 · `StackReg` §3.1, §3.4, §15, §17 · `StarDist (TrackMate detector)` §6 · `Static background image` §3.3 · `Subtract Background` §3.3, §3.4, §11
+
+### T
+`Template Matching` §3.1 · `Temporal-Color Code` §14 · `Temporal intensity analysis` §10 · `Temporal median subtraction` §3.3 · `Temporal statistics maps (Z Project)` §16 · `Threshold (TrackMate detector)` §6 · `Time Series Analyzer` §15 · `Time Stamper` §14, §15 · `Track length` §6 · `Track metrics` §6 · `Tracker (TrackMate)` §6 · `TrackMate` §2, §6, §15 · `TrackMate + division detection` §7 · `Trace extraction (FRAP)` §4 · `Translate (manual drift)` §3.1
+
+### V
+`Velocity (kymograph)` §5 · `Video export` §14, §15
+
+### W
+`Whole-image dF/F0 map` §10 · `Wound healing` §9, §15 · `Wound_healing_size_tool` §9
+
+### Z
+`Z Project` §3.3, §10, §16 · `Z Project (Max / Min / StdDev)` §16
+
+---
+
+## §2 Quick Start
 
 ### Minimal pipeline
 ```
@@ -39,11 +155,11 @@ Death detection? → Section 7
 
 ---
 
-## 2. Time-Lapse Preprocessing
+## §3 Time-Lapse Preprocessing
 
 Apply in order: (1) drift correction, (2) bleach correction, (3) background subtraction.
 
-### 2.1 Drift Correction
+### §3.1 Drift Correction
 
 | Method | Dimensions | Transform | Best For |
 |--------|-----------|-----------|----------|
@@ -103,7 +219,7 @@ python ij.py macro '
 - First frame is reference by default
 - Probe unfamiliar plugins: `python probe_plugin.py "HyperStackReg"`
 
-### 2.2 Bleach Correction
+### §3.2 Bleach Correction
 
 | Method | When to Use | Gotcha |
 |--------|-------------|--------|
@@ -139,7 +255,7 @@ python ij.py macro '
 
 **Reference region correction** — if a region has constant fluorescence, use it as reference to derive per-frame correction factors.
 
-### 2.3 Background Subtraction
+### §3.3 Background Subtraction
 
 | Method | When to Use | Key Parameter |
 |--------|-------------|---------------|
@@ -165,7 +281,7 @@ python ij.py macro '
 '
 ```
 
-### 2.4 Complete Preprocessing Pipeline
+### §3.4 Complete Preprocessing Pipeline
 
 ```bash
 python ij.py macro '
@@ -179,7 +295,7 @@ python ij.py macro '
 
 ---
 
-## 3. FRAP (Fluorescence Recovery After Photobleaching)
+## §4 FRAP (Fluorescence Recovery After Photobleaching)
 
 ### Key outputs
 - **Mobile fraction (Mf)** — proportion of molecules free to move
@@ -286,7 +402,7 @@ python ij.py macro 'run("FRAP Tools");'
 
 ---
 
-## 4. Kymograph Analysis
+## §5 Kymograph Analysis
 
 A kymograph represents motion along a 1D path over time: distance on one axis, time on the other.
 
@@ -329,7 +445,7 @@ Draw vertical line through periodic trace, get profile, count threshold crossing
 
 ---
 
-## 5. Cell Tracking with TrackMate
+## §6 Cell Tracking with TrackMate
 
 ### Detector comparison
 
@@ -424,7 +540,7 @@ python ij.py macro 'selectWindow("Track statistics"); saveAs("Results", "/path/t
 
 ---
 
-## 6. Cell Division Analysis
+## §7 Cell Division Analysis
 
 ### Morphological indicators
 
@@ -464,7 +580,7 @@ Measure red/green ratio per cell over time: ratio >1 = S/G2, <1 = G1.
 
 ---
 
-## 7. Cell Death Detection
+## §8 Cell Death Detection
 
 ### Morphological indicators
 
@@ -493,7 +609,7 @@ python ij.py macro '
 
 ---
 
-## 8. Confluency Analysis
+## §9 Confluency Analysis
 
 ### Threshold-based confluency
 ```bash
@@ -530,7 +646,7 @@ python ij.py macro 'run("Wound healing size tool");'
 
 ---
 
-## 9. Temporal Intensity Analysis
+## §10 Temporal Intensity Analysis
 
 ### Single ROI trace
 ```bash
@@ -615,7 +731,7 @@ Create 1-row image from detrended signal, run FFT. Dominant peak position / (nFr
 
 ---
 
-## 10. Ratiometric & FRET Imaging
+## §11 Ratiometric & FRET Imaging
 
 ### Ratio image generation
 ```bash
@@ -651,7 +767,7 @@ Ratio = F340/F380. Higher ratio = higher [Ca2+]. Background subtract both channe
 
 ---
 
-## 11. Phototoxicity & Imaging Guidance
+## §12 Phototoxicity & Imaging Guidance
 
 ### Signs of phototoxicity
 
@@ -687,7 +803,7 @@ Ratio = F340/F380. Higher ratio = higher [Ca2+]. Background subtract both channe
 
 ---
 
-## 12. Multi-Position Time-Lapse
+## §13 Multi-Position Time-Lapse
 
 ### Bio-Formats series navigation
 ```bash
@@ -726,7 +842,7 @@ python ij.py macro '
 
 ---
 
-## 13. Video Export & Annotated Movies
+## §14 Video Export & Annotated Movies
 
 ### Export formats
 
@@ -776,57 +892,7 @@ Early frames → cool colours, late → warm. Shows migration paths and dynamic 
 
 ---
 
-## 14. Common Problems & Solutions
-
-### Focus drift
-```bash
-# Find best focus per timepoint (highest variance = sharpest)
-python ij.py macro '
-  getDimensions(w, h, c, z, t);
-  for (f = 1; f <= t; f++) {
-      bestZ = 1; bestVar = 0;
-      for (zz = 1; zz <= z; zz++) {
-          Stack.setPosition(1, zz, f);
-          getStatistics(area, mean, min, max, stdDev);
-          if (stdDev*stdDev > bestVar) { bestVar = stdDev*stdDev; bestZ = zz; }
-      }
-      print("Frame " + f + ": best z=" + bestZ);
-  }
-'
-```
-Prevention: pre-equilibrate 1+ hour, hardware autofocus (PFS/Definite Focus).
-
-### Bleaching severity diagnosis
-```bash
-python ij.py macro '
-  nF = nSlices;
-  setSlice(1); getStatistics(area, mean1);
-  setSlice(nF); getStatistics(area, meanN);
-  bleachPct = (1 - meanN/mean1) * 100;
-  print("Bleaching: " + d2s(bleachPct, 1) + "%");
-  if (bleachPct > 50) print("Severe — consider reducing excitation");
-  else if (bleachPct > 20) print("Moderate — Histogram Matching recommended");
-  else print("Mild — Simple Ratio typically sufficient");
-'
-```
-
-### Intensity fluctuations (condensation/temperature)
-Large frame-to-frame changes (>5%) suggest condensation or temperature cycling. Pre-equilibrate, use heated lid.
-
-### Common macro errors
-
-| Error | Fix |
-|-------|-----|
-| "No image open" | Check state, reopen |
-| "Not a stack" | Verify frame count >1 |
-| "Not a hyperstack" | Convert with Stack to Hyperstack |
-| "Selection required" | Create ROI first |
-| "Out of memory" | Close other images, increase JVM memory |
-| "Plugin not found" | Check .tmp/commands.md |
-
----
-
-## 15. Plugin Quick Reference
+## §15 Plugin Quick Reference
 
 ### Drift Correction
 
@@ -881,7 +947,7 @@ Large frame-to-frame changes (>5%) suggest condensation or temperature cycling. 
 
 ---
 
-## Appendix: Hyperstack Dimension Handling
+## §16 Appendix: Hyperstack Dimension Handling
 
 ```bash
 # Get/set dimensions
@@ -919,3 +985,53 @@ python ij.py macro 'run("Z Project...", "projection=[Min Intensity]");'       # 
 
 ### Python trace analysis utilities
 Use `load_traces()` to parse ImageJ Results CSV, `find_peaks()` for event detection (threshold at mean+SD), `compute_msd()` + `classify_motion()` for track analysis (alpha >1.5 = directed, 0.8-1.5 = diffusion, <0.8 = confined).
+
+---
+
+## §17 Common Problems & Solutions
+
+### Focus drift
+```bash
+# Find best focus per timepoint (highest variance = sharpest)
+python ij.py macro '
+  getDimensions(w, h, c, z, t);
+  for (f = 1; f <= t; f++) {
+      bestZ = 1; bestVar = 0;
+      for (zz = 1; zz <= z; zz++) {
+          Stack.setPosition(1, zz, f);
+          getStatistics(area, mean, min, max, stdDev);
+          if (stdDev*stdDev > bestVar) { bestVar = stdDev*stdDev; bestZ = zz; }
+      }
+      print("Frame " + f + ": best z=" + bestZ);
+  }
+'
+```
+Prevention: pre-equilibrate 1+ hour, hardware autofocus (PFS/Definite Focus).
+
+### Bleaching severity diagnosis
+```bash
+python ij.py macro '
+  nF = nSlices;
+  setSlice(1); getStatistics(area, mean1);
+  setSlice(nF); getStatistics(area, meanN);
+  bleachPct = (1 - meanN/mean1) * 100;
+  print("Bleaching: " + d2s(bleachPct, 1) + "%");
+  if (bleachPct > 50) print("Severe — consider reducing excitation");
+  else if (bleachPct > 20) print("Moderate — Histogram Matching recommended");
+  else print("Mild — Simple Ratio typically sufficient");
+'
+```
+
+### Intensity fluctuations (condensation/temperature)
+Large frame-to-frame changes (>5%) suggest condensation or temperature cycling. Pre-equilibrate, use heated lid.
+
+### Common macro errors
+
+| Error | Fix |
+|-------|-----|
+| "No image open" | Check state, reopen |
+| "Not a stack" | Verify frame count >1 |
+| "Not a hyperstack" | Convert with Stack to Hyperstack |
+| "Selection required" | Create ROI first |
+| "Out of memory" | Close other images, increase JVM memory |
+| "Plugin not found" | Check .tmp/commands.md |

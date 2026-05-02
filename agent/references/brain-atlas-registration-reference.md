@@ -4,9 +4,97 @@ Register 2D histological brain sections to standardised atlases (Allen CCFv3, Wa
 for reproducible, region-specific quantification. Primary tool: ABBA in Fiji, with
 QuPath for downstream analysis.
 
+Sources: ABBA (`biop.epfl.ch/Fiji_ABBA.html`), Allen CCFv3 (`atlas.brain-map.org`),
+BigWarp (`imagej.net/plugins/bigwarp`), QuPath (`qupath.github.io`), BrainGlobe
+(`brainglobe.info`), Elastix (`elastix.lumc.nl`).
+
+Invoke from the agent:
+`python ij.py macro '<code>'` — run ImageJ macro (.ijm) code.
+`python ij.py script '<code>'` — run Groovy (default), Jython, or JavaScript.
+
 ---
 
-## 1. Quick Start
+## §0 Lookup Map — "How do I find X?"
+
+| Question | Where to look |
+|---|---|
+| "How do I register a section to Allen CCFv3?" | §2, §5 |
+| "What are bregma coordinates for SCN?" | §7.1, §7.3 |
+| "How do I install ABBA / elastix?" | §4 |
+| "What's the ABBA registration workflow?" | §5 |
+| "Allen ID for SCN / CA1 / hippocampus?" | §8.2, §8.3, §8.4 |
+| "How do I identify a coronal level by landmarks?" | §7.2 |
+| "Which tool: ABBA vs brainreg vs BigWarp?" | §9 |
+| "How do I quantify per region after registration?" | §6 |
+| "Can the agent automate ABBA?" | §3, §11 |
+| "What do I cite for ABBA / CCFv3 / elastix?" | §12 |
+| "Why did my registration fail?" | §13 |
+| "Hippocampal subfields at a glance?" | §7.4, §8.4 |
+
+---
+
+## §1 Term Index (A–Z)
+
+Alphabetical pointer to the section containing each term. Use
+`grep -n '`<term>`' brain-atlas-registration-reference.md` to jump.
+
+### A
+`ABBA` §2, §4, §5, §9, §12 · `Affine (Elastix)` §5.3 · `Allen CCFv3` §3, §8, §12 · `Anterior commissure` §7.1, §7.2 · `Aqueduct` §7.2 · `ARH (Arcuate)` §8.3 · `AHN (Anterior hypothalamic)` §8.3 · `AP (bregma AP)` §3, §7.1
+
+### B
+`Batch registration` §5.4 · `Bio-Formats Importer` §5.1 · `BigWarp` §3, §5.3, §9, §12 · `BigDataViewer (BDV)` §4.1, §13 · `BIOP` §2, §4.1 · `brainglobe` §8.5, §12 · `brainreg` §9 · `Bregma` §3, §7.1, §7.2
+
+### C
+`CA1 / CA2 / CA3` §7.4, §8.2, §8.4, §12 · `CB (Cerebellum)` §8.1 · `CCFv3` §3, §8, §12 · `Cell detection per region` §6.1 · `Cerebrum (CH)` §8.1 · `ClearMap` §9 · `Coronal landmarks` §7.2 · `Corpus callosum` §7.2
+
+### D
+`DAPI (registration channel)` §5.1, §13 · `DeepSlice` §3, §5.2, §9, §12 · `DG (Dentate gyrus)` §7.4, §8.2, §8.4 · `DMH` §8.3
+
+### E
+`Elastix` §3, §4.2, §5.3, §12 · `ENTl / ENTm (Entorhinal)` §8.2, §8.4 · `Export (Regions to QuPath / ImageJ)` §5.5
+
+### F
+`Fiji Update Sites` §4.1
+
+### H
+`Hippocampal formation (HPF)` §8.1 · `Hippocampal subfields` §7.4, §8.4 · `Hypothalamus (HY)` §8.1, §8.3
+
+### I
+`IHC-DAB workflow` §10.1 · `Installation status` §4.3
+
+### L
+`Landmarks (coronal level)` §7.2 · `Lateral ventricle` §7.2 · `LHA` §8.3
+
+### M
+`MB (Midbrain)` §8.1 · `ME (Median eminence)` §8.3 · `Methods template (citation)` §12 · `Mouse bregma coordinates` §7.1 · `Multi Measure (per-region)` §6.2, §11
+
+### O
+`Olfactory bulb` §7.1 · `Ontology (Allen)` §3, §8 · `Optic chiasm / tract` §7.1, §7.2
+
+### P
+`Pipeline (agent / human split)` §3 · `Prefrontal cortex` §7.1 · `PTBIOP` §4.1, §4.3 · `PVH / PVN` §7.1, §7.3, §8.2, §8.3 · `Python post-processing` §6.3
+
+### Q
+`QuPath` §2, §5.5, §6.1, §11, §12
+
+### R
+`Register > Elastix > Affine / Spline` §5.3 · `ROI Manager (post-export)` §6.2
+
+### S
+`SCH (SCN)` §7.1, §7.3, §8.2, §8.3, §13 · `SCN identification` §7.3 · `SCN-specific workflow` §10.3 · `Section positioning` §5.2 · `Set and Check Wrappers` §4.2 · `Set Measurements` §6.2 · `Slice positioning` §5.2 · `SO (Supraoptic)` §7.1, §8.2, §8.3 · `Spline (Elastix)` §5.3 · `StarDist (per region)` §10.2, §11 · `Striatum` §7.1 · `SUB (Subiculum)` §7.4, §8.4 · `Substantia nigra` §7.1
+
+### T
+`Tau/Amyloid per region` §10.1 · `TH (Thalamus)` §7.1, §8.1 · `Third ventricle` §7.2, §7.3 · `Transform file (export)` §5.5 · `Transformix` §4.2
+
+### V
+`VMH` §8.3
+
+### W
+`Watershed Cell Detection` §6.1 · `Waxholm` header · `Whole slide images (WSI)` §13
+
+---
+
+## §2 Quick Start
 
 ```
 1. Fiji → Plugins > BIOP > Atlas > ABBA - Start
@@ -23,7 +111,7 @@ grep -i "abba\|atlas.*start" .tmp/commands.md
 
 ---
 
-## 2. Core Concepts
+## §3 Core Concepts
 
 | Term | Definition |
 |------|-----------|
@@ -48,9 +136,9 @@ ABBA registration is **interactive** — cannot be fully automated via macro.
 
 ---
 
-## 3. Installation & Setup
+## §4 Installation & Setup
 
-### 3.1 Fiji Update Sites
+### §4.1 Fiji Update Sites
 
 | Update Site | Purpose |
 |------------|---------|
@@ -61,14 +149,14 @@ ABBA registration is **interactive** — cannot be fully automated via macro.
 
 Enable via `Help > Update... > Manage Update Sites`, then restart Fiji.
 
-### 3.2 Elastix
+### §4.2 Elastix
 
 External binary (not a Fiji plugin):
 1. Download from https://elastix.lumc.nl/
 2. Extract (e.g., `C:\elastix`)
 3. In Fiji: `Plugins > BIOP > Set and Check Wrappers` → set paths to `elastix.exe` and `transformix.exe`
 
-### 3.3 Current Installation Status
+### §4.3 Current Installation Status
 
 - ABBA JARs present but menu commands may not appear — re-enable PTBIOP
 - `elastix_registration_server-0.0.0-STUB.jar` — **STUB only**, elastix not installed
@@ -77,9 +165,9 @@ External binary (not a Fiji plugin):
 
 ---
 
-## 4. ABBA Registration Workflow
+## §5 ABBA Registration Workflow
 
-### 4.1 Image Preparation (agent-automatable)
+### §5.1 Image Preparation (agent-automatable)
 
 ```bash
 python ij.py macro 'run("Bio-Formats Importer", "open=/path/to/section.nd2 color_mode=Composite");'
@@ -91,11 +179,11 @@ python ij.py capture brain_section_overview
 
 **Checklist:** image opens, channels identified (DAPI for registration), no DAPI saturation, pixel size calibrated, orientation correct.
 
-### 4.2 Slice Positioning
+### §5.2 Slice Positioning
 
-Each slice must be placed at its correct AP position. Use anatomical landmarks (Section 6) or DeepSlice (automated, typically within 100–200 um accuracy).
+Each slice must be placed at its correct AP position. Use anatomical landmarks (§7) or DeepSlice (automated, typically within 100–200 um accuracy).
 
-### 4.3 Registration Steps
+### §5.3 Registration Steps
 
 | Step | Action | Time |
 |------|--------|------|
@@ -105,11 +193,11 @@ Each slice must be placed at its correct AP position. Use anatomical landmarks (
 
 **Always affine first, then spline.** Spline alone produces poor results.
 
-### 4.4 Batch Registration
+### §5.4 Batch Registration
 
 Select all slices (Ctrl+A) → run Affine on all → run Spline on all → review each, BigWarp-correct failures (~5–10 typically need fixing). ~30–60 min for 80 sections.
 
-### 4.5 Export
+### §5.5 Export
 
 | Target | Method |
 |--------|--------|
@@ -119,9 +207,9 @@ Select all slices (Ctrl+A) → run Affine on all → run Spline on all → revie
 
 ---
 
-## 5. Post-Registration Quantification
+## §6 Post-Registration Quantification
 
-### 5.1 In QuPath
+### §6.1 In QuPath
 
 **Cell detection per region:**
 ```groovy
@@ -152,7 +240,7 @@ for (ann in getAnnotationObjects()) {
 writer.close()
 ```
 
-### 5.2 In ImageJ (via ROI Manager)
+### §6.2 In ImageJ (via ROI Manager)
 
 ```bash
 python ij.py macro '
@@ -164,7 +252,7 @@ python ij.py results
 python auditor.py
 ```
 
-### 5.3 Python Post-Processing
+### §6.3 Python Post-Processing
 
 ```python
 import pandas as pd
@@ -183,9 +271,9 @@ for region in df["Region"].unique():
 
 ---
 
-## 6. Neuroanatomy Quick Reference
+## §7 Neuroanatomy Quick Reference
 
-### 6.1 Bregma Coordinates (Mouse)
+### §7.1 Bregma Coordinates (Mouse)
 
 | Structure | Bregma (AP, mm) | Notes |
 |-----------|----------------|-------|
@@ -202,7 +290,7 @@ for region in df["Region"].unique():
 | Substantia nigra | -2.9 to -3.6 | Ventral midbrain |
 | Cerebellum | -5.5 to -7.5 | Most posterior |
 
-### 6.2 Landmarks for Coronal Level Identification
+### §7.2 Landmarks for Coronal Level Identification
 
 | Landmark | What to look for | Bregma level |
 |----------|-----------------|--------------|
@@ -214,7 +302,7 @@ for region in df["Region"].unique():
 | Optic chiasm/tract | Midline (chiasm) → lateral (tract) | -0.1 to -2.0 |
 | Aqueduct | Replaces 3V at midbrain level | -3.0 to -5.0 |
 
-### 6.3 SCN Identification
+### §7.3 SCN Identification
 
 ```
 CORONAL at bregma ~ -0.46 mm
@@ -233,7 +321,7 @@ CORONAL at bregma ~ -0.46 mm
     └───────────────────┘
 ```
 
-### 6.4 Hippocampal Subfields
+### §7.4 Hippocampal Subfields
 
 | Subfield | Identification | Cell layer |
 |----------|---------------|------------|
@@ -245,9 +333,9 @@ CORONAL at bregma ~ -0.46 mm
 
 ---
 
-## 7. Allen CCFv3 Ontology
+## §8 Allen CCFv3 Ontology
 
-### 7.1 Major Divisions
+### §8.1 Major Divisions
 
 | ID | Abbrev | Name | Key sub-regions |
 |----|--------|------|-----------------|
@@ -258,7 +346,7 @@ CORONAL at bregma ~ -0.46 mm
 | 313 | MB | Midbrain | Colliculi, SN, VTA |
 | 512 | CB | Cerebellum | Molecular, Purkinje, granular layers |
 
-### 7.2 Lab-Relevant Regions
+### §8.2 Lab-Relevant Regions
 
 | Allen ID | Abbrev | Name | Relevance |
 |---------|--------|------|-----------|
@@ -270,7 +358,7 @@ CORONAL at bregma ~ -0.46 mm
 | 726 | DG | Dentate gyrus | Neurogenesis |
 | 909 | ENT | Entorhinal cortex | Earliest AD cortical pathology |
 
-### 7.3 Hypothalamic Nuclei (Complete)
+### §8.3 Hypothalamic Nuclei (Complete)
 
 | Allen ID | Abbrev | Name | Function |
 |---------|--------|------|----------|
@@ -284,7 +372,7 @@ CORONAL at bregma ~ -0.46 mm
 | 88 | AHN | Anterior hypothalamic nucleus | Thermoregulation |
 | 599 | ME | Median eminence | Neuroendocrine secretion |
 
-### 7.4 Hippocampal Subfields
+### §8.4 Hippocampal Subfields
 
 | Allen ID | Abbrev | Name | Layers |
 |---------|--------|------|--------|
@@ -296,7 +384,7 @@ CORONAL at bregma ~ -0.46 mm
 | 909 | ENTl | Entorhinal (lateral) | Layers II–VI |
 | 918 | ENTm | Entorhinal (medial) | Layers II–VI |
 
-### 7.5 Programmatic Access
+### §8.5 Programmatic Access
 
 ```python
 # brainglobe (recommended)
@@ -311,7 +399,7 @@ scn_mask = atlas.get_structure_mask("SCH")
 
 ---
 
-## 8. Alternative Registration Tools
+## §9 Alternative Registration Tools
 
 | Tool | Type | Automation | When to use |
 |------|------|-----------|-------------|
@@ -329,9 +417,9 @@ scn_mask = atlas.get_structure_mask("SCH")
 
 ---
 
-## 9. Common Lab Workflows
+## §10 Common Lab Workflows
 
-### 9.1 Tau/Amyloid per Brain Region (IHC-DAB)
+### §10.1 Tau/Amyloid per Brain Region (IHC-DAB)
 
 ```
 1. [AGENT] Open section, colour deconvolution (H-DAB)
@@ -340,7 +428,7 @@ scn_mask = atlas.get_structure_mask("SCH")
 4. [PYTHON] Compare area fraction between genotypes
 ```
 
-### 9.2 Cell Counting per Region (IF)
+### §10.2 Cell Counting per Region (IF)
 
 ```
 1. [AGENT] Open, split channels, identify DAPI + marker
@@ -349,31 +437,13 @@ scn_mask = atlas.get_structure_mask("SCH")
 4. [PYTHON] Cell density (cells/mm^2) per region, compare groups
 ```
 
-### 9.3 SCN-Specific (No ABBA Needed)
+### §10.3 SCN-Specific (No ABBA Needed)
 
 SCN is small and easily identified manually — full atlas registration is optional. See `scn-analysis-reference.md` for manual ROI workflows.
 
 ---
 
-## 10. Tips & Gotchas
-
-| Issue | Guidance |
-|-------|----------|
-| DAPI quality | Registration aligns DAPI to atlas Nissl — weak/saturated DAPI = poor registration |
-| Tissue damage | Tears/folds cause local failures — use BigWarp landmarks around damaged areas |
-| Wrong bregma level | Use anatomical landmarks (Section 6.2) or DeepSlice |
-| Skip affine → spline only | Always affine first |
-| Not checking visually | Review every slice after registration |
-| Non-DAPI for registration | Must use DAPI/autofluorescence (matches Nissl) |
-| Atlas as ground truth | Boundaries are approximate — report at appropriate hierarchy level |
-| Mixed left/right hemispheres | Register consistently or analyse separately |
-| Atlas granularity | Too fine + small N inflates multiple comparisons without insight |
-| Large files (1–10 GB WSI) | ABBA uses BDV (lazy loading); QuPath handles WSI better than ImageJ |
-| Allen CCFv3 SCN limitation | Does NOT subdivide into dorsal/ventral — must do manually |
-
----
-
-## 11. Agent Capabilities
+## §11 Agent Capabilities
 
 | Step | Agent can do? | How |
 |------|-------------|-----|
@@ -387,7 +457,7 @@ SCN is small and easily identified manually — full atlas registration is optio
 
 ---
 
-## 12. Reporting & Citations
+## §12 Reporting & Citations
 
 **Methods template:** "Sections registered to Allen CCFv3 [Wang 2020] using ABBA [Chiaruttini 2022] with elastix [Klein 2010] affine + B-spline transforms and BigWarp [Bogovic 2016] correction where needed. Regions exported to QuPath [Bankhead 2017] for quantification."
 
@@ -400,3 +470,21 @@ SCN is small and easily identified manually — full atlas registration is optio
 | QuPath | Bankhead P et al. (2017) *Sci Rep* 7:16878 |
 | DeepSlice | Carey H et al. (2023) *Nat Commun* 14:5884 |
 | BrainGlobe | Claudi F et al. (2020) *JOSS* 5(54):2668 |
+
+---
+
+## §13 Tips & Gotchas
+
+| Issue | Guidance |
+|-------|----------|
+| DAPI quality | Registration aligns DAPI to atlas Nissl — weak/saturated DAPI = poor registration |
+| Tissue damage | Tears/folds cause local failures — use BigWarp landmarks around damaged areas |
+| Wrong bregma level | Use anatomical landmarks (§7.2) or DeepSlice |
+| Skip affine → spline only | Always affine first |
+| Not checking visually | Review every slice after registration |
+| Non-DAPI for registration | Must use DAPI/autofluorescence (matches Nissl) |
+| Atlas as ground truth | Boundaries are approximate — report at appropriate hierarchy level |
+| Mixed left/right hemispheres | Register consistently or analyse separately |
+| Atlas granularity | Too fine + small N inflates multiple comparisons without insight |
+| Large files (1–10 GB WSI) | ABBA uses BDV (lazy loading); QuPath handles WSI better than ImageJ |
+| Allen CCFv3 SCN limitation | Does NOT subdivide into dorsal/ventral — must do manually |

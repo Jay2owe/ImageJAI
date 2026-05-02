@@ -1,10 +1,123 @@
 # Image Registration & Stitching Reference
 
-API reference for registration/stitching in Fiji and Python.
+API reference for registration/stitching in Fiji and Python. Covers
+Grid/Collection + Pairwise Stitching (Preibisch), StackReg/TurboReg
+(BIG, EPFL), Linear Stack Alignment with SIFT (mpicbg), bUnwarpJ
+(elastic B-spline), BigWarp (landmark TPS via BigDataViewer),
+Correct 3D Drift, Register Virtual Stack Slices, Descriptor-based
+Registration, MIST (NIST large-grid stitching), CLIJ2 GPU transforms,
+scikit-image (`phase_cross_correlation`, `optical_flow_*`, transforms,
+ORB+RANSAC), SimpleITK (intensity-based multi-resolution, B-spline,
+Demons), OpenCV (SIFT/ORB/AKAZE, findHomography, estimateAffine2D,
+Stitcher), and pystackreg (Python port of StackReg/TurboReg).
+
+Sources: Fiji/ImageJ plugin dialogs and menus, `imagej.net/plugins/`,
+scikit-image docs (`scikit-image.org`), SimpleITK docs
+(`simpleitk.readthedocs.io`), OpenCV docs (`docs.opencv.org`),
+pystackreg docs (`pystackreg.readthedocs.io`).
+
+Invoke from the agent:
+`python ij.py macro '<code>'` — run ImageJ macro (.ijm) code.
+`python ij.py script '<code>'` — run Groovy (default), Jython, or JavaScript.
+Python (scikit-image / SimpleITK / OpenCV / pystackreg) runs outside the
+Fiji JVM using the agent's Python environment.
 
 ---
 
-## 1. Grid/Collection Stitching
+## §0 Lookup Map — "How do I find X?"
+
+| Question | Where to look |
+|---|---|
+| "How do I stitch a tile grid?" | §2 (Grid/Collection), §17 (MIST for >50 tiles) |
+| "How do I stitch exactly two images?" | §3 Pairwise Stitching |
+| "How do I register a time-lapse stack?" | §4 StackReg/TurboReg, §16 pystackreg, §5 SIFT |
+| "How do I correct 3D drift in a hyperstack?" | §8 Correct 3D Drift |
+| "How do I do elastic / non-rigid registration in Fiji?" | §6 bUnwarpJ |
+| "How do I do landmark-based registration with a GUI?" | §7 BigWarp |
+| "How do I register serial sections from a directory?" | §9 Register Virtual Stack Slices |
+| "How do I register bead / spot datasets?" | §10 Descriptor-based Registration |
+| "What Python options are there for registration?" | §11–§16 (scikit-image, SimpleITK, OpenCV, pystackreg) |
+| "How do I use the GPU for registration?" | §18 CLIJ2 |
+| "Which method fits my problem?" | §20 Decision Tree |
+| "How do I register multi-channel data?" | §21 Multi-Channel Registration Strategy |
+| "How do I parse TileConfiguration / move transforms between Fiji and Python?" | §22 Cross-Tool Workflows |
+| "Which plugins are installed?" | §23 Installed Plugin Inventory |
+| "Why did my registration fail / produce black borders / break bit depth?" | §24 Gotchas |
+
+---
+
+## §1 Term Index (A–Z)
+
+Alphabetical pointer to the section containing each method, plugin, or
+concept. Use `grep -n '<term>' registration-stitching-reference.md`
+to jump.
+
+### A
+`absolute_displacement_threshold` §2 · `adaptCoefficientsMacro` §6 · `Affine (OpenCV)` §15 · `AffineTransform (scikit-image)` §12 · `AffineTransform (SimpleITK)` §14 · `AKAZE` §15 · `ANTSNeighborhoodCorrelation` §14 · `Auto Crop` §24
+
+### B
+`Batch Registration Macro` §22 · `BFMatcher` §15 · `bilinear (TurboReg)` §4 · `Bio-Formats stage coords` §24 · `blendingmode (MIST)` §17 · `BigStitcher` §23 · `BigWarp` §7 · `BRIEF` §13 · `BSplineTransform (SimpleITK)` §14 · `BSplineTransformInitializer` §14 · `bUnwarpJ` §6
+
+### C
+`Calcium imaging (time-lapse)` §20 · `Cell cultures (time-lapse)` §20 · `check_peaks` §3 · `CLIJ2 / CLIJx` §18 · `closest/next_closest_ratio` §5 · `compareOppositeElasticTransforms` §6 · `composeElasticTransformations` §6 · `composeRawTransformations` §6 · `compute_overlap` §2, §3 · `ConjugateGradientLineSearch` §14 · `consistency_weight` §6 · `convertToRawTransformation` §6 · `Correct 3D Drift` §8 · `corner_harris` §13 · `corner_peaks` §13 · `corner_subpix` §13 · `curl_weight` §6
+
+### D
+`Decision Tree` §20 · `Demons (metric)` §14 · `Descriptor-based Registration` §10 · `detection_brightness` §10 · `detection_size` §10 · `detection_type` §10 · `Displacement thresholds (stitching)` §2 · `DisplacementFieldTransform` §14 · `divergence_weight` §6 · `driftCorrectionByCenterOfMassFixation` §18 · `driftCorrectionByCentroidFixation` §18
+
+### E
+`edge_enhance (Correct 3D drift)` §8 · `Elastic (bUnwarpJ)` §6 · `elasticTransformImageMacro` §6 · `ElastixWrapper` §23 · `estimate_transform` §12 · `estimateAffine2D` §15 · `estimateAffinePartial2D` §15 · `Euler2DTransform` §14 · `Euler3DTransform` §14 · `EuclideanTransform (scikit-image)` §12 · `Exhaustive (optimizer)` §14
+
+### F
+`Fast (bUnwarpJ mode)` §6 · `Fast4DReg` §8 · `feature_descriptor_orientation_bins` §5 · `feature_descriptor_size` §5 · `Filename defined position` §2 · `Filename Placeholders` §2 · `findHomography` §15 · `first_file_index_i / _x / _y` §2 · `FlannBasedMatcher` §15 · `fusion_method` §2, §3
+
+### G
+`Gotchas` §24 · `GPU Registration` §18 · `GradientDescent` §14 · `Grid/Collection Stitching` §2 · `grid_size_x / grid_size_y` §2 · `gridorigin (MIST)` §17
+
+### H
+`Homography` §10, §15 · `HyperStackReg` §4
+
+### I
+`image_output` §2 · `image_subsample_factor (bUnwarpJ)` §6 · `image_weight (bUnwarpJ)` §6 · `initial_gaussian_blur` §5 · `inlier_ratio` §5 · `Installed Plugin Inventory` §23 · `Interactive Affine / Rigid / Similarity / Perspective / Moving Least Squares / Thin Plate Spline` §19
+
+### K
+`knnMatch` §15
+
+### L
+`Landmark Correspondences` §19 · `landmark_weight (bUnwarpJ)` §6 · `Landmark CSV (BigWarp)` §7 · `LBFGSB` §14 · `LBFGS2` §14 · `Linear Blending` §2, §3 · `Linear Stack Alignment with SIFT` §5 · `Linear Stack Alignment with SIFT MultiChannel` §5, §21 · `loadElasticTransform` §6 · `loadRawTransform` §6 · `Lowe's ratio test` §15 · `LMEDS` §15
+
+### M
+`match_descriptors` §13 · `Mattes Mutual Information` §14 · `maximal_alignment_error` §5 · `maximum_image_size` §5 · `max/avg_displacement_threshold` §2 · `max_shift_x / _y / _z` §8 · `Mean Squares (metric)` §14 · `Microglia (time-lapse)` §20 · `min_pixel_value` §8 · `minimum_image_size` §5 · `MIST` §17 · `Mono (bUnwarpJ mode)` §6 · `Moving least squares` §9 · `MultiStackReg` §4, §23 · `Multi-Channel Registration Strategy` §21 · `multi_time_scale` §8
+
+### N
+`Neuronal rhythms (SCN, time-lapse)` §20 · `NORM_HAMMING` §15 · `NORM_L2` §15 · `num_iterations (descriptor-based)` §10 · `number_of_neighbors` §10 · `numberingpattern (MIST)` §17
+
+### O
+`only_compute (Correct 3D drift)` §8 · `OpenCV` §15 · `OpenCV Stitcher` §15 · `optical_flow_ilk` §11 · `optical_flow_tvl1` §11 · `Optimizers (SimpleITK)` §14 · `Order Options (stitching)` §2 · `ORB` §13, §15 · `OVERLAY (MIST blending)` §17
+
+### P
+`Pairwise Stitching` §3 · `phase_cross_correlation` §11 · `PiecewiseAffineTransform` §12 · `Positions from file` §2 · `Powell (optimizer)` §14 · `ProjectiveTransform` §12 · `PolynomialTransform` §12 · `pystackreg` §16 · `PTBIOP / ABBA` §23
+
+### R
+`RANSAC` §13, §15 · `RANSAC_threshold` §10 · `redundancy` §10 · `reference_slice` §9 · `reference strategies (pystackreg)` §16 · `Register Virtual Stack Slices` §9 · `RegularStepGradientDescent` §14 · `regression_threshold` §2 · `RHO` §15 · `Rigid Body (StackReg)` §4 · `registration_3d` §23
+
+### S
+`SCANS (OpenCV Stitcher mode)` §15 · `Scaled Rotation (StackReg)` §4 · `SEQUENTIAL (MIST pattern)` §17 · `Serial sections` §9 · `SetInterpolator` §14 · `SetMetricSamplingStrategy` §14 · `SetOptimizerScalesFromPhysicalShift` §14 · `SetShrinkFactorsPerLevel` §14 · `SetSmoothingSigmasPerLevel` §14 · `shear / scaling / isotropy / lambda` §9 · `SIFT (Fiji)` §5 · `SIFT (OpenCV)` §15 · `Similarity2D/3DTransform` §14 · `SimilarityTransform (scikit-image)` §12 · `SimpleITK` §14 · `Snake by rows / columns` §2 · `SPIM_Registration` §23 · `StackReg` §4 · `steps_per_scale_octave` §5 · `stop_threshold (bUnwarpJ)` §6 · `Stitcher` §15 · `subpixel_accuracy` §2 · `subpixel_localization` §10 · `Super Fine (bUnwarpJ)` §6
+
+### T
+`Thin Plate Spline` §7 · `Tile mosaic` §20 · `TileConfiguration.txt` §2, §22 · `TileConfiguration.registered.txt` §2, §22 · `tile_overlap` §2 · `Time-lapse Registration (organotypic slices)` §20 · `Transform Model Selection` §20 · `translationTimelapseRegistration` §18 · `TranslationTransform` §14 · `TransformJ_` §23 · `TurboReg` §4
+
+### U
+`Update Sites (not installed)` §23 · `upsample_factor` §11 · `use_virtualstack` §8 · `use_virtual_input_images` §2
+
+### V
+`Very Coarse / Coarse / Fine / Very Fine (bUnwarpJ)` §6
+
+### W
+`warp (scikit-image)` §12 · `warpAffine` §15 · `warpPerspective` §15
+
+---
+
+## §2 Grid/Collection Stitching
 
 > Plugins > Stitching > Grid/Collection stitching
 
@@ -95,7 +208,7 @@ After stitching, `TileConfiguration.registered.txt` is written with refined posi
 
 ---
 
-## 2. Pairwise Stitching
+## §3 Pairwise Stitching
 
 > Plugins > Stitching > Pairwise stitching
 
@@ -112,7 +225,7 @@ Key parameters: `check_peaks` (default 5), `registration_channel_image_1`/`_2` f
 
 ---
 
-## 3. StackReg / TurboReg
+## §4 StackReg / TurboReg
 
 > Plugins > Registration > StackReg / TurboReg (BIG, EPFL)
 
@@ -129,7 +242,7 @@ Registers all slices to first slice. Modifies stack in-place.
 
 **Note:** StackReg does NOT support Bilinear (TurboReg does, but StackReg cannot propagate it).
 
-**Variants:** HyperStackReg (multi-channel hyperstacks), MultiStackReg (register one channel, apply to all), pystackreg (Python port, section 16).
+**Variants:** HyperStackReg (multi-channel hyperstacks), MultiStackReg (register one channel, apply to all), pystackreg (Python port, section 17).
 
 ### TurboReg
 
@@ -175,7 +288,7 @@ dy = targetY0 - sourceY0;
 
 ---
 
-## 4. Linear Stack Alignment with SIFT
+## §5 Linear Stack Alignment with SIFT
 
 > Plugins > Registration > Linear Stack Alignment with SIFT
 
@@ -213,7 +326,7 @@ run("Linear Stack Alignment with SIFT MultiChannel",
 
 ---
 
-## 5. bUnwarpJ (Elastic Registration)
+## §6 bUnwarpJ (Elastic Registration)
 
 > Plugins > Registration > bUnwarpJ
 
@@ -264,7 +377,7 @@ call("bunwarpj.bUnwarpJ_.adaptCoefficientsMacro", "/path/transform.txt", "2.0", 
 
 ---
 
-## 6. BigWarp (Landmark Registration)
+## §7 BigWarp (Landmark Registration)
 
 > Plugins > BigDataViewer > Big Warp Command
 
@@ -301,7 +414,7 @@ For 3D, add `moving-z` and `target-z` rows.
 
 ---
 
-## 7. Correct 3D Drift
+## §8 Correct 3D Drift
 
 > Plugins > Registration > Correct 3D drift
 
@@ -324,7 +437,7 @@ Key parameters: `only_compute` (drift vectors only), `use_virtualstack` (saves R
 
 ---
 
-## 8. Register Virtual Stack Slices
+## §9 Register Virtual Stack Slices
 
 > Plugins > Registration > Register Virtual Stack Slices
 
@@ -332,13 +445,13 @@ Registers a directory of 2D images. Good for serial sections, histology.
 
 **Models:** `Translation`, `Rigid`, `Similarity`, `Affine`, `Elastic` (bUnwarpJ), `Moving least squares`
 
-Uses same SIFT parameters as section 4. Additional parameters: `reference_slice`, regularization (`shear`, `scaling`, `isotropy`, `lambda`). Elastic model adds bUnwarpJ parameters.
+Uses same SIFT parameters as section 5. Additional parameters: `reference_slice`, regularization (`shear`, `scaling`, `isotropy`, `lambda`). Elastic model adds bUnwarpJ parameters.
 
 Input: directory of 2D images. Output: TIFF files with enlarged canvas.
 
 ---
 
-## 9. Descriptor-based Registration (2D/3D)
+## §10 Descriptor-based Registration (2D/3D)
 
 > Plugins > Registration > Descriptor-based registration (2d/3d)
 
@@ -353,7 +466,7 @@ Matching: `RANSAC_threshold`, `num_iterations`, `regularization`, `lambda`.
 
 ---
 
-## 10. scikit-image Registration
+## §11 scikit-image Registration
 
 ### phase_cross_correlation
 
@@ -393,7 +506,7 @@ flow = optical_flow_ilk(reference, moving, radius=7, num_warp=10)
 
 ---
 
-## 11. scikit-image Transforms
+## §12 scikit-image Transforms
 
 ### Transform Classes
 
@@ -429,7 +542,7 @@ Modes: `'constant'`, `'edge'`, `'symmetric'`, `'reflect'`, `'wrap'`
 
 ---
 
-## 12. scikit-image Feature Matching
+## §13 scikit-image Feature Matching
 
 ### ORB + RANSAC Registration
 
@@ -473,7 +586,7 @@ skimage.feature.BRIEF(descriptor_size=256, patch_size=49)
 
 ---
 
-## 13. SimpleITK Registration
+## §14 SimpleITK Registration
 
 > `pip install SimpleITK`
 
@@ -571,7 +684,7 @@ final_bspline = R.Execute(fixed, moving)
 
 ---
 
-## 14. OpenCV Registration & Stitching
+## §15 OpenCV Registration & Stitching
 
 > `pip install opencv-python` or `opencv-contrib-python`
 
@@ -624,7 +737,7 @@ status, result = stitcher.stitch(images)
 
 ---
 
-## 15. pystackreg
+## §16 pystackreg
 
 > `pip install pystackreg` — Python port of Fiji StackReg/TurboReg
 
@@ -671,7 +784,7 @@ for ch in range(stack.shape[1]):
 
 ---
 
-## 16. MIST (NIST Stitching)
+## §17 MIST (NIST Stitching)
 
 > Plugins > MIST — optimised for large regular grids (100s-1000s of tiles)
 
@@ -693,7 +806,7 @@ run("MIST",
 
 ---
 
-## 17. GPU Registration (CLIJ2)
+## §18 GPU Registration (CLIJ2)
 
 ```javascript
 run("CLIJ2 Macro Extensions", "cl_device=");
@@ -716,7 +829,7 @@ Consider GPU registration for >100 frames, >4000x4000 images, or batch processin
 
 ---
 
-## 18. Interactive Transform Tools
+## §19 Interactive Transform Tools
 
 ```javascript
 run("Interactive Affine");
@@ -730,29 +843,29 @@ run("Landmark Correspondences");    // uses point ROI pairs
 
 ---
 
-## 19. Decision Tree
+## §20 Decision Tree
 
 ```
 TILE MOSAIC (multiple fields of view)?
-├── Regular grid → Grid/Collection Stitching (§1) or MIST for >50 tiles (§16)
-├── Two images → Pairwise Stitching (§2)
+├── Regular grid → Grid/Collection Stitching (§2) or MIST for >50 tiles (§17)
+├── Two images → Pairwise Stitching (§3)
 │
 TIME-LAPSE STACK needing alignment?
-├── Small drift → StackReg (§3) or pystackreg (§15)
-├── Large drift → SIFT Alignment (§4)
-├── 3D + time → Correct 3D Drift (§7) or Fast4DReg
-├── Non-rigid → optical_flow_tvl1 (§10)
+├── Small drift → StackReg (§4) or pystackreg (§16)
+├── Large drift → SIFT Alignment (§5)
+├── 3D + time → Correct 3D Drift (§8) or Fast4DReg
+├── Non-rigid → optical_flow_tvl1 (§11)
 │
 TWO IMAGES needing alignment?
-├── Feature-based: many features → SIFT/ORB (§12, §14)
-├── Feature-based: beads/fiducials → Descriptor-based (§9)
-├── Feature-based: manual landmarks → BigWarp (§6)
-├── Intensity-based, same modality → phase_cross_correlation (§10)
-├── Intensity-based, multi-modal → SimpleITK mutual information (§13)
-├── Non-rigid → bUnwarpJ (§5) or SimpleITK B-spline
+├── Feature-based: many features → SIFT/ORB (§13, §15)
+├── Feature-based: beads/fiducials → Descriptor-based (§10)
+├── Feature-based: manual landmarks → BigWarp (§7)
+├── Intensity-based, same modality → phase_cross_correlation (§11)
+├── Intensity-based, multi-modal → SimpleITK mutual information (§14)
+├── Non-rigid → bUnwarpJ (§6) or SimpleITK B-spline
 │
-SERIAL SECTIONS? → Register Virtual Stack Slices (§8)
-PANORAMA/SCAN? → OpenCV Stitcher (§14)
+SERIAL SECTIONS? → Register Virtual Stack Slices (§9)
+PANORAMA/SCAN? → OpenCV Stitcher (§15)
 ```
 
 ### Transform Model Selection
@@ -781,7 +894,7 @@ PANORAMA/SCAN? → OpenCV Stitcher (§14)
 
 ---
 
-## 20. Multi-Channel Registration Strategy
+## §21 Multi-Channel Registration Strategy
 
 ```javascript
 // Method 1: SIFT MultiChannel (built-in, registers on chosen channel)
@@ -804,7 +917,7 @@ for ch in range(stack.shape[1]):
 
 ---
 
-## 21. Cross-Tool Workflows
+## §22 Cross-Tool Workflows
 
 ### Parse TileConfiguration in Python
 
@@ -843,33 +956,7 @@ for (i = 0; i < list.length; i++) {
 
 ---
 
-## 22. Gotchas
-
-### Stitching
-- Phase correlation typically fails below ~10% overlap; consider 15-20%
-- Lower `regression_threshold` (e.g. 0.10) if tiles won't register; raise it if bad tiles register
-- `{iii}` = 3-digit zero-padded; must match filenames exactly
-- Modern microscopes typically use snake/serpentine scanning; check acquisition software
-- Some .nd2/.czi/.lif files embed stage coords; try `Positions from file` + `Defined by image metadata` first
-- Registered images often have black borders; crop with `run("Auto Crop");`
-
-### Registration
-- **StackReg modifies in-place** — duplicate first if you need the original
-- **SIFT fails on featureless images** — use phase correlation instead
-- **TurboReg trailing space** — command is `run("TurboReg ", ...)` not `run("TurboReg", ...)`
-- **bUnwarpJ needs same-size images** — resize or pad first
-- **StackReg + Bilinear** — not supported (only TurboReg supports Bilinear)
-- Register on the channel with the best features (typically DAPI or bright structures)
-
-### Performance
-- CLIJ2 GPU registration is typically 10-100x faster for translation correction on large datasets
-- MIST outperforms Grid/Collection Stitching for >50 tiles
-- Register Virtual Stack Slices processes from disk without loading all into RAM
-- pystackreg is typically faster than Fiji StackReg for Python-side processing
-
----
-
-## 23. Installed Plugin Inventory
+## §23 Installed Plugin Inventory
 
 | Plugin | Version | Purpose |
 |--------|---------|---------|
@@ -892,3 +979,29 @@ for (i = 0; i < list.length; i++) {
 | ElastixWrapper | elastix | Automated atlas registration (for ABBA) |
 | PTBIOP | ABBA tools | Brain atlas registration |
 | MultiStackReg | MultiStackReg | Apply one stack's transforms to another |
+
+---
+
+## §24 Gotchas
+
+### Stitching
+- Phase correlation typically fails below ~10% overlap; consider 15-20%
+- Lower `regression_threshold` (e.g. 0.10) if tiles won't register; raise it if bad tiles register
+- `{iii}` = 3-digit zero-padded; must match filenames exactly
+- Modern microscopes typically use snake/serpentine scanning; check acquisition software
+- Some .nd2/.czi/.lif files embed stage coords; try `Positions from file` + `Defined by image metadata` first
+- Registered images often have black borders; crop with `run("Auto Crop");`
+
+### Registration
+- **StackReg modifies in-place** — duplicate first if you need the original
+- **SIFT fails on featureless images** — use phase correlation instead
+- **TurboReg trailing space** — command is `run("TurboReg ", ...)` not `run("TurboReg", ...)`
+- **bUnwarpJ needs same-size images** — resize or pad first
+- **StackReg + Bilinear** — not supported (only TurboReg supports Bilinear)
+- Register on the channel with the best features (typically DAPI or bright structures)
+
+### Performance
+- CLIJ2 GPU registration is typically 10-100x faster for translation correction on large datasets
+- MIST outperforms Grid/Collection Stitching for >50 tiles
+- Register Virtual Stack Slices processes from disk without loading all into RAM
+- pystackreg is typically faster than Fiji StackReg for Python-side processing

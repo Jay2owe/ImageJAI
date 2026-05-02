@@ -4,9 +4,149 @@ Reference for spatial point pattern analysis in microscopy. For ImageJ-side 3D
 spatial plugins, see `3d-spatial-reference.md`. For pixel-level colocalization,
 see `colocalization-reference.md`.
 
+Methodology sources: Clark & Evans (1954) nearest-neighbor test; Ripley (1976,
+1977) second-order K/L functions with isotropic edge correction; Diggle (2003)
+*Statistical Analysis of Spatial and Spatio-Temporal Point Patterns*; Baddeley,
+Rubak & Turner (2015) *Spatial Point Patterns: Methodology and Applications with
+R*; Ester et al. (1996) DBSCAN; Campello et al. (2013) HDBSCAN; Ankerst et al.
+(1999) OPTICS; Voronoi (1908) tessellation; Moran (1950) `I` and Getis-Ord
+(1992) `Gi*` autocorrelation; Myllymaki et al. (2017) global envelope tests;
+Stoyan & Stoyan (1994) pair correlation function. Python libraries: `pointpats`
+(PySAL), `esda` + `libpysal`, `astropy.stats.RipleysKEstimator`, `scipy.spatial`,
+`scikit-learn`, `hdbscan`, `shapely`.
+
+Invoke from the agent:
+`python ij.py macro '<code>'` — run ImageJ macro (.ijm) code to extract
+coordinates.
+`python ij.py results` — fetch measurements table as CSV.
+Spatial analysis itself runs in Python (scipy, scikit-learn, pointpats) against
+exported centroid coordinates, not inside ImageJ.
+
 ---
 
-## 1. Quick Start
+## §0 Lookup Map — "How do I find X?"
+
+| Question | Where to look |
+|---|---|
+| "How do I extract centroid coordinates from ImageJ?" | §4 |
+| "Are my cells clustered, random, or regular?" | §7 Clark-Evans, §8 Ripley's K |
+| "What's the formula for expected NND under CSR?" | §6, §28 formula summary |
+| "How do I pick DBSCAN `eps`?" | §13 k-distance plot |
+| "Two cell types — are they spatially associated?" | §11 cross-K, random labeling, toroidal shift |
+| "How far is each cell from a vessel / boundary?" | §14 distance transform |
+| "Where are the hot spots of high local density?" | §15.2 Getis-Ord Gi* |
+| "How do I handle edge effects?" | §8 edge correction, §28 pitfalls |
+| "What's the minimum object count for method X?" | §3 minimum counts table |
+| "How many Monte Carlo simulations do I need?" | §18 |
+| "My tissue doesn't fill the image — what now?" | §19 inhomogeneous patterns |
+| "3D spatial statistics — how do formulas change?" | §17 |
+| "What figure / template sentence goes in the paper?" | §21 statistical reporting |
+| "Which test should I use for my question?" | §24 decision trees |
+| "Why does my analysis give wrong answers?" | §28 common pitfalls |
+| "What Python library implements X?" | §22 Python library reference |
+
+---
+
+## §1 Term Index (A–Z)
+
+Alphabetical pointer to every statistic, method, and concept with `§X.Y`
+pointer. Use `grep -n '<term>' spatial-statistics-reference.md` to jump.
+
+### A
+
+`Analyze Particles` §4 · `anisotropic voxels` §17 · `astropy` §22 · `autocorrelation` §15
+
+### B
+
+`bandwidth (Stoyan's rule)` §10 · `bivariate analysis` §11 · `border edge correction` §8
+
+### C
+
+`Cellpose` §4 · `centroid extraction` §4 · `chi-square (quadrat)` §16 · `Clark-Evans test` §7 · `clustering (DBSCAN)` §13 · `clustering (HDBSCAN)` §13 · `clustering (OPTICS)` §13 · `coefficient of variation (Voronoi)` §12 · `confidence envelope` §18 · `coordinate system` §28 · `cross-K function` §11 · `cross-NND` §11 · `CSR (Complete Spatial Randomness)` §5 · `CV of Voronoi areas` §12
+
+### D
+
+`DBSCAN` §13 · `density (lambda)` §28 · `Diggle` (header) · `distance map` §14 · `distance transform` §14 · `distance-to-feature` §14 · `Donnelly edge correction` §7
+
+### E
+
+`edge correction (Ripley isotropic)` §8 · `edge correction (translation)` §8 · `edge correction (border)` §8 · `edge effects (gotcha)` §28 · `eps (DBSCAN)` §13 · `esda` §22 · `expected NND` §7, §28 · `expected NND (3D)` §17, §28
+
+### F
+
+`F function (empty-space CDF)` §25 · `Fiji` (header)
+
+### G
+
+`G function (NND CDF)` §25 · `g(r) pair correlation` §10 · `Getis-Ord Gi*` §15.2 · `global envelope` §18 · `grid size (quadrat)` §16 · `guard area` §8
+
+### H
+
+`H(r) function` §9 · `hardcore process` §19, §28 · `HDBSCAN` §13 · `hexagonal lattice` §7, §12 · `hot spot analysis` §15.2 · `homogeneous Poisson` §5
+
+### I
+
+`immune infiltration` §3 · `independent populations (null)` §11 · `inhomogeneous K-function` §19 · `inhomogeneous point pattern` §19 · `isotropic edge correction` §8
+
+### J
+
+`J function` §25
+
+### K
+
+`K function (Ripley)` §8 · `k-distance plot` §13 · `k-th nearest neighbor` §6 · `KDTree (scipy)` §6, §22 · `kernel smoothing` §19
+
+### L
+
+`L function` §9 · `lambda (density)` §28 · `LISA` §22 · `local autocorrelation` §15.2
+
+### M
+
+`mark correlation` §26 · `Monte Carlo envelope` §18 · `Moran's I` §15.1 · `mosaic (retinal)` §3, §12 · `multiple testing` §28
+
+### N
+
+`nearest-neighbor distance (NND)` §6 · `NND histogram shapes` §6 · `null model (random labeling)` §11 · `null model (toroidal shift)` §11 · `null model (independent)` §11
+
+### O
+
+`Otsu threshold` §2, §4 · `OPTICS` §13
+
+### P
+
+`pair correlation function` §10 · `PCF` §10 · `perimeter (Donnelly)` §7 · `pixel calibration` §4, §17 · `pointpats` §22 · `pointwise envelope` §18 · `Poisson process` §5 · `pseudoreplication` §28 · `publication figures` §21 · `PySAL` §22
+
+### Q
+
+`quadrat analysis` §16
+
+### R
+
+`R (Clark-Evans ratio)` §7 · `random labeling` §11, §19 · `randomness (CSR)` §5 · `reachability (OPTICS)` §13 · `regularity index` §12 · `reporting template sentences` §21 · `retinal mosaics` §3, §12 · `Ripley isotropic correction` §8 · `Ripley's K function` §8 · `RipleysKEstimator (astropy)` §22 · `r_max choice` §8
+
+### S
+
+`scikit-learn` §22 · `shapely` §22 · `spatial autocorrelation` §15 · `Spatial Statistics 2D/3D (ImageJ plugin)` §17 · `StarDist` §4 · `study area definition` §4, §28 · `synaptic correlation` §3
+
+### T
+
+`tessellation (Voronoi)` §12 · `tissue mask` §19, §28 · `toroidal shift` §11 · `translation edge correction` §8 · `3D Manager` §4 · `3D Objects Counter` §4 · `3D spatial statistics` §17
+
+### V
+
+`variance-to-mean ratio (VMR)` §16, §28 · `Voronoi tessellation` §12 · `Voronoi CV (2D)` §12, §28 · `Voronoi CV (3D)` §17, §28
+
+### W
+
+`Watershed` §2, §4
+
+### Z
+
+`Z score (Clark-Evans)` §7
+
+---
+
+## §2 Quick Start
 
 ```bash
 # Detect and extract centroids
@@ -51,7 +191,7 @@ print(f"{'Clustered' if R < 1 else 'Regular/Dispersed' if R > 1 else 'Random'}")
 
 ---
 
-## 2. When to Use Spatial Statistics
+## §3 When to Use Spatial Statistics
 
 Spatial statistics asks whether the **pattern** of objects is meaningful, beyond
 simple counts and measurements.
@@ -86,7 +226,7 @@ simple counts and measurements.
 
 ---
 
-## 3. Extracting Spatial Data from ImageJ
+## §4 Extracting Spatial Data from ImageJ
 
 ### From Analyze Particles
 
@@ -163,7 +303,7 @@ python ij.py metadata   # calibration (pixelWidth, unit)
 
 ---
 
-## 4. Complete Spatial Randomness (CSR) -- The Null Model
+## §5 Complete Spatial Randomness (CSR) -- The Null Model
 
 All spatial statistics test against CSR (homogeneous Poisson process):
 constant density everywhere, independent point locations.
@@ -182,11 +322,11 @@ def generate_csr(n, xmin, xmax, ymin, ymax, seed=None):
 
 **When CSR is NOT appropriate:** tissue does not fill the image, natural density
 gradients exist (e.g., cortical layers), or objects have finite size (hard-core).
-Use inhomogeneous Poisson or random labeling instead (Section 18).
+Use inhomogeneous Poisson or random labeling instead (Section 19).
 
 ---
 
-## 5. Nearest-Neighbor Distance (NND)
+## §6 Nearest-Neighbor Distance (NND)
 
 | Statistic | Meaning |
 |---|---|
@@ -237,7 +377,7 @@ def compute_knn(coords, k=5):
 
 ---
 
-## 6. Clark-Evans Test
+## §7 Clark-Evans Test
 
 Compares observed mean NND to expected under CSR. Single-number summary.
 
@@ -287,7 +427,7 @@ to study area definition; consider ~30+ points minimum.
 
 ---
 
-## 7. Ripley's K Function
+## §8 Ripley's K Function
 
 Describes spatial structure at multiple scales. K(r) = expected neighbors within
 distance r of a typical point, divided by density.
@@ -352,7 +492,7 @@ def ripley_k_fast(coords, xmin, xmax, ymin, ymax, r_values):
 
 ---
 
-## 8. L Function and H Function
+## §9 L Function and H Function
 
 Transformations of K for easier interpretation.
 
@@ -371,7 +511,7 @@ def k_to_h(K, r_values): return k_to_l(K, r_values) - r_values
 
 ---
 
-## 9. Pair Correlation Function g(r)
+## §10 Pair Correlation Function g(r)
 
 Non-cumulative alternative to K(r): density of points at distance r relative to
 CSR. `g(r) = K'(r) / (2*pi*r)`.
@@ -424,7 +564,7 @@ inhomogeneity.
 
 ---
 
-## 10. Cross-Type Analysis (Bivariate)
+## §11 Cross-Type Analysis (Bivariate)
 
 For two object types (e.g., microglia and plaques): "Are type A objects closer
 to type B than expected by chance?"
@@ -503,7 +643,7 @@ def toroidal_shift_test(coords_a, coords_b, xmin, xmax, ymin, ymax,
 
 ---
 
-## 11. Voronoi Tessellation
+## §12 Voronoi Tessellation
 
 Partitions the plane into territories (one per point). Each Voronoi cell
 contains all locations closer to that point than to any other.
@@ -559,7 +699,7 @@ def voronoi_analysis(coords, xmin, xmax, ymin, ymax):
 
 ---
 
-## 12. DBSCAN Clustering
+## §13 DBSCAN Clustering
 
 Groups nearby points into clusters without specifying cluster count. Points not
 near any cluster are labeled noise.
@@ -632,7 +772,7 @@ def run_optics(coords, min_samples=5, xi=0.05):
 
 ---
 
-## 13. Distance to Features
+## §14 Distance to Features
 
 "How far is each cell from the nearest vessel / boundary / lesion?"
 
@@ -691,9 +831,9 @@ def distance_to_feature_test(cell_distances, feature_mask, n_cells,
 
 ---
 
-## 14. Spatial Autocorrelation
+## §15 Spatial Autocorrelation
 
-### 14.1 Moran's I (global)
+### §15.1 Moran's I (global)
 
 Tests whether nearby locations have similar values. Choose neighborhood by
 k-nearest-neighbors (typical k=8) or distance threshold.
@@ -724,7 +864,7 @@ def morans_i(coords, values, k=8):
     return {'I': I, 'expected_I': expected_I}
 ```
 
-### 14.2 Getis-Ord Gi* (local hot/cold spots)
+### §15.2 Getis-Ord Gi* (local hot/cold spots)
 
 For each point, identifies whether it is surrounded by unusually high (hot spot)
 or low (cold spot) values. Gi* > 1.96 = hot spot (p<0.05), Gi* < -1.96 = cold spot.
@@ -747,7 +887,7 @@ def getis_ord_gi_star(coords, values, k=8):
 
 ---
 
-## 15. Quadrat Analysis
+## §16 Quadrat Analysis
 
 Divides study area into grid, counts objects per cell, compares to Poisson.
 
@@ -787,7 +927,7 @@ NND or K-function analysis.
 
 ---
 
-## 16. 3D Spatial Statistics
+## §17 3D Spatial Statistics
 
 ### 2D vs 3D formulas
 
@@ -822,7 +962,7 @@ python ij.py macro '
 
 ---
 
-## 17. Monte Carlo Simulation Envelopes
+## §18 Monte Carlo Simulation Envelopes
 
 Analytical significance formulas may not hold. Monte Carlo envelopes provide
 non-parametric significance testing.
@@ -873,7 +1013,7 @@ values and ranks against simulations. Returns a single global p-value.
 
 ---
 
-## 18. Inhomogeneous Point Patterns
+## §19 Inhomogeneous Point Patterns
 
 CSR assumes uniform density. In tissue with natural density gradients, testing
 against CSR will always find "clustering" that is merely density variation.
@@ -894,7 +1034,7 @@ against CSR will always find "clustering" that is merely density variation.
 
 ---
 
-## 19. Complete Agent Workflows
+## §20 Complete Agent Workflows
 
 ### Workflow 1: Cell Clustering Analysis
 
@@ -934,7 +1074,7 @@ gi_star, p_vals, hot, cold = getis_ord_gi_star(coords, local_density)
 
 ---
 
-## 20. Statistical Reporting
+## §21 Statistical Reporting
 
 | Element | Example |
 |---|---|
@@ -978,26 +1118,7 @@ p=[val])."
 
 ---
 
-## 21. Common Pitfalls
-
-| Pitfall | Solution |
-|---|---|
-| **Edge effects** | Use edge correction (Ripley isotropic, translation). Never report uncorrected statistics. |
-| **Study area = full image** | Define study area as tissue outline, not image frame. Compute area from tissue mask. |
-| **Inhomogeneous density** | Use inhomogeneous K-function, restrict to homogeneous subregions, or use Gi*. |
-| **Objects are not points** | Use hard-core process as null, or interpret K/g only at distances > object diameter. |
-| **Multiple testing** | Bonferroni/FDR across tests. For K at multiple r, use global envelope. |
-| **Pseudoreplication** | Biological replicate = animal/sample, not cell. 5000 cells from 1 mouse = N=1. Compare per-sample summary stats across replicates. |
-| **Spatial association != interaction** | Spatial association is pattern, not mechanism. Consider third-variable confounders. |
-| **2D analysis of 3D data** | Use 3D statistics if z-stack available. Acknowledge limitation if using projections. |
-| **Too few objects** | See minimum counts table in Section 2. |
-| **Quadrat size sensitivity** | Supplement with scale-independent methods (K-function, NND). |
-| **DBSCAN epsilon cherry-picking** | Choose eps BEFORE seeing results via k-distance plot. Report multiple values if uncertain. |
-| **Coordinate system mismatch** | Convert to calibrated physical units before analysis. Verify with `python ij.py metadata`. |
-
----
-
-## 22. Python Library Reference
+## §22 Python Library Reference
 
 ### Core (typically pre-installed)
 
@@ -1043,7 +1164,7 @@ K = Kest(data=coords, radii=r_values, mode='ripley')
 
 ---
 
-## 23. Decision Trees
+## §23 Decision Trees
 
 ### What spatial analysis to use
 
@@ -1088,7 +1209,7 @@ What is the question?
 
 ---
 
-## Appendix: G, F, J Functions
+## §24 Appendix: G, F, J Functions
 
 | Function | What it is | Clustering signal | Regularity signal |
 |---|---|---|---|
@@ -1116,7 +1237,7 @@ def f_function(coords, xmin, xmax, ymin, ymax, r_values, n_test=1000):
 
 ---
 
-## Appendix: Mark Correlation
+## §25 Appendix: Mark Correlation
 
 Tests if objects at distance r have correlated continuous marks (e.g.,
 intensity, area). k_mm(r) = 1 for independent marks, > 1 for similar marks
@@ -1124,7 +1245,7 @@ clustering, < 1 for dissimilar marks clustering.
 
 ---
 
-## Appendix: Formula Summary
+## §26 Appendix: Formula Summary
 
 ### 2D
 
@@ -1148,3 +1269,22 @@ clustering, < 1 for dissimilar marks clustering.
 | K(r) CSR | (4/3) * pi * r^3 |
 | L(r) | (3K / 4pi)^(1/3) |
 | Voronoi CV CSR | 0.422 |
+
+---
+
+## §27 Common Pitfalls
+
+| Pitfall | Solution |
+|---|---|
+| **Edge effects** | Use edge correction (Ripley isotropic, translation). Never report uncorrected statistics. |
+| **Study area = full image** | Define study area as tissue outline, not image frame. Compute area from tissue mask. |
+| **Inhomogeneous density** | Use inhomogeneous K-function, restrict to homogeneous subregions, or use Gi*. |
+| **Objects are not points** | Use hard-core process as null, or interpret K/g only at distances > object diameter. |
+| **Multiple testing** | Bonferroni/FDR across tests. For K at multiple r, use global envelope. |
+| **Pseudoreplication** | Biological replicate = animal/sample, not cell. 5000 cells from 1 mouse = N=1. Compare per-sample summary stats across replicates. |
+| **Spatial association != interaction** | Spatial association is pattern, not mechanism. Consider third-variable confounders. |
+| **2D analysis of 3D data** | Use 3D statistics if z-stack available. Acknowledge limitation if using projections. |
+| **Too few objects** | See minimum counts table in Section 2. |
+| **Quadrat size sensitivity** | Supplement with scale-independent methods (K-function, NND). |
+| **DBSCAN epsilon cherry-picking** | Choose eps BEFORE seeing results via k-distance plot. Report multiple values if uncertain. |
+| **Coordinate system mismatch** | Convert to calibrated physical units before analysis. Verify with `python ij.py metadata`. |

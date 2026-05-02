@@ -1,10 +1,163 @@
 # Pipeline Construction Reference
 
-Designing, building, and executing multi-step image analysis pipelines in ImageJ/Fiji.
+Designing, building, and executing multi-step image analysis pipelines in
+ImageJ/Fiji. Covers the batch skeleton, script parameters, memory and quality
+gates, multi-channel/Z-stack flows, Bio-Formats series iteration, matched
+file pairs, error handling, progress reporting, decision points, parameter
+sweeps, CLIJ2 GPU pipelines, Groovy alternatives, reproducibility, export,
+and the ImageJAI `PipelineBuilder` / `<pipeline>` XML / `run_pipeline` TCP
+protocol / recipe system.
+
+Sources: `imagej.net/tutorials/batch-processing-with-ij-macro`,
+`imagej.net/ij/macros/BatchProcessFolders.txt`,
+`imagej.net/ij/developer/macro/functions.html`,
+`imagej.net/scripting/parameters`, `clij.github.io`, Bio-Formats macro
+extensions Javadoc, scikit-image regionprops, PyImageJ docs, ImageJ Auto
+Threshold plugin. ImageJAI-specific sections cross-reference
+`src/main/java/imagejai/engine/PipelineBuilder.java`.
+
+Invoke from the agent:
+`python ij.py macro '<code>'` — run ImageJ macro (.ijm) code.
+`python ij.py script '<code>'` — run Groovy (default), Jython, or JavaScript.
+`python ij.py raw '{"command": "run_pipeline", "steps": [...]}'` — run a
+multi-step pipeline via TCP.
 
 ---
 
-## Core Pipeline Structure
+## §0 Lookup Map — "How do I find X?"
+
+| Question | Where to look |
+|---|---|
+| "What's the skeleton of a batch pipeline?" | §2 |
+| "How do I filter files by name / extension?" | §2.2 |
+| "How do I add parameters / a dialog to my pipeline?" | §2.3 |
+| "How do I run things faster in batch mode?" | §3.1 |
+| "When should I call `run('Collect Garbage')`?" | §3.3 |
+| "How do I validate an image before processing?" | §4 |
+| "Should I clear Results between images?" | §5 |
+| "How do I pull a value out of the Summary table?" | §5.1 |
+| "How do I process multi-channel / Z-stacks / interleaved?" | §6.1, §6.2, §6.4 |
+| "How do I segment on one channel and measure on another?" | §6.3, §24 |
+| "How do I iterate every series in a .lif / .nd2 / .czi?" | §7 |
+| "How do I process DAPI/GFP matched pairs?" | §8 |
+| "There's no try/catch — how do I handle errors?" | §9 |
+| "How do I show progress and ETA?" | §10 |
+| "Which threshold method should I pick?" | §11.1 |
+| "How do I sweep parameters (sigma, threshold, size)?" | §12 |
+| "How do I write a GPU-accelerated pipeline?" | §13 |
+| "When should I use Groovy instead of macro?" | §14 |
+| "What's the CellProfiler equivalent in ImageJ?" | §15.1 |
+| "How do I make a pipeline reproducible?" | §16 |
+| "How does `run_pipeline` work over TCP?" | §20 |
+| "What's the `<pipeline>` XML format the LLM emits?" | §19 |
+| "What does a recipe YAML file look like?" | §21 |
+| "What's the agent's visual feedback loop?" | §22 |
+| "Agent CLI vs in-plugin pipeline — what's the difference?" | §23 |
+| "What are the canonical step patterns?" | §24 |
+
+---
+
+## §1 Term Index (A–Z)
+
+Alphabetical pointer to the section covering each function, command, plugin,
+concept, or YAML key. Use `grep -n '`<term>`' pipeline-construction-reference.md`
+to jump.
+
+### A
+
+`Adaptive processing` §11.2 · `Analyze Particles` §6.3, §8, §24 · `Agent vs Plugin paths` §23 · `Auto Threshold` §11.1, §14
+
+### B
+
+`Batch mode` §3.1 · `batch wrapping` §23 · `bitDepth` §4, §11.2 · `Bio-Formats Importer` §7 · `Bio-Formats Macro Extensions` §7 · `Branching pattern` §2.1
+
+### C
+
+`capture_after` §21 · `capture (visual feedback)` §22 · `CellProfiler translation` §15.1 · `CLIJ2 Macro Extensions` §13 · `CLIJ2_clear` §13 · `CLIJ2_connectedComponentsLabelingBox` §13 · `CLIJ2_gaussianBlur2D/3D` §13 · `CLIJ2_pull` §13 · `CLIJ2_push` §13 · `CLIJ2_release` §13 · `CLIJ2_statisticsOfLabelledPixels` §13 · `CLIJ2_thresholdOtsu` §13 · `close("*") / close("\\Others") / close("temp_*")` §3.2 · `Collect Garbage` §3.3, §9.1 · `Convert to Mask` §9, §11.1, §19, §24 · `CTCF` §24
+
+### D
+
+`d2s` §12 · `decision_logic` §21 · `decision_point` §21 · `Deinterleave` §6.4 · `difficulty (recipe)` §21 · `Duplicate` §24 · `domain (recipe)` §21
+
+### E
+
+`Edge case handling` §4.1 · `endsWith` §2, §2.2 · `ETA calculation` §10.1 · `exit` §4, §9 · `Ext.close` §7.1 · `Ext.closeFileOnly` §7.1 · `Ext.getCurrentFile` §7.1 · `Ext.getDimensionOrder` §7.1 · `Ext.getEffectiveSizeC` §7.1 · `Ext.getFormat` §7.1 · `Ext.getImageCount` §7.1 · `Ext.getImageCreationDate` §7.1 · `Ext.getIndex` §7.1 · `Ext.getMetadataValue` §7.1 · `Ext.getPixelsPhysicalSizeX/Y/Z` §7.1 · `Ext.getPixelsTimeIncrement` §7.1 · `Ext.getPixelType` §7.1 · `Ext.getPlanePositionX/Y/Z` §7.1 · `Ext.getPlaneTimingDeltaT` §7.1 · `Ext.getPlaneTimingExposureTime` §7.1 · `Ext.getRGBChannelCount` §7.1 · `Ext.getSeries` §7, §7.1 · `Ext.getSeriesCount` §7, §7.1 · `Ext.getSeriesMetadataValue` §7.1 · `Ext.getSeriesName` §7, §7.1 · `Ext.getSizeX/Y/Z/C/T` §7.1 · `Ext.getZCTCoords` §7.1 · `Ext.isIndexed` §7.1 · `Ext.isThisType` §7.1 · `Ext.openImagePlus` §7.1 · `Ext.setId` §7, §7.1 · `Ext.setSeries` §7, §7.1
+
+### F
+
+`File.close` §5, §9.1, §16.1 · `File.exists` §4, §8, §8.1, §9 · `File.getNameWithoutExtension` §5 · `File.open` §5, §9.1, §16.1 · `File filtering` §2.2 · `foregroundPercent` §4, §12
+
+### G
+
+`getDateAndTime` §16.1 · `getDimensions` §4, §6.1 · `getDirectory` §2 · `getFileList` §2, §8 · `getImageID` §8 · `getList("threshold.methods")` §11.1, §12 · `getResult` §5.1, §10 · `getStatistics` §4, §12 · `getTime` §10.1 · `getTitle` §4, §13 · `getVersion` §16.1 · `getVoxelSize` §4 · `Groovy pipeline` §14 · `Groovy pipeline example` §14.1
+
+### H
+
+`Hypothesis agent pipeline` §19.1
+
+### I
+
+`IJ.currentMemory` §3.3 · `IJ.log` §14.1 · `IJ.maxMemory` §3.3 · `IJ.openImage` §14.1 · `IJ.redirectErrorMessages` §4.1, §9, §9.1 · `IJ.renameResults` §5, §5.1 · `IJ.run` §14.1 · `IJ.showProgress` §14.1 · `imageCalculator` §24 · `ImagePlus (script param)` §2.3 · `indexOf` §2.2 · `Input validation` §4 · `Integrated density (CTCF)` §24
+
+### L
+
+`Linear pattern` §2.1 · `LLM response format` §19
+
+### M
+
+`Matched file pair processing` §8 · `Measurement agent pipeline` §19.1 · `Memory management` §3 · `Memory monitoring` §3.3 · `Merge Channels` §6.1
+
+### N
+
+`nImages` §4, §9, §9.1 · `nResults` §4, §9
+
+### O
+
+`Output (script param)` §2.3 · `Otsu` §11.1
+
+### P
+
+`Parameters (recipe)` §21 · `Parameter logging` §16.1 · `Parameter substitution (${})` §21 · `Parameter sweeps` §12 · `parsePipeline` §18.1 · `Pattern choices (Linear / Branching / Recursive)` §2.1 · `Pipeline (class)` §18, §18.1 · `Pipeline.exportAsMacro` §18.2 · `Pipeline.getStatusSummary` §18.2 · `PipelineBuilder` §18 · `PipelineBuilder.createBatchMacro` §18.1, §23 · `PipelineBuilder.executePipeline` §18.1 · `PipelineBuilder.resumePipeline` §18.1 · `PipelineBuilder.retryStep` §18.1 · `PipelineBuilder.savePipeline` §18.1 · `PipelineCallback` §18.1 · `PipelineStep fields` §18 · `preconditions (recipe)` §21 · `print` §10 · `print("\\Clear")` §10 · `print("\\Update:text")` §10 · `print("[Window Name]", ...)` §10 · `Progress reporting` §10 · `PyImageJ bridge` §15.3 · `Python/scikit-image pipeline` §15.2
+
+### Q
+
+`Quality gates` §4.1
+
+### R
+
+`Recipe schema` §21 · `Recipe discovery` §21.1 · `Recursive folder pattern` §2.1 · `redirect= (Set Measurements)` §6.3, §24 · `regionprops_table` §15.2 · `replace` §8 · `Reproducibility checklist` §16.2 · `Results table management` §5 · `Robust pipeline wrapper` §9.1 · `roiManager("count")` §4, §9 · `roiManager("Measure")` §6.3, §8, §15.1 · `roiManager("Reset")` §8 · `run_pipeline` §20 · `run_pipeline (failure response)` §20.2 · `run_pipeline (success response)` §20.1
+
+### S
+
+`saveAs("Results", ...)` §2, §5, §15.1 · `saveAs("Tiff", ...)` §2, §9.1 · `Script Parameters` §2.3 · `Segmentation agent pipeline` §19.1 · `selectImage` §3.2, §8 · `selectWindow` §3.2, §6.1 · `Separate folder pairs` §8.1 · `setAutoThreshold` §4.1, §8, §9, §11.1, §12, §19 · `setBatchMode` §3.1 · `setResult` §5, §5.1 · `Set Measurements` §2, §6.3, §24 · `showProgress` §2, §9.1, §10 · `showStatus` §10, §10.1 · `Specialist agent pipelines` §19.1 · `Split Channels` §6.1, §6.2, §24 · `startsWith` §2.2 · `steps (recipe)` §21 · `Summary (table)` §5.1
+
+### T
+
+`tags (recipe)` §21 · `Triangle (threshold)` §11.1
+
+### U
+
+`updateResults` §5
+
+### V
+
+`validate (recipe)` §21 · `validateImage` §4 · `Visualization agent pipeline` §19.1 · `Visual feedback loop` §22
+
+### W
+
+`Watershed` §8, §24 · `Well plate processing` §8.2
+
+### X
+
+`<pipeline>` XML format §19 · `<step description="...">` §19
+
+### Z
+
+`Z Project` §6.2 · `Z-stack pipeline` §6.2
+
+---
+
+## §2 Core Pipeline Structure
 
 Every batch pipeline follows this skeleton:
 
@@ -32,7 +185,7 @@ function processFile(input, output, filename) {
 }
 ```
 
-### Pipeline Patterns
+### §2.1 Pipeline Patterns
 
 | Pattern | When to Use | Key Idea |
 |---------|-------------|----------|
@@ -40,7 +193,7 @@ function processFile(input, output, filename) {
 | **Branching** | Mixed image types | Check `bitDepth()`, `getStatistics()`, route accordingly |
 | **Recursive folder** | Nested subdirectories | `endsWith(list[i], "/")` detects directories; two-pass (count then process) for accurate progress |
 
-### File Filtering
+### §2.2 File Filtering
 
 ```javascript
 if (endsWith(list[i], ".tif") || endsWith(list[i], ".nd2"))  // by extension
@@ -49,7 +202,7 @@ if (indexOf(list[i], "channel1") >= 0)                        // by substring
 if (endsWith(list[i], ".tif") && indexOf(list[i], "thumb") < 0) // exclude pattern
 ```
 
-### Script Parameters (Parameterised Pipelines)
+### §2.3 Script Parameters (Parameterised Pipelines)
 
 ```javascript
 #@ File (label="Input directory", style="directory") inputDir
@@ -75,9 +228,9 @@ if (endsWith(list[i], ".tif") && indexOf(list[i], "thumb") < 0) // exclude patte
 
 ---
 
-## Memory Management and Performance
+## §3 Memory Management and Performance
 
-### setBatchMode
+### §3.1 setBatchMode
 
 | Mode | Effect |
 |------|--------|
@@ -88,7 +241,7 @@ if (endsWith(list[i], ".tif") && indexOf(list[i], "thumb") < 0) // exclude patte
 
 **Gotchas:** SCIFIO plugin can prevent memory release in batch mode. Some Bio-Formats operations misbehave in batch mode.
 
-### Closing Images
+### §3.2 Closing Images
 
 ```javascript
 close("temp_*");       // wildcard
@@ -98,7 +251,7 @@ close("*");            // all image windows
 
 **Tip:** Use `selectImage(id)` not `selectWindow(title)` -- IDs are unique, titles may not be.
 
-### Memory Monitoring
+### §3.3 Memory Monitoring
 
 ```javascript
 usedMB = parseInt(IJ.currentMemory()) / (1024 * 1024);
@@ -111,7 +264,7 @@ if (i % 10 == 0) run("Collect Garbage");
 
 ---
 
-## Input Validation and Quality Gates
+## §4 Input Validation and Quality Gates
 
 ```javascript
 function validateImage() {
@@ -131,7 +284,7 @@ function validateImage() {
 }
 ```
 
-### Quality Gates Between Steps
+### §4.1 Quality Gates Between Steps
 
 | Gate | Check | Action on Fail |
 |------|-------|----------------|
@@ -156,7 +309,7 @@ if (!is("binary")) { setAutoThreshold("Otsu dark"); run("Convert to Mask"); }
 
 ---
 
-## Results Table Management
+## §5 Results Table Management
 
 | Pattern | Use Case | Key Commands |
 |---------|----------|--------------|
@@ -166,7 +319,7 @@ if (!is("binary")) { setAutoThreshold("Otsu dark"); run("Convert to Mask"); }
 | Rename table | Multiple concurrent tables | `IJ.renameResults("Results", "MyData")` frees "Results" for reuse |
 | Log file | Tab-delimited output | `f = File.open(path); print(f, "col1\tcol2"); File.close(f);` |
 
-### Summary Table Pattern
+### §5.1 Summary Table Pattern
 
 ```javascript
 // Access the Summary window created by "summarize" option
@@ -178,9 +331,9 @@ IJ.renameResults("Results", "Summary");
 
 ---
 
-## Multi-Channel and Z-Stack Pipelines
+## §6 Multi-Channel and Z-Stack Pipelines
 
-### Split-Process-Merge
+### §6.1 Split-Process-Merge
 
 ```javascript
 getDimensions(w, h, channels, slices, frames);
@@ -192,7 +345,7 @@ if (channels > 1) {
 }
 ```
 
-### Z-Stack: Project Then Split (Memory Efficient)
+### §6.2 Z-Stack: Project Then Split (Memory Efficient)
 
 ```javascript
 if (slices > 1) {
@@ -204,7 +357,7 @@ if (slices > 1) {
 if (channels > 1) run("Split Channels");
 ```
 
-### Segment on One Channel, Measure on Another
+### §6.3 Segment on One Channel, Measure on Another
 
 ```javascript
 // Segment nuclei on DAPI, measure marker intensity in nuclear ROIs
@@ -215,7 +368,7 @@ run("Set Measurements...", "area mean integrated redirect=marker decimal=3");
 roiManager("Measure");
 ```
 
-### De-interleaving
+### §6.4 De-interleaving
 
 ```javascript
 // When channels are interleaved in a plain stack
@@ -225,7 +378,7 @@ run("Deinterleave", "how=" + numChannels);
 
 ---
 
-## Bio-Formats Series Iteration
+## §7 Bio-Formats Series Iteration
 
 For multi-series files (.lif, .nd2, .czi):
 
@@ -247,7 +400,7 @@ for (s = 0; s < seriesCount; s++) {
 Ext.close();
 ```
 
-### Bio-Formats Macro Extension Functions
+### §7.1 Bio-Formats Macro Extension Functions
 
 | Category | Functions |
 |----------|----------|
@@ -264,7 +417,7 @@ Ext.close();
 
 ---
 
-## Matched File Pair Processing
+## §8 Matched File Pair Processing
 
 ```javascript
 // Files named: sample01_DAPI.tif, sample01_GFP.tif
@@ -292,17 +445,17 @@ for (i = 0; i < list.length; i++) {
 }
 ```
 
-### Separate Folder Pairs
+### §8.1 Separate Folder Pairs
 
 Same approach: iterate one folder, use `File.exists(otherDir + filename)` to find matches.
 
-### Well Plate Processing
+### §8.2 Well Plate Processing
 
 Pattern: extract well ID from filename (e.g. `WellA01_s1_w1.tif`), collect unique wells, then iterate per-well.
 
 ---
 
-## Error Handling
+## §9 Error Handling
 
 ImageJ macro has no try/catch. Use these patterns:
 
@@ -315,7 +468,7 @@ ImageJ macro has no try/catch. Use these patterns:
 | Pre-check ROIs | `if (roiManager("count") == 0) return;` |
 | Pre-check binary | `if (!is("binary")) { setAutoThreshold("Otsu dark"); run("Convert to Mask"); }` |
 
-### Robust Pipeline Wrapper
+### §9.1 Robust Pipeline Wrapper
 
 ```javascript
 function safePipeline(inputDir, outputDir) {
@@ -345,7 +498,7 @@ function safePipeline(inputDir, outputDir) {
 
 ---
 
-## Progress Reporting and Logging
+## §10 Progress Reporting and Logging
 
 | Function | Purpose |
 |----------|---------|
@@ -356,7 +509,7 @@ function safePipeline(inputDir, outputDir) {
 | `print("\\Update:text")` | Replace last log line |
 | `print("[Window Name]", "text\n")` | Named text window |
 
-### ETA Calculation
+### §10.1 ETA Calculation
 
 ```javascript
 startTime = getTime();
@@ -371,9 +524,9 @@ for (i = 0; i < list.length; i++) {
 
 ---
 
-## Pipeline Decision Points
+## §11 Pipeline Decision Points
 
-### Choosing Threshold Method
+### §11.1 Choosing Threshold Method
 
 | Histogram Shape | Recommended Method |
 |----------------|-------------------|
@@ -384,7 +537,7 @@ for (i = 0; i < list.length; i++) {
 
 To choose programmatically, analyse the histogram for peak count and intensity distribution. Use `explore_thresholds` (TCP) or `getList("threshold.methods")` to compare all methods on a test image.
 
-### Adaptive Processing Considerations
+### §11.2 Adaptive Processing Considerations
 
 | Image Property | How to Check | Adaptation |
 |---------------|--------------|------------|
@@ -395,7 +548,7 @@ To choose programmatically, analyse the histogram for peak count and intensity d
 
 ---
 
-## Parameter Sweeps
+## §12 Parameter Sweeps
 
 General approach: duplicate image, apply each parameter value, measure outcome, compare.
 
@@ -421,7 +574,7 @@ Same pattern works for sigma values, size filters, circularity ranges. Compare r
 
 ---
 
-## CLIJ2 GPU-Accelerated Pipelines
+## §13 CLIJ2 GPU-Accelerated Pipelines
 
 ### Pattern
 
@@ -460,7 +613,7 @@ Ext.CLIJ2_release(labels);
 
 ---
 
-## Groovy Pipeline Advantages
+## §14 Groovy Pipeline Advantages
 
 | Feature | Macro Language | Groovy |
 |---------|---------------|--------|
@@ -470,7 +623,7 @@ Ext.CLIJ2_release(labels);
 | String operations | Basic | Full regex, templating |
 | External libraries | None | Any Java library |
 
-### Groovy Pipeline Example
+### §14.1 Groovy Pipeline Example
 
 ```groovy
 #@ File (label="Input", style="directory") inputDir
@@ -506,9 +659,9 @@ new File(outputDir, "summary.csv").text = "Filename,Count\n" +
 
 ---
 
-## External Tool Concepts
+## §15 External Tool Concepts
 
-### CellProfiler Translation
+### §15.1 CellProfiler Translation
 
 | CellProfiler Module | ImageJ Equivalent |
 |---------------------|-------------------|
@@ -518,11 +671,11 @@ new File(outputDir, "summary.csv").text = "Filename,Count\n" +
 | MeasureObjectSizeShape | `"area shape feret's"` in Set Measurements |
 | ExportToSpreadsheet | `saveAs("Results", path)` |
 
-### Python/scikit-image Pipeline
+### §15.2 Python/scikit-image Pipeline
 
 Functional pattern: `preprocess()` -> `segment()` -> `measure_objects()` -> `quality_check()`. Use `regionprops_table()` for measurements, `pd.DataFrame` for results.
 
-### PyImageJ Bridge
+### §15.3 PyImageJ Bridge
 
 ```python
 import imagej
@@ -532,9 +685,9 @@ ij.py.run_macro('open("/path/to/image.tif"); run("Gaussian Blur...", "sigma=2");
 
 ---
 
-## Reproducibility
+## §16 Reproducibility
 
-### Parameter Logging
+### §16.1 Parameter Logging
 
 ```javascript
 function logParameters(outputDir) {
@@ -550,7 +703,7 @@ function logParameters(outputDir) {
 }
 ```
 
-### Checklist
+### §16.2 Checklist
 
 - Record all processing parameters; use macros/scripts (never manual-only for quantitative work)
 - Apply uniformly across all images in a dataset
@@ -562,7 +715,7 @@ function logParameters(outputDir) {
 
 ---
 
-## Pipeline Export Formats
+## §17 Pipeline Export Formats
 
 | Format | Extension | How to Run | Notes |
 |--------|-----------|-----------|-------|
@@ -579,7 +732,7 @@ function logParameters(outputDir) {
 
 ---
 
-## ImageJAI PipelineBuilder API
+## §18 ImageJAI PipelineBuilder API
 
 **Source**: `src/main/java/imagejai/engine/PipelineBuilder.java`
 
@@ -594,7 +747,7 @@ function logParameters(outputDir) {
 | `result` | `ExecutionResult` | Populated after execution |
 | `executionTimeMs` | `long` | Time taken |
 
-### PipelineBuilder Methods
+### §18.1 PipelineBuilder Methods
 
 ```java
 Pipeline parsePipeline(String llmResponse)                    // Parse <pipeline> XML from LLM
@@ -605,7 +758,7 @@ void savePipeline(Pipeline pipeline, String filePath)         // Save as .ijm
 String createBatchMacro(Pipeline p, String inputDir, String outputDir)
 ```
 
-### Execution Model
+### §18.2 Execution Model
 
 - Each step dispatched to EDT via `SwingUtilities.invokeAndWait()`
 - Sequential only, no parallelism
@@ -616,7 +769,7 @@ String createBatchMacro(Pipeline p, String inputDir, String outputDir)
 
 ---
 
-## ImageJAI Pipeline XML Format
+## §19 ImageJAI Pipeline XML Format
 
 ### LLM Response Format
 
@@ -646,7 +799,7 @@ String createBatchMacro(Pipeline p, String inputDir, String outputDir)
 
 Never mix `<macro>` and `<pipeline>` in the same response.
 
-### Specialist Agent Pipeline Structures
+### §19.1 Specialist Agent Pipeline Structures
 
 | Agent | Typical Flow |
 |-------|-------------|
@@ -657,7 +810,7 @@ Never mix `<macro>` and `<pipeline>` in the same response.
 
 ---
 
-## ImageJAI TCP run_pipeline Protocol
+## §20 ImageJAI TCP run_pipeline Protocol
 
 ### Request
 
@@ -672,7 +825,7 @@ Never mix `<macro>` and `<pipeline>` in the same response.
 }
 ```
 
-### Response (success)
+### §20.1 Response (success)
 
 ```json
 {
@@ -688,7 +841,7 @@ Never mix `<macro>` and `<pipeline>` in the same response.
 }
 ```
 
-### Response (failure)
+### §20.2 Response (failure)
 
 On failure: failed step has `"status": "failed"` with `"error"` field; subsequent steps have `"status": "skipped"`.
 
@@ -710,7 +863,7 @@ Preferred when: agent needs decisions between steps, visual inspection required,
 
 ---
 
-## ImageJAI Recipe System
+## §21 ImageJAI Recipe System
 
 Recipes are YAML files in `agent/recipes/` defining reproducible workflows.
 
@@ -757,7 +910,7 @@ tags: [cells, counting, nuclei, threshold, watershed]
 
 **Parameter substitution:** `${param_name}` in macro code replaced with parameter values.
 
-### Recipe Discovery
+### §21.1 Recipe Discovery
 
 ```bash
 python recipe_search.py "count cells"           # keyword search
@@ -768,7 +921,7 @@ python recipe_search.py --show cell_counting     # full recipe YAML
 
 ---
 
-## Agent Pipeline Construction Workflow
+## §22 Agent Pipeline Construction Workflow
 
 ### The Visual Feedback Loop
 
@@ -804,7 +957,7 @@ python ij.py capture final_result    # visual verification
 
 ---
 
-## Agent vs Plugin Pipeline Paths
+## §23 Agent vs Plugin Pipeline Paths
 
 | Aspect | Plugin (Chat UI) | Agent (Claude CLI) |
 |--------|------------------|-------------------|
@@ -819,7 +972,7 @@ python ij.py capture final_result    # visual verification
 
 ---
 
-## Common Step Patterns
+## §24 Common Step Patterns
 
 ### Standard Analysis Sequence
 
@@ -848,7 +1001,7 @@ python ij.py capture final_result    # visual verification
 
 ---
 
-## Sources
+## §25 Sources
 
 - [Batch Processing with ImageJ Macro](https://imagej.net/tutorials/batch-processing-with-ij-macro)
 - [BatchProcessFolders.txt Template](https://imagej.net/ij/macros/BatchProcessFolders.txt)
