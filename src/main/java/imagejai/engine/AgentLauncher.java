@@ -124,13 +124,13 @@ public class AgentLauncher {
      * lands (stage 05); until then it throws {@link UnsupportedOperationException}.
      */
     public AgentSession launch(AgentInfo agent, Mode mode) {
-        if (mode == Mode.EMBEDDED) {
-            throw new UnsupportedOperationException(
-                    "Embedded mode is not yet implemented (stage 05 of embedded-agent-widget).");
-        }
-
         try {
             syncContextFiles();
+
+            if (mode == Mode.EMBEDDED) {
+                AgentLaunchSpec spec = buildEmbeddedLaunchSpec(agent);
+                return new EmbeddedAgentSession(agent, spec);
+            }
 
             AgentLaunchSpec spec = buildExternalLaunchSpec(agent);
             ProcessBuilder pb = new ProcessBuilder(spec.agentCommand);
@@ -191,6 +191,38 @@ public class AgentLauncher {
 
         Map<String, String> env = new LinkedHashMap<>();
         env.put("IMAGEJAI_TCP_PORT", String.valueOf(tcpPort));
+
+        return new AgentLaunchSpec(agent, cmd, new File(agentWorkspace), env);
+    }
+
+    /**
+     * Build the command for an embedded PTY. It intentionally goes through the
+     * platform shell so compound commands and context flags behave like the
+     * existing external-terminal path.
+     */
+    private AgentLaunchSpec buildEmbeddedLaunchSpec(AgentInfo agent) {
+        String fullCommand = agent.command;
+        if (agent.contextFlags != null && !agent.contextFlags.isEmpty()) {
+            fullCommand = agent.command + " " + agent.contextFlags;
+        }
+
+        String os = System.getProperty("os.name", "").toLowerCase();
+        List<String> cmd = new ArrayList<String>();
+        if (os.contains("win")) {
+            cmd.add("cmd.exe");
+            cmd.add("/c");
+            cmd.add(fullCommand);
+        } else {
+            cmd.add("bash");
+            cmd.add("-lc");
+            cmd.add("exec " + fullCommand);
+        }
+
+        Map<String, String> env = new LinkedHashMap<>(System.getenv());
+        env.put("IMAGEJAI_TCP_PORT", String.valueOf(tcpPort));
+        env.put("TERM", "xterm-256color");
+        env.put("COLORTERM", "truecolor");
+        env.put("TERMINAL_EMULATOR", "JetBrains-JediTerm");
 
         return new AgentLaunchSpec(agent, cmd, new File(agentWorkspace), env);
     }

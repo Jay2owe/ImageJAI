@@ -33,13 +33,20 @@
         <scijava.jvm.build.version>[11,)</scijava.jvm.build.version>
         <!-- Override scijava's enforcer to allow building with newer JDKs -->
         <enforcer.skip>true</enforcer.skip>
-        <!-- Kotlin stdlib version is pinned in stage 05 (when JediTerm/pty4j deps
-             land). Pinning it here without those deps breaks artifact resolution:
-             Kotlin 2.x retired kotlin-stdlib-common, but pom-scijava's BOM still
-             references it. Leave at SciJava default until 05. -->
+        <!-- pty4j / JediTerm resolve Kotlin 2.x transitive artifacts. Keep this
+             explicit so SciJava's older BOM does not pull a mismatched stdlib. -->
+        <kotlin.version>2.1.21</kotlin.version>
+        <!-- SciJava still manages kotlin-stdlib-common, which Kotlin 2.x no
+             longer publishes as a jar. Keep that retired compatibility artifact
+             on SciJava's original line while the terminal deps use Kotlin 2.x. -->
+        <kotlin-stdlib-common.version>1.9.22</kotlin-stdlib-common.version>
     </properties>
 
     <repositories>
+        <repository>
+            <id>jetbrains-intellij-dependencies</id>
+            <url>https://packages.jetbrains.team/maven/p/ij/intellij-dependencies</url>
+        </repository>
         <repository>
             <id>scijava.public</id>
             <url>https://maven.scijava.org/content/groups/public</url>
@@ -71,6 +78,26 @@
             <scope>provided</scope>
         </dependency>
 
+        <!-- Embedded terminal backend (stage 05) -->
+        <dependency>
+            <groupId>org.jetbrains.pty4j</groupId>
+            <artifactId>pty4j</artifactId>
+            <version>0.13.12</version>
+            <scope>compile</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.jetbrains.jediterm</groupId>
+            <artifactId>jediterm-core</artifactId>
+            <version>3.66</version>
+            <scope>compile</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.jetbrains.jediterm</groupId>
+            <artifactId>jediterm-ui</artifactId>
+            <version>3.66</version>
+            <scope>compile</scope>
+        </dependency>
+
         <!-- Test -->
         <dependency>
             <groupId>junit</groupId>
@@ -99,6 +126,27 @@
                         </manifest>
                     </archive>
                 </configuration>
+            </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-shade-plugin</artifactId>
+                <version>3.6.0</version>
+                <executions>
+                    <execution>
+                        <phase>package</phase>
+                        <goals>
+                            <goal>shade</goal>
+                        </goals>
+                        <configuration>
+                            <minimizeJar>false</minimizeJar>
+                            <createDependencyReducedPom>false</createDependencyReducedPom>
+                            <transformers>
+                                <transformer implementation="org.apache.maven.plugins.shade.resource.ServicesResourceTransformer" />
+                                <transformer implementation="org.apache.maven.plugins.shade.resource.ManifestResourceTransformer" />
+                            </transformers>
+                        </configuration>
+                    </execution>
+                </executions>
             </plugin>
         </plugins>
     </build>

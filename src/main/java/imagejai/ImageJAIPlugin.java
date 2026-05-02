@@ -6,8 +6,10 @@ import org.scijava.plugin.Plugin;
 import imagejai.config.Constants;
 import imagejai.config.Settings;
 import imagejai.engine.AgentLauncher;
+import imagejai.engine.AgentSession;
 import imagejai.engine.CommandEngine;
 import imagejai.engine.DialogWatcher;
+import imagejai.engine.EmbeddedAgentSession;
 import imagejai.engine.EventBus;
 import imagejai.engine.ExplorationEngine;
 import imagejai.engine.ImageMonitor;
@@ -23,6 +25,9 @@ import javax.swing.*;
 import java.awt.*;
 import java.awt.event.WindowAdapter;
 import java.awt.event.WindowEvent;
+import java.io.IOException;
+import java.io.InputStream;
+import java.util.List;
 
 /**
  * Main entry point for the ImageJ AI Assistant plugin.
@@ -37,6 +42,7 @@ public class ImageJAIPlugin implements Command {
     private static TCPCommandServer tcpServer;
     private static ImageMonitor imageMonitor;
     private static DialogWatcher dialogWatcher;
+    private static boolean terminalFontsRegistered;
 
     @Override
     public void run() {
@@ -45,6 +51,8 @@ public class ImageJAIPlugin implements Command {
             SwingUtilities.invokeLater(this::run);
             return;
         }
+
+        registerBundledTerminalFonts();
 
         // If already open, bring to front
         if (chatFrame != null && chatFrame.isDisplayable()) {
@@ -144,6 +152,111 @@ public class ImageJAIPlugin implements Command {
         }
 
         chatFrame.setVisible(true);
+    }
+
+    @Plugin(type = Command.class, menuPath = "Plugins>AI Assistant>Terminal Smoke Test")
+    public static class TerminalSmokeTest implements Command {
+        @Override
+        public void run() {
+            if (!SwingUtilities.isEventDispatchThread()) {
+                SwingUtilities.invokeLater(this::run);
+                return;
+            }
+
+            registerBundledTerminalFonts();
+
+            Settings settings = Settings.load();
+            String agentWorkspace = findAgentWorkspace();
+            if (agentWorkspace == null) {
+                JOptionPane.showMessageDialog(null,
+                        "Could not find the ImageJAI agent workspace.",
+                        "ImageJAI Terminal Smoke Test",
+                        JOptionPane.ERROR_MESSAGE);
+                return;
+            }
+
+            AgentLauncher launcher = new AgentLauncher(agentWorkspace, settings.tcpPort);
+            AgentLauncher.AgentInfo gemma = findSmokeTestAgent(launcher.detectAgents());
+            if (gemma == null) {
+                JOptionPane.showMessageDialog(null,
+                        "Gemma CLI was not found on PATH. Install gemma4_31b_agent before running the smoke test.",
+                        "ImageJAI Terminal Smoke Test",
+                        JOptionPane.ERROR_MESSAGE);
+                return;
+            }
+
+            AgentSession launched = launcher.launch(gemma, AgentLauncher.Mode.EMBEDDED);
+            if (!(launched instanceof EmbeddedAgentSession)) {
+                JOptionPane.showMessageDialog(null,
+                        "Embedded terminal launch failed. Check the ImageJ log for details.",
+                        "ImageJAI Terminal Smoke Test",
+                        JOptionPane.ERROR_MESSAGE);
+                return;
+            }
+
+            final EmbeddedAgentSession session = (EmbeddedAgentSession) launched;
+            final JFrame frame = new JFrame("ImageJAI Terminal Smoke Test - " + gemma.name);
+            frame.setDefaultCloseOperation(JFrame.DISPOSE_ON_CLOSE);
+            frame.getContentPane().add(session.component(), BorderLayout.CENTER);
+            frame.setSize(980, 680);
+            frame.setMinimumSize(new Dimension(760, 420));
+            frame.addWindowListener(new WindowAdapter() {
+                @Override
+                public void windowClosed(WindowEvent e) {
+                    session.destroy();
+                }
+            });
+
+            Frame ijFrame = IJ.getInstance();
+            if (ijFrame != null) {
+                Rectangle bounds = ijFrame.getBounds();
+                frame.setLocation(bounds.x + bounds.width + 10, bounds.y);
+            }
+
+            frame.setVisible(true);
+            session.component().requestFocusInWindow();
+            IJ.log("[ImageJAI-Term] Opened terminal smoke-test frame for " + gemma.name);
+        }
+
+        private static AgentLauncher.AgentInfo findSmokeTestAgent(List<AgentLauncher.AgentInfo> agents) {
+            for (AgentLauncher.AgentInfo agent : agents) {
+                if ("Gemma 4 31B (Claude-style)".equals(agent.name)) {
+                    return agent;
+                }
+            }
+            for (AgentLauncher.AgentInfo agent : agents) {
+                if ("Gemma 4 31B".equals(agent.name)) {
+                    return agent;
+                }
+            }
+            return null;
+        }
+    }
+
+    static synchronized void registerBundledTerminalFonts() {
+        if (terminalFontsRegistered) {
+            return;
+        }
+
+        try {
+            registerFontResource("/fonts/JetBrainsMono-Regular.ttf");
+            registerFontResource("/fonts/NotoEmoji-Regular.ttf");
+            terminalFontsRegistered = true;
+            IJ.log("[ImageJAI-Term] Registered bundled terminal fonts");
+        } catch (Exception e) {
+            IJ.log("[ImageJAI-Term] Failed to register bundled terminal fonts: " + e.getMessage());
+        }
+    }
+
+    private static void registerFontResource(String resourcePath)
+            throws FontFormatException, IOException {
+        try (InputStream in = ImageJAIPlugin.class.getResourceAsStream(resourcePath)) {
+            if (in == null) {
+                throw new IOException("missing resource " + resourcePath);
+            }
+            Font font = Font.createFont(Font.TRUETYPE_FONT, in);
+            GraphicsEnvironment.getLocalGraphicsEnvironment().registerFont(font);
+        }
     }
 
     /**
