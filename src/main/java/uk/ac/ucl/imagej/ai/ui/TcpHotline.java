@@ -33,10 +33,16 @@ public final class TcpHotline {
     }
 
     public JsonObject executeMacro(String code) throws IOException {
+        return executeMacro(code, "rail:hotline");
+    }
+
+    public JsonObject executeMacro(String code, String source) throws IOException {
         JsonObject request = new JsonObject();
         request.addProperty("command", "execute_macro");
         request.addProperty("code", code);
-        request.addProperty("source", "rail:hotline");
+        request.addProperty("source", source == null || source.trim().isEmpty()
+                ? "rail:hotline"
+                : source);
         return requireSuccess(send(request));
     }
 
@@ -49,6 +55,14 @@ public final class TcpHotline {
         }
         JsonElement result = response.get("result");
         return result != null && result.isJsonObject() ? result.getAsJsonObject() : null;
+    }
+
+    public String getResultsTable() throws IOException {
+        JsonObject request = new JsonObject();
+        request.addProperty("command", "get_results_table");
+        JsonObject response = requireSuccess(send(request));
+        JsonElement result = response.get("result");
+        return result != null && result.isJsonPrimitive() ? result.getAsString() : "";
     }
 
     public JsonObject send(JsonObject request) throws IOException {

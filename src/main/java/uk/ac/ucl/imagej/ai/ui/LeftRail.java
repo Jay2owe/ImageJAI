@@ -15,6 +15,7 @@ import javax.swing.JLabel;
 import javax.swing.JMenuItem;
 import javax.swing.JPanel;
 import javax.swing.JPopupMenu;
+import javax.swing.JOptionPane;
 import javax.swing.JSeparator;
 import javax.swing.SwingUtilities;
 import javax.swing.SwingWorker;
@@ -27,8 +28,20 @@ import java.awt.Font;
 import java.awt.Insets;
 import java.awt.event.ActionEvent;
 import java.awt.event.ActionListener;
+import java.io.BufferedReader;
 import java.io.File;
 import java.io.IOException;
+import java.io.InputStream;
+import java.io.InputStreamReader;
+import java.io.OutputStreamWriter;
+import java.io.Writer;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.DirectoryStream;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.Comparator;
 import java.util.List;
 import java.util.regex.Pattern;
 
@@ -47,6 +60,24 @@ public class LeftRail extends JPanel {
     private static final String RESET_ROI_MACRO = "roiManager('Reset');";
     private static final String Z_PROJECT_MACRO =
             "run('Z Project...', 'projection=[Max Intensity]');";
+    private static final String WIP_TEMPLATE_RESOURCE = "/wip_template.md";
+    private static final String AUDIT_SCRIPT =
+            "import json, os, re, sys\n"
+                    + "sys.path.insert(0, os.path.join(os.getcwd(), 'agent'))\n"
+                    + "from auditor import audit_results\n"
+                    + "data = json.load(sys.stdin)\n"
+                    + "info = data.get('image_info') or {}\n"
+                    + "type_str = str(info.get('type') or '')\n"
+                    + "bit_depth = 8 if '8' in type_str else 16 if '16' in type_str else 32 if '32' in type_str else None\n"
+                    + "cal = str(info.get('calibration') or '')\n"
+                    + "pixel_size = None\n"
+                    + "unit = None\n"
+                    + "m = re.match(r'([0-9.]+)\\s+(.+)/px', cal)\n"
+                    + "if m:\n"
+                    + "    pixel_size = float(m.group(1))\n"
+                    + "    unit = m.group(2)\n"
+                    + "result = audit_results(data.get('results_table') or '', pixel_size=pixel_size, unit=unit, bit_depth=bit_depth)\n"
+                    + "print(result.get('summary') or '')\n";
 
     private static final Color BG = new Color(34, 34, 40);
     private static final Color BG_DARK = new Color(28, 28, 33);
@@ -56,6 +87,7 @@ public class LeftRail extends JPanel {
     private static final Color TEXT_MUTED = new Color(130, 130, 140);
 
     private final TcpHotline tcpHotline;
+    private final Settings settings;
     private final SessionRelauncher sessionRelauncher;
     private final Runnable focusReturn;
     private final JPanel body;
@@ -65,6 +97,10 @@ public class LeftRail extends JPanel {
     private final Timer statusTimer;
     private final JButton commandsButton;
     private final JButton newAgentChatButton;
+    private final JButton newWipButton;
+    private final JButton macroSetsButton;
+    private final JButton runRecipeButton;
+    private final JButton auditButton;
 
     private boolean collapsed;
     private int railFontSize;
@@ -73,6 +109,7 @@ public class LeftRail extends JPanel {
 
     public LeftRail(Settings settings, File workspace,
                     SessionRelauncher sessionRelauncher, Runnable focusReturn) {
+        this.settings = settings;
         this.tcpHotline = new TcpHotline(settings);
         this.workspace = workspace;
         this.sessionRelauncher = sessionRelauncher;
@@ -106,6 +143,14 @@ public class LeftRail extends JPanel {
         });
         statusTimer.setRepeats(false);
 
+        newWipButton = railButton("New WIP", "Create a work-in-progress note");
+        newWipButton.addActionListener(new ActionListener() {
+            @Override
+            public void actionPerformed(ActionEvent e) {
+                newWip();
+            }
+        });
+
         commandsButton = railButton("Commands", "no command list");
         commandsButton.addActionListener(new ActionListener() {
             @Override
@@ -121,14 +166,40 @@ public class LeftRail extends JPanel {
             }
         });
 
+        macroSetsButton = railButton("Macro sets...", "Run a saved .ijm macro set");
+        macroSetsButton.addActionListener(new ActionListener() {
+            @Override
+            public void actionPerformed(ActionEvent e) {
+                showMacroSetsPopup(macroSetsButton);
+            }
+        });
+
+        runRecipeButton = railButton("Run recipe...", "Run an agent recipe");
+        runRecipeButton.addActionListener(new ActionListener() {
+            @Override
+            public void actionPerformed(ActionEvent e) {
+                showRecipesPopup(runRecipeButton);
+            }
+        });
+
+        auditButton = railButton("Audit my results", "Audit the current Results table");
+        auditButton.addActionListener(new ActionListener() {
+            @Override
+            public void actionPerformed(ActionEvent e) {
+                auditResults();
+            }
+        });
+
         add(createHeader());
         add(Box.createVerticalStrut(8));
         add(body);
         add(Box.createVerticalGlue());
         add(statusLabel);
 
+        buildSessionSection();
         buildAgentSection();
         buildHotlineSection();
+        buildGuidanceSection();
         updateAgentButtons();
         applyCollapsedState(false);
     }
@@ -181,6 +252,13 @@ public class LeftRail extends JPanel {
         return header;
     }
 
+    private void buildSessionSection() {
+        body.add(sectionTitle("Session"));
+        body.add(Box.createVerticalStrut(6));
+        body.add(newWipButton);
+        body.add(Box.createVerticalStrut(12));
+    }
+
     private void buildAgentSection() {
         body.add(sectionTitle("Agent"));
         body.add(Box.createVerticalStrut(6));
@@ -220,6 +298,17 @@ public class LeftRail extends JPanel {
                         tcpHotline.executeMacro(Z_PROJECT_MACRO);
                     }
                 }));
+        body.add(Box.createVerticalStrut(6));
+        body.add(macroSetsButton);
+        body.add(Box.createVerticalStrut(12));
+    }
+
+    private void buildGuidanceSection() {
+        body.add(sectionTitle("Guidance"));
+        body.add(Box.createVerticalStrut(6));
+        body.add(runRecipeButton);
+        body.add(Box.createVerticalStrut(6));
+        body.add(auditButton);
     }
 
     private void updateAgentButtons() {
@@ -319,6 +408,209 @@ public class LeftRail extends JPanel {
         });
         clearTimer.setRepeats(false);
         clearTimer.start();
+    }
+
+    private void newWip() {
+        String raw = JOptionPane.showInputDialog(
+                SwingUtilities.getWindowAncestor(this),
+                "Slug for the new WIP note:",
+                "New WIP",
+                JOptionPane.PLAIN_MESSAGE);
+        if (raw == null) {
+            focusTerminal();
+            return;
+        }
+        String slug = sanitizeSlug(raw);
+        if (slug.isEmpty()) {
+            showStatus("Enter a slug");
+            focusTerminal();
+            return;
+        }
+
+        try {
+            File base = workspace != null ? workspace : new File(".");
+            Path wipDir = base.toPath().resolve("agent").resolve("work_in_progress");
+            Files.createDirectories(wipDir);
+            Path wip = wipDir.resolve(slug + ".md");
+            if (!Files.exists(wip)) {
+                String template = loadWipTemplate().replace("<slug>", slug);
+                Files.write(wip, template.getBytes(StandardCharsets.UTF_8));
+                IJ.log("[ImageJAI-Term] Created WIP note: " + wip.toAbsolutePath());
+            } else {
+                IJ.log("[ImageJAI-Term] Reusing existing WIP note: " + wip.toAbsolutePath());
+            }
+
+            String path = wip.toAbsolutePath().normalize().toString();
+            if (session != null && session.isAlive()) {
+                session.writeInput("Start new WIP: read `" + path + "` and help me scope it.");
+                showStatus("WIP prompt sent");
+            } else {
+                showStatus("WIP note created");
+            }
+        } catch (IOException e) {
+            String msg = readableMessage(e);
+            showStatus(msg);
+            IJ.log("[ImageJAI-Term] New WIP failed: " + msg);
+        } finally {
+            focusTerminal();
+        }
+    }
+
+    private void showMacroSetsPopup(Component owner) {
+        final List<Path> macros = listFiles("agent/macro_sets", ".ijm");
+        JPopupMenu popup = new JPopupMenu();
+        if (macros.isEmpty()) {
+            JMenuItem empty = new JMenuItem("No .ijm files");
+            empty.setEnabled(false);
+            popup.add(empty);
+        } else {
+            for (final Path macro : macros) {
+                JMenuItem item = new JMenuItem(macro.getFileName().toString());
+                item.addActionListener(new ActionListener() {
+                    @Override
+                    public void actionPerformed(ActionEvent e) {
+                        runHotline("Macro set " + macro.getFileName(), macroSetsButton,
+                                new HotlineTask() {
+                                    @Override
+                                    public void run() throws IOException {
+                                        String code = new String(Files.readAllBytes(macro), StandardCharsets.UTF_8);
+                                        tcpHotline.executeMacro(code, "rail:macro-set");
+                                    }
+                                });
+                    }
+                });
+                popup.add(item);
+            }
+        }
+        popup.show(owner, 0, owner.getHeight());
+    }
+
+    private void showRecipesPopup(Component owner) {
+        final List<Path> recipes = listFiles("agent/recipes", ".yaml");
+        JPopupMenu popup = new JPopupMenu();
+        if (recipes.isEmpty()) {
+            JMenuItem empty = new JMenuItem("No recipes found");
+            empty.setEnabled(false);
+            popup.add(empty);
+        } else {
+            for (final Path recipe : recipes) {
+                final String name = stripExtension(recipe.getFileName().toString());
+                JMenuItem item = new JMenuItem(name);
+                item.addActionListener(new ActionListener() {
+                    @Override
+                    public void actionPerformed(ActionEvent e) {
+                        runRecipe(name);
+                    }
+                });
+                popup.add(item);
+            }
+        }
+        popup.show(owner, 0, owner.getHeight());
+    }
+
+    private void runRecipe(final String name) {
+        final EmbeddedAgentSession current = session;
+        runRecipeButton.setEnabled(false);
+        showStatus("Running recipe...");
+        focusTerminal();
+        new SwingWorker<Integer, String>() {
+            @Override
+            protected Integer doInBackground() throws Exception {
+                File base = workspace != null ? workspace : new File(".");
+                ProcessBuilder pb = new ProcessBuilder(
+                        "python", "-u", "agent/run_recipe.py", name);
+                pb.directory(base);
+                pb.redirectErrorStream(true);
+                pb.environment().put("IMAGEJAI_TCP_PORT", String.valueOf(tcpHotlinePort()));
+                Process process = pb.start();
+                try (BufferedReader reader = new BufferedReader(new InputStreamReader(
+                        process.getInputStream(), StandardCharsets.UTF_8))) {
+                    String line;
+                    while ((line = reader.readLine()) != null) {
+                        publish(line);
+                    }
+                }
+                return process.waitFor();
+            }
+
+            @Override
+            protected void process(List<String> chunks) {
+                for (String line : chunks) {
+                    showStatus(line);
+                    if (current != null && current.isAlive()) {
+                        current.writeRaw(line + "\r");
+                    }
+                }
+            }
+
+            @Override
+            protected void done() {
+                runRecipeButton.setEnabled(true);
+                try {
+                    int exit = get();
+                    showStatus(exit == 0 ? "Recipe done" : "Recipe failed");
+                    IJ.log("[ImageJAI-Term] Recipe " + name + " exited " + exit);
+                } catch (Exception e) {
+                    String msg = readableMessage(e);
+                    showStatus(msg);
+                    IJ.log("[ImageJAI-Term] Recipe failed: " + name + " - " + msg);
+                }
+                focusTerminal();
+            }
+        }.execute();
+    }
+
+    private void auditResults() {
+        final EmbeddedAgentSession current = session;
+        auditButton.setEnabled(false);
+        showStatus("Auditing results...");
+        focusTerminal();
+        new SwingWorker<String, Void>() {
+            @Override
+            protected String doInBackground() throws Exception {
+                String csv = tcpHotline.getResultsTable();
+                JsonObject info = tcpHotline.getImageInfo();
+                JsonObject payload = new JsonObject();
+                payload.addProperty("results_table", csv);
+                payload.add("image_info", info != null ? info : new JsonObject());
+
+                File base = workspace != null ? workspace : new File(".");
+                ProcessBuilder pb = new ProcessBuilder("python", "-c", AUDIT_SCRIPT);
+                pb.directory(base);
+                pb.redirectErrorStream(true);
+                Process process = pb.start();
+                try (Writer writer = new OutputStreamWriter(
+                        process.getOutputStream(), StandardCharsets.UTF_8)) {
+                    writer.write(payload.toString());
+                }
+                String output = readAll(process.getInputStream()).trim();
+                int exit = process.waitFor();
+                if (exit != 0) {
+                    throw new IOException(output.isEmpty()
+                            ? "Auditor exited " + exit
+                            : output);
+                }
+                return output.isEmpty() ? "Audit returned no summary." : output;
+            }
+
+            @Override
+            protected void done() {
+                auditButton.setEnabled(true);
+                try {
+                    String summary = get();
+                    if (current != null && current.isAlive()) {
+                        current.writeInput("Audit my results:\n" + summary);
+                    }
+                    showStatus("Audit sent");
+                    IJ.log("[ImageJAI-Term] Audit summary sent to PTY");
+                } catch (Exception e) {
+                    String msg = readableMessage(e);
+                    showStatus(msg);
+                    IJ.log("[ImageJAI-Term] Audit failed: " + msg);
+                }
+                focusTerminal();
+            }
+        }.execute();
     }
 
     private JLabel sectionTitle(String text) {
@@ -505,6 +797,77 @@ public class LeftRail extends JPanel {
         return message == null || message.trim().isEmpty()
                 ? e.getClass().getSimpleName()
                 : message;
+    }
+
+    private int tcpHotlinePort() {
+        return settings != null ? settings.tcpPort : 7746;
+    }
+
+    private List<Path> listFiles(String relativeDir, String suffix) {
+        List<Path> files = new ArrayList<Path>();
+        File base = workspace != null ? workspace : new File(".");
+        Path dir = base.toPath().resolve(relativeDir);
+        if (!Files.isDirectory(dir)) {
+            return files;
+        }
+        try (DirectoryStream<Path> stream = Files.newDirectoryStream(dir)) {
+            for (Path path : stream) {
+                if (Files.isRegularFile(path)
+                        && path.getFileName().toString().toLowerCase().endsWith(suffix)) {
+                    files.add(path);
+                }
+            }
+        } catch (IOException e) {
+            showStatus(readableMessage(e));
+            IJ.log("[ImageJAI-Term] Could not list " + relativeDir + ": " + e.getMessage());
+        }
+        Collections.sort(files, new Comparator<Path>() {
+            @Override
+            public int compare(Path a, Path b) {
+                return a.getFileName().toString()
+                        .compareToIgnoreCase(b.getFileName().toString());
+            }
+        });
+        return files;
+    }
+
+    private static String stripExtension(String name) {
+        int dot = name.lastIndexOf('.');
+        return dot > 0 ? name.substring(0, dot) : name;
+    }
+
+    private static String sanitizeSlug(String raw) {
+        if (raw == null) {
+            return "";
+        }
+        String slug = raw.trim().toLowerCase()
+                .replaceAll("[^a-z0-9._-]+", "-")
+                .replaceAll("^-+", "")
+                .replaceAll("-+$", "");
+        return slug;
+    }
+
+    private static String loadWipTemplate() throws IOException {
+        InputStream in = LeftRail.class.getResourceAsStream(WIP_TEMPLATE_RESOURCE);
+        if (in == null) {
+            return "# <slug>\n\n## Goal\n\n## Steps\n\n## Decisions\n\n## Open questions\n";
+        }
+        try (InputStream stream = in) {
+            return readAll(stream);
+        }
+    }
+
+    private static String readAll(InputStream stream) throws IOException {
+        StringBuilder out = new StringBuilder();
+        try (BufferedReader reader = new BufferedReader(new InputStreamReader(
+                stream, StandardCharsets.UTF_8))) {
+            char[] buf = new char[4096];
+            int n;
+            while ((n = reader.read(buf)) >= 0) {
+                out.append(buf, 0, n);
+            }
+        }
+        return out.toString();
     }
 
     private interface HotlineTask {
