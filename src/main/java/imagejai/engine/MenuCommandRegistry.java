@@ -23,7 +23,7 @@ import java.util.Map;
  * for Phase 1 — the reload surface (a {@code reload_commands} TCP handler)
  * can be added later if telemetry shows this bites.
  */
-final class MenuCommandRegistry {
+public final class MenuCommandRegistry {
 
     /** A single fuzzy-match result: canonical name + its score. */
     static final class Match {
@@ -48,7 +48,7 @@ final class MenuCommandRegistry {
     // isn't initialised yet.
     private static volatile MenuCommandRegistry INSTANCE;
 
-    static MenuCommandRegistry get() {
+    public static MenuCommandRegistry get() {
         MenuCommandRegistry r = INSTANCE;
         if (r != null) return r;
         synchronized (MenuCommandRegistry.class) {
@@ -70,7 +70,7 @@ final class MenuCommandRegistry {
      * Test-only: replace the singleton with an explicit command set. Allows
      * unit tests to exercise the fuzzy-match logic without a live Fiji.
      */
-    static void setForTesting(Map<String, String> cmds) {
+    public static void setForTesting(Map<String, String> cmds) {
         synchronized (MenuCommandRegistry.class) {
             INSTANCE = new MenuCommandRegistry(cmds == null
                     ? Collections.<String, String>emptyMap() : cmds);
@@ -83,7 +83,10 @@ final class MenuCommandRegistry {
     }
 
     /** Canonical command list. Snapshot; callers may not mutate. */
-    List<String> allCommands() { return names; }
+    public List<String> allCommands() { return names; }
+
+    /** Canonical command list from the singleton snapshot. */
+    public static List<String> allCommandNames() { return get().allCommands(); }
 
     /** Resolving class name for the given command, or {@code null} if unknown. */
     String classFor(String name) {

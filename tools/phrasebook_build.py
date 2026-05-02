@@ -49,6 +49,12 @@ def normalise(text: str) -> str:
     return WS.sub(" ", text).strip()
 
 
+def slugify(text: str) -> str:
+    """Mirror imagejai.local.MenuIntentImporter.slugify."""
+    slug = re.sub(r"[^a-z0-9]+", ".", text.lower())
+    return slug.strip(".")
+
+
 @dataclass(frozen=True)
 class IntentDef:
     id: str
@@ -213,6 +219,28 @@ def load_intents(path: Path) -> List[IntentDef]:
     return intents
 
 
+def load_menu_intents(path: Path) -> List[IntentDef]:
+    commands = [line.strip() for line in path.read_text(encoding="utf-8").splitlines()
+                if line.strip()]
+    intents: List[IntentDef] = []
+    seen: set[str] = set()
+    for command in commands:
+        slug = slugify(command)
+        if not slug:
+            continue
+        intent_id = "menu." + slug
+        if intent_id in seen:
+            continue
+        seen.add(intent_id)
+        intents.append(IntentDef(
+            intent_id,
+            f"Open menu command: {command}",
+            (command.lower(),),
+            (),
+        ))
+    return intents
+
+
 def provider_from_args(name: str, model: Optional[str]) -> LlmProvider:
     if name == "mock":
         return MockProvider()
@@ -298,7 +326,7 @@ def select_intents(intents: Sequence[IntentDef], intent_id: Optional[str]) -> Li
     return selected
 
 
-def validate_schema(document: Dict[str, object]) -> None:
+def validate_schema(document: Dict[str, object], *, require_normalised_phrases: bool = True) -> None:
     if document.get("version") != 1:
         raise ValueError("phrasebook version must be 1")
     intents = document.get("intents")
@@ -315,7 +343,9 @@ def validate_schema(document: Dict[str, object]) -> None:
         if not isinstance(phrases, list) or not phrases:
             raise ValueError(f"{entry['id']} must have phrases")
         for phrase in phrases:
-            if not isinstance(phrase, str) or normalise(phrase) != phrase:
+            if not isinstance(phrase, str):
+                raise ValueError(f"{entry['id']} has an invalid phrase: {phrase!r}")
+            if require_normalised_phrases and normalise(phrase) != phrase:
                 raise ValueError(f"{entry['id']} has an unnormalised phrase: {phrase!r}")
 
 
@@ -357,6 +387,30 @@ def merge_selected_intent(existing: Dict[str, object], generated: Dict[str, obje
         if intent_id not in seen:
             merged.append(entry)
     return {"version": 1, "intents": merged}
+
+
+def remove_existing_phrase_collisions(existing: Dict[str, object],
+                                      generated: Dict[str, object]) -> Dict[str, object]:
+    existing_phrases: set[str] = set()
+    for entry in existing.get("intents", []):
+        if not isinstance(entry, dict):
+            continue
+        for phrase in entry.get("phrases", []):
+            existing_phrases.add(normalise(str(phrase)))
+
+    filtered: List[dict] = []
+    for entry in generated.get("intents", []):
+        if not isinstance(entry, dict):
+            continue
+        phrases = [
+            phrase for phrase in entry.get("phrases", [])
+            if normalise(str(phrase)) not in existing_phrases
+        ]
+        if phrases:
+            copy = dict(entry)
+            copy["phrases"] = phrases
+            filtered.append(copy)
+    return {"version": 1, "intents": filtered}
 
 
 def java_load_check(json_path: Path) -> None:
@@ -427,6 +481,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--intents-file", type=Path, default=DEFAULT_INTENTS)
     parser.add_argument("--output", type=Path, default=DEFAULT_PHRASEBOOK)
     parser.add_argument("--intent", help="Regenerate one intent id")
+    parser.add_argument("--menu-dump", type=Path, help="Read ImageJ/Fiji menu commands, one per line, and add menu.* intents")
     parser.add_argument("--provider", choices=("mock", "claude", "openai"), default=os.environ.get("LOCAL_ASSISTANT_LLM_PROVIDER", "claude"))
     parser.add_argument("--model", help="Provider model override")
     parser.add_argument("--dry-run", action="store_true", help="Print generated JSON to stdout without writing")
@@ -439,13 +494,27 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = parse_args(argv)
     try:
-        intents = select_intents(load_intents(args.intents_file), args.intent)
         provider = provider_from_args(args.provider, args.model)
-        existing = existing_phrasebook(args.output) if args.keep else None
-        phrasebook = build_phrasebook(intents, provider, minimum=args.minimum, existing=existing, keep=args.keep)
-        if args.intent and not args.dry_run and args.output.exists():
-            phrasebook = merge_selected_intent(existing_phrasebook(args.output), phrasebook)
-        validate_schema(phrasebook)
+        if args.menu_dump:
+            existing_output = existing_phrasebook(args.output)
+            existing_ids = {
+                entry["id"]
+                for entry in existing_output.get("intents", [])
+                if isinstance(entry, dict) and isinstance(entry.get("id"), str)
+            }
+            menu_intents = [intent for intent in load_menu_intents(args.menu_dump)
+                            if intent.id not in existing_ids]
+            intents = select_intents(menu_intents, args.intent)
+            generated = build_phrasebook(intents, provider, minimum=args.minimum)
+            generated = remove_existing_phrase_collisions(existing_output, generated)
+            phrasebook = merge_selected_intent(existing_output, generated)
+        else:
+            intents = select_intents(load_intents(args.intents_file), args.intent)
+            existing = existing_phrasebook(args.output) if args.keep else None
+            phrasebook = build_phrasebook(intents, provider, minimum=args.minimum, existing=existing, keep=args.keep)
+            if args.intent and not args.dry_run and args.output.exists():
+                phrasebook = merge_selected_intent(existing_phrasebook(args.output), phrasebook)
+        validate_schema(phrasebook, require_normalised_phrases=not bool(args.menu_dump))
         check_cross_intent_collisions(phrasebook)
         rendered = json.dumps(phrasebook, indent=2, ensure_ascii=False) + "\n"
         if args.dry_run:

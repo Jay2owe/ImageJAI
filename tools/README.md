@@ -27,3 +27,13 @@ Schema check against the Java loader:
 ```bash
 python tools/phrasebook_build.py --provider mock --output %TEMP%\phrasebook.json --java-load-check
 ```
+
+Menu-command expansion dry run:
+
+```bash
+python tools/phrasebook_build.py --menu-dump tools/menu-commands.txt --provider mock --dry-run | python -c "import json,sys; data=json.load(sys.stdin); wanted=sum(1 for line in open('tools/menu-commands.txt', encoding='utf-8') if line.strip()); got=sum(1 for row in data['intents'] if row['id'].startswith('menu.')); assert got == wanted, (got, wanted); print(f'menu intents: {got}')"
+```
+
+`tools/menu-commands.txt` is the canonical build-time input for menu
+phrase generation. `agent/scan_plugins.py` is a legacy agent-side scanner,
+not the Java Local Assistant source.

@@ -67,6 +67,7 @@ public class Settings {
 
     public String selectedAgentName = AgentLauncher.LOCAL_ASSISTANT_NAME;
     public double localAssistantFuzzyThreshold = 0.90;
+    public boolean expandMenuPhrasebook = false;
 
     public static final String DEFAULT_MINILM_MODEL_SHA256 =
             "4278337fd0ff3c68bfb6291042cad8ab363e1d9fbc43dcb499fe91c871902474";

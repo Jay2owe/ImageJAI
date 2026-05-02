@@ -2,6 +2,7 @@ package imagejai.local;
 
 import com.google.gson.Gson;
 import com.google.gson.JsonSyntaxException;
+import imagejai.config.Settings;
 import imagejai.local.intents.HelpIntent;
 import imagejai.local.intents.PixelSizeIntent;
 import imagejai.local.intents.analysis.AnalysisIntentFactory;
@@ -29,12 +30,21 @@ public class IntentLibrary {
     private final List<String> phrases = new ArrayList<String>();
 
     public IntentLibrary() {
+        this(new Settings());
+    }
+
+    public IntentLibrary(Settings settings) {
         registerBuiltIns();
         loadPhrasebookResource();
+        MenuIntentImporter.importInto(this, settings != null && settings.expandMenuPhrasebook);
     }
 
     public static IntentLibrary load() {
         return new IntentLibrary();
+    }
+
+    public static IntentLibrary load(Settings settings) {
+        return new IntentLibrary(settings);
     }
 
     private void registerBuiltIns() {
@@ -124,6 +134,16 @@ public class IntentLibrary {
         if (!phraseToIntentId.containsKey(normalised)) {
             phrases.add(normalised);
         }
+        phraseToIntentId.put(normalised, intentId);
+    }
+
+    public void addPhraseIfAbsent(String phrase, String intentId) {
+        String normalised = IntentMatcher.normalise(phrase);
+        if (normalised.length() == 0 || intentId == null
+                || phraseToIntentId.containsKey(normalised)) {
+            return;
+        }
+        phrases.add(normalised);
         phraseToIntentId.put(normalised, intentId);
     }
 
