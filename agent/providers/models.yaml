@@ -7,6 +7,13 @@
 # Reliability vocabulary: high | medium | low
 # Provider keys must match the canonical hyphenated set in agent/providers/router.py.
 #
+# Phase G fields (auto-discovery + curation + soft-deprecation):
+#   curated         : true for every entry in this file
+#   pinned          : curator pin (user pin lives in models_local.yaml)
+#   last_verified   : ISO date — audit tool flags entries >90 days stale
+#   deprecated_since: optional ISO date — set when upstream /models drops the entry
+#   replacement     : optional model_id — surfaced in "no longer available" dialog
+#
 # Each consumer ignores fields it does not recognise. Display fields
 # (display_name/description/tier/pinned/vision_capable) are read by Java;
 # context-loader fields (harness/family/context_size/tool_call_reliability)
@@ -16,11 +23,12 @@
 #   harness        : cli_shell | tool_loop
 #   family         : claude | gemma | llama | qwen | gpt | mistral |
 #                    deepseek | kimi | glm | grok | phi | gptoss | (other)
-#   context_size   : small | medium | large  (loader applies small_context overlay when "small")
-#   tool_call_reliability  : high | medium | low (already shipped in Phase D)
+#   context_size   : small | medium | large
 
 models:
-  # ---------------- Anthropic (paid — placeholder until Phase H tier safety) ---
+  # ============================================================================
+  # Anthropic — paid, native bypass path (prompt caching, parallel tool calls)
+  # ============================================================================
   - provider: anthropic
     model_id: claude-opus-4-7
     display_name: Claude Opus 4.7
@@ -37,6 +45,11 @@ models:
     harness: cli_shell
     family: claude
     context_size: large
+    deprecated_since: null
+    replacement: null
+    notes: >
+      Opus 4.7 tokenizer consumes ~35% more tokens than 4.5 — factor into
+      stage-6 cost.
 
   - provider: anthropic
     model_id: claude-sonnet-4-6
@@ -54,6 +67,8 @@ models:
     harness: cli_shell
     family: claude
     context_size: large
+    deprecated_since: null
+    replacement: null
 
   - provider: anthropic
     model_id: claude-haiku-4-5
@@ -70,8 +85,50 @@ models:
     harness: cli_shell
     family: claude
     context_size: large
+    deprecated_since: null
+    replacement: null
 
-  # ---------------- OpenAI (Codex CLI primary user) --------------------------
+  # ============================================================================
+  # OpenAI — paid GPT-5 family
+  # ============================================================================
+  - provider: openai
+    model_id: gpt-5
+    display_name: GPT-5
+    description: >
+      OpenAI's frontier model. Strong tool calling, generous context window,
+      vision capable.
+    tier: paid
+    context_window: 400000
+    vision_capable: true
+    tool_call_reliability: high
+    last_verified: 2026-05-01
+    pinned: false
+    curated: true
+    harness: cli_shell
+    family: gpt
+    context_size: large
+    deprecated_since: null
+    replacement: null
+
+  - provider: openai
+    model_id: gpt-5-mini
+    display_name: GPT-5 Mini
+    description: >
+      Smaller, cheaper GPT-5 variant. Sufficient for most ImageJ workflows
+      that don't need frontier reasoning.
+    tier: paid
+    context_window: 400000
+    vision_capable: true
+    tool_call_reliability: high
+    last_verified: 2026-05-01
+    pinned: false
+    curated: true
+    harness: cli_shell
+    family: gpt
+    context_size: large
+    deprecated_since: null
+    replacement: null
+
   - provider: openai
     model_id: gpt-5-codex
     display_name: GPT-5 Codex
@@ -88,8 +145,12 @@ models:
     harness: cli_shell
     family: gpt
     context_size: large
+    deprecated_since: null
+    replacement: null
 
-  # ---------------- Gemini (free with limits) ---------------------------------
+  # ============================================================================
+  # Gemini — free with limits, native bypass for server tools + caching
+  # ============================================================================
   - provider: gemini
     model_id: gemini-2.5-pro
     display_name: Gemini 2.5 Pro
@@ -106,6 +167,8 @@ models:
     harness: cli_shell
     family: gemini
     context_size: large
+    deprecated_since: null
+    replacement: null
 
   - provider: gemini
     model_id: gemini-2.5-flash
@@ -123,6 +186,8 @@ models:
     harness: tool_loop
     family: gemini
     context_size: large
+    deprecated_since: null
+    replacement: null
 
   - provider: gemini
     model_id: gemini-2.5-flash-lite
@@ -139,8 +204,31 @@ models:
     harness: tool_loop
     family: gemini
     context_size: large
+    deprecated_since: null
+    replacement: null
 
-  # ---------------- Groq (free with limits) -----------------------------------
+  - provider: gemini
+    model_id: gemini-2.0-flash
+    display_name: Gemini 2.0 Flash
+    description: >
+      Older Flash kept for stability — slightly weaker tool calling than 2.5
+      Flash but with a calmer rate-limit profile on heavy days.
+    tier: free-with-limits
+    context_window: 1000000
+    vision_capable: true
+    tool_call_reliability: medium
+    last_verified: 2026-05-01
+    pinned: false
+    curated: true
+    harness: tool_loop
+    family: gemini
+    context_size: large
+    deprecated_since: null
+    replacement: null
+
+  # ============================================================================
+  # Groq — free with limits, very fast inference
+  # ============================================================================
   - provider: groq
     model_id: llama-3.3-70b-versatile
     display_name: Llama 3.3 70B Versatile
@@ -157,6 +245,8 @@ models:
     harness: tool_loop
     family: llama
     context_size: large
+    deprecated_since: null
+    replacement: null
 
   - provider: groq
     model_id: llama-3.1-8b-instant
@@ -174,8 +264,418 @@ models:
     harness: tool_loop
     family: llama
     context_size: large
+    deprecated_since: null
+    replacement: null
 
-  # ---------------- Ollama (local, always free) -------------------------------
+  - provider: groq
+    model_id: qwen-2.5-32b
+    display_name: Qwen 2.5 32B
+    description: >
+      Strong instruction follower from the Qwen family on Groq's fast
+      backend. Good general-purpose tool caller.
+    tier: free-with-limits
+    context_window: 128000
+    vision_capable: false
+    tool_call_reliability: high
+    last_verified: 2026-05-01
+    pinned: false
+    curated: true
+    harness: tool_loop
+    family: qwen
+    context_size: large
+    deprecated_since: null
+    replacement: null
+
+  - provider: groq
+    model_id: qwen-2.5-coder-32b
+    display_name: Qwen 2.5 Coder 32B
+    description: >
+      Code-focused Qwen on Groq. Strong at ImageJ macro syntax and Groovy
+      scripts.
+    tier: free-with-limits
+    context_window: 128000
+    vision_capable: false
+    tool_call_reliability: high
+    last_verified: 2026-05-01
+    pinned: false
+    curated: true
+    harness: tool_loop
+    family: qwen
+    context_size: large
+    deprecated_since: null
+    replacement: null
+
+  - provider: groq
+    model_id: openai/gpt-oss-120b
+    display_name: GPT-OSS 120B
+    description: >
+      OpenAI's open-weight 120B model on Groq. Frontier-grade tool calling
+      with no API cost on the free tier.
+    tier: free-with-limits
+    context_window: 128000
+    vision_capable: false
+    tool_call_reliability: high
+    last_verified: 2026-05-01
+    pinned: false
+    curated: true
+    harness: tool_loop
+    family: gptoss
+    context_size: large
+    deprecated_since: null
+    replacement: null
+
+  - provider: groq
+    model_id: moonshotai/kimi-k2-instruct
+    display_name: Kimi K2 (1T MoE)
+    description: >
+      Moonshot's frontier 1T-parameter MoE accessible through Groq. Very
+      strong reasoning + tool use, free with daily quota.
+    tier: free-with-limits
+    context_window: 128000
+    vision_capable: false
+    tool_call_reliability: high
+    last_verified: 2026-05-01
+    pinned: false
+    curated: true
+    harness: tool_loop
+    family: kimi
+    context_size: large
+    deprecated_since: null
+    replacement: null
+
+  # ============================================================================
+  # Cerebras — free with limits, ultra-fast inference
+  # ============================================================================
+  - provider: cerebras
+    model_id: llama-3.3-70b
+    display_name: Llama 3.3 70B (Cerebras)
+    description: >
+      Same Llama 70B as Groq, but on Cerebras' wafer-scale inference —
+      similar quality, different rate-limit envelope.
+    tier: free-with-limits
+    context_window: 128000
+    vision_capable: false
+    tool_call_reliability: high
+    last_verified: 2026-05-01
+    pinned: false
+    curated: true
+    harness: tool_loop
+    family: llama
+    context_size: large
+    deprecated_since: null
+    replacement: null
+
+  - provider: cerebras
+    model_id: qwen-3-coder-480b
+    display_name: Qwen3 Coder 480B (Cerebras)
+    description: >
+      The same large Qwen3 coder accessible through Ollama Cloud, served
+      on Cerebras silicon for very fast token rates.
+    tier: free-with-limits
+    context_window: 256000
+    vision_capable: false
+    tool_call_reliability: high
+    last_verified: 2026-05-01
+    pinned: false
+    curated: true
+    harness: tool_loop
+    family: qwen
+    context_size: large
+    deprecated_since: null
+    replacement: null
+
+  # ============================================================================
+  # OpenRouter — free with limits (`:free` variants)
+  # ============================================================================
+  - provider: openrouter
+    model_id: deepseek/deepseek-chat:free
+    display_name: DeepSeek V3.1 (free)
+    description: >
+      DeepSeek's V3.1 surfaced through OpenRouter's free routing. No card
+      required; rate-limited.
+    tier: free-with-limits
+    context_window: 128000
+    vision_capable: false
+    tool_call_reliability: medium
+    last_verified: 2026-05-01
+    pinned: false
+    curated: true
+    harness: tool_loop
+    family: deepseek
+    context_size: large
+    deprecated_since: null
+    replacement: null
+
+  - provider: openrouter
+    model_id: zhipuai/glm-4.6:free
+    display_name: GLM 4.6 (free)
+    description: >
+      Zhipu's GLM-4.6 on OpenRouter free tier — strong agentic behaviour.
+    tier: free-with-limits
+    context_window: 200000
+    vision_capable: false
+    tool_call_reliability: medium
+    last_verified: 2026-05-01
+    pinned: false
+    curated: true
+    harness: tool_loop
+    family: glm
+    context_size: large
+    deprecated_since: null
+    replacement: null
+
+  - provider: openrouter
+    model_id: meta-llama/llama-3.3-70b-instruct:free
+    display_name: Llama 3.3 70B (free)
+    description: >
+      Llama 3.3 70B on OpenRouter free tier. Fallback when Groq daily quota
+      is exhausted.
+    tier: free-with-limits
+    context_window: 128000
+    vision_capable: false
+    tool_call_reliability: medium
+    last_verified: 2026-05-01
+    pinned: false
+    curated: true
+    harness: tool_loop
+    family: llama
+    context_size: large
+    deprecated_since: null
+    replacement: null
+
+  # ============================================================================
+  # GitHub Models — free with limits (PAT models:read scope)
+  # ============================================================================
+  - provider: github-models
+    model_id: openai/gpt-4o-mini
+    display_name: GPT-4o Mini (GitHub)
+    description: >
+      OpenAI's GPT-4o-mini through GitHub Models. Free with hard daily caps
+      — 50 RPD on the high tier.
+    tier: free-with-limits
+    context_window: 128000
+    vision_capable: true
+    tool_call_reliability: high
+    last_verified: 2026-05-01
+    pinned: false
+    curated: true
+    harness: tool_loop
+    family: gpt
+    context_size: large
+    deprecated_since: null
+    replacement: null
+
+  - provider: github-models
+    model_id: meta/Meta-Llama-3.1-70B-Instruct
+    display_name: Llama 3.1 70B (GitHub)
+    description: >
+      Meta Llama 3.1 70B through GitHub Models — shares the same 50 RPD cap
+      on the high-tier plan.
+    tier: free-with-limits
+    context_window: 128000
+    vision_capable: false
+    tool_call_reliability: medium
+    last_verified: 2026-05-01
+    pinned: false
+    curated: true
+    harness: tool_loop
+    family: llama
+    context_size: large
+    deprecated_since: null
+    replacement: null
+
+  - provider: github-models
+    model_id: microsoft/Phi-4
+    display_name: Phi-4 (GitHub)
+    description: >
+      Microsoft's small reasoning model on GitHub Models. Cheap and fast,
+      good for quick triage tasks.
+    tier: free-with-limits
+    context_window: 16384
+    vision_capable: false
+    tool_call_reliability: medium
+    last_verified: 2026-05-01
+    pinned: false
+    curated: true
+    harness: tool_loop
+    family: phi
+    context_size: small
+    deprecated_since: null
+    replacement: null
+
+  # ============================================================================
+  # Mistral — paid (devstral-small overrides to free)
+  # ============================================================================
+  - provider: mistral
+    model_id: mistral-large-latest
+    display_name: Mistral Large
+    description: >
+      Mistral's flagship paid model. Strong general tool use; vision capable
+      via the multimodal route.
+    tier: paid
+    context_window: 128000
+    vision_capable: false
+    tool_call_reliability: high
+    last_verified: 2026-05-01
+    pinned: false
+    curated: true
+    harness: tool_loop
+    family: mistral
+    context_size: large
+    deprecated_since: null
+    replacement: null
+
+  - provider: mistral
+    model_id: codestral-latest
+    display_name: Codestral
+    description: >
+      Mistral's code-focused model. Strong at macro syntax and Groovy.
+    tier: paid
+    context_window: 256000
+    vision_capable: false
+    tool_call_reliability: high
+    last_verified: 2026-05-01
+    pinned: false
+    curated: true
+    harness: tool_loop
+    family: mistral
+    context_size: large
+    deprecated_since: null
+    replacement: null
+
+  # ============================================================================
+  # Together AI — paid
+  # ============================================================================
+  - provider: together
+    model_id: mistralai/Mixtral-8x7B-Instruct-v0.1
+    display_name: Mixtral 8x7B
+    description: >
+      Mistral's classic Mixtral 8x7B MoE on Together. Reliable, cheap
+      pay-as-you-go alternative to Llama 70B.
+    tier: paid
+    context_window: 32768
+    vision_capable: false
+    tool_call_reliability: medium
+    last_verified: 2026-05-01
+    pinned: false
+    curated: true
+    harness: tool_loop
+    family: mistral
+    context_size: large
+    deprecated_since: null
+    replacement: null
+
+  # ============================================================================
+  # HuggingFace Inference Providers — paid
+  # ============================================================================
+  - provider: huggingface
+    model_id: meta-llama/Llama-3.3-70B-Instruct
+    display_name: Llama 3.3 70B (HF)
+    description: >
+      Llama 3.3 70B on HuggingFace's routed inference — HF picks the
+      fastest/cheapest backend automatically.
+    tier: paid
+    context_window: 128000
+    vision_capable: false
+    tool_call_reliability: medium
+    last_verified: 2026-05-01
+    pinned: false
+    curated: true
+    harness: tool_loop
+    family: llama
+    context_size: large
+    deprecated_since: null
+    replacement: null
+
+  # ============================================================================
+  # DeepSeek — paid (currently on a 75% promotional discount until 2026-05-31)
+  # ============================================================================
+  - provider: deepseek
+    model_id: deepseek-chat
+    display_name: DeepSeek V3.1 Chat
+    description: >
+      DeepSeek's V3.1 chat model. Very cheap during the promotional discount
+      ending 2026-05-31; reliable tool calls.
+    tier: paid
+    context_window: 128000
+    vision_capable: false
+    tool_call_reliability: medium
+    last_verified: 2026-05-01
+    pinned: false
+    curated: true
+    harness: tool_loop
+    family: deepseek
+    context_size: large
+    deprecated_since: null
+    replacement: null
+    notes: >
+      75% promotional discount expires 2026-05-31; pricing increases ~4×
+      after that date.
+
+  # ============================================================================
+  # xAI Grok — paid
+  # ============================================================================
+  - provider: xai
+    model_id: grok-4
+    display_name: Grok 4
+    description: >
+      xAI's frontier reasoning model. Pay-as-you-go; vision capable.
+    tier: paid
+    context_window: 256000
+    vision_capable: true
+    tool_call_reliability: high
+    last_verified: 2026-05-01
+    pinned: false
+    curated: true
+    harness: tool_loop
+    family: grok
+    context_size: large
+    deprecated_since: null
+    replacement: null
+
+  # ============================================================================
+  # Perplexity — paid (no live /models endpoint; curated-only)
+  # ============================================================================
+  - provider: perplexity
+    model_id: sonar
+    display_name: Perplexity Sonar
+    description: >
+      Perplexity's grounded-search Sonar model. Pay-as-you-go; strong at
+      web-augmented Q&A but offers no live /models listing.
+    tier: paid
+    context_window: 128000
+    vision_capable: false
+    tool_call_reliability: medium
+    last_verified: 2026-05-01
+    pinned: false
+    curated: true
+    harness: tool_loop
+    family: other
+    context_size: large
+    deprecated_since: null
+    replacement: null
+
+  - provider: perplexity
+    model_id: sonar-pro
+    display_name: Perplexity Sonar Pro
+    description: >
+      Pro tier of Sonar with stronger reasoning and citation depth.
+    tier: paid
+    context_window: 200000
+    vision_capable: false
+    tool_call_reliability: medium
+    last_verified: 2026-05-01
+    pinned: false
+    curated: true
+    harness: tool_loop
+    family: other
+    context_size: large
+    deprecated_since: null
+    replacement: null
+
+  # ============================================================================
+  # Ollama (local) — always free
+  # ============================================================================
   - provider: ollama
     model_id: llama3.2:3b
     display_name: Llama 3.2 3B
@@ -192,6 +692,8 @@ models:
     harness: tool_loop
     family: llama
     context_size: small
+    deprecated_since: null
+    replacement: null
 
   - provider: ollama
     model_id: qwen2.5-coder:7b
@@ -209,8 +711,31 @@ models:
     harness: tool_loop
     family: qwen
     context_size: small
+    deprecated_since: null
+    replacement: null
 
-  # ---------------- Ollama Cloud (free with limits) ---------------------------
+  - provider: ollama
+    model_id: gemma4:4b
+    display_name: Gemma 4 4B
+    description: >
+      Compact local Gemma with vision. Useful when no network is available
+      and the user wants screenshot-aware analysis.
+    tier: free
+    context_window: 128000
+    vision_capable: true
+    tool_call_reliability: medium
+    last_verified: 2026-05-01
+    pinned: false
+    curated: true
+    harness: tool_loop
+    family: gemma
+    context_size: small
+    deprecated_since: null
+    replacement: null
+
+  # ============================================================================
+  # Ollama Cloud — free with limits (no live /models endpoint; curated-only)
+  # ============================================================================
   - provider: ollama-cloud
     model_id: gemma4:31b-cloud
     display_name: Gemma 4 31B (cloud)
@@ -227,6 +752,9 @@ models:
     harness: tool_loop
     family: gemma
     context_size: large
+    deprecated_since: null
+    replacement: null
+    notes: ImageJAI's existing default Gemma path.
 
   - provider: ollama-cloud
     model_id: qwen3-coder:480b-cloud
@@ -235,12 +763,33 @@ models:
       Very large code model accessible through Ollama Cloud. Strong at macro
       generation; opaque rate caps on the free tier.
     tier: free-with-limits
-    context_window: 128000
+    context_window: 256000
     vision_capable: false
-    tool_call_reliability: medium
+    tool_call_reliability: high
     last_verified: 2026-05-01
     pinned: false
     curated: true
     harness: tool_loop
     family: qwen
     context_size: large
+    deprecated_since: null
+    replacement: null
+
+  - provider: ollama-cloud
+    model_id: gpt-oss:120b-cloud
+    display_name: GPT-OSS 120B (cloud)
+    description: >
+      OpenAI's open-weight 120B model on Ollama Cloud. Frontier-grade tool
+      use without an OpenAI key.
+    tier: free-with-limits
+    context_window: 128000
+    vision_capable: false
+    tool_call_reliability: high
+    last_verified: 2026-05-01
+    pinned: false
+    curated: true
+    harness: tool_loop
+    family: gptoss
+    context_size: large
+    deprecated_since: null
+    replacement: null

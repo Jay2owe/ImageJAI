@@ -5,10 +5,21 @@ import imagejai.engine.picker.ModelEntry;
 import imagejai.engine.picker.ProviderEntry;
 import imagejai.engine.picker.ProviderRegistry;
 
+import javax.swing.BorderFactory;
+import javax.swing.Box;
+import javax.swing.BoxLayout;
 import javax.swing.JButton;
+import javax.swing.JLabel;
 import javax.swing.JMenuItem;
+import javax.swing.JPanel;
 import javax.swing.JPopupMenu;
 import javax.swing.JSeparator;
+import javax.swing.SwingUtilities;
+import javax.swing.SwingWorker;
+import javax.swing.UIManager;
+import java.awt.BorderLayout;
+import java.awt.Color;
+import java.awt.Component;
 import java.awt.event.ActionEvent;
 import java.awt.event.ActionListener;
 import java.util.ArrayList;
@@ -40,13 +51,48 @@ public class ModelPickerButton extends JButton {
         void openInstallerForProvider(String providerId);
     }
 
+    /**
+     * Refresh result returned by the user-supplied refresh task.
+     * Counts let the strip render "X new, Y removed since last check" per 05 §8.3.
+     */
+    public static final class RefreshOutcome {
+        public final ProviderRegistry newRegistry;
+        public final int newCount;
+        public final int removedCount;
+        public final List<String> failedProviders;
+
+        public RefreshOutcome(ProviderRegistry newRegistry,
+                              int newCount,
+                              int removedCount,
+                              List<String> failedProviders) {
+            this.newRegistry = newRegistry;
+            this.newCount = newCount;
+            this.removedCount = removedCount;
+            this.failedProviders = failedProviders == null
+                    ? java.util.Collections.<String>emptyList()
+                    : new ArrayList<String>(failedProviders);
+        }
+    }
+
+    /**
+     * Background-thread refresh hook. Phase G's
+     * {@link imagejai.engine.picker.ProviderDiscovery} fan-out is
+     * the production implementation; tests inject a stub.
+     */
+    public interface RefreshTask {
+        RefreshOutcome refresh() throws Exception;
+    }
+
     private final Settings settings;
     private ProviderRegistry registry;
     private SelectionListener selectionListener;
     private SettingsLink settingsLink;
     private InstallerLink installerLink;
+    private RefreshTask refreshTask;
 
     private final JPopupMenu popup = new JPopupMenu();
+    private JLabel headerStatusLabel;
+    private JButton headerRefreshButton;
 
     public ModelPickerButton(ProviderRegistry registry, Settings settings) {
         super(captionFor(settings, registry));
@@ -71,6 +117,13 @@ public class ModelPickerButton extends JButton {
 
     public void setInstallerLink(InstallerLink link) {
         this.installerLink = link;
+    }
+
+    public void setRefreshTask(RefreshTask refreshTask) {
+        this.refreshTask = refreshTask;
+        if (headerRefreshButton != null) {
+            headerRefreshButton.setEnabled(refreshTask != null);
+        }
     }
 
     public void setRegistry(ProviderRegistry registry) {
@@ -174,11 +227,144 @@ public class ModelPickerButton extends JButton {
         return out;
     }
 
-    private JMenuItem buildHeaderStrip() {
-        JMenuItem header = new JMenuItem("Models");
-        header.setEnabled(false);
-        return header;
+    private Component buildHeaderStrip() {
+        JPanel strip = new JPanel(new BorderLayout(8, 0));
+        strip.setOpaque(true);
+        strip.setBackground(UIManager.getColor("MenuItem.background"));
+        strip.setBorder(BorderFactory.createEmptyBorder(4, 8, 4, 8));
+
+        headerStatusLabel = new JLabel("Models");
+        headerStatusLabel.setForeground(new Color(80, 80, 90));
+        strip.add(headerStatusLabel, BorderLayout.WEST);
+
+        headerRefreshButton = new JButton("↻ refresh");
+        headerRefreshButton.setFocusable(false);
+        headerRefreshButton.setEnabled(refreshTask != null);
+        headerRefreshButton.addActionListener(new ActionListener() {
+            @Override
+            public void actionPerformed(ActionEvent e) {
+                runRefresh();
+            }
+        });
+        // Click on refresh must NOT close the popup — same MouseEvent.consume()
+        // pattern as the pin star (05 §8.1).
+        headerRefreshButton.addMouseListener(new java.awt.event.MouseAdapter() {
+            @Override
+            public void mousePressed(java.awt.event.MouseEvent e) {
+                e.consume();
+            }
+        });
+
+        JPanel right = new JPanel();
+        right.setOpaque(false);
+        right.setLayout(new BoxLayout(right, BoxLayout.X_AXIS));
+        right.add(Box.createHorizontalGlue());
+        right.add(headerRefreshButton);
+        strip.add(right, BorderLayout.EAST);
+        return strip;
     }
+
+    private void runRefresh() {
+        final RefreshTask task = this.refreshTask;
+        if (task == null) {
+            return;
+        }
+        if (headerStatusLabel != null) {
+            headerStatusLabel.setText("⟳ refreshing…");
+        }
+        if (headerRefreshButton != null) {
+            headerRefreshButton.setEnabled(false);
+        }
+        SwingWorker<RefreshOutcome, Void> worker = new SwingWorker<RefreshOutcome, Void>() {
+            @Override
+            protected RefreshOutcome doInBackground() throws Exception {
+                return task.refresh();
+            }
+
+            @Override
+            protected void done() {
+                try {
+                    RefreshOutcome outcome = get();
+                    handleRefreshSuccess(outcome);
+                } catch (Exception ex) {
+                    handleRefreshFailure(ex);
+                } finally {
+                    if (headerRefreshButton != null) {
+                        headerRefreshButton.setEnabled(true);
+                    }
+                }
+            }
+        };
+        worker.execute();
+    }
+
+    private void handleRefreshSuccess(RefreshOutcome outcome) {
+        if (outcome == null) {
+            if (headerStatusLabel != null) {
+                headerStatusLabel.setText("Models");
+            }
+            return;
+        }
+        if (outcome.newRegistry != null) {
+            setRegistry(outcome.newRegistry);
+        }
+        if (!outcome.failedProviders.isEmpty()) {
+            String first = outcome.failedProviders.get(0);
+            String message = outcome.failedProviders.size() == 1
+                    ? "Couldn't reach " + first + " — using cached list. Retry?"
+                    : "Couldn't reach " + outcome.failedProviders.size() + " providers — using cached list.";
+            if (headerStatusLabel != null) {
+                headerStatusLabel.setText("⚠ " + message);
+            }
+            return;
+        }
+        if (headerStatusLabel != null) {
+            headerStatusLabel.setText("Models · "
+                    + outcome.newCount + " new, "
+                    + outcome.removedCount + " removed since last check");
+        }
+    }
+
+    private void handleRefreshFailure(Exception ex) {
+        if (headerStatusLabel != null) {
+            headerStatusLabel.setText("⚠ Refresh failed — using cached list. Retry?");
+        }
+        // Quietly: don't pop a JOptionPane — strip text is the user-visible
+        // surface per 05 §8.4. Logging happens through the registry's own
+        // pipe; here we only need to show the cached state survived.
+        SwingUtilities.invokeLater(() -> {
+            if (headerRefreshButton != null) {
+                headerRefreshButton.setToolTipText(ex.getMessage());
+            }
+        });
+    }
+
+    /** Test hook — returns the strip text so headless tests can assert it. */
+    String headerStripText() {
+        return headerStatusLabel == null ? "" : headerStatusLabel.getText();
+    }
+
+    /**
+     * Test hook — invoke the refresh path synchronously without bouncing
+     * through a {@link SwingWorker}, used by unit tests to assert the strip
+     * transitions through fetching → success/failure states.
+     */
+    void runRefreshForTest() {
+        RefreshTask task = this.refreshTask;
+        if (task == null) {
+            return;
+        }
+        if (headerStatusLabel != null) {
+            headerStatusLabel.setText("⟳ refreshing…");
+        }
+        try {
+            RefreshOutcome outcome = task.refresh();
+            handleRefreshSuccess(outcome);
+        } catch (Exception ex) {
+            handleRefreshFailure(ex);
+        }
+    }
+
 
     private void handleLaunch(ModelEntry entry) {
         if (entry == null) {

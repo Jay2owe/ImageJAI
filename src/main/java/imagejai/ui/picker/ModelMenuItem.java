@@ -1,11 +1,13 @@
 package imagejai.ui.picker;
 
 import imagejai.engine.picker.ModelEntry;
+import imagejai.engine.picker.SoftDeprecationPolicy;
 
 import javax.swing.JMenuItem;
 import javax.swing.UIManager;
 import java.awt.Color;
 import java.awt.Dimension;
+import java.awt.Font;
 import java.awt.FontMetrics;
 import java.awt.Graphics;
 import java.awt.Graphics2D;
@@ -13,6 +15,11 @@ import java.awt.RenderingHints;
 import java.awt.event.MouseAdapter;
 import java.awt.event.MouseEvent;
 import java.awt.event.MouseMotionAdapter;
+import java.awt.font.TextAttribute;
+import java.time.LocalDate;
+import java.time.format.DateTimeFormatter;
+import java.util.HashMap;
+import java.util.Map;
 
 /**
  * Custom JMenuItem that renders five fixed-width columns: tier badge, status
@@ -65,7 +72,10 @@ public class ModelMenuItem extends JMenuItem {
         this.statusClickListener = statusClickListener;
         setPreferredSize(new Dimension(380, ROW_HEIGHT));
         setOpaque(true);
-        setToolTipText(null);
+        // Hover-card replaces the Swing tooltip; for soft-deprecated rows we
+        // surface the "no longer available since X" copy via an HTML tooltip
+        // so screen readers still get the key date even with HoverCard down.
+        setToolTipText(deprecationTooltip(entry, LocalDate.now()));
         addMouseMotionListener(new MouseMotionAdapter() {
             @Override
             public void mouseMoved(MouseEvent e) {
@@ -142,12 +152,20 @@ public class ModelMenuItem extends JMenuItem {
             g2.setColor(background);
             g2.fillRect(0, 0, getWidth(), getHeight());
 
-            paintBadge(g2, entry.tier());
+            SoftDeprecationPolicy.State lifecycle =
+                    SoftDeprecationPolicy.stateOf(entry, LocalDate.now());
+
+            paintBadge(g2, entry.tier(), lifecycle);
             paintStatus(g2, statusIcon);
             paintStar(g2, pinned, starHovered);
 
-            g2.setFont(getFont());
-            g2.setColor(textColorFor(entry, getForeground()));
+            Font baseFont = getFont();
+            Font textFont = lifecycle == SoftDeprecationPolicy.State.SOFT_DEPRECATED
+                    || lifecycle == SoftDeprecationPolicy.State.PINNED_DEPRECATED
+                    ? strikethrough(baseFont)
+                    : baseFont;
+            g2.setFont(textFont);
+            g2.setColor(textColorFor(entry, lifecycle, getForeground()));
             FontMetrics fm = g2.getFontMetrics();
             int baseline = (getHeight() + fm.getAscent() - fm.getDescent()) / 2;
             g2.drawString(entry.displayName(), COL_TEXT, baseline);
@@ -166,11 +184,46 @@ public class ModelMenuItem extends JMenuItem {
         return c == null ? new Color(180, 200, 240) : c;
     }
 
-    private static Color textColorFor(ModelEntry entry, Color fallback) {
+    private static Color textColorFor(ModelEntry entry,
+                                      SoftDeprecationPolicy.State lifecycle,
+                                      Color fallback) {
+        if (lifecycle == SoftDeprecationPolicy.State.PINNED_DEPRECATED) {
+            return new Color(180, 60, 60);
+        }
+        if (lifecycle == SoftDeprecationPolicy.State.SOFT_DEPRECATED) {
+            return new Color(170, 130, 30);
+        }
         if (!entry.curated()) {
             return new Color(110, 110, 120);
         }
         return fallback == null ? Color.BLACK : fallback;
+    }
+
+    private static Font strikethrough(Font base) {
+        Map<TextAttribute, Object> attrs = new HashMap<TextAttribute, Object>();
+        attrs.put(TextAttribute.STRIKETHROUGH, TextAttribute.STRIKETHROUGH_ON);
+        return base.deriveFont(attrs);
+    }
+
+    static String deprecationTooltip(ModelEntry entry, LocalDate today) {
+        if (entry == null || entry.deprecatedSince() == null) {
+            return null;
+        }
+        SoftDeprecationPolicy.State state = SoftDeprecationPolicy.stateOf(entry, today);
+        DateTimeFormatter fmt = DateTimeFormatter.ISO_LOCAL_DATE;
+        String since = entry.deprecatedSince().format(fmt);
+        if (state == SoftDeprecationPolicy.State.PINNED_DEPRECATED) {
+            return entry.replacement() == null || entry.replacement().isEmpty()
+                    ? "RETIRED — calls will fail. Provider has retired this model."
+                    : "RETIRED — calls will fail. Switch to " + entry.replacement() + ".";
+        }
+        if (state == SoftDeprecationPolicy.State.SOFT_DEPRECATED) {
+            String suffix = entry.replacement() == null || entry.replacement().isEmpty()
+                    ? ""
+                    : " — try " + entry.replacement();
+            return "No longer available since " + since + suffix + ".";
+        }
+        return null;
     }
 
     private static String providerHint(String providerId) {
@@ -197,21 +250,32 @@ public class ModelMenuItem extends JMenuItem {
         }
     }
 
-    /** Paint a 12px filled disc per tier; documented mapping in 06 §1.1. */
-    static void paintBadge(Graphics2D g2, ModelEntry.Tier tier) {
+    /** Paint a 12px filled disc per tier; documented mapping in 06 §1.1.
+     * Pinned-deprecated rows swap to the red {@code RETIRED} dot per 02 §3. */
+    static void paintBadge(Graphics2D g2, ModelEntry.Tier tier,
+                           SoftDeprecationPolicy.State lifecycle) {
         Color fill;
-        switch (tier) {
-            case FREE: fill = new Color(60, 180, 75); break;
-            case FREE_WITH_LIMITS: fill = new Color(240, 200, 50); break;
-            case PAID: fill = new Color(70, 130, 220); break;
-            case REQUIRES_SUBSCRIPTION: fill = new Color(160, 95, 215); break;
-            case UNCURATED:
-            default: fill = new Color(200, 200, 205); break;
+        if (lifecycle == SoftDeprecationPolicy.State.PINNED_DEPRECATED) {
+            fill = new Color(200, 60, 60);
+        } else {
+            switch (tier) {
+                case FREE: fill = new Color(60, 180, 75); break;
+                case FREE_WITH_LIMITS: fill = new Color(240, 200, 50); break;
+                case PAID: fill = new Color(70, 130, 220); break;
+                case REQUIRES_SUBSCRIPTION: fill = new Color(160, 95, 215); break;
+                case UNCURATED:
+                default: fill = new Color(200, 200, 205); break;
+            }
         }
         g2.setColor(fill);
         g2.fillOval(COL_BADGE, 6, 12, 12);
         g2.setColor(new Color(60, 60, 70));
         g2.drawOval(COL_BADGE, 6, 12, 12);
+    }
+
+    /** Backwards-compatible overload — defaults to ACTIVE lifecycle. */
+    static void paintBadge(Graphics2D g2, ModelEntry.Tier tier) {
+        paintBadge(g2, tier, SoftDeprecationPolicy.State.ACTIVE);
     }
 
     /** Paint the configuration status glyph next to the badge. */

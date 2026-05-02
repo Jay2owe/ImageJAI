@@ -82,20 +82,32 @@ public class ProviderMenu extends JMenu {
                                  final StatusListener statusListener) {
         removeAll();
         ModelMenuItem.ProviderStatusIcon icon = iconFor(providerEntry.status());
-        for (final ModelEntry entry : providerEntry.models()) {
-            ModelMenuItem.StatusIconClickListener bridge = statusListener == null
-                    ? null
-                    : (model, status) -> statusListener.onStatusIconClicked(model, status);
-            ModelMenuItem item = new ModelMenuItem(entry, icon, pinToggleListener, bridge);
-            item.addActionListener(new ActionListener() {
-                @Override
-                public void actionPerformed(ActionEvent e) {
-                    if (launchListener != null) {
-                        launchListener.onLaunchRequested(entry);
-                    }
-                }
-            });
-            add(item);
+
+        // Phase G: split curated vs auto-discovered (uncurated). Curator rows
+        // render first; uncurated rows fall under the "— Auto-discovered
+        // (unverified) —" separator (05 §4.4).
+        java.util.List<ModelEntry> curatedRows = new java.util.ArrayList<ModelEntry>();
+        java.util.List<ModelEntry> uncuratedRows = new java.util.ArrayList<ModelEntry>();
+        for (ModelEntry entry : providerEntry.models()) {
+            if (entry.curated()) {
+                curatedRows.add(entry);
+            } else {
+                uncuratedRows.add(entry);
+            }
+        }
+        for (final ModelEntry entry : curatedRows) {
+            add(buildItem(entry, icon, launchListener, pinToggleListener, statusListener));
+        }
+        if (!uncuratedRows.isEmpty()) {
+            if (!curatedRows.isEmpty()) {
+                addSeparator();
+            }
+            JMenuItem header = new JMenuItem("— Auto-discovered (unverified) —");
+            header.setEnabled(false);
+            add(header);
+            for (final ModelEntry entry : uncuratedRows) {
+                add(buildItem(entry, icon, launchListener, pinToggleListener, statusListener));
+            }
         }
         if (providerEntry.status() != ProviderEntry.Status.READY) {
             if (getMenuComponentCount() > 0) {
@@ -115,5 +127,25 @@ public class ProviderMenu extends JMenu {
             });
             add(addCreds);
         }
+    }
+
+    private ModelMenuItem buildItem(final ModelEntry entry,
+                                    ModelMenuItem.ProviderStatusIcon icon,
+                                    final ModelLaunchListener launchListener,
+                                    ModelMenuItem.PinToggleListener pinToggleListener,
+                                    final StatusListener statusListener) {
+        ModelMenuItem.StatusIconClickListener bridge = statusListener == null
+                ? null
+                : (model, status) -> statusListener.onStatusIconClicked(model, status);
+        ModelMenuItem item = new ModelMenuItem(entry, icon, pinToggleListener, bridge);
+        item.addActionListener(new ActionListener() {
+            @Override
+            public void actionPerformed(ActionEvent e) {
+                if (launchListener != null) {
+                    launchListener.onLaunchRequested(entry);
+                }
+            }
+        });
+        return item;
     }
 }
