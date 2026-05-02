@@ -1,9 +1,20 @@
 package imagejai.local;
 
+import com.google.gson.Gson;
+import com.google.gson.JsonSyntaxException;
 import imagejai.local.intents.HelpIntent;
+import imagejai.local.intents.PixelSizeIntent;
 
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.InputStreamReader;
+import java.io.Reader;
+import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.Collection;
+import java.util.Collections;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 
 /**
@@ -12,9 +23,22 @@ import java.util.Map;
 public class IntentLibrary {
 
     private final Map<String, Intent> intents = new LinkedHashMap<String, Intent>();
+    private final Map<String, String> phraseToIntentId = new LinkedHashMap<String, String>();
+    private final List<String> phrases = new ArrayList<String>();
 
     public IntentLibrary() {
+        registerBuiltIns();
+        loadPhrasebookResource();
+    }
+
+    public static IntentLibrary load() {
+        return new IntentLibrary();
+    }
+
+    private void registerBuiltIns() {
         register(new HelpIntent());
+        register(new PixelSizeIntent());
+        addPhrase("help", HelpIntent.ID);
     }
 
     public Intent byId(String id) {
@@ -22,7 +46,15 @@ public class IntentLibrary {
     }
 
     public Collection<Intent> all() {
-        return java.util.Collections.unmodifiableCollection(intents.values());
+        return Collections.unmodifiableCollection(intents.values());
+    }
+
+    public Map<String, String> phraseToIntentId() {
+        return Collections.unmodifiableMap(phraseToIntentId);
+    }
+
+    public List<String> allPhrases() {
+        return Collections.unmodifiableList(phrases);
     }
 
     public void register(Intent intent) {
@@ -30,5 +62,58 @@ public class IntentLibrary {
             return;
         }
         intents.put(intent.id(), intent);
+    }
+
+    private void loadPhrasebookResource() {
+        InputStream in = getClass().getResourceAsStream("/phrasebook.json");
+        if (in == null) {
+            throw new IllegalStateException("Missing /phrasebook.json resource");
+        }
+
+        try {
+            Reader reader = new InputStreamReader(in, StandardCharsets.UTF_8);
+            Phrasebook phrasebook = new Gson().fromJson(reader, Phrasebook.class);
+            if (phrasebook == null || phrasebook.intents == null) {
+                return;
+            }
+            for (PhrasebookIntent entry : phrasebook.intents) {
+                if (entry == null || entry.id == null || entry.phrases == null) {
+                    continue;
+                }
+                for (String phrase : entry.phrases) {
+                    addPhrase(phrase, entry.id);
+                }
+            }
+        } catch (JsonSyntaxException e) {
+            throw new IllegalStateException("Invalid /phrasebook.json", e);
+        } finally {
+            try {
+                in.close();
+            } catch (IOException ignored) {
+                // Nothing useful to recover here; the stream was already read.
+            }
+        }
+    }
+
+    private void addPhrase(String phrase, String intentId) {
+        String normalised = IntentMatcher.normalise(phrase);
+        if (normalised.length() == 0 || intentId == null) {
+            return;
+        }
+        if (!phraseToIntentId.containsKey(normalised)) {
+            phrases.add(normalised);
+        }
+        phraseToIntentId.put(normalised, intentId);
+    }
+
+    private static class Phrasebook {
+        int version;
+        List<PhrasebookIntent> intents;
+    }
+
+    private static class PhrasebookIntent {
+        String id;
+        String description;
+        List<String> phrases;
     }
 }
