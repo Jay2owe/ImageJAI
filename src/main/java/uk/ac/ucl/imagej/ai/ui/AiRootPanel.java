@@ -11,10 +11,8 @@ import javax.swing.JButton;
 import javax.swing.JComboBox;
 import javax.swing.JComponent;
 import javax.swing.JFrame;
-import javax.swing.JMenuItem;
 import javax.swing.JOptionPane;
 import javax.swing.JPanel;
-import javax.swing.JPopupMenu;
 import javax.swing.SwingUtilities;
 import javax.swing.SwingWorker;
 import javax.swing.Timer;
@@ -22,7 +20,6 @@ import javax.swing.border.EmptyBorder;
 import java.awt.BorderLayout;
 import java.awt.Color;
 import java.awt.Cursor;
-import java.awt.Desktop;
 import java.awt.Dimension;
 import java.awt.FlowLayout;
 import java.awt.Font;
@@ -63,9 +60,12 @@ public class AiRootPanel extends JPanel implements ChatSurface {
 
     private AgentLauncher agentLauncher;
     private JComboBox<Settings.ModelConfig> profileSwitcher;
+    private JComboBox<String> agentSelector;
+    private JButton agentBtn;
     private JFrame frame;
     private String currentCard = CARD_CHAT;
     private boolean applyingFrameSize;
+    private List<AgentLauncher.AgentInfo> detectedAgents = new ArrayList<AgentLauncher.AgentInfo>();
 
     public AiRootPanel(Settings settings) {
         super(new BorderLayout(0, 6));
@@ -123,6 +123,7 @@ public class AiRootPanel extends JPanel implements ChatSurface {
         if (launcher != null) {
             terminalView.setWorkspace(new File(launcher.getAgentWorkspace()));
         }
+        refreshAgentSelectorAsync();
     }
 
     public void refreshProfileSwitcher() {
@@ -200,6 +201,33 @@ public class AiRootPanel extends JPanel implements ChatSurface {
         title.setFont(new Font(Font.SANS_SERIF, Font.BOLD, 14));
         leftPanel.add(title);
 
+        javax.swing.JLabel agentLabel = new javax.swing.JLabel("Agent:");
+        agentLabel.setForeground(TEXT_MUTED);
+        agentLabel.setFont(new Font(Font.SANS_SERIF, Font.PLAIN, 11));
+        leftPanel.add(agentLabel);
+
+        agentSelector = new JComboBox<String>();
+        agentSelector.setPreferredSize(new Dimension(140, 22));
+        agentSelector.setFont(new Font(Font.SANS_SERIF, Font.PLAIN, 11));
+        refreshAgentSelector(new ArrayList<AgentLauncher.AgentInfo>());
+        agentSelector.addActionListener(new ActionListener() {
+            @Override
+            public void actionPerformed(ActionEvent e) {
+                String selected = (String) agentSelector.getSelectedItem();
+                if (selected != null) {
+                    settings.setSelectedAgentName(selected);
+                    chatView.refreshInputState();
+                    updateLaunchButtonState();
+                }
+            }
+        });
+        leftPanel.add(agentSelector);
+
+        javax.swing.JLabel profileLabel = new javax.swing.JLabel("Profile:");
+        profileLabel.setForeground(TEXT_MUTED);
+        profileLabel.setFont(new Font(Font.SANS_SERIF, Font.PLAIN, 11));
+        leftPanel.add(profileLabel);
+
         profileSwitcher = new JComboBox<Settings.ModelConfig>();
         profileSwitcher.setPreferredSize(new Dimension(150, 22));
         profileSwitcher.setFont(new Font(Font.SANS_SERIF, Font.PLAIN, 11));
@@ -226,13 +254,14 @@ public class AiRootPanel extends JPanel implements ChatSurface {
         JPanel buttons = new JPanel(new FlowLayout(FlowLayout.RIGHT, 2, 0));
         buttons.setOpaque(false);
 
-        JButton agentBtn = createHeaderButton("\u25B6", "Launch AI Agent");
+        agentBtn = createHeaderButton("\u25B6", "Launch selected external agent");
         agentBtn.addActionListener(new ActionListener() {
             @Override
             public void actionPerformed(ActionEvent e) {
-                showAgentLaunchMenuAsync(agentBtn, false);
+                launchSelectedAgentAsync();
             }
         });
+        updateLaunchButtonState();
         buttons.add(agentBtn);
 
         JButton clearBtn = createHeaderButton("\u2718", "Clear conversation");
@@ -279,96 +308,106 @@ public class AiRootPanel extends JPanel implements ChatSurface {
         return button;
     }
 
-    private void showAgentLaunchMenuAsync(final JButton anchor, final boolean rescan) {
+    private void refreshAgentSelectorAsync() {
+        if (agentSelector == null) {
+            return;
+        }
         if (agentLauncher == null) {
-            JOptionPane.showMessageDialog(this,
-                    "Agent launcher not configured.\nEnable the TCP server in Settings first.",
-                    "Agent Launcher", JOptionPane.INFORMATION_MESSAGE);
+            refreshAgentSelector(new ArrayList<AgentLauncher.AgentInfo>());
             return;
         }
 
-        anchor.setEnabled(false);
         new SwingWorker<List<AgentLauncher.AgentInfo>, Void>() {
             @Override
             protected List<AgentLauncher.AgentInfo> doInBackground() {
-                return rescan ? agentLauncher.rescanAgents() : agentLauncher.detectAgents();
+                return agentLauncher.detectAgents();
             }
 
             @Override
             protected void done() {
-                anchor.setEnabled(true);
                 try {
-                    showAgentLaunchMenu(anchor, get());
+                    refreshAgentSelector(get());
                 } catch (Exception ex) {
                     chatView.appendMessage("assistant",
                             "Could not detect agents: " + ex.getMessage());
+                    refreshAgentSelector(new ArrayList<AgentLauncher.AgentInfo>());
                 }
             }
         }.execute();
     }
 
-    private void showAgentLaunchMenu(final JButton anchor,
-                                     final List<AgentLauncher.AgentInfo> agents) {
-        JPopupMenu menu = new JPopupMenu();
-        menu.setBackground(new Color(40, 40, 48));
+    private void refreshAgentSelector(List<AgentLauncher.AgentInfo> agents) {
+        detectedAgents = new ArrayList<AgentLauncher.AgentInfo>(agents);
+        if (agentSelector == null) {
+            updateLaunchButtonState();
+            return;
+        }
 
-        if (agents.isEmpty()) {
-            JMenuItem noAgents = new JMenuItem("No AI agents detected on PATH");
-            noAgents.setEnabled(false);
-            noAgents.setForeground(TEXT_MUTED);
-            menu.add(noAgents);
+        ActionListener[] listeners = agentSelector.getActionListeners();
+        for (ActionListener listener : listeners) {
+            agentSelector.removeActionListener(listener);
+        }
 
-            menu.addSeparator();
-            JMenuItem hint = new JMenuItem("Install: claude, aider, gemini...");
-            hint.setEnabled(false);
-            hint.setForeground(TEXT_MUTED);
-            hint.setFont(new Font(Font.SANS_SERIF, Font.ITALIC, 11));
-            menu.add(hint);
+        agentSelector.removeAllItems();
+        agentSelector.addItem(AgentLauncher.LOCAL_ASSISTANT_NAME);
+        for (AgentLauncher.AgentInfo agent : detectedAgents) {
+            agentSelector.addItem(agent.name);
+        }
+
+        String selected = settings.getSelectedAgentName();
+        if (AgentLauncher.LOCAL_ASSISTANT_NAME.equals(selected) || findDetectedAgent(selected) != null) {
+            agentSelector.setSelectedItem(selected);
         } else {
-            JMenuItem header = new JMenuItem("Launch AI Agent");
-            header.setEnabled(false);
-            header.setFont(new Font(Font.SANS_SERIF, Font.BOLD, 12));
-            header.setForeground(ACCENT);
-            menu.add(header);
-            menu.addSeparator();
-
-            for (final AgentLauncher.AgentInfo agent : agents) {
-                JMenuItem item = new JMenuItem(agent.name + " - " + agent.description);
-                item.setForeground(Color.WHITE);
-                item.setBackground(new Color(40, 40, 48));
-                item.addActionListener(new ActionListener() {
-                    @Override
-                    public void actionPerformed(ActionEvent e) {
-                        launchAgentAsync(agent);
-                    }
-                });
-                menu.add(item);
+            agentSelector.setSelectedItem(AgentLauncher.LOCAL_ASSISTANT_NAME);
+            if (agentLauncher != null) {
+                settings.setSelectedAgentName(AgentLauncher.LOCAL_ASSISTANT_NAME);
             }
         }
 
-        menu.addSeparator();
+        for (ActionListener listener : listeners) {
+            agentSelector.addActionListener(listener);
+        }
+        updateLaunchButtonState();
+    }
 
-        JMenuItem rescan = new JMenuItem("Rescan for agents...");
-        rescan.setForeground(TEXT_MUTED);
-        rescan.addActionListener(new ActionListener() {
-            @Override
-            public void actionPerformed(ActionEvent e) {
-                showAgentLaunchMenuAsync(anchor, true);
+    private void updateLaunchButtonState() {
+        if (agentBtn == null) {
+            return;
+        }
+        String selected = settings.getSelectedAgentName();
+        AgentLauncher.AgentInfo agent = findDetectedAgent(selected);
+        boolean externalSelected = agentLauncher != null && agent != null;
+        agentBtn.setEnabled(externalSelected);
+        agentBtn.setToolTipText(externalSelected
+                ? "Launch " + selected
+                : "Local Assistant is built in");
+    }
+
+    private AgentLauncher.AgentInfo findDetectedAgent(String name) {
+        if (name == null) {
+            return null;
+        }
+        for (AgentLauncher.AgentInfo agent : detectedAgents) {
+            if (name.equals(agent.name)) {
+                return agent;
             }
-        });
-        menu.add(rescan);
+        }
+        return null;
+    }
 
-        JMenuItem openFolder = new JMenuItem("Open agent workspace folder");
-        openFolder.setForeground(TEXT_MUTED);
-        openFolder.addActionListener(new ActionListener() {
-            @Override
-            public void actionPerformed(ActionEvent e) {
-                openAgentWorkspaceAsync();
-            }
-        });
-        menu.add(openFolder);
-
-        menu.show(anchor, 0, anchor.getHeight());
+    private void launchSelectedAgentAsync() {
+        String selected = settings.getSelectedAgentName();
+        if (AgentLauncher.LOCAL_ASSISTANT_NAME.equals(selected)) {
+            return;
+        }
+        AgentLauncher.AgentInfo agent = findDetectedAgent(selected);
+        if (agent == null) {
+            chatView.appendMessage("assistant",
+                    "Could not launch " + selected + ": agent is not detected on PATH.");
+            updateLaunchButtonState();
+            return;
+        }
+        launchAgentAsync(agent);
     }
 
     private void launchAgentAsync(final AgentLauncher.AgentInfo agent) {
@@ -568,26 +607,6 @@ public class AiRootPanel extends JPanel implements ChatSurface {
             settings.save();
             refreshProfileSwitcher();
         }
-    }
-
-    private void openAgentWorkspaceAsync() {
-        new SwingWorker<Void, Void>() {
-            @Override
-            protected Void doInBackground() throws Exception {
-                Desktop.getDesktop().open(new File(agentLauncher.getAgentWorkspace()));
-                return null;
-            }
-
-            @Override
-            protected void done() {
-                try {
-                    get();
-                } catch (Exception ex) {
-                    chatView.appendMessage("assistant",
-                            "Could not open folder: " + ex.getMessage());
-                }
-            }
-        }.execute();
     }
 
     private void shutdownSessionsNow() {
