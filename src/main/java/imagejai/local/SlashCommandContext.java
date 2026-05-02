@@ -11,14 +11,22 @@ public class SlashCommandContext {
     private final IntentLibrary library;
     private final IntentRouter intentRouter;
     private final ChatHistoryController chatHistory;
+    private final Runnable clearPending;
 
     public SlashCommandContext(String args, FijiBridge fiji, IntentLibrary library,
                                IntentRouter intentRouter, ChatHistoryController chatHistory) {
+        this(args, fiji, library, intentRouter, chatHistory, null);
+    }
+
+    public SlashCommandContext(String args, FijiBridge fiji, IntentLibrary library,
+                               IntentRouter intentRouter, ChatHistoryController chatHistory,
+                               Runnable clearPending) {
         this.args = args == null ? "" : args;
         this.fiji = fiji;
         this.library = library;
         this.intentRouter = intentRouter;
         this.chatHistory = chatHistory;
+        this.clearPending = clearPending;
     }
 
     public String args() {
@@ -39,5 +47,11 @@ public class SlashCommandContext {
 
     public ChatHistoryController chatHistory() {
         return chatHistory;
+    }
+
+    public void clearPendingTurn() {
+        if (clearPending != null) {
+            clearPending.run();
+        }
     }
 }

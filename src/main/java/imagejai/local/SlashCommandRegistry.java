@@ -44,6 +44,12 @@ public class SlashCommandRegistry {
 
     public AssistantReply dispatchSlash(String input, FijiBridge fiji, IntentLibrary library,
                                         IntentRouter router, ChatHistoryController chatHistory) {
+        return dispatchSlash(input, fiji, library, router, chatHistory, null);
+    }
+
+    public AssistantReply dispatchSlash(String input, FijiBridge fiji, IntentLibrary library,
+                                        IntentRouter router, ChatHistoryController chatHistory,
+                                        Runnable clearPending) {
         Parsed parsed = parse(input);
         if (parsed == null) {
             return null;
@@ -52,18 +58,27 @@ public class SlashCommandRegistry {
         if (command == null) {
             return AssistantReply.text("Unknown command: /" + parsed.name + ". Type /help.");
         }
-        return command.execute(new SlashCommandContext(parsed.args, fiji, library, router, chatHistory));
+        return command.execute(new SlashCommandContext(parsed.args, fiji, library, router,
+                chatHistory, clearPending));
     }
 
     public AssistantReply dispatchIntent(String intentId, String input, FijiBridge fiji,
                                          IntentLibrary library, IntentRouter router,
                                          ChatHistoryController chatHistory) {
+        return dispatchIntent(intentId, input, fiji, library, router, chatHistory, null);
+    }
+
+    public AssistantReply dispatchIntent(String intentId, String input, FijiBridge fiji,
+                                         IntentLibrary library, IntentRouter router,
+                                         ChatHistoryController chatHistory,
+                                         Runnable clearPending) {
         SlashCommand command = byIntentId.get(intentId);
         if (command == null) {
             return null;
         }
         String args = input == null ? "" : input.trim();
-        return command.execute(new SlashCommandContext(args, fiji, library, router, chatHistory));
+        return command.execute(new SlashCommandContext(args, fiji, library, router,
+                chatHistory, clearPending));
     }
 
     public Collection<SlashCommand> commands() {

@@ -20,6 +20,7 @@ public class LocalAssistant {
     private final IntentRouter intentRouter;
     private final SlashCommandRegistry slashCommands;
     private final ChatHistoryController chatHistory;
+    private Optional<PendingTurn> pending = Optional.empty();
 
     public LocalAssistant() {
         this(IntentLibrary.load(), new FijiBridge(new CommandEngine()), new FrictionLog());
@@ -80,16 +81,25 @@ public class LocalAssistant {
     }
 
     public AssistantReply handle(String input) {
+        if (pending.isPresent()) {
+            PendingTurn pendingTurn = pending.get();
+            Optional<AssistantReply> resolved = tryResolve(pendingTurn, input);
+            pending = Optional.empty();
+            if (resolved.isPresent()) {
+                return resolved.get();
+            }
+        }
         // Slash commands are dispatched before phrasebook lookup so a literal
         // /name command always wins over any built-in phrasebook alias.
         if (SlashCommandRegistry.isSlashInput(input)) {
-            return slashCommands.dispatchSlash(input, fiji, library, intentRouter, chatHistory);
+            return slashCommands.dispatchSlash(input, fiji, library, intentRouter,
+                    chatHistory, this::clearPending);
         }
         Optional<IntentMatcher.MatchedIntent> matched = matcher.match(input);
         if (matched.isPresent()) {
             IntentMatcher.MatchedIntent match = matched.get();
             AssistantReply slashAlias = slashCommands.dispatchIntent(match.intentId(), input,
-                    fiji, library, intentRouter, chatHistory);
+                    fiji, library, intentRouter, chatHistory, this::clearPending);
             if (slashAlias != null) {
                 return slashAlias;
             }
@@ -113,5 +123,32 @@ public class LocalAssistant {
 
     public List<RankedPhrase> topK(String input, int k) {
         return matcher.topK(input, k);
+    }
+
+    public void clearPending() {
+        pending = Optional.empty();
+    }
+
+    Optional<PendingTurn> pendingTurnForTest() {
+        return pending;
+    }
+
+    void parkPendingForTest(PendingTurn pendingTurn) {
+        pending = Optional.ofNullable(pendingTurn);
+    }
+
+    Optional<AssistantReply> tryResolveForTest(PendingTurn pendingTurn, String input) {
+        return tryResolve(pendingTurn, input);
+    }
+
+    private Optional<AssistantReply> tryResolve(PendingTurn pendingTurn, String input) {
+        switch (pendingTurn.kind()) {
+            case PARAMETER:
+                return Optional.empty();
+            case DISAMBIGUATION:
+                return Optional.empty();
+            default:
+                return Optional.empty();
+        }
     }
 }

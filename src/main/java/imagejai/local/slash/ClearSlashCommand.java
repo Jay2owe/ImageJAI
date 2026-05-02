@@ -11,6 +11,7 @@ public class ClearSlashCommand implements SlashCommand {
     public String description() { return "Clear the chat history"; }
 
     public AssistantReply execute(SlashCommandContext context) {
+        context.clearPendingTurn();
         ChatHistoryController history = context.chatHistory();
         if (history == null) {
             return AssistantReply.text("Chat history is not available to clear.");
