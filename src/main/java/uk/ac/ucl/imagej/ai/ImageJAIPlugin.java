@@ -93,7 +93,7 @@ public class ImageJAIPlugin implements Command {
         // Set up agent launcher — find the agent workspace directory
         String agentWorkspace = findAgentWorkspace();
         if (agentWorkspace != null) {
-            rootPanel.setAgentLauncher(new AgentLauncher(agentWorkspace, settings.tcpPort));
+            rootPanel.setAgentLauncher(new AgentLauncher(agentWorkspace, settings.tcpPort, settings));
         }
 
         // Start TCP command server if enabled

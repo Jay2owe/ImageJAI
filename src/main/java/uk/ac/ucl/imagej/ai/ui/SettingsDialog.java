@@ -55,6 +55,7 @@ public class SettingsDialog extends JDialog {
     private JLabel tcpPortLabel;
     private JLabel tcpHelpLabel;
     private JCheckBox persistScrollbackCheckbox;
+    private InstallerPanel installerPanel;
 
     private JPanel cardsPanel;
     private CardLayout cardsLayout;
@@ -77,6 +78,7 @@ public class SettingsDialog extends JDialog {
     private void buildUI() {
         JPanel content = new JPanel(new BorderLayout(8, 8));
         content.setBorder(new EmptyBorder(12, 12, 12, 12));
+        JPanel profilesTab = new JPanel(new BorderLayout(8, 8));
 
         // Profile Selection Area
         JPanel profilePanel = new JPanel(new GridBagLayout());
@@ -141,7 +143,7 @@ public class SettingsDialog extends JDialog {
         });
         profilePanel.add(providerCombo, pc);
 
-        content.add(profilePanel, BorderLayout.NORTH);
+        profilesTab.add(profilePanel, BorderLayout.NORTH);
 
         // Provider-specific cards
         cardsLayout = new CardLayout();
@@ -156,7 +158,13 @@ public class SettingsDialog extends JDialog {
         centerPanel.setLayout(new BoxLayout(centerPanel, BoxLayout.Y_AXIS));
         centerPanel.add(cardsPanel);
         centerPanel.add(buildAdvancedPanel());
-        content.add(centerPanel, BorderLayout.CENTER);
+        profilesTab.add(centerPanel, BorderLayout.CENTER);
+
+        JTabbedPane tabs = new JTabbedPane();
+        tabs.addTab("Profiles", profilesTab);
+        installerPanel = new InstallerPanel(settings);
+        tabs.addTab("Models & Agents", installerPanel);
+        content.add(tabs, BorderLayout.CENTER);
 
         // Buttons
         JPanel btnPanel = new JPanel(new FlowLayout(FlowLayout.RIGHT));
@@ -488,6 +496,7 @@ public class SettingsDialog extends JDialog {
             settings.tcpPort = Constants.DEFAULT_TCP_PORT;
         }
         settings.persistScrollback = persistScrollbackCheckbox.isSelected();
+        installerPanel.saveToSettings();
 
         if (editingConfig != null) {
             settings.activeConfigId = editingConfig.id;
