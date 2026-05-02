@@ -7,6 +7,9 @@ import ij.gui.ImageWindow;
 import ij.gui.Overlay;
 import ij.gui.Roi;
 import imagejai.config.Settings;
+import imagejai.engine.AgentLauncher;
+import imagejai.local.AssistantReply;
+import imagejai.local.LocalAssistant;
 
 import javax.swing.*;
 import javax.swing.border.EmptyBorder;
@@ -44,6 +47,7 @@ public class ChatView extends JPanel implements ChatPanelController, ChatSurface
     private static final Color BTN_BG = new Color(0, 140, 200);
 
     private final Settings settings;
+    private final LocalAssistant localAssistant;
     private final List<ChatPanel.ChatListener> listeners = new ArrayList<ChatPanel.ChatListener>();
 
     private JTextPane messageArea;
@@ -62,6 +66,7 @@ public class ChatView extends JPanel implements ChatPanelController, ChatSurface
 
     public ChatView(Settings settings) {
         this.settings = settings;
+        this.localAssistant = new LocalAssistant();
         setLayout(new BorderLayout(0, 4));
         setBorder(new EmptyBorder(0, 0, 0, 0));
         setBackground(BG_MAIN);
@@ -162,10 +167,10 @@ public class ChatView extends JPanel implements ChatPanelController, ChatSurface
     }
 
     public void refreshInputState() {
-        boolean hasKey = settings.hasApiKey();
-        inputArea.setEnabled(hasKey);
-        sendBtn.setEnabled(hasKey);
-        if (hasKey) {
+        boolean inputEnabled = isLocalAssistantSelected() || settings.hasApiKey();
+        inputArea.setEnabled(inputEnabled);
+        sendBtn.setEnabled(inputEnabled);
+        if (inputEnabled) {
             if ("API key required for chat...".equals(inputArea.getText())) {
                 inputArea.setText("");
             }
@@ -277,9 +282,11 @@ public class ChatView extends JPanel implements ChatPanelController, ChatSurface
         SwingUtilities.invokeLater(new Runnable() {
             @Override
             public void run() {
-                inputArea.setEnabled(enabled && settings.hasApiKey());
-                sendBtn.setEnabled(enabled && settings.hasApiKey());
-                if (enabled && settings.hasApiKey()) {
+                boolean inputEnabled = enabled
+                        && (isLocalAssistantSelected() || settings.hasApiKey());
+                inputArea.setEnabled(inputEnabled);
+                sendBtn.setEnabled(inputEnabled);
+                if (inputEnabled) {
                     inputArea.requestFocusInWindow();
                 }
             }
@@ -715,13 +722,23 @@ public class ChatView extends JPanel implements ChatPanelController, ChatSurface
     }
 
     private void sendMessage() {
-        if (!settings.hasApiKey()) return;
+        boolean localAssistantSelected = isLocalAssistantSelected();
+        if (!localAssistantSelected && !settings.hasApiKey()) return;
         
         String text = inputArea.getText().trim();
         if (text.isEmpty()) return;
         inputArea.setText("");
 
         appendMessage("user", text);
+
+        if (localAssistantSelected) {
+            AssistantReply reply = localAssistant.handle(text);
+            appendMessage("assistant", reply.text());
+            if (reply.macroEcho() != null && !reply.macroEcho().trim().isEmpty()) {
+                appendMessage("assistant", "```\n" + reply.macroEcho() + "\n```");
+            }
+            return;
+        }
 
         // Notify listeners (Phase 2 conversation loop)
         if (!listeners.isEmpty()) {
@@ -750,6 +767,10 @@ public class ChatView extends JPanel implements ChatPanelController, ChatSurface
                 .replace("<", "&lt;")
                 .replace(">", "&gt;")
                 .replace("\"", "&quot;");
+    }
+
+    private boolean isLocalAssistantSelected() {
+        return AgentLauncher.LOCAL_ASSISTANT_NAME.equals(settings.getSelectedAgentName());
     }
 
 }
