@@ -1,5 +1,6 @@
 package imagejai.local;
 
+import java.util.List;
 import java.util.Map;
 
 /**
@@ -12,4 +13,12 @@ public interface Intent {
     String description();
 
     AssistantReply execute(Map<String, String> slots, FijiBridge fiji);
+
+    default List<SlotSpec> requiredSlots() {
+        return List.of();
+    }
+
+    default List<SlotSpec> suggestedSlots() {
+        return List.of();
+    }
 }

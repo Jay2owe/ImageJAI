@@ -9,6 +9,7 @@ import ij.io.FileSaver;
 import ij.measure.Calibration;
 import imagejai.local.AssistantReply;
 import imagejai.local.FijiBridge;
+import imagejai.local.SlotSpec;
 
 import javax.swing.JFileChooser;
 import javax.swing.SwingUtilities;
@@ -17,6 +18,7 @@ import java.io.File;
 import java.lang.reflect.InvocationTargetException;
 import java.nio.file.Path;
 import java.util.Locale;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -207,6 +209,7 @@ class PreviousSliceIntent extends AbstractControlIntent {
 class SwitchChannelIntent extends AbstractControlIntent {
     public String id() { return "image.switch_channel"; }
     public String description() { return "Switch to a channel number"; }
+    public List<SlotSpec> requiredSlots() { return List.of(new SlotSpec("channel", "channel number", null)); }
     protected AssistantReply executeChecked(Map<String, String> slots, FijiBridge fiji, ImagePlus imp) {
         int channel = intSlot(slots, "channel", -1);
         if (channel < 1 || channel > imp.getNChannels()) {
@@ -220,6 +223,7 @@ class SwitchChannelIntent extends AbstractControlIntent {
 class JumpSliceIntent extends AbstractControlIntent {
     public String id() { return "image.jump_slice"; }
     public String description() { return "Jump to a slice number"; }
+    public List<SlotSpec> requiredSlots() { return List.of(new SlotSpec("slice", "slice number", null)); }
     protected AssistantReply executeChecked(Map<String, String> slots, FijiBridge fiji, ImagePlus imp) {
         int slice = intSlot(slots, "slice", -1);
         if (slice < 1 || slice > imp.getNSlices()) {
@@ -233,6 +237,7 @@ class JumpSliceIntent extends AbstractControlIntent {
 class JumpFrameIntent extends AbstractControlIntent {
     public String id() { return "image.jump_frame"; }
     public String description() { return "Jump to a frame number"; }
+    public List<SlotSpec> requiredSlots() { return List.of(new SlotSpec("frame", "frame number", null)); }
     protected AssistantReply executeChecked(Map<String, String> slots, FijiBridge fiji, ImagePlus imp) {
         int frame = intSlot(slots, "frame", -1);
         if (frame < 1 || frame > imp.getNFrames()) {

@@ -60,14 +60,14 @@ public class PendingTurnTest {
     }
 
     @Test
-    public void resolutionStubsReturnEmptyForBothKinds() {
+    public void nonValueResolutionReturnsEmptyForBothKinds() {
         LocalAssistant assistant = assistantWithHistory(null);
         PendingTurn parameter = PendingTurn.parameter("image.switch_channel",
                 new LinkedHashMap<String, String>(), "channel", "Which channel?", null);
         PendingTurn disambiguation = PendingTurn.disambiguation("Did you mean:",
                 Arrays.asList(new RankedPhrase("help", "slash.help", 0.95)));
 
-        Optional<AssistantReply> parameterResolved = assistant.tryResolveForTest(parameter, "2");
+        Optional<AssistantReply> parameterResolved = assistant.tryResolveForTest(parameter, "not a value");
         Optional<AssistantReply> disambiguationResolved = assistant.tryResolveForTest(disambiguation, "help");
 
         assertFalse(parameterResolved.isPresent());

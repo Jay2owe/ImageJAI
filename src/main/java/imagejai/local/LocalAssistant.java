@@ -5,7 +5,10 @@ import imagejai.engine.CommandEngine;
 import imagejai.engine.FrictionLog;
 import imagejai.engine.IntentRouter;
 
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 
 /**
@@ -83,8 +86,8 @@ public class LocalAssistant {
     public AssistantReply handle(String input) {
         if (pending.isPresent()) {
             PendingTurn pendingTurn = pending.get();
-            Optional<AssistantReply> resolved = tryResolve(pendingTurn, input);
             pending = Optional.empty();
+            Optional<AssistantReply> resolved = tryResolve(pendingTurn, input);
             if (resolved.isPresent()) {
                 return resolved.get();
             }
@@ -105,7 +108,7 @@ public class LocalAssistant {
             }
             Intent intent = library.byId(match.intentId());
             if (intent != null) {
-                return intent.execute(match.slots(), fiji);
+                return executeOrPrompt(intent, match.slots());
             }
         }
         Optional<IntentRouter.Resolved> userMatch = intentRouter.resolve(input);
@@ -144,11 +147,80 @@ public class LocalAssistant {
     private Optional<AssistantReply> tryResolve(PendingTurn pendingTurn, String input) {
         switch (pendingTurn.kind()) {
             case PARAMETER:
-                return Optional.empty();
+                return resolveParameter(pendingTurn, input);
             case DISAMBIGUATION:
                 return Optional.empty();
             default:
                 return Optional.empty();
         }
+    }
+
+    private Optional<AssistantReply> resolveParameter(PendingTurn pendingTurn, String input) {
+        String value = stripLeadingWords(input == null ? "" : input.trim());
+        if (value.length() == 0) {
+            if (pendingTurn.defaultValue() == null) {
+                return Optional.empty();
+            }
+            value = pendingTurn.defaultValue();
+        }
+        if (!isNumeric(value)) {
+            return Optional.empty();
+        }
+
+        Intent intent = library.byId(pendingTurn.intentId());
+        if (intent == null) {
+            return Optional.empty();
+        }
+
+        Map<String, String> slots = new LinkedHashMap<String, String>(pendingTurn.filledSlots());
+        slots.put(pendingTurn.missingSlot(), value);
+        return Optional.of(executeOrPrompt(intent, slots));
+    }
+
+    private AssistantReply executeOrPrompt(Intent intent, Map<String, String> slots) {
+        List<SlotSpec> missing = computeMissing(intent.requiredSlots(), slots);
+        if (!missing.isEmpty()) {
+            SlotSpec first = missing.get(0);
+            String question = parameterQuestion(first);
+            pending = Optional.of(PendingTurn.parameter(
+                    intent.id(),
+                    slots,
+                    first.name(),
+                    question,
+                    first.defaultValue()));
+            return AssistantReply.text(question);
+        }
+        return intent.execute(slots, fiji);
+    }
+
+    private static List<SlotSpec> computeMissing(List<SlotSpec> required,
+                                                 Map<String, String> filled) {
+        List<SlotSpec> missing = new ArrayList<SlotSpec>();
+        if (required == null) {
+            return missing;
+        }
+        for (SlotSpec spec : required) {
+            String value = filled == null ? null : filled.get(spec.name());
+            if (value == null || value.trim().length() == 0) {
+                missing.add(spec);
+            }
+        }
+        return missing;
+    }
+
+    private static String parameterQuestion(SlotSpec slot) {
+        String prompt = "What " + slot.prompt() + "? ";
+        if (slot.hasDefault()) {
+            prompt += "Default: " + slot.defaultValue() + ". ";
+        }
+        return prompt + "(or type a new request to cancel)";
+    }
+
+    private static String stripLeadingWords(String value) {
+        return value.replaceAll("^[A-Za-z ]+", "").trim();
+    }
+
+    private static boolean isNumeric(String value) {
+        return value.matches("^-?\\d+(?:\\.\\d+)?$");
     }
 }
