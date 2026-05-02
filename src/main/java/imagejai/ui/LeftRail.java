@@ -98,6 +98,7 @@ public class LeftRail extends JPanel {
     private final JButton commandsButton;
     private final JButton newAgentChatButton;
     private final JButton newWipButton;
+    private final SessionHistoryPanel sessionHistoryPanel;
     private final JButton macroSetsButton;
     private final JButton runRecipeButton;
     private final JButton auditButton;
@@ -150,6 +151,7 @@ public class LeftRail extends JPanel {
                 newWip();
             }
         });
+        sessionHistoryPanel = new SessionHistoryPanel(tcpHotline, workspace, focusReturn);
 
         commandsButton = railButton("Commands", "no command list");
         commandsButton.addActionListener(new ActionListener() {
@@ -206,6 +208,7 @@ public class LeftRail extends JPanel {
 
     public void setWorkspace(File workspace) {
         this.workspace = workspace;
+        sessionHistoryPanel.setWorkspace(workspace);
     }
 
     public void attachSession(EmbeddedAgentSession newSession) {
@@ -298,6 +301,8 @@ public class LeftRail extends JPanel {
                         tcpHotline.executeMacro(Z_PROJECT_MACRO);
                     }
                 }));
+        body.add(Box.createVerticalStrut(6));
+        body.add(sessionHistoryPanel);
         body.add(Box.createVerticalStrut(6));
         body.add(macroSetsButton);
         body.add(Box.createVerticalStrut(12));

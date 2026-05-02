@@ -1,12 +1,18 @@
 package imagejai.engine;
 
+import com.google.gson.JsonArray;
+import com.google.gson.JsonElement;
+import com.google.gson.JsonObject;
+import com.google.gson.JsonParser;
 import ij.IJ;
 import ij.ImagePlus;
+import ij.Prefs;
 import ij.WindowManager;
 import ij.io.FileInfo;
 
 import java.io.IOException;
 import java.io.PrintWriter;
+import java.io.Reader;
 import java.io.StringWriter;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -48,6 +54,7 @@ import java.util.concurrent.atomic.AtomicLong;
 public final class SessionCodeJournal {
 
     public static final SessionCodeJournal INSTANCE = new SessionCodeJournal();
+    public static final String PREF_PERSIST = "ai.assistant.history.persist";
     private static final int RING_CAP = 200;
     private static final int MIN_CODE_LEN = 20;
     private static final DateTimeFormatter HMS = DateTimeFormatter.ofPattern("HHmmss");
@@ -67,11 +74,13 @@ public final class SessionCodeJournal {
         public final long durationMs;
         public final boolean success;
         public final String failureMessage;
+        public final boolean plumbingOnly;
         public int runCount;
 
         Entry(long id, String name, String language, String code, String canonical,
               String fileName, String source, long macroId, long startedAtMs,
-              long durationMs, boolean success, String failureMessage) {
+              long durationMs, boolean success, String failureMessage,
+              boolean plumbingOnly) {
             this.id = id;
             this.name = name;
             this.language = language;
@@ -85,7 +94,12 @@ public final class SessionCodeJournal {
             this.durationMs = durationMs;
             this.success = success;
             this.failureMessage = failureMessage;
+            this.plumbingOnly = plumbingOnly;
             this.runCount = 1;
+        }
+
+        public boolean isPlumbingOnly() {
+            return plumbingOnly;
         }
     }
 
@@ -102,6 +116,7 @@ public final class SessionCodeJournal {
                 t.setDaemon(true);
                 return t;
             });
+    private boolean indexLoadAttempted;
     private SessionCodeJournal() {}
 
     public void addListener(Listener l) { listeners.add(l); }
@@ -112,6 +127,7 @@ public final class SessionCodeJournal {
      * holding the journal lock.
      */
     public synchronized List<Entry> snapshot() {
+        loadFromIndexIfPersistEnabled();
         return new ArrayList<>(ring);
     }
 
@@ -127,6 +143,7 @@ public final class SessionCodeJournal {
         String trimmed = code.trim();
         if (trimmed.length() <= MIN_CODE_LEN) return;
 
+        loadFromIndexIfPersistEnabled();
         String canonical = canonicalise(code);
         Entry toWrite = null;
         List<Entry> indexSnapshot = null;
@@ -149,13 +166,14 @@ public final class SessionCodeJournal {
             }
             if (indexSnapshot == null) {
                 String timeSuffix = timeSuffix(startedAtMs);
-                String slug = CodeAutoNamer.nameFor(language, code, timeSuffix);
+                CodeAutoNamer.NamingResult name = CodeAutoNamer.describeFor(language, code, timeSuffix);
+                String slug = name.slug;
                 slug = dedupSlug(slug);
                 String safeLanguage = language == null ? "ijm" : language;
                 String fileName = timeSuffix + "_" + slug + "." + extensionFor(safeLanguage);
                 Entry e = new Entry(idSeq.incrementAndGet(), slug, safeLanguage, code,
                         canonical, fileName, source == null ? "tcp" : source, macroId,
-                        startedAtMs, durationMs, success, failureMessage);
+                        startedAtMs, durationMs, success, failureMessage, name.plumbingOnly);
                 ring.addFirst(e);
                 while (ring.size() > RING_CAP) ring.pollLast();
                 toWrite = e;
@@ -167,13 +185,153 @@ public final class SessionCodeJournal {
     }
 
     public synchronized Entry get(long id) {
+        loadFromIndexIfPersistEnabled();
         for (Entry e : ring) {
             if (e.id == id) return e;
         }
         return null;
     }
 
+    public synchronized boolean removeFromRing(long id) {
+        for (Iterator<Entry> it = ring.iterator(); it.hasNext(); ) {
+            Entry e = it.next();
+            if (e.id == id) {
+                it.remove();
+                fire();
+                return true;
+            }
+        }
+        return false;
+    }
+
+    public synchronized void clearRing() {
+        if (ring.isEmpty()) return;
+        ring.clear();
+        fire();
+    }
+
+    public synchronized void clearRingAndDeleteFiles() {
+        if (ring.isEmpty()) return;
+        final List<Entry> filesToDelete = new ArrayList<>(ring);
+        ring.clear();
+        fire();
+        ioExecutor.submit(() -> {
+            try {
+                Path dir = resolveCodeDir();
+                if (dir == null) return;
+                for (Entry e : filesToDelete) {
+                    if (e.fileName != null && !e.fileName.trim().isEmpty()) {
+                        Files.deleteIfExists(dir.resolve(e.fileName));
+                    }
+                }
+                Files.deleteIfExists(dir.resolve("INDEX.json"));
+            } catch (Throwable t) {
+                IJ.log("[ImageJAI-Journal] clear files failed: " + t);
+            }
+        });
+    }
+
+    public synchronized void loadFromIndexIfPresent() {
+        if (indexLoadAttempted) return;
+        indexLoadAttempted = true;
+        Path dir = resolveCodeDir();
+        if (dir == null) return;
+        Path index = dir.resolve("INDEX.json");
+        if (!Files.isRegularFile(index)) return;
+        try (Reader reader = Files.newBufferedReader(index, StandardCharsets.UTF_8)) {
+            JsonElement root = JsonParser.parseReader(reader);
+            if (root == null || !root.isJsonArray()) return;
+            JsonArray entries = root.getAsJsonArray();
+            ring.clear();
+            long maxId = idSeq.get();
+            for (JsonElement element : entries) {
+                if (element == null || !element.isJsonObject()) continue;
+                Entry e = entryFromIndexObject(dir, element.getAsJsonObject());
+                if (e == null) continue;
+                ring.addLast(e);
+                if (e.id > maxId) maxId = e.id;
+                while (ring.size() > RING_CAP) ring.pollLast();
+            }
+            idSeq.set(Math.max(idSeq.get(), maxId));
+            IJ.log("[ImageJAI-Journal] loaded " + ring.size() + " entries from " + index);
+        } catch (Throwable t) {
+            IJ.log("[ImageJAI-Journal] INDEX load failed: " + t);
+        }
+    }
+
+    public Path filePathFor(Entry e) {
+        if (e == null || e.fileName == null || e.fileName.trim().isEmpty()) return null;
+        Path dir = resolveCodeDir();
+        return dir == null ? null : dir.resolve(e.fileName);
+    }
+
     // ---- internals ----
+
+    private void loadFromIndexIfPersistEnabled() {
+        if (Prefs.get(PREF_PERSIST, false)) {
+            loadFromIndexIfPresent();
+        }
+    }
+
+    private static Entry entryFromIndexObject(Path dir, JsonObject obj) throws IOException {
+        String fileName = stringValue(obj, "file", "");
+        if (fileName.isEmpty()) return null;
+        Path file = dir.resolve(fileName);
+        if (!Files.isRegularFile(file)) return null;
+        String code = Files.readString(file, StandardCharsets.UTF_8);
+        String language = stringValue(obj, "language", "ijm");
+        long timestamp = longValue(obj, "timestamp", System.currentTimeMillis());
+        boolean plumbingOnly = obj.has("plumbingOnly")
+                ? booleanValue(obj, "plumbingOnly", false)
+                : CodeAutoNamer.describeFor(language, code, timeSuffix(timestamp)).plumbingOnly;
+        Entry e = new Entry(
+                longValue(obj, "id", 0L),
+                stringValue(obj, "name", CodeAutoNamer.nameFor(language, code, timeSuffix(timestamp))),
+                language,
+                code,
+                canonicalise(code),
+                fileName,
+                stringValue(obj, "source", "tcp"),
+                0L,
+                timestamp,
+                0L,
+                booleanValue(obj, "success", true),
+                stringValue(obj, "failureMessage", null),
+                plumbingOnly);
+        e.lastRunAtMs = longValue(obj, "lastRunAt", timestamp);
+        e.runCount = (int) longValue(obj, "runCount", 1L);
+        return e;
+    }
+
+    private static String stringValue(JsonObject obj, String key, String fallback) {
+        JsonElement value = obj.get(key);
+        if (value == null || value.isJsonNull()) return fallback;
+        try {
+            return value.getAsString();
+        } catch (Exception e) {
+            return fallback;
+        }
+    }
+
+    private static long longValue(JsonObject obj, String key, long fallback) {
+        JsonElement value = obj.get(key);
+        if (value == null || value.isJsonNull()) return fallback;
+        try {
+            return value.getAsLong();
+        } catch (Exception e) {
+            return fallback;
+        }
+    }
+
+    private static boolean booleanValue(JsonObject obj, String key, boolean fallback) {
+        JsonElement value = obj.get(key);
+        if (value == null || value.isJsonNull()) return fallback;
+        try {
+            return value.getAsBoolean();
+        } catch (Exception e) {
+            return fallback;
+        }
+    }
 
     private String dedupSlug(String slug) {
         // Same slug + different canonical code → numeric suffix.
@@ -287,7 +445,9 @@ public final class SessionCodeJournal {
                 pw.print("\"lastRunAt\":" + e.lastRunAtMs + ",");
                 pw.print("\"runCount\":" + e.runCount + ",");
                 pw.print("\"source\":\"" + jsonEscape(e.source) + "\",");
-                pw.print("\"success\":" + e.success);
+                pw.print("\"success\":" + e.success + ",");
+                pw.print("\"failureMessage\":\"" + jsonEscape(e.failureMessage) + "\",");
+                pw.print("\"plumbingOnly\":" + e.plumbingOnly);
                 pw.print("}");
                 if (i < entries.size() - 1) pw.print(",");
                 pw.print("\n");
