@@ -12,8 +12,12 @@
 # context-loader fields (harness/family/context_size/tool_call_reliability)
 # are read by the Python loader landed in Phase F.
 #
-# This is the Phase D seed list (~12 entries, enough to exercise the
-# dropdown end-to-end). Phase G replaces it with the full curated catalogue.
+# Phase F context-loader fields (see docs/multi_provider/04_context_strategy.md):
+#   harness        : cli_shell | tool_loop
+#   family         : claude | gemma | llama | qwen | gpt | mistral |
+#                    deepseek | kimi | glm | grok | phi | gptoss | (other)
+#   context_size   : small | medium | large  (loader applies small_context overlay when "small")
+#   tool_call_reliability  : high | medium | low (already shipped in Phase D)
 
 models:
   # ---------------- Anthropic (paid — placeholder until Phase H tier safety) ---
@@ -30,6 +34,9 @@ models:
     last_verified: 2026-05-01
     pinned: true
     curated: true
+    harness: cli_shell
+    family: claude
+    context_size: large
 
   - provider: anthropic
     model_id: claude-sonnet-4-6
@@ -44,6 +51,9 @@ models:
     last_verified: 2026-05-01
     pinned: false
     curated: true
+    harness: cli_shell
+    family: claude
+    context_size: large
 
   - provider: anthropic
     model_id: claude-haiku-4-5
@@ -57,6 +67,27 @@ models:
     last_verified: 2026-05-01
     pinned: false
     curated: true
+    harness: cli_shell
+    family: claude
+    context_size: large
+
+  # ---------------- OpenAI (Codex CLI primary user) --------------------------
+  - provider: openai
+    model_id: gpt-5-codex
+    display_name: GPT-5 Codex
+    description: >
+      OpenAI's coding-focused frontier model — primary backend for Codex CLI
+      driving AGENTS.md.
+    tier: paid
+    context_window: 400000
+    vision_capable: true
+    tool_call_reliability: high
+    last_verified: 2026-05-01
+    pinned: false
+    curated: true
+    harness: cli_shell
+    family: gpt
+    context_size: large
 
   # ---------------- Gemini (free with limits) ---------------------------------
   - provider: gemini
@@ -72,6 +103,9 @@ models:
     last_verified: 2026-05-01
     pinned: false
     curated: true
+    harness: cli_shell
+    family: gemini
+    context_size: large
 
   - provider: gemini
     model_id: gemini-2.5-flash
@@ -86,6 +120,9 @@ models:
     last_verified: 2026-05-01
     pinned: false
     curated: true
+    harness: tool_loop
+    family: gemini
+    context_size: large
 
   - provider: gemini
     model_id: gemini-2.5-flash-lite
@@ -99,6 +136,9 @@ models:
     last_verified: 2026-05-01
     pinned: false
     curated: true
+    harness: tool_loop
+    family: gemini
+    context_size: large
 
   # ---------------- Groq (free with limits) -----------------------------------
   - provider: groq
@@ -114,6 +154,9 @@ models:
     last_verified: 2026-05-01
     pinned: false
     curated: true
+    harness: tool_loop
+    family: llama
+    context_size: large
 
   - provider: groq
     model_id: llama-3.1-8b-instant
@@ -128,6 +171,9 @@ models:
     last_verified: 2026-05-01
     pinned: false
     curated: true
+    harness: tool_loop
+    family: llama
+    context_size: large
 
   # ---------------- Ollama (local, always free) -------------------------------
   - provider: ollama
@@ -143,6 +189,9 @@ models:
     last_verified: 2026-05-01
     pinned: false
     curated: true
+    harness: tool_loop
+    family: llama
+    context_size: small
 
   - provider: ollama
     model_id: qwen2.5-coder:7b
@@ -157,6 +206,9 @@ models:
     last_verified: 2026-05-01
     pinned: false
     curated: true
+    harness: tool_loop
+    family: qwen
+    context_size: small
 
   # ---------------- Ollama Cloud (free with limits) ---------------------------
   - provider: ollama-cloud
@@ -172,6 +224,9 @@ models:
     last_verified: 2026-05-01
     pinned: true
     curated: true
+    harness: tool_loop
+    family: gemma
+    context_size: large
 
   - provider: ollama-cloud
     model_id: qwen3-coder:480b-cloud
@@ -186,3 +241,6 @@ models:
     last_verified: 2026-05-01
     pinned: false
     curated: true
+    harness: tool_loop
+    family: qwen
+    context_size: large

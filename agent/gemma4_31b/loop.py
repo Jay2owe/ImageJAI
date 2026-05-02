@@ -1957,14 +1957,25 @@ def run(
     _console_emit("While Gemma is working, plain text queues and /interrupt aborts the current turn.")
 
     messages: list = []
-    _gemma_md_path = os.path.join(os.path.dirname(__file__), prompt_filename)
-    try:
-        with open(_gemma_md_path, "r", encoding="utf-8") as _f:
-            _gemma_md_text = _f.read().strip()
-        if _gemma_md_text:
-            messages.append({"role": "system", "content": _gemma_md_text})
-    except OSError:
-        pass
+    _system_text: str = ""
+    if prompt_filename in (None, "", "GEMMA.md"):
+        # Phase F: default system prompt is composed by the overlay loader.
+        try:
+            from agent.contexts import loader as _ctx_loader
+            _system_text = _ctx_loader.load_context(
+                "ollama-cloud/gemma4:31b-cloud"
+            ).strip()
+        except Exception:
+            _system_text = ""
+    if not _system_text and prompt_filename:
+        _gemma_md_path = os.path.join(os.path.dirname(__file__), prompt_filename)
+        try:
+            with open(_gemma_md_path, "r", encoding="utf-8") as _f:
+                _system_text = _f.read().strip()
+        except OSError:
+            pass
+    if _system_text:
+        messages.append({"role": "system", "content": _system_text})
     pending_prompts: deque[str] = deque()
     pending_system_notes: deque[str] = deque()
     event_queue: "queue.Queue[dict]" = queue.Queue()
