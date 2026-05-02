@@ -1,6 +1,7 @@
 package imagejai.engine;
 
 import ij.IJ;
+import imagejai.config.Settings;
 
 import java.io.File;
 import java.io.IOException;
@@ -59,7 +60,7 @@ public class AgentLauncher {
     // Context flags tell the agent where to find project context.
     // Empty string means the agent auto-reads its own file (e.g., CLAUDE.md, GEMINI.md).
     private static final String[][] KNOWN_AGENTS = {
-        {"Claude Code", "claude", "Anthropic's Claude CLI agent", "--dangerously-skip-permissions"},
+        {"Claude Code", "claude", "Anthropic's Claude CLI agent", ""},
         {"Aider", "aider", "AI pair programming in your terminal", "--read .aider.conventions.md"},
         {"GitHub Copilot CLI", "gh copilot", "GitHub Copilot in the terminal", ""},
         {"Gemini CLI", "gemini", "Google's Gemini CLI agent", "--yolo"},
@@ -72,6 +73,7 @@ public class AgentLauncher {
 
     private final String agentWorkspace;
     private final int tcpPort;
+    private final Settings settings;
     private List<AgentInfo> cachedAgents;
 
     /**
@@ -79,8 +81,13 @@ public class AgentLauncher {
      * @param tcpPort the ImageJAI TCP server port to expose to launched agents
      */
     public AgentLauncher(String agentWorkspace, int tcpPort) {
+        this(agentWorkspace, tcpPort, Settings.load());
+    }
+
+    public AgentLauncher(String agentWorkspace, int tcpPort, Settings settings) {
         this.agentWorkspace = agentWorkspace;
         this.tcpPort = tcpPort;
+        this.settings = settings == null ? Settings.load() : settings;
     }
 
     /**
@@ -157,11 +164,8 @@ public class AgentLauncher {
      * construction so the two paths share the same {@link AgentLaunchSpec}
      * shape without cross-contaminating shell quoting.
      */
-    private AgentLaunchSpec buildExternalLaunchSpec(AgentInfo agent) {
-        String fullCommand = agent.command;
-        if (agent.contextFlags != null && !agent.contextFlags.isEmpty()) {
-            fullCommand = agent.command + " " + agent.contextFlags;
-        }
+    AgentLaunchSpec buildExternalLaunchSpec(AgentInfo agent) {
+        String fullCommand = buildAgentCommandString(agent);
 
         String os = System.getProperty("os.name", "").toLowerCase();
         List<String> cmd = new ArrayList<String>();
@@ -202,11 +206,8 @@ public class AgentLauncher {
      * platform shell so compound commands and context flags behave like the
      * existing external-terminal path.
      */
-    private AgentLaunchSpec buildEmbeddedLaunchSpec(AgentInfo agent) {
-        String fullCommand = agent.command;
-        if (agent.contextFlags != null && !agent.contextFlags.isEmpty()) {
-            fullCommand = agent.command + " " + agent.contextFlags;
-        }
+    AgentLaunchSpec buildEmbeddedLaunchSpec(AgentInfo agent) {
+        String fullCommand = buildAgentCommandString(agent);
 
         String os = System.getProperty("os.name", "").toLowerCase();
         List<String> cmd = new ArrayList<String>();
@@ -251,6 +252,25 @@ public class AgentLauncher {
     }
 
     // --- Private helpers ---
+
+    String buildAgentCommandString(AgentInfo agent) {
+        List<String> parts = new ArrayList<String>();
+        parts.add(agent.command);
+        if (agent.contextFlags != null && !agent.contextFlags.trim().isEmpty()) {
+            parts.add(agent.contextFlags.trim());
+        }
+        if ("Claude Code".equals(agent.name)
+                && settings.claudeUseGsdFlag
+                && GsdDetector.isInstalled(settings)) {
+            parts.add("--dangerously-skip-permissions");
+        }
+        StringBuilder sb = new StringBuilder();
+        for (String part : parts) {
+            if (sb.length() > 0) sb.append(' ');
+            sb.append(part);
+        }
+        return sb.toString();
+    }
 
     /**
      * Find an executable on PATH or in common locations.

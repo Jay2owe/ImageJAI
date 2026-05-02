@@ -68,6 +68,22 @@ public class Settings {
     public String selectedAgentName = AgentLauncher.LOCAL_ASSISTANT_NAME;
     public double localAssistantFuzzyThreshold = 0.90;
 
+    public static final String DEFAULT_MINILM_MODEL_SHA256 =
+            "4278337fd0ff3c68bfb6291042cad8ab363e1d9fbc43dcb499fe91c871902474";
+    public boolean miniLmInstalled = false;
+    public String miniLmModelSha256 = DEFAULT_MINILM_MODEL_SHA256;
+    public boolean claudeUseGsdFlag = true;
+    public String gsdSkillsPath = "";
+
+    public String claudeInstallCommand = "npm i -g @anthropic-ai/claude-code";
+    public String codexInstallCommand = "npm i -g @openai/codex";
+    public String aiderInstallCommand = "pip install aider-chat";
+    public String geminiInstallCommand = "npm i -g @google/gemini-cli";
+    public String ollamaInstallUrl = "https://ollama.com/download";
+    public String gsdInstallCommand = "";
+    public String gsdInstallDocsUrl =
+            "https://www.claudepluginhub.com/commands/glittercowboy-get-shit-done/commands/gsd/help";
+
     /**
      * Stage 03 (embedded-agent-widget): when true, AgentLauncher launches the
      * agent's terminal UI inside the plugin frame (requires stage 05+). When
@@ -136,6 +152,30 @@ public class Settings {
         // Ensure activeConfigId is valid
         if (activeConfigId == null || getActiveConfig() == null) {
             activeConfigId = configs.get(0).id;
+        }
+        if (miniLmModelSha256 == null || miniLmModelSha256.trim().isEmpty()) {
+            miniLmModelSha256 = DEFAULT_MINILM_MODEL_SHA256;
+        }
+        if (gsdSkillsPath == null) gsdSkillsPath = "";
+        if (claudeInstallCommand == null || claudeInstallCommand.trim().isEmpty()) {
+            claudeInstallCommand = "npm i -g @anthropic-ai/claude-code";
+        }
+        if (codexInstallCommand == null || codexInstallCommand.trim().isEmpty()) {
+            codexInstallCommand = "npm i -g @openai/codex";
+        }
+        if (aiderInstallCommand == null || aiderInstallCommand.trim().isEmpty()) {
+            aiderInstallCommand = "pip install aider-chat";
+        }
+        if (geminiInstallCommand == null || geminiInstallCommand.trim().isEmpty()) {
+            geminiInstallCommand = "npm i -g @google/gemini-cli";
+        }
+        if (ollamaInstallUrl == null || ollamaInstallUrl.trim().isEmpty()) {
+            ollamaInstallUrl = "https://ollama.com/download";
+        }
+        if (gsdInstallCommand == null) gsdInstallCommand = "";
+        if (gsdInstallDocsUrl == null || gsdInstallDocsUrl.trim().isEmpty()) {
+            gsdInstallDocsUrl =
+                    "https://www.claudepluginhub.com/commands/glittercowboy-get-shit-done/commands/gsd/help";
         }
     }
 
