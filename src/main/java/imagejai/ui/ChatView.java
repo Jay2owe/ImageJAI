@@ -10,6 +10,7 @@ import imagejai.config.Settings;
 import imagejai.engine.AgentLauncher;
 import imagejai.local.AssistantReply;
 import imagejai.local.AutocompleteChipRow;
+import imagejai.local.ChatHistoryController;
 import imagejai.local.LocalAssistant;
 import imagejai.local.RankedPhrase;
 
@@ -53,6 +54,7 @@ public class ChatView extends JPanel implements ChatPanelController, ChatSurface
     private final Settings settings;
     private final LocalAssistant localAssistant;
     private final List<ChatPanel.ChatListener> listeners = new ArrayList<ChatPanel.ChatListener>();
+    private volatile boolean localAssistantBusy;
 
     private JTextPane messageArea;
     private JScrollPane scrollPane;
@@ -72,7 +74,15 @@ public class ChatView extends JPanel implements ChatPanelController, ChatSurface
 
     public ChatView(Settings settings) {
         this.settings = settings;
-        this.localAssistant = new LocalAssistant(settings);
+        this.localAssistant = new LocalAssistant(settings, new ChatHistoryController() {
+            public boolean canClear() {
+                return !localAssistantBusy;
+            }
+
+            public void clear() {
+                clearRenderedHistory();
+            }
+        });
         setLayout(new BorderLayout(0, 4));
         setBorder(new EmptyBorder(0, 0, 0, 0));
         setBackground(BG_MAIN);
@@ -324,6 +334,15 @@ public class ChatView extends JPanel implements ChatPanelController, ChatSurface
             public void run() {
                 initHtmlContent();
                 appendMessage("assistant", "Conversation cleared. How can I help you?");
+            }
+        });
+    }
+
+    public void clearRenderedHistory() {
+        SwingUtilities.invokeLater(new Runnable() {
+            @Override
+            public void run() {
+                initHtmlContent();
             }
         });
     }
@@ -814,10 +833,18 @@ public class ChatView extends JPanel implements ChatPanelController, ChatSurface
         appendMessage("user", text);
 
         if (localAssistantSelected) {
-            AssistantReply reply = localAssistant.handle(text);
-            appendMessage("assistant", reply.text());
-            if (reply.macroEcho() != null && !reply.macroEcho().trim().isEmpty()) {
-                appendMessage("assistant", "```\n" + reply.macroEcho() + "\n```");
+            boolean clearCommand = text.trim().toLowerCase().startsWith("/clear");
+            localAssistantBusy = !clearCommand;
+            try {
+                AssistantReply reply = localAssistant.handle(text);
+                if (reply.text() != null && reply.text().trim().length() > 0) {
+                    appendMessage("assistant", reply.text());
+                }
+                if (reply.macroEcho() != null && !reply.macroEcho().trim().isEmpty()) {
+                    appendMessage("assistant", "```\n" + reply.macroEcho() + "\n```");
+                }
+            } finally {
+                localAssistantBusy = false;
             }
             return;
         }

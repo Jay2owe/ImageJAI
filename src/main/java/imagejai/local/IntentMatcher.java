@@ -99,9 +99,27 @@ public class IntentMatcher {
         if (input == null) {
             return "";
         }
+        String trimmed = input.trim();
+        if (trimmed.startsWith("/")) {
+            int split = firstWhitespace(trimmed);
+            String command = split < 0 ? trimmed : trimmed.substring(0, split);
+            String args = split < 0 ? "" : WS.matcher(trimmed.substring(split).trim()).replaceAll(" ");
+            return args.length() == 0
+                    ? command.toLowerCase(Locale.ROOT)
+                    : command.toLowerCase(Locale.ROOT) + " " + args;
+        }
         String s = input.toLowerCase(Locale.ROOT);
         s = PUNCT.matcher(s).replaceAll(" ");
         return WS.matcher(s).replaceAll(" ").trim();
+    }
+
+    private static int firstWhitespace(String input) {
+        for (int i = 0; i < input.length(); i++) {
+            if (Character.isWhitespace(input.charAt(i))) {
+                return i;
+            }
+        }
+        return -1;
     }
 
     private static double similarity(String key, String sortedKey, String phrase) {
