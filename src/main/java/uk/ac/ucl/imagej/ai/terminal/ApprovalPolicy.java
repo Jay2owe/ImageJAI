@@ -13,7 +13,6 @@ import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
-import java.util.Locale;
 import java.util.regex.Pattern;
 import java.util.regex.PatternSyntaxException;
 
@@ -45,7 +44,7 @@ public final class ApprovalPolicy {
     }
 
     public static ApprovalPolicy loadForAgent(AgentLauncher.AgentInfo info) {
-        String id = agentId(info);
+        String id = AgentRegistry.agentId(info);
         ApprovalPolicy policy = load(id);
         if (policy != null) {
             return policy;
@@ -130,17 +129,4 @@ public final class ApprovalPolicy {
         return false;
     }
 
-    private static String agentId(AgentLauncher.AgentInfo info) {
-        if (info == null || info.command == null || info.command.trim().isEmpty()) {
-            return DEFAULT_ID;
-        }
-        String command = info.command.trim().split("\\s+")[0].toLowerCase(Locale.ROOT);
-        if (command.endsWith("_agent")) {
-            command = command.substring(0, command.length() - "_agent".length());
-        }
-        String slug = command.replaceAll("[^a-z0-9]+", "_")
-                .replaceAll("^_+", "")
-                .replaceAll("_+$", "");
-        return slug.isEmpty() ? DEFAULT_ID : slug;
-    }
 }

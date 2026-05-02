@@ -1,0 +1,4 @@
+{
+  "match": "(?i)(cleared|conversation\\s+(cleared|reset)|new\\s+conversation)",
+  "on_miss": "pty_restart"
+}

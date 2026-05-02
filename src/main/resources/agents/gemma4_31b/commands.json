@@ -1,0 +1,10 @@
+[
+  {"command": "/help", "description": "Show available slash commands."},
+  {"command": "/clear", "description": "Reset the conversation history."},
+  {"command": "/queue <text>", "description": "Queue a prompt to run after the current turn."},
+  {"command": "/interrupt [text]", "description": "Abort the current turn and optionally queue replacement text."},
+  {"command": "/think [on|off|auto]", "description": "Force thinking mode on/off, or return to auto. No arg = show state."},
+  {"command": "/mode [<name>|auto]", "description": "Lock sampling mode (tool/plan/recover/explain/recipe) or return to auto."},
+  {"command": "/ccommands [name]", "description": "List or load custom command prompts."},
+  {"command": "/save-recipe", "description": "Offer to save the current workflow as a reusable recipe."}
+]

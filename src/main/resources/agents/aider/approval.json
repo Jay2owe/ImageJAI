@@ -1,0 +1,15 @@
+{
+  "auto_confirm": [
+    "(?i)press\\s+enter\\s+to\\s+confirm\\s+paste",
+    "(?i)pasted\\s+\\d+\\s+lines"
+  ],
+  "always_escalate": [
+    "(?i)rm\\s+-rf",
+    "(?i)git\\s+reset\\s+--hard",
+    "(?i)drop\\s+table",
+    "(?i)delete\\s+.*\\b(AI_Exports|agent|src|docs)\\b"
+  ],
+  "pending": [
+    "(?i)\\b(allow|approve|permit|continue|proceed)\\b.*(\\?|:|\\[y/n\\])\\s*$"
+  ]
+}

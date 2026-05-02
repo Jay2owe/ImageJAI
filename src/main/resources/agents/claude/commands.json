@@ -1,0 +1,20 @@
+[
+  {"command": "/help", "description": "Show help and available commands."},
+  {"command": "/clear", "description": "Clear conversation history."},
+  {"command": "/compact", "description": "Compact the conversation into a smaller summary."},
+  {"command": "/cost", "description": "Show token and cost usage."},
+  {"command": "/doctor", "description": "Check Claude Code installation and environment."},
+  {"command": "/exit", "description": "Exit Claude Code."},
+  {"command": "/ide", "description": "Manage IDE integration."},
+  {"command": "/init", "description": "Create or refresh project instructions."},
+  {"command": "/login", "description": "Authenticate Claude Code."},
+  {"command": "/logout", "description": "Sign out of Claude Code."},
+  {"command": "/mcp", "description": "Manage MCP servers."},
+  {"command": "/memory", "description": "Edit project or user memory."},
+  {"command": "/model", "description": "Select or view the active model."},
+  {"command": "/pr_comments", "description": "Fetch pull request comments."},
+  {"command": "/review", "description": "Ask Claude to review changes."},
+  {"command": "/status", "description": "Show session status."},
+  {"command": "/terminal-setup", "description": "Configure terminal integration."},
+  {"command": "/vim", "description": "Toggle Vim mode."}
+]

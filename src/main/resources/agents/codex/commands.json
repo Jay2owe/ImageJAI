@@ -1,0 +1,12 @@
+[
+  {"command": "/help", "description": "Show help and slash commands."},
+  {"command": "/clear", "description": "Start a fresh conversation."},
+  {"command": "/compact", "description": "Compact the conversation context."},
+  {"command": "/diff", "description": "Show current changes."},
+  {"command": "/exit", "description": "Exit Codex CLI."},
+  {"command": "/init", "description": "Create project guidance files."},
+  {"command": "/model", "description": "Select or view the active model."},
+  {"command": "/status", "description": "Show session status."},
+  {"command": "/quit", "description": "Exit Codex CLI."},
+  {"command": "/review", "description": "Review code changes."}
+]
