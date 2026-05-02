@@ -64,8 +64,11 @@ public class ImageJAIPlugin implements Command {
         // Load settings
         Settings settings = Settings.load();
 
+        boolean localAssistantSelected =
+                AgentLauncher.LOCAL_ASSISTANT_NAME.equals(settings.getSelectedAgentName());
+
         // First-run: show settings dialog (if no key and not just TCP)
-        if (settings.isFirstRun()) {
+        if (settings.isFirstRun() && !localAssistantSelected) {
             Frame parent = IJ.getInstance();
             SettingsDialog dialog = new SettingsDialog(parent, settings);
             dialog.setVisible(true);
@@ -82,7 +85,7 @@ public class ImageJAIPlugin implements Command {
         if (settings.hasApiKey()) {
             conversationLoop = new ConversationLoop(rootPanel, settings);
             rootPanel.addChatListener(conversationLoop);
-        } else {
+        } else if (!localAssistantSelected) {
             rootPanel.appendMessage("assistant", "AI Assistant is running in TCP-only mode. " +
                     "To use chat features, please configure an API key in Settings.");
         }
