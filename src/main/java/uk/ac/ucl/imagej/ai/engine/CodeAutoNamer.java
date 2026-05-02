@@ -68,6 +68,16 @@ public final class CodeAutoNamer {
 
     private CodeAutoNamer() {}
 
+    public static final class NamingResult {
+        public final String slug;
+        public final boolean plumbingOnly;
+
+        private NamingResult(String slug, boolean plumbingOnly) {
+            this.slug = slug;
+            this.plumbingOnly = plumbingOnly;
+        }
+    }
+
     /**
      * Build a slug for the given code. Never returns null or blank; the
      * timestamp-fallback guarantees at least {@code macro_<HHMMSS>}.
@@ -77,15 +87,24 @@ public final class CodeAutoNamer {
      * @param timeSuffix a short time suffix for the fallback (e.g. "143215")
      */
     public static String nameFor(String language, String code, String timeSuffix) {
+        return describeFor(language, code, timeSuffix).slug;
+    }
+
+    public static NamingResult describeFor(String language, String code, String timeSuffix) {
         String slug = fromLeadingComment(code);
-        if (slug == null || slug.isEmpty()) slug = fromRunCalls(code);
-        if (slug == null || slug.isEmpty()) slug = fromFirstSymbol(code);
+        if (slug != null && !slug.isEmpty()) return new NamingResult(slug, false);
+        NamingResult runCalls = fromRunCalls(code);
+        if (runCalls != null && runCalls.slug != null && !runCalls.slug.isEmpty()) {
+            return runCalls;
+        }
+        slug = fromFirstSymbol(code);
+        if (slug != null && !slug.isEmpty()) return new NamingResult(slug, false);
         if (slug == null || slug.isEmpty()) {
             String prefix = (language == null || "ijm".equalsIgnoreCase(language))
                     ? "macro" : "script";
             slug = prefix + "_" + timeSuffix;
         }
-        return slug;
+        return new NamingResult(slug, false);
     }
 
     private static String fromLeadingComment(String code) {
@@ -107,7 +126,7 @@ public final class CodeAutoNamer {
         return null;
     }
 
-    private static String fromRunCalls(String code) {
+    private static NamingResult fromRunCalls(String code) {
         List<String> distinct = new ArrayList<>();
         Matcher m = RUN_CALL.matcher(code);
         while (m.find()) {
@@ -118,6 +137,7 @@ public final class CodeAutoNamer {
             if (!distinct.contains(slug)) distinct.add(slug);
             if (distinct.size() >= 3) break;
         }
+        if (!distinct.isEmpty()) return new NamingResult(truncate(String.join("__", distinct)), false);
         if (distinct.isEmpty()) {
             // Fall back to plumbing-only signature so the entry is still nameable
             m = RUN_CALL.matcher(code);
@@ -128,7 +148,7 @@ public final class CodeAutoNamer {
             }
         }
         if (distinct.isEmpty()) return null;
-        return truncate(String.join("__", distinct));
+        return new NamingResult(truncate(String.join("__", distinct)), true);
     }
 
     private static String fromFirstSymbol(String code) {
