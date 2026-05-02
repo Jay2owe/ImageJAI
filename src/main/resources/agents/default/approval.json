@@ -1,0 +1,9 @@
+{
+  "auto_confirm": [],
+  "always_escalate": [
+    "(?i)rm\\s+-rf",
+    "(?i)git\\s+reset\\s+--hard",
+    "(?i)drop\\s+table"
+  ],
+  "pending": []
+}

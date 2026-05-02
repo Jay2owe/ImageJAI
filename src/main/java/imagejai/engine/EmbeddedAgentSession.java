@@ -1,5 +1,6 @@
 package imagejai.engine;
 
+import com.jediterm.terminal.ui.JediTermWidget;
 import ij.IJ;
 import imagejai.terminal.EmbeddedPty;
 
@@ -25,6 +26,10 @@ public final class EmbeddedAgentSession implements AgentSession {
         return pty.component();
     }
 
+    public JediTermWidget terminalWidget() {
+        return pty.widget();
+    }
+
     @Override
     public AgentLauncher.AgentInfo info() {
         return info;
@@ -36,6 +41,14 @@ public final class EmbeddedAgentSession implements AgentSession {
             pty.write((s == null ? "" : s) + "\r");
         } catch (IOException e) {
             IJ.log("[ImageJAI-Term] Failed to write input: " + e.getMessage());
+        }
+    }
+
+    public void writeRaw(String s) {
+        try {
+            pty.write(s == null ? "" : s);
+        } catch (IOException e) {
+            IJ.log("[ImageJAI-Term] Failed to write raw input: " + e.getMessage());
         }
     }
 
