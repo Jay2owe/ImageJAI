@@ -31,18 +31,38 @@ public class ModelMenuItem extends JMenuItem {
     private final ModelEntry entry;
     private boolean starHovered;
     private boolean pinned;
+    private ProviderStatusIcon statusIcon;
     private final PinToggleListener pinToggleListener;
+    private final StatusIconClickListener statusClickListener;
 
     /** Callback invoked when the user clicks the star column. */
     public interface PinToggleListener {
         void onPinToggled(ModelEntry entry, boolean nowPinned);
     }
 
+    /**
+     * Callback invoked when the user clicks the status icon column. ⚠ deep-links
+     * to the multi-provider settings tab; ✗ opens the cached-error dialog;
+     * ✓ falls through (callers can ignore by returning false).
+     */
+    public interface StatusIconClickListener {
+        boolean onStatusIconClicked(ModelEntry entry, ProviderStatusIcon status);
+    }
+
     public ModelMenuItem(ModelEntry entry, PinToggleListener pinToggleListener) {
+        this(entry, ProviderStatusIcon.READY, pinToggleListener, null);
+    }
+
+    public ModelMenuItem(ModelEntry entry,
+                         ProviderStatusIcon statusIcon,
+                         PinToggleListener pinToggleListener,
+                         StatusIconClickListener statusClickListener) {
         super(entry.displayName());
         this.entry = entry;
         this.pinned = entry.pinned();
+        this.statusIcon = statusIcon == null ? ProviderStatusIcon.READY : statusIcon;
         this.pinToggleListener = pinToggleListener;
+        this.statusClickListener = statusClickListener;
         setPreferredSize(new Dimension(380, ROW_HEIGHT));
         setOpaque(true);
         setToolTipText(null);
@@ -59,6 +79,13 @@ public class ModelMenuItem extends JMenuItem {
         addMouseListener(new MouseAdapter() {
             @Override
             public void mousePressed(MouseEvent e) {
+                if (e.getX() >= COL_STATUS && e.getX() < COL_STATUS + ICON_HIT_WIDTH) {
+                    if (statusClickListener != null
+                            && statusClickListener.onStatusIconClicked(entry, statusIcon)) {
+                        e.consume();
+                    }
+                    return;
+                }
                 if (e.getX() >= COL_STAR && e.getX() < COL_STAR + ICON_HIT_WIDTH) {
                     togglePin();
                     repaint();
@@ -84,6 +111,15 @@ public class ModelMenuItem extends JMenuItem {
         return pinned;
     }
 
+    public ProviderStatusIcon statusIcon() {
+        return statusIcon;
+    }
+
+    public void setStatusIcon(ProviderStatusIcon statusIcon) {
+        this.statusIcon = statusIcon == null ? ProviderStatusIcon.READY : statusIcon;
+        repaint();
+    }
+
     void togglePin() {
         pinned = !pinned;
         if (pinToggleListener != null) {
@@ -107,7 +143,7 @@ public class ModelMenuItem extends JMenuItem {
             g2.fillRect(0, 0, getWidth(), getHeight());
 
             paintBadge(g2, entry.tier());
-            paintStatus(g2, ProviderStatusIcon.READY);
+            paintStatus(g2, statusIcon);
             paintStar(g2, pinned, starHovered);
 
             g2.setFont(getFont());

@@ -125,8 +125,17 @@ public class Settings {
     public boolean showCurrencyFootnote = true;
     public boolean useMultiProviderPicker = false;
 
+    /**
+     * Per-provider cached error from the most recent {@code /models} probe —
+     * surfaced by Phase E's CachedErrorDialog. Keyed by canonical hyphenated
+     * provider id. Raw API keys are never stored here; those live in
+     * {@code <imagej-ai>/secrets/&lt;provider&gt;.env}.
+     */
+    public java.util.Map<String, String> lastProviderErrors = new java.util.LinkedHashMap<>();
+
     // Transient
     private transient Path configPath;
+    private transient imagejai.ui.installer.ProviderCredentials providerCredentials;
 
     public Settings() {
         configPath = getConfigDir().resolve("config.json");
@@ -309,5 +318,61 @@ public class Settings {
     public static Path getConfigDir() {
         String home = System.getProperty("user.home");
         return Paths.get(home, Constants.CONFIG_DIR_NAME);
+    }
+
+    /**
+     * Lazily-instantiated handle for the per-provider .env credential store.
+     * Tests inject a custom store via {@link #setProviderCredentials}.
+     */
+    public imagejai.ui.installer.ProviderCredentials providerCredentials() {
+        if (providerCredentials == null) {
+            providerCredentials = new imagejai.ui.installer.ProviderCredentials();
+        }
+        return providerCredentials;
+    }
+
+    public void setProviderCredentials(imagejai.ui.installer.ProviderCredentials store) {
+        this.providerCredentials = store;
+    }
+
+    /**
+     * True when the named provider has a non-empty key on disk. Backed by the
+     * {@code .env} files under {@code <imagej-ai>/secrets/} — never reads the
+     * settings JSON, so exporting settings.json cannot leak credentials.
+     */
+    public boolean hasCredentialsFor(String providerKey) {
+        if (providerKey == null) {
+            return false;
+        }
+        if ("ollama".equals(providerKey)) {
+            // Local Ollama runs without a key — assume reachable unless the
+            // user configured an explicit override. Returning true keeps the
+            // dropdown's status icon green for biologists who haven't touched
+            // settings yet.
+            return true;
+        }
+        return providerCredentials().hasCredentials(providerKey);
+    }
+
+    public String lastErrorFor(String providerKey) {
+        if (providerKey == null || lastProviderErrors == null) {
+            return null;
+        }
+        return lastProviderErrors.get(providerKey);
+    }
+
+    public void setLastError(String providerKey, String message) {
+        if (providerKey == null) {
+            return;
+        }
+        if (lastProviderErrors == null) {
+            lastProviderErrors = new java.util.LinkedHashMap<>();
+        }
+        if (message == null || message.isEmpty()) {
+            lastProviderErrors.remove(providerKey);
+        } else {
+            lastProviderErrors.put(providerKey, message);
+        }
+        save();
     }
 }

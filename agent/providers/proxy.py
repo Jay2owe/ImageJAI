@@ -118,6 +118,7 @@ def start(config_path: str | os.PathLike[str]) -> subprocess.Popen[str]:
     if not config.exists():
         raise FileNotFoundError(config)
     _assert_litellm_importable()
+    _load_secrets_env(config)
 
     port = _first_available_port()
     _LAST_PORT = port
@@ -244,6 +245,55 @@ def startup_self_test() -> bool:
             record_cost_header("0")
             return True
         raise
+
+
+def _load_secrets_env(config_path: Path) -> dict[str, str]:
+    """Read every <provider>.env from the secrets directories into os.environ.
+
+    Two locations are checked in order — values from the second override the
+    first when the same key appears in both:
+
+      1. ``agent/providers/.secrets/`` next to ``litellm.config.yaml`` —
+         development-tree convenience (gitignored).
+      2. ``~/.imagej-ai/secrets/`` — canonical per-machine store written by
+         the Java MultiProviderPanel installer wizards.
+
+    Returns the merged set of key/value pairs that were applied so callers
+    can log or assert on what was loaded.
+    """
+
+    applied: dict[str, str] = {}
+    candidates: list[Path] = []
+    repo_secrets = config_path.parent / ".secrets"
+    if repo_secrets.is_dir():
+        candidates.append(repo_secrets)
+    user_secrets = Path.home() / ".imagej-ai" / "secrets"
+    if user_secrets.is_dir():
+        candidates.append(user_secrets)
+    override = os.environ.get("IMAGEJAI_SECRETS_DIR")
+    if override:
+        override_path = Path(override)
+        if override_path.is_dir():
+            candidates.append(override_path)
+
+    for directory in candidates:
+        for env_file in sorted(directory.glob("*.env")):
+            try:
+                contents = env_file.read_text(encoding="utf-8")
+            except OSError:
+                continue
+            for raw in contents.splitlines():
+                line = raw.strip()
+                if not line or line.startswith("#"):
+                    continue
+                key, _, value = line.partition("=")
+                key = key.strip()
+                value = value.strip().strip("\"").strip("'")
+                if not key:
+                    continue
+                os.environ[key] = value
+                applied[key] = value
+    return applied
 
 
 def _assert_litellm_importable() -> None:

@@ -1,0 +1,23 @@
+{
+  "_comment": "Approximate download sizes for curated Ollama models — surfaced by the LocalModelDownloadWizard. Sizes drawn from ollama.com/library entries (May 2026).",
+  "llama3.2:3b": "2.0 GB",
+  "llama3.1:8b": "4.7 GB",
+  "llama3.3:70b": "40 GB",
+  "qwen2.5-coder:7b": "4.4 GB",
+  "qwen2.5-coder:14b": "9 GB",
+  "qwen2.5-coder:32b": "20 GB",
+  "qwen3:4b": "2.5 GB",
+  "qwen3:8b": "5 GB",
+  "qwen3:14b": "9 GB",
+  "qwen3:32b": "20 GB",
+  "mistral-nemo:12b": "7 GB",
+  "mistral-small3:24b": "14 GB",
+  "granite4:3b": "2.0 GB",
+  "granite4.1:8b": "5 GB",
+  "gemma3:4b": "2.5 GB",
+  "gemma3:12b": "7 GB",
+  "gemma3:27b": "16 GB",
+  "deepseek-r1:7b": "4.4 GB",
+  "deepseek-r1:14b": "9 GB",
+  "deepseek-r1:32b": "20 GB"
+}

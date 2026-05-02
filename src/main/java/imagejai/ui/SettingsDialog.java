@@ -2,6 +2,8 @@ package imagejai.ui;
 
 import imagejai.config.Constants;
 import imagejai.config.Settings;
+import imagejai.engine.picker.ProviderRegistry;
+import imagejai.ui.installer.MultiProviderPanel;
 
 import javax.swing.*;
 import javax.swing.border.EmptyBorder;
@@ -59,6 +61,10 @@ public class SettingsDialog extends JDialog {
 
     private JPanel cardsPanel;
     private CardLayout cardsLayout;
+
+    private MultiProviderPanel multiProviderPanel;
+    private JTabbedPane tabs;
+    private static final int MULTI_PROVIDER_TAB_INDEX = 2;
 
     public SettingsDialog(Frame parent, Settings settings) {
         super(parent, Constants.PLUGIN_NAME + " Settings", true);
@@ -160,10 +166,13 @@ public class SettingsDialog extends JDialog {
         centerPanel.add(buildAdvancedPanel());
         profilesTab.add(centerPanel, BorderLayout.CENTER);
 
-        JTabbedPane tabs = new JTabbedPane();
+        tabs = new JTabbedPane();
         tabs.addTab("Profiles", profilesTab);
         installerPanel = new InstallerPanel(settings);
         tabs.addTab("Models & Agents", installerPanel);
+        multiProviderPanel = new MultiProviderPanel(
+                ProviderRegistry.loadBundled(), settings.providerCredentials());
+        tabs.addTab("Multi-Provider", multiProviderPanel);
         content.add(tabs, BorderLayout.CENTER);
 
         // Buttons
@@ -571,5 +580,38 @@ public class SettingsDialog extends JDialog {
     private void openUrl(String url) {
         try { Desktop.getDesktop().browse(new URI(url)); }
         catch (Exception e) { JOptionPane.showMessageDialog(this, "URL: " + url); }
+    }
+
+    /**
+     * Open the dialog on the Multi-Provider tab pre-scrolled to one provider's
+     * card. Powers the one-click flow from the cascading dropdown's ⚠ status
+     * icon (docs/multi_provider/06_tier_safety.md §4.3).
+     */
+    public void openWithProvider(String providerKey) {
+        if (tabs != null) {
+            tabs.setSelectedIndex(MULTI_PROVIDER_TAB_INDEX);
+        }
+        if (multiProviderPanel != null && providerKey != null) {
+            // Defer until after the dialog is laid out so scrollRectToVisible
+            // operates on real component bounds.
+            SwingUtilities.invokeLater(() -> multiProviderPanel.scrollTo(providerKey));
+        }
+        if (!isVisible()) {
+            setVisible(true);
+        }
+    }
+
+    /**
+     * Static convenience used by callers that have a parent frame but no live
+     * dialog reference. Constructs a dialog, jumps to the Multi-Provider tab,
+     * and shows it.
+     */
+    public static void openWithProvider(Frame parent, Settings settings, String providerKey) {
+        SettingsDialog dialog = new SettingsDialog(parent, settings);
+        dialog.openWithProvider(providerKey);
+    }
+
+    public MultiProviderPanel multiProviderPanel() {
+        return multiProviderPanel;
     }
 }

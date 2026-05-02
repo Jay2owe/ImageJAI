@@ -13,8 +13,9 @@ import java.awt.event.ActionListener;
  * status icon; children are the {@link ModelMenuItem} rows for the provider's
  * curated entries plus an "Add credentials…" leaf for unconfigured providers.
  *
- * <p>Phase D ships the curated rows + credential leaf only. Auto-discovered
- * subsection and "↻ Refresh local Ollama list" leaf are Phase G.
+ * <p>Phase D ships the curated rows + credential leaf only. Phase E wires the
+ * status-icon column in each row to the deep-link / cached-error dialog.
+ * Auto-discovered subsection and "↻ Refresh local Ollama list" leaf are Phase G.
  */
 public class ProviderMenu extends JMenu {
 
@@ -26,15 +27,29 @@ public class ProviderMenu extends JMenu {
         void onCredentialsRequested(String providerId);
     }
 
+    /** Status-icon column click — caller decides whether to deep-link. */
+    public interface StatusListener {
+        boolean onStatusIconClicked(ModelEntry entry,
+                                    ModelMenuItem.ProviderStatusIcon status);
+    }
+
     private final ProviderEntry providerEntry;
 
     public ProviderMenu(ProviderEntry providerEntry,
                         ModelLaunchListener launchListener,
                         ModelMenuItem.PinToggleListener pinToggleListener,
                         InstallerListener installerListener) {
+        this(providerEntry, launchListener, pinToggleListener, installerListener, null);
+    }
+
+    public ProviderMenu(ProviderEntry providerEntry,
+                        ModelLaunchListener launchListener,
+                        ModelMenuItem.PinToggleListener pinToggleListener,
+                        InstallerListener installerListener,
+                        StatusListener statusListener) {
         super(buildHeader(providerEntry));
         this.providerEntry = providerEntry;
-        rebuildChildren(launchListener, pinToggleListener, installerListener);
+        rebuildChildren(launchListener, pinToggleListener, installerListener, statusListener);
     }
 
     public ProviderEntry providerEntry() {
@@ -52,12 +67,26 @@ public class ProviderMenu extends JMenu {
         return providerEntry.displayName() + suffix;
     }
 
+    private static ModelMenuItem.ProviderStatusIcon iconFor(ProviderEntry.Status status) {
+        switch (status) {
+            case READY: return ModelMenuItem.ProviderStatusIcon.READY;
+            case UNAVAILABLE: return ModelMenuItem.ProviderStatusIcon.UNAVAILABLE;
+            case NEEDS_SETUP:
+            default: return ModelMenuItem.ProviderStatusIcon.NEEDS_SETUP;
+        }
+    }
+
     private void rebuildChildren(final ModelLaunchListener launchListener,
                                  final ModelMenuItem.PinToggleListener pinToggleListener,
-                                 final InstallerListener installerListener) {
+                                 final InstallerListener installerListener,
+                                 final StatusListener statusListener) {
         removeAll();
+        ModelMenuItem.ProviderStatusIcon icon = iconFor(providerEntry.status());
         for (final ModelEntry entry : providerEntry.models()) {
-            ModelMenuItem item = new ModelMenuItem(entry, pinToggleListener);
+            ModelMenuItem.StatusIconClickListener bridge = statusListener == null
+                    ? null
+                    : (model, status) -> statusListener.onStatusIconClicked(model, status);
+            ModelMenuItem item = new ModelMenuItem(entry, icon, pinToggleListener, bridge);
             item.addActionListener(new ActionListener() {
                 @Override
                 public void actionPerformed(ActionEvent e) {

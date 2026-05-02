@@ -1,3 +1,8 @@
 .env
 .env.*
 !.env.example
+
+# Phase E — local credential store. The canonical location is
+# ~/.imagej-ai/secrets/, but proxy.py also scans agent/providers/.secrets/
+# as a development-tree fallback. Both are gitignored.
+agent/providers/.secrets/
