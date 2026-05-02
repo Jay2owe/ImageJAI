@@ -4,6 +4,7 @@ import com.google.gson.Gson;
 import com.google.gson.JsonSyntaxException;
 import imagejai.local.intents.HelpIntent;
 import imagejai.local.intents.PixelSizeIntent;
+import imagejai.local.intents.analysis.AnalysisIntentFactory;
 import imagejai.local.intents.control.ControlIntentFactory;
 
 import java.io.IOException;
@@ -40,6 +41,9 @@ public class IntentLibrary {
         register(new HelpIntent());
         register(new PixelSizeIntent());
         for (Intent intent : ControlIntentFactory.createAll()) {
+            register(intent);
+        }
+        for (Intent intent : AnalysisIntentFactory.createAll()) {
             register(intent);
         }
         addPhrase("help", HelpIntent.ID);

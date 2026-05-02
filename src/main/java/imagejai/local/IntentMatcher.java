@@ -154,6 +154,24 @@ public class IntentMatcher {
             extractScaleSlots(slots, key);
         } else if ("image.make_substack".equals(intentId)) {
             extractSubstackSlots(slots, key);
+        } else if ("preprocess.subtract_background".equals(intentId)
+                || "preprocess.median_filter".equals(intentId)
+                || "preprocess.mean_filter".equals(intentId)
+                || "preprocess.variance".equals(intentId)
+                || "preprocess.unsharp_mask".equals(intentId)) {
+            putFirstDouble(slots, "radius", key);
+        } else if ("preprocess.gaussian_blur".equals(intentId)) {
+            putFirstDouble(slots, "sigma", key);
+        } else if ("preprocess.bandpass_filter".equals(intentId)) {
+            extractBandpassSlots(slots, key);
+        } else if ("segmentation.auto_threshold".equals(intentId)) {
+            extractThresholdSlots(slots, key);
+        } else if ("segmentation.compare_thresholds".equals(intentId)) {
+            extractThresholdMethods(slots, key);
+        } else if ("segmentation.find_maxima".equals(intentId)) {
+            putFirstDouble(slots, "prominence", key);
+        } else if ("measurement.set_measurements".equals(intentId)) {
+            extractMeasurementKeys(slots, raw);
         }
         return slots;
     }
@@ -197,6 +215,67 @@ public class IntentMatcher {
             String start = matcher.group(1);
             String end = matcher.group(2);
             slots.put(slot, end == null ? start : start + "-" + end);
+        }
+    }
+
+    private static void extractThresholdSlots(Map<String, String> slots, String key) {
+        String method = findThresholdMethod(key);
+        if (method.length() > 0) {
+            slots.put("method", method);
+        }
+        if (key.contains("dark background") || key.contains("dark bg")
+                || key.contains("fluorescence")) {
+            slots.put("dark", "true");
+        }
+    }
+
+    private static void extractThresholdMethods(Map<String, String> slots, String key) {
+        java.util.List<String> methods = new java.util.ArrayList<String>();
+        addIfPresent(methods, key, "otsu", "Otsu");
+        addIfPresent(methods, key, "li", "Li");
+        addIfPresent(methods, key, "triangle", "Triangle");
+        addIfPresent(methods, key, "huang", "Huang");
+        addIfPresent(methods, key, "maxentropy", "MaxEntropy");
+        addIfPresent(methods, key, "max entropy", "MaxEntropy");
+        addIfPresent(methods, key, "default", "Default");
+        if (!methods.isEmpty()) {
+            slots.put("methods", String.join(",", methods));
+        }
+    }
+
+    private static String findThresholdMethod(String key) {
+        if (key.contains("li")) return "Li";
+        if (key.contains("triangle")) return "Triangle";
+        if (key.contains("huang")) return "Huang";
+        if (key.contains("maxentropy") || key.contains("max entropy")) return "MaxEntropy";
+        if (key.contains("default")) return "Default";
+        if (key.contains("otsu")) return "Otsu";
+        return "";
+    }
+
+    private static void addIfPresent(java.util.List<String> methods, String key,
+                                     String token, String method) {
+        if (key.contains(token) && !methods.contains(method)) {
+            methods.add(method);
+        }
+    }
+
+    private static void extractBandpassSlots(Map<String, String> slots, String key) {
+        java.util.regex.Matcher large = Pattern.compile("(?:large|filter large)\\s+(\\d+(?:\\.\\d+)?)").matcher(key);
+        if (large.find()) {
+            slots.put("large", large.group(1));
+        }
+        java.util.regex.Matcher small = Pattern.compile("(?:small|filter small)\\s+(\\d+(?:\\.\\d+)?)").matcher(key);
+        if (small.find()) {
+            slots.put("small", small.group(1));
+        }
+    }
+
+    private static void extractMeasurementKeys(Map<String, String> slots, String raw) {
+        String text = raw == null ? "" : raw.trim();
+        java.util.regex.Matcher matcher = Pattern.compile("(?i)set measurements?\\s+(.+)").matcher(text);
+        if (matcher.find()) {
+            slots.put("keys", matcher.group(1).replace(" and ", ","));
         }
     }
 
