@@ -11,6 +11,7 @@ import imagejai.engine.DialogWatcher;
 import imagejai.engine.EventBus;
 import imagejai.engine.ExplorationEngine;
 import imagejai.engine.ImageMonitor;
+import imagejai.engine.LiteLlmProxyService;
 import imagejai.engine.PipelineBuilder;
 import imagejai.engine.StateInspector;
 import imagejai.engine.TCPCommandServer;
@@ -41,6 +42,7 @@ public class ImageJAIPlugin implements Command {
     private static TCPCommandServer tcpServer;
     private static ImageMonitor imageMonitor;
     private static DialogWatcher dialogWatcher;
+    private static LiteLlmProxyService liteLlmProxyService;
     private static boolean terminalFontsRegistered;
     private static boolean shutdownHookRegistered;
 
@@ -93,6 +95,7 @@ public class ImageJAIPlugin implements Command {
         // Set up agent launcher — find the agent workspace directory
         String agentWorkspace = findAgentWorkspace();
         if (agentWorkspace != null) {
+            startLiteLlmProxy(agentWorkspace);
             rootPanel.setAgentLauncher(new AgentLauncher(agentWorkspace, settings.tcpPort, settings));
         }
 
@@ -201,9 +204,20 @@ public class ImageJAIPlugin implements Command {
                 if (panel != null) {
                     panel.shutdownSessions();
                 }
+                LiteLlmProxyService proxyService = liteLlmProxyService;
+                if (proxyService != null) {
+                    proxyService.shutdown();
+                }
             }
         }, "ImageJAI-agent-shutdown-hook"));
         shutdownHookRegistered = true;
+    }
+
+    private static synchronized void startLiteLlmProxy(String agentWorkspace) {
+        if (liteLlmProxyService == null) {
+            liteLlmProxyService = new LiteLlmProxyService(agentWorkspace);
+        }
+        liteLlmProxyService.startAsync();
     }
 
     /**

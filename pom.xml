@@ -107,6 +107,20 @@
     </dependencies>
 
     <build>
+        <resources>
+            <resource>
+                <directory>src/main/resources</directory>
+            </resource>
+            <resource>
+                <directory>agent/providers</directory>
+                <targetPath>agent/providers</targetPath>
+                <includes>
+                    <include>proxy.py</include>
+                    <include>litellm.config.yaml</include>
+                    <include>requirements.txt</include>
+                </includes>
+            </resource>
+        </resources>
         <plugins>
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>

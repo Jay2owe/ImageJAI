@@ -1,0 +1,185 @@
+# ImageJAI LiteLLM Proxy config.
+#
+# Keep one placeholder entry for every provider in
+# docs/multi_provider/01_provider_survey.md's master comparison table.
+# agent/providers/proxy.py filters entries whose environment variables are
+# unset before starting LiteLLM, so this file can ship with no user keys.
+
+model_list:
+  # 1. Ollama (local): no key. These aliases appear in /v1/models even when
+  # no cloud provider keys are configured.
+  - model_name: ollama/llama3.2:3b
+    litellm_params:
+      model: ollama/llama3.2:3b
+      api_base: os.environ/OLLAMA_API_BASE
+    model_info:
+      provider: ollama
+      imagejai_env_optional: true
+      imagejai_default_api_base: http://localhost:11434
+  - model_name: ollama/llama3.1:8b
+    litellm_params:
+      model: ollama/llama3.1:8b
+      api_base: os.environ/OLLAMA_API_BASE
+    model_info:
+      provider: ollama
+      imagejai_env_optional: true
+      imagejai_default_api_base: http://localhost:11434
+  - model_name: ollama/qwen2.5-coder:7b
+    litellm_params:
+      model: ollama/qwen2.5-coder:7b
+      api_base: os.environ/OLLAMA_API_BASE
+    model_info:
+      provider: ollama
+      imagejai_env_optional: true
+      imagejai_default_api_base: http://localhost:11434
+
+  # 2. Ollama Cloud
+  - model_name: ollama-cloud/gemma4:31b-cloud
+    litellm_params:
+      model: ollama/gemma4:31b-cloud
+      api_key: os.environ/OLLAMA_API_KEY
+      api_base: os.environ/OLLAMA_CLOUD_API_BASE
+    model_info:
+      provider: ollama-cloud
+      imagejai_required_env: OLLAMA_API_KEY
+      imagejai_default_api_base: https://ollama.com
+
+  # 3. OpenAI
+  - model_name: openai/gpt-5-mini
+    litellm_params:
+      model: openai/gpt-5-mini
+      api_key: os.environ/OPENAI_API_KEY
+    model_info:
+      provider: openai
+      imagejai_required_env: OPENAI_API_KEY
+  - model_name: openai/gpt-4o-mini
+    litellm_params:
+      model: openai/gpt-4o-mini
+      api_key: os.environ/OPENAI_API_KEY
+    model_info:
+      provider: openai
+      imagejai_required_env: OPENAI_API_KEY
+
+  # 4. Anthropic (Phase C uses native path; proxy placeholder kept for parity)
+  - model_name: anthropic/claude-sonnet-4-6
+    litellm_params:
+      model: anthropic/claude-sonnet-4-6
+      api_key: os.environ/ANTHROPIC_API_KEY
+    model_info:
+      provider: anthropic
+      imagejai_required_env: ANTHROPIC_API_KEY
+
+  # 5. Google Gemini (Phase C uses native path; proxy placeholder kept for parity)
+  - model_name: gemini/gemini-2.5-flash-lite
+    litellm_params:
+      model: gemini/gemini-2.5-flash-lite
+      api_key: os.environ/GEMINI_API_KEY
+    model_info:
+      provider: gemini
+      imagejai_required_env: GEMINI_API_KEY
+
+  # 6. Groq
+  - model_name: groq/openai/gpt-oss-120b
+    litellm_params:
+      model: groq/openai/gpt-oss-120b
+      api_key: os.environ/GROQ_API_KEY
+    model_info:
+      provider: groq
+      imagejai_required_env: GROQ_API_KEY
+
+  # 7. Cerebras
+  - model_name: cerebras/gpt-oss-120b
+    litellm_params:
+      model: cerebras/gpt-oss-120b
+      api_key: os.environ/CEREBRAS_API_KEY
+    model_info:
+      provider: cerebras
+      imagejai_required_env: CEREBRAS_API_KEY
+
+  # 8. OpenRouter
+  - model_name: openrouter/meta-llama/llama-3.1-8b-instruct:free
+    litellm_params:
+      model: openrouter/meta-llama/llama-3.1-8b-instruct:free
+      api_key: os.environ/OPENROUTER_API_KEY
+    model_info:
+      provider: openrouter
+      imagejai_required_env: OPENROUTER_API_KEY
+
+  # 9. GitHub Models
+  - model_name: github-models/openai/gpt-4o-mini
+    litellm_params:
+      model: github/openai/gpt-4o-mini
+      api_key: os.environ/GITHUB_TOKEN
+    model_info:
+      provider: github-models
+      imagejai_required_env: GITHUB_TOKEN
+
+  # 10. Mistral
+  - model_name: mistral/mistral-small-latest
+    litellm_params:
+      model: mistral/mistral-small-latest
+      api_key: os.environ/MISTRAL_API_KEY
+    model_info:
+      provider: mistral
+      imagejai_required_env: MISTRAL_API_KEY
+
+  # 11. Together AI
+  - model_name: together/meta-llama/Llama-3.3-70B-Instruct-Turbo
+    litellm_params:
+      model: together_ai/meta-llama/Llama-3.3-70B-Instruct-Turbo
+      api_key: os.environ/TOGETHER_API_KEY
+    model_info:
+      provider: together
+      imagejai_required_env: TOGETHER_API_KEY
+
+  # 12. Hugging Face Inference Providers
+  - model_name: huggingface/openai/gpt-oss-120b
+    litellm_params:
+      model: huggingface/openai/gpt-oss-120b
+      api_key: os.environ/HUGGINGFACE_API_KEY
+    model_info:
+      provider: huggingface
+      imagejai_required_env: HUGGINGFACE_API_KEY
+
+  # 13. DeepSeek
+  - model_name: deepseek/deepseek-v4-flash
+    litellm_params:
+      model: deepseek/deepseek-v4-flash
+      api_key: os.environ/DEEPSEEK_API_KEY
+    model_info:
+      provider: deepseek
+      imagejai_required_env: DEEPSEEK_API_KEY
+
+  # 14. xAI
+  - model_name: xai/grok-4.1-fast
+    litellm_params:
+      model: xai/grok-4.1-fast
+      api_key: os.environ/XAI_API_KEY
+    model_info:
+      provider: xai
+      imagejai_required_env: XAI_API_KEY
+
+  # 15. Perplexity
+  - model_name: perplexity/sonar
+    litellm_params:
+      model: perplexity/sonar
+      api_key: os.environ/PERPLEXITY_API_KEY
+    model_info:
+      provider: perplexity
+      imagejai_required_env: PERPLEXITY_API_KEY
+
+litellm_settings:
+  # LiteLLM returns x-litellm-response-cost on proxied responses. The Python
+  # launcher also installs ResponseCostMiddleware and records the header for
+  # Phase H's budget ceiling subscriber.
+  callbacks: agent.providers.proxy.response_cost_middleware
+  drop_params: true
+  request_timeout: 120
+  set_verbose: false
+
+general_settings:
+  disable_spend_logs: true
+  disable_error_logs: true
+
+router_settings:
+  routing_strategy: simple-shuffle
