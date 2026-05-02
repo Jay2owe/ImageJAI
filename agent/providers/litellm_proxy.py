@@ -50,6 +50,17 @@ class LiteLLMProxyClient(ProviderClient):
         model: str,
         **opts: Any,
     ) -> Any:
+        # Phase C native-only kwargs — silently drop on the proxy path so
+        # callers can pass features uniformly. Routing intentionally chooses
+        # the native client when these matter.
+        for native_only in (
+            "enable_prompt_caching",
+            "thinking_budget",
+            "enable_server_tools",
+            "enable_google_search",
+            "enable_code_execution",
+        ):
+            opts.pop(native_only, None)
         tool_specs = [to_openai_tool(tool) for tool in tools] if tools else None
         kwargs: dict[str, Any] = {
             "model": self.normalise_model(model),

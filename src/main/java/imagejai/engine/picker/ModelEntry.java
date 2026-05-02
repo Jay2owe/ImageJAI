@@ -1,6 +1,9 @@
 package imagejai.engine.picker;
 
 import java.time.LocalDate;
+import java.util.Collections;
+import java.util.LinkedHashMap;
+import java.util.Map;
 import java.util.Objects;
 
 /**
@@ -13,7 +16,15 @@ import java.util.Objects;
  * ignored — the file is the unified source of truth and each consumer only
  * deserialises what it needs.
  *
- * <p>Schema reference: docs/multi_provider/02_curation_strategy.md §1.
+ * <p>Phase C adds {@link #nativeFeatures()} — an opaque map mirroring the
+ * optional {@code native_features} block on Anthropic / Gemini entries. Carries
+ * keys like {@code prompt_caching}, {@code thinking_budget},
+ * {@code server_tools}, {@code google_search}, {@code code_execution}. Forwarded
+ * verbatim to the Python wrapper by {@link NativeAgentLauncher}; ignored when
+ * absent or non-native.
+ *
+ * <p>Schema reference: docs/multi_provider/02_curation_strategy.md §1 +
+ * docs/multi_provider/07_implementation_plan.md §C.
  */
 public final class ModelEntry {
 
@@ -80,6 +91,7 @@ public final class ModelEntry {
     private final LocalDate lastVerified;
     private final LocalDate deprecatedSince;
     private final String replacement;
+    private final Map<String, Object> nativeFeatures;
 
     public ModelEntry(String providerId,
                       String modelId,
@@ -94,7 +106,7 @@ public final class ModelEntry {
                       String notes) {
         this(providerId, modelId, displayName, description, tier, contextWindow,
                 visionCapable, toolCallReliability, pinned, curated, notes,
-                null, null, null);
+                null, null, null, null);
     }
 
     public ModelEntry(String providerId,
@@ -111,6 +123,26 @@ public final class ModelEntry {
                       LocalDate lastVerified,
                       LocalDate deprecatedSince,
                       String replacement) {
+        this(providerId, modelId, displayName, description, tier, contextWindow,
+                visionCapable, toolCallReliability, pinned, curated, notes,
+                lastVerified, deprecatedSince, replacement, null);
+    }
+
+    public ModelEntry(String providerId,
+                      String modelId,
+                      String displayName,
+                      String description,
+                      Tier tier,
+                      int contextWindow,
+                      boolean visionCapable,
+                      Reliability toolCallReliability,
+                      boolean pinned,
+                      boolean curated,
+                      String notes,
+                      LocalDate lastVerified,
+                      LocalDate deprecatedSince,
+                      String replacement,
+                      Map<String, Object> nativeFeatures) {
         this.providerId = Objects.requireNonNull(providerId, "providerId");
         this.modelId = Objects.requireNonNull(modelId, "modelId");
         this.displayName = displayName == null ? modelId : displayName;
@@ -127,6 +159,9 @@ public final class ModelEntry {
         this.lastVerified = lastVerified;
         this.deprecatedSince = deprecatedSince;
         this.replacement = replacement;
+        this.nativeFeatures = nativeFeatures == null || nativeFeatures.isEmpty()
+                ? Collections.<String, Object>emptyMap()
+                : Collections.unmodifiableMap(new LinkedHashMap<String, Object>(nativeFeatures));
     }
 
     public String providerId() { return providerId; }
@@ -143,33 +178,34 @@ public final class ModelEntry {
     public LocalDate lastVerified() { return lastVerified; }
     public LocalDate deprecatedSince() { return deprecatedSince; }
     public String replacement() { return replacement; }
+    public Map<String, Object> nativeFeatures() { return nativeFeatures; }
 
     /** Return a copy with a different pinned flag — used when applying user overrides. */
     public ModelEntry withPinned(boolean newPinned) {
         return new ModelEntry(providerId, modelId, displayName, description, tier,
                 contextWindow, visionCapable, toolCallReliability, newPinned,
-                curated, notes, lastVerified, deprecatedSince, replacement);
+                curated, notes, lastVerified, deprecatedSince, replacement, nativeFeatures);
     }
 
     /** Return a copy with the given last-verified date — used after a successful refresh. */
     public ModelEntry withLastVerified(LocalDate when) {
         return new ModelEntry(providerId, modelId, displayName, description, tier,
                 contextWindow, visionCapable, toolCallReliability, pinned,
-                curated, notes, when, deprecatedSince, replacement);
+                curated, notes, when, deprecatedSince, replacement, nativeFeatures);
     }
 
     /** Return a copy with deprecation cleared — used when an entry comes back upstream. */
     public ModelEntry withDeprecatedSince(LocalDate when) {
         return new ModelEntry(providerId, modelId, displayName, description, tier,
                 contextWindow, visionCapable, toolCallReliability, pinned,
-                curated, notes, lastVerified, when, replacement);
+                curated, notes, lastVerified, when, replacement, nativeFeatures);
     }
 
     /** Return a copy with overridden context window — used when upstream knows better than curator. */
     public ModelEntry withContextWindow(int newContextWindow) {
         return new ModelEntry(providerId, modelId, displayName, description, tier,
                 newContextWindow, visionCapable, toolCallReliability, pinned,
-                curated, notes, lastVerified, deprecatedSince, replacement);
+                curated, notes, lastVerified, deprecatedSince, replacement, nativeFeatures);
     }
 
     @Override

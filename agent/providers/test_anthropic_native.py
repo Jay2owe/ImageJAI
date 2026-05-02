@@ -65,7 +65,10 @@ def test_anthropic_splits_system_and_preserves_full_content_blocks(monkeypatch) 
     ]
     with respx.mock(assert_all_called=True) as mock:
         mock.post("https://api.anthropic.com/v1/messages").mock(side_effect=handler)
-        response = client.chat(messages, [], "claude-sonnet-4-6")
+        # Opt out of Phase C prompt caching so the legacy string-shaped system
+        # prompt is asserted exactly. Caching is covered in
+        # test_anthropic_native_features.py.
+        response = client.chat(messages, [], "claude-sonnet-4-6", enable_prompt_caching=False)
 
     assert seen[0]["system"] == "be concise"
     assert [message["role"] for message in seen[0]["messages"]] == ["user"]

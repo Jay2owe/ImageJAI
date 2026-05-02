@@ -24,6 +24,14 @@
 #   family         : claude | gemma | llama | qwen | gpt | mistral |
 #                    deepseek | kimi | glm | grok | phi | gptoss | (other)
 #   context_size   : small | medium | large
+#
+# Phase C native_features block — opt-in capabilities the OpenAI translation
+# loses (only honoured by anthropic + gemini native clients):
+#   prompt_caching   : bool  (anthropic) — mark system + last tool block ephemeral
+#   thinking_budget  : int   (anthropic + gemini) — extended thinking budget tokens
+#   server_tools     : list  (anthropic) — ["web_search", "code_execution"]
+#   google_search    : bool  (gemini)    — attach Google Search grounding
+#   code_execution   : bool  (gemini)    — attach Google sandbox code execution
 
 models:
   # ============================================================================
@@ -47,6 +55,8 @@ models:
     context_size: large
     deprecated_since: null
     replacement: null
+    native_features:
+      prompt_caching: true
     notes: >
       Opus 4.7 tokenizer consumes ~35% more tokens than 4.5 — factor into
       stage-6 cost.
@@ -69,6 +79,8 @@ models:
     context_size: large
     deprecated_since: null
     replacement: null
+    native_features:
+      prompt_caching: true
 
   - provider: anthropic
     model_id: claude-haiku-4-5

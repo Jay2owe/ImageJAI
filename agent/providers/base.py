@@ -37,7 +37,28 @@ class ProviderClient(ABC):
         model: str,
         **opts: Any,
     ) -> Any:
-        """Issue one non-streaming chat completion."""
+        """Issue one non-streaming chat completion.
+
+        Standard opts (recognised by every client where they make sense):
+        ``temperature``, ``max_tokens``/``max_output_tokens``, ``top_p``,
+        ``top_k``, ``tool_choice``.
+
+        Phase C opt-in native features — each client ignores the kwargs it
+        does not support, so callers can pass them uniformly:
+
+        - Anthropic (``anthropic_native.py``):
+          ``enable_prompt_caching: bool = True``,
+          ``thinking_budget: int = 0``,
+          ``enable_server_tools: list[str] | None = None``  (``"web_search"``,
+          ``"code_execution"``).
+        - Gemini (``gemini_native.py``):
+          ``enable_google_search: bool = False``,
+          ``enable_code_execution: bool = False``,
+          ``thinking_budget: int = 0``.
+
+        The proxy path (``litellm_proxy.py``) drops these — they are exactly
+        the features the bypass exists to expose.
+        """
 
     @abstractmethod
     def extract_text(self, response: Any) -> str:

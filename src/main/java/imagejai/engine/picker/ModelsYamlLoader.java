@@ -13,6 +13,7 @@ import java.time.format.DateTimeParseException;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -107,7 +108,8 @@ public final class ModelsYamlLoader {
                     stringValue(row.get("notes")),
                     dateValue(row.get("last_verified")),
                     dateValue(row.get("deprecated_since")),
-                    stringValue(row.get("replacement")));
+                    stringValue(row.get("replacement")),
+                    nativeFeaturesValue(row.get("native_features")));
             out.add(entry);
         }
         return out;
@@ -145,6 +147,22 @@ public final class ModelsYamlLoader {
             if ("false".equals(s) || "no".equals(s)) return false;
         }
         return defaultValue;
+    }
+
+    @SuppressWarnings("unchecked")
+    static Map<String, Object> nativeFeaturesValue(Object raw) {
+        if (!(raw instanceof Map)) {
+            return Collections.emptyMap();
+        }
+        Map<Object, Object> source = (Map<Object, Object>) raw;
+        Map<String, Object> out = new LinkedHashMap<String, Object>();
+        for (Map.Entry<Object, Object> entry : source.entrySet()) {
+            if (entry.getKey() == null || entry.getValue() == null) {
+                continue;
+            }
+            out.put(entry.getKey().toString(), entry.getValue());
+        }
+        return out;
     }
 
     static LocalDate dateValue(Object o) {
