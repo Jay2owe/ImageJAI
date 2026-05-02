@@ -15,6 +15,7 @@ import java.util.Locale;
 import java.util.Optional;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 
 public class IntentMatcherBenchmarkTest {
@@ -55,6 +56,36 @@ public class IntentMatcherBenchmarkTest {
                 total,
                 percent));
         assertTrue("benchmark must contain at least one row", total > 0);
+        assertTrue("top-1 accuracy must improve over the stage 03 50.0% baseline",
+                percent > 50.0);
+    }
+
+    @Test
+    public void tier2FallbackMatchesTyposAndReorderedWords() {
+        IntentLibrary library = IntentLibrary.load();
+        IntentMatcher matcher = new IntentMatcher(library);
+
+        Optional<IntentMatcher.MatchedIntent> typo = matcher.match("pixle siz");
+        Optional<IntentMatcher.MatchedIntent> reordered = matcher.match("size pixel");
+
+        assertTrue(typo.isPresent());
+        assertEquals("image.pixel_size", typo.get().intentId());
+        assertTrue(reordered.isPresent());
+        assertEquals("image.pixel_size", reordered.get().intentId());
+    }
+
+    @Test
+    public void topKRanksExistingPhrasebookCandidates() {
+        IntentLibrary library = IntentLibrary.load();
+        IntentMatcher matcher = new IntentMatcher(library);
+
+        java.util.List<RankedPhrase> ranked = matcher.topK("pixle siz", 3);
+
+        assertFalse(ranked.isEmpty());
+        assertEquals("pixel size", ranked.get(0).phrase());
+        assertEquals("image.pixel_size", ranked.get(0).intentId());
+        assertTrue(ranked.get(0).score() >= 0.90);
+        assertTrue(ranked.size() <= 3);
     }
 
     @Test
