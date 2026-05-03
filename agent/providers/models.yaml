@@ -32,6 +32,15 @@
 #   server_tools     : list  (anthropic) — ["web_search", "code_execution"]
 #   google_search    : bool  (gemini)    — attach Google Search grounding
 #   code_execution   : bool  (gemini)    — attach Google sandbox code execution
+#
+# Phase C / H field — Anthropic Opus 4.7 tokenizer cost shift (verification
+# report E.8 / risk #24). Opus 4.7 ships a new tokenizer that consumes ~35%
+# more tokens than 4.5 for the same English text. The multiplier is captured
+# as a structured field so Phase H's budget-ceiling fallback (local
+# token-count × yaml price), the typical-session estimate, and hover-card
+# pricing all apply it without re-deriving the constant from prose.
+#   tokenizer_multiplier : float — multiply local tiktoken count by this before
+#                                  pricing math. Defaults to 1.0 when absent.
 
 models:
   # ============================================================================
@@ -57,9 +66,15 @@ models:
     replacement: null
     native_features:
       prompt_caching: true
+    tokenizer_multiplier: 1.35
     notes: >
-      Opus 4.7 tokenizer consumes ~35% more tokens than 4.5 — factor into
-      stage-6 cost.
+      Opus 4.7 tokenizer consumes ~35% more tokens than 4.5 for the same
+      English text (verification report E.8). Phase H must apply
+      tokenizer_multiplier to the local-token-count × yaml-price fallback,
+      to typical-session estimates (06 §2.4 / §3.2), and to hover-card
+      pricing ranges. Cache-hit tests in test_anthropic_native_features.py
+      already exercise Opus 4.7 directly so the multiplier is exercised on
+      the request path.
 
   - provider: anthropic
     model_id: claude-sonnet-4-6
