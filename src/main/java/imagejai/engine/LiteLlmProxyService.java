@@ -23,6 +23,8 @@ public class LiteLlmProxyService {
     private static final String LOG_PREFIX = "[ImageJAI-LiteLLM]";
     private static final String COST_PREFIX = "[ImageJAI-LiteLLM-Cost] ";
     private static final int DEFAULT_PORT = 4000;
+    private static final int PORT_SCAN_LO = 4000;
+    private static final int PORT_SCAN_HI = 4010;
 
     private final Path agentWorkspace;
     private final List<CostHeaderListener> costHeaderListeners =
@@ -217,7 +219,12 @@ public class LiteLlmProxyService {
         long deadline = System.nanoTime() + (long) (timeoutSeconds * 1_000_000_000L);
         while (System.nanoTime() < deadline) {
             updatePortFromFile();
-            if (readinessOk()) {
+            if (readinessOk(port)) {
+                return true;
+            }
+            int scanned = scanForLiveProxy();
+            if (scanned > 0) {
+                port = scanned;
                 return true;
             }
             try {
@@ -228,6 +235,26 @@ public class LiteLlmProxyService {
             }
         }
         return false;
+    }
+
+    /**
+     * Falls back to probing 4000-4010 when {@code proxy.port} is stale.
+     *
+     * Recovers the live proxy port if the file lists a port the sidecar no
+     * longer occupies (Python-side crash mid-rewrite, leftover file from a
+     * prior session, etc). Returns 0 when no live readiness endpoint is found
+     * in the scan range.
+     */
+    private int scanForLiveProxy() {
+        for (int candidate = PORT_SCAN_LO; candidate <= PORT_SCAN_HI; candidate++) {
+            if (candidate == port) {
+                continue;
+            }
+            if (readinessOk(candidate)) {
+                return candidate;
+            }
+        }
+        return 0;
     }
 
     private void updatePortFromFile() {
@@ -247,10 +274,10 @@ public class LiteLlmProxyService {
         }
     }
 
-    private boolean readinessOk() {
+    private boolean readinessOk(int candidatePort) {
         HttpURLConnection connection = null;
         try {
-            URL url = new URL("http://localhost:" + port + "/health/readiness");
+            URL url = new URL("http://localhost:" + candidatePort + "/health/readiness");
             connection = (HttpURLConnection) url.openConnection();
             connection.setConnectTimeout(600);
             connection.setReadTimeout(600);
