@@ -57,7 +57,26 @@ if _KNOWN != set(PROVIDER_KEYS):
 
 
 def get_client(provider: str, model: str | None = None, **opts: Any) -> ProviderClient:
-    """Return a client for one canonical hyphenated provider key."""
+    """Return a client for one canonical hyphenated provider key.
+
+    Provider-specific opts:
+
+    - ``api_key`` (all): override the credential picked from env.
+    - ``timeout`` / ``max_retries`` (all): wire timeouts.
+    - ``server_tools`` (gemini only): list opt-in for Google's server-side
+      tools. Accepts ``["google_search"]`` and/or ``["code_execution"]``.
+      Both default off (parity with the OpenAI translation surface).
+
+      **Cost note (Phase H risk E.8 — server-tool cost surprise):**
+      ``code_execution`` runs in Google's billed sandbox. Each enabled
+      call therefore incurs a sandbox charge in addition to token cost,
+      and the charge is *not* surfaced in LiteLLM's
+      ``x-litellm-response-cost`` header (we bypass the proxy on the
+      native path). Phase H's budget ceiling must add a fixed surcharge
+      per ``code_execution``-enabled call when accounting for spend.
+      ``google_search`` is metered against a free daily quota and incurs
+      no per-call dollar charge under current pricing.
+    """
 
     provider_key = provider.strip().lower()
     if provider_key not in _KNOWN:
@@ -73,6 +92,7 @@ def get_client(provider: str, model: str | None = None, **opts: Any) -> Provider
         return GeminiNativeClient(
             api_key=opts.get("api_key"),
             max_retries=opts.get("max_retries", 2),
+            server_tools=opts.get("server_tools"),
         )
 
     return LiteLLMProxyClient(

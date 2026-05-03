@@ -5,17 +5,24 @@ Phase B is non-streaming by design.
 
 Phase C adds opt-in native features beyond the OpenAI translation surface:
 
-- ``enable_google_search`` (default ``False``): attach a
-  ``Tool(google_search=GoogleSearch())`` so the model can ground answers in
-  Google Search. ``extract_grounding_metadata`` surfaces the citations.
-- ``enable_code_execution`` (default ``False``): attach a
-  ``Tool(code_execution=ToolCodeExecution())`` so the model can run Python
-  inside Google's sandbox. ``executable_code`` and ``code_execution_result``
-  parts are exposed by ``extract_code_execution``.
+- ``server_tools`` (default ``[]``): canonical opt-in surface routed through
+  ``router.get_client("gemini", model, server_tools=[...])``. Names accepted:
+  ``"google_search"`` (Google Search grounding) and ``"code_execution"``
+  (Google sandbox Python execution — bills extra, see router docstring).
+  Stored on the client and re-applied on every ``chat()`` call so a single
+  router lookup configures the whole loop.
+- ``enable_google_search`` / ``enable_code_execution`` (per-call kwargs):
+  thin aliases that flip the corresponding ``server_tools`` entry for one
+  ``chat()`` call without rebuilding the client.
 - ``thinking_budget`` (default ``0``): when > 0 forwards
   ``thinking_config=ThinkingConfig(include_thoughts=True, thinking_budget=N)``
   and ``extract_thinking`` returns the thought parts separately so they are
   not surfaced as user-visible assistant text.
+
+Vision input round-trips: any ``user`` message whose ``content`` is a list of
+parts (e.g. ``[{"text": ...}, {"inline_data": {"mime_type": "image/png",
+"data": "..."}}]``) is forwarded to ``generate_content`` unchanged so a PNG
+captured by ``python ij.py capture`` can be inlined alongside the prompt.
 """
 from __future__ import annotations
 
@@ -66,6 +73,30 @@ def _emit_cost(value: float) -> None:
             pass
 
 
+_KNOWN_SERVER_TOOLS = frozenset({"google_search", "code_execution"})
+
+
+def _normalise_server_tools(server_tools: Any) -> set[str]:
+    if server_tools is None:
+        return set()
+    if isinstance(server_tools, str):
+        candidates = [server_tools]
+    else:
+        candidates = list(server_tools)
+    out: set[str] = set()
+    for raw in candidates:
+        name = str(raw).strip().lower()
+        if not name:
+            continue
+        if name not in _KNOWN_SERVER_TOOLS:
+            raise ValueError(
+                f"unknown Gemini server tool {raw!r}; "
+                f"supported: {sorted(_KNOWN_SERVER_TOOLS)}"
+            )
+        out.add(name)
+    return out
+
+
 def _estimate_cost_usd(model: str, response: Any) -> float:
     pricing = GEMINI_PRICING_USD_PER_MTOK.get(model)
     if not pricing:
@@ -88,10 +119,12 @@ class GeminiNativeClient(ProviderClient):
         api_key: str | None = None,
         max_retries: int = 2,
         retry_backoff: float = 0.25,
+        server_tools: list[str] | None = None,
     ) -> None:
         self._client = genai.Client(api_key=api_key) if api_key else genai.Client()
         self.max_retries = max_retries
         self.retry_backoff = retry_backoff
+        self._default_server_tools = _normalise_server_tools(server_tools)
 
     def chat(
         self,
@@ -100,8 +133,18 @@ class GeminiNativeClient(ProviderClient):
         model: str,
         **opts: Any,
     ) -> Any:
-        enable_google_search = bool(opts.pop("enable_google_search", False))
-        enable_code_execution = bool(opts.pop("enable_code_execution", False))
+        per_call_server_tools = opts.pop("server_tools", None)
+        active_server_tools = (
+            _normalise_server_tools(per_call_server_tools)
+            if per_call_server_tools is not None
+            else set(self._default_server_tools)
+        )
+        enable_google_search = bool(
+            opts.pop("enable_google_search", "google_search" in active_server_tools)
+        )
+        enable_code_execution = bool(
+            opts.pop("enable_code_execution", "code_execution" in active_server_tools)
+        )
         thinking_budget = int(opts.pop("thinking_budget", 0) or 0)
 
         config_kwargs: dict[str, Any] = {}
@@ -357,10 +400,15 @@ class GeminiNativeClient(ProviderClient):
                 continue
 
             mapped_role = "model" if role == "assistant" else "user"
-            contents.append(
-                {
-                    "role": mapped_role,
-                    "parts": [{"text": str(message.get("content", ""))}],
-                }
-            )
+            content = message.get("content", "")
+            if isinstance(content, list):
+                parts = [dict(part) if isinstance(part, dict) else part for part in content]
+                contents.append({"role": mapped_role, "parts": parts})
+            else:
+                contents.append(
+                    {
+                        "role": mapped_role,
+                        "parts": [{"text": str(content)}],
+                    }
+                )
         return contents
