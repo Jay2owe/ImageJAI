@@ -271,6 +271,158 @@ def test_integration_caching_plus_thinking_through_tool_loop(monkeypatch) -> Non
     assert any(block["type"] == "tool_use" for block in assistant_turn["content"])
 
 
+def test_prompt_cache_hit_reports_cache_read_tokens_on_second_call(monkeypatch) -> None:
+    """Phase C acceptance: assert ``cache_read_input_tokens > 0`` on the 2nd call.
+
+    First call mints the cache prefix (creation tokens); second call reuses it
+    (read tokens). The wrapper must surface those usage counters to the caller
+    so Phase H's budget tracker can credit cached prefix at the discounted
+    rate.
+    """
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-not-real")
+    client = router.get_client("anthropic")
+    seen: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(json.loads(request.content))
+        if len(seen) == 1:
+            usage = {
+                "input_tokens": 12,
+                "output_tokens": 4,
+                "cache_creation_input_tokens": 256,
+                "cache_read_input_tokens": 0,
+            }
+        else:
+            usage = {
+                "input_tokens": 12,
+                "output_tokens": 4,
+                "cache_creation_input_tokens": 0,
+                "cache_read_input_tokens": 256,
+            }
+        return httpx.Response(
+            200,
+            json={
+                "id": f"msg_{len(seen)}",
+                "type": "message",
+                "role": "assistant",
+                "model": "claude-test",
+                "content": [{"type": "text", "text": "ok"}],
+                "stop_reason": "end_turn",
+                "stop_sequence": None,
+                "usage": usage,
+            },
+        )
+
+    messages_first = [
+        {"role": "system", "content": "you are an image analysis agent"},
+        {"role": "user", "content": "first call"},
+    ]
+    messages_second = [
+        {"role": "system", "content": "you are an image analysis agent"},
+        {"role": "user", "content": "second call within five-minute window"},
+    ]
+    with respx.mock(assert_all_called=True) as mock:
+        mock.post("https://api.anthropic.com/v1/messages").mock(side_effect=handler)
+        first = client.chat(messages_first, [multiply], "claude-opus-4-7")
+        second = client.chat(messages_second, [multiply], "claude-opus-4-7")
+
+    # Second-call request body still carries the cache_control marker so the
+    # API knows to look up the cached prefix.
+    assert seen[1]["system"][-1]["cache_control"] == {"type": "ephemeral"}
+    assert seen[1]["tools"][-1]["cache_control"] == {"type": "ephemeral"}
+
+    # Usage on the first call records cache creation, second call records
+    # cache read > 0 — the spec's hard requirement.
+    assert getattr(first.usage, "cache_creation_input_tokens", 0) > 0
+    assert getattr(first.usage, "cache_read_input_tokens", 0) == 0
+    assert getattr(second.usage, "cache_read_input_tokens", 0) > 0
+
+
+def test_extract_tool_calls_returns_full_parallel_list(monkeypatch) -> None:
+    """Phase C acceptance: parallel tool calls in a single response.
+
+    Claude Opus 4.7 can emit several ``tool_use`` blocks in one assistant
+    turn. ``extract_tool_calls`` must surface all of them so the loop can
+    dispatch each (sequential dispatch is fine; the wrapper guarantees
+    visibility).
+    """
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-not-real")
+    client = router.get_client("anthropic")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "id": "msg_parallel",
+                "type": "message",
+                "role": "assistant",
+                "model": "claude-test",
+                "content": [
+                    {"type": "text", "text": "computing both products"},
+                    {"type": "tool_use", "id": "toolu_a", "name": "multiply", "input": {"a": 2, "b": 3}},
+                    {"type": "tool_use", "id": "toolu_b", "name": "multiply", "input": {"a": 5, "b": 7}},
+                    {"type": "tool_use", "id": "toolu_c", "name": "multiply", "input": {"a": 11, "b": 13}},
+                ],
+                "stop_reason": "tool_use",
+                "stop_sequence": None,
+                "usage": {"input_tokens": 1, "output_tokens": 1},
+            },
+        )
+
+    with respx.mock(assert_all_called=True) as mock:
+        mock.post("https://api.anthropic.com/v1/messages").mock(side_effect=handler)
+        response = client.chat(
+            [{"role": "user", "content": "compute three products in parallel"}],
+            [multiply],
+            "claude-opus-4-7",
+        )
+
+    calls = client.extract_tool_calls(response)
+    assert [call.id for call in calls] == ["toolu_a", "toolu_b", "toolu_c"]
+    assert [call.args for call in calls] == [
+        {"a": 2, "b": 3},
+        {"a": 5, "b": 7},
+        {"a": 11, "b": 13},
+    ]
+
+
+def test_vision_image_block_passes_through_unmodified(monkeypatch) -> None:
+    """Phase C acceptance: ``{"type": "image", "source": {...}}`` round-trips.
+
+    The Anthropic Messages API takes image content blocks as part of a
+    user message; the wrapper must not flatten or drop them on the way to
+    ``messages.create``.
+    """
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-not-real")
+    client = router.get_client("anthropic")
+    seen: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(json.loads(request.content))
+        return httpx.Response(200, json=_anthropic_text_json("looks like blobs"))
+
+    image_block = {
+        "type": "image",
+        "source": {
+            "type": "base64",
+            "media_type": "image/png",
+            "data": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=",
+        },
+    }
+    user_content = [
+        {"type": "text", "text": "what's in this screenshot?"},
+        image_block,
+    ]
+    with respx.mock(assert_all_called=True) as mock:
+        mock.post("https://api.anthropic.com/v1/messages").mock(side_effect=handler)
+        client.chat([{"role": "user", "content": user_content}], [], "claude-opus-4-7")
+
+    forwarded = seen[0]["messages"][0]["content"]
+    assert forwarded == user_content
+    assert forwarded[1]["type"] == "image"
+    assert forwarded[1]["source"]["media_type"] == "image/png"
+
+
 def _anthropic_text_json(text: str) -> dict:
     return {
         "id": "msg_text",

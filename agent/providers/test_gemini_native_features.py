@@ -11,6 +11,7 @@ import types
 import pytest
 from google.genai import types as genai_types
 
+from agent.providers import router
 from agent.providers.gemini_native import GeminiNativeClient
 from agent.providers.test_base import multiply
 
@@ -169,6 +170,108 @@ def test_features_default_off_preserves_phase_b_behaviour(monkeypatch) -> None:
     assert only_tool.google_search is None
     assert only_tool.code_execution is None
     assert config.thinking_config is None
+
+
+def test_router_server_tools_off_by_default(monkeypatch) -> None:
+    """Phase C acceptance: server tools must be off when router opt-in absent."""
+    monkeypatch.setenv("GOOGLE_API_KEY", "AIza-test-not-real")
+    client = router.get_client("gemini", "gemini-2.5-pro")
+    assert isinstance(client, GeminiNativeClient)
+    assert client._default_server_tools == set()
+
+    captured: dict = {}
+
+    def fake_generate_content(**kwargs):
+        captured.update(kwargs)
+        return _gemini_sdk_text_response("ok")
+
+    monkeypatch.setattr(client._client.models, "generate_content", fake_generate_content)
+    client.chat([{"role": "user", "content": "hi"}], [], "gemini-2.5-pro")
+
+    config = captured["config"]
+    # No server-side tools attached when nothing was opted in via router.
+    if config and getattr(config, "tools", None):
+        for tool in config.tools:
+            assert getattr(tool, "google_search", None) is None
+            assert getattr(tool, "code_execution", None) is None
+
+
+def test_router_server_tools_code_execution_threads_through(monkeypatch) -> None:
+    """Phase C acceptance: ``router.get_client('gemini', model, server_tools=['code_execution'])``
+    enables sandbox code execution on every chat() call without per-call kwargs.
+    """
+    monkeypatch.setenv("GOOGLE_API_KEY", "AIza-test-not-real")
+    client = router.get_client(
+        "gemini", "gemini-2.5-pro", server_tools=["code_execution"]
+    )
+    assert client._default_server_tools == {"code_execution"}
+
+    captured: dict = {}
+
+    def fake_generate_content(**kwargs):
+        captured.update(kwargs)
+        return _gemini_sdk_text_response("ok")
+
+    monkeypatch.setattr(client._client.models, "generate_content", fake_generate_content)
+    client.chat([{"role": "user", "content": "compute 21*2"}], [], "gemini-2.5-pro")
+
+    config = captured["config"]
+    assert config.tools, "expected at least one Tool when code_execution opted in via router"
+    assert any(getattr(t, "code_execution", None) is not None for t in config.tools)
+
+
+def test_router_server_tools_google_search_threads_through(monkeypatch) -> None:
+    """Phase C acceptance: same pattern enables Google Search grounding."""
+    monkeypatch.setenv("GOOGLE_API_KEY", "AIza-test-not-real")
+    client = router.get_client(
+        "gemini", "gemini-2.5-pro", server_tools=["google_search"]
+    )
+
+    captured: dict = {}
+
+    def fake_generate_content(**kwargs):
+        captured.update(kwargs)
+        return _gemini_sdk_text_response("ok")
+
+    monkeypatch.setattr(client._client.models, "generate_content", fake_generate_content)
+    client.chat([{"role": "user", "content": "what is fiji?"}], [], "gemini-2.5-pro")
+
+    config = captured["config"]
+    assert any(getattr(t, "google_search", None) is not None for t in config.tools)
+
+
+def test_router_server_tools_unknown_name_raises(monkeypatch) -> None:
+    monkeypatch.setenv("GOOGLE_API_KEY", "AIza-test-not-real")
+    with pytest.raises(ValueError, match="unknown Gemini server tool"):
+        router.get_client("gemini", "gemini-2.5-pro", server_tools=["bogus"])
+
+
+def test_vision_png_inline_data_round_trips(monkeypatch) -> None:
+    """Phase C acceptance: PNG screenshots from ``python ij.py capture`` survive.
+
+    A list-shaped user content payload carrying a Gemini ``inline_data`` part
+    must reach ``generate_content`` unchanged so ImageJAI's screenshot
+    workflow ("capture, look, decide") works on the native Gemini path.
+    """
+    client, captured = _build_client(monkeypatch)
+    image_part = {
+        "inline_data": {
+            "mime_type": "image/png",
+            "data": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=",
+        }
+    }
+    text_part = {"text": "what's in this microscopy capture?"}
+    client.chat(
+        [{"role": "user", "content": [text_part, image_part]}],
+        [],
+        "gemini-2.5-pro",
+    )
+
+    forwarded_contents = captured["contents"]
+    assert len(forwarded_contents) == 1
+    parts = forwarded_contents[0]["parts"]
+    assert parts == [text_part, image_part]
+    assert parts[1]["inline_data"]["mime_type"] == "image/png"
 
 
 def _gemini_sdk_text_response(text: str):
