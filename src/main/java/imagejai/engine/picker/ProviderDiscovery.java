@@ -247,7 +247,7 @@ public final class ProviderDiscovery {
         return out;
     }
 
-    static HttpFetcher defaultFetcher() {
+    public static HttpFetcher defaultFetcher() {
         return new HttpFetcher() {
             @Override
             public HttpResult fetch(Endpoint endpoint, Duration timeout) {

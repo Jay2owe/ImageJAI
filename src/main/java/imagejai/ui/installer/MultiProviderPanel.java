@@ -5,10 +5,12 @@ import imagejai.engine.picker.ModelEntry;
 import imagejai.engine.picker.ProviderEntry;
 import imagejai.engine.picker.ProviderRegistry;
 import imagejai.ui.installer.wizard.BrowserAuthWizard;
+import imagejai.ui.installer.wizard.CredentialVerifier;
 import imagejai.ui.installer.wizard.InstallerWizard;
 import imagejai.ui.installer.wizard.LocalModelDownloadWizard;
 import imagejai.ui.installer.wizard.LocalRuntimeWizard;
 import imagejai.ui.installer.wizard.PaidWithCardWizard;
+import imagejai.ui.installer.wizard.ProviderDiscoveryCredentialVerifier;
 import imagejai.ui.installer.wizard.PureApiKeyWizard;
 
 import javax.swing.BoxLayout;
@@ -267,6 +269,13 @@ public class MultiProviderPanel extends JPanel {
 
     private static WizardFactory defaultFactory(final ProviderRegistry registry,
                                                 final ProviderCredentials credentials) {
+        // Phase G cross-phase carry-over from Phase E: wire the production
+        // CredentialVerifier so "Save & test" actually fires a /models probe
+        // through ProviderDiscovery. Without this the wizards default to noop
+        // and the user's key is saved but never validated.
+        final CredentialVerifier verifier = credentials == null
+                ? CredentialVerifier.noop()
+                : new ProviderDiscoveryCredentialVerifier(credentials);
         return providerKey -> {
             ProviderMeta meta = META.get(providerKey);
             if (meta == null) {
@@ -275,10 +284,10 @@ public class MultiProviderPanel extends JPanel {
             switch (meta.shape) {
                 case "paid":
                     return new PaidWithCardWizard(providerKey, meta.displayName,
-                            meta.signupUrl, credentials);
+                            meta.signupUrl, credentials, verifier);
                 case "browser":
                     return new BrowserAuthWizard(providerKey, meta.displayName,
-                            meta.signupUrl, cliHintFor(providerKey), credentials);
+                            meta.signupUrl, cliHintFor(providerKey), credentials, verifier);
                 case "runtime":
                     return new LocalRuntimeWizard(providerKey, credentials);
                 case "runtime-models":
@@ -286,7 +295,7 @@ public class MultiProviderPanel extends JPanel {
                 case "key":
                 default:
                     return new PureApiKeyWizard(providerKey, meta.displayName,
-                            meta.signupUrl, credentials);
+                            meta.signupUrl, credentials, verifier);
             }
         };
     }
