@@ -6,7 +6,6 @@ import java.util.Collections;
 
 import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 
 /**
@@ -33,30 +32,9 @@ public class UndoFrameTest {
         assertEquals(0, UndoFrame.deflate(new byte[0]).length);
     }
 
-    @Test
-    public void macroHasDiskWritesDetectsCommonForms() {
-        assertTrue(UndoFrame.macroHasDiskWrites("saveAs(\"Tiff\", \"/tmp/x.tif\");"));
-        assertTrue(UndoFrame.macroHasDiskWrites("IJ.save(imp, \"/tmp/x.tif\");"));
-        assertTrue(UndoFrame.macroHasDiskWrites("File.copy(a, b);"));
-        assertTrue(UndoFrame.macroHasDiskWrites("saveTable(\"results.csv\");"));
-        assertTrue(UndoFrame.macroHasDiskWrites("run(\"Save\")"));
-    }
-
-    @Test
-    public void macroHasDiskWritesReturnsFalseForReadOnlyMacros() {
-        assertFalse(UndoFrame.macroHasDiskWrites(null));
-        assertFalse(UndoFrame.macroHasDiskWrites(""));
-        assertFalse(UndoFrame.macroHasDiskWrites(
-                "run(\"Gaussian Blur...\", \"sigma=2\");"));
-        assertFalse(UndoFrame.macroHasDiskWrites(
-                "setAutoThreshold(\"Otsu\");\nrun(\"Convert to Mask\");"));
-    }
-
-    @Test
-    public void macroHasDiskWritesDetectsFileWrite() {
-        assertTrue(UndoFrame.macroHasDiskWrites(
-                "f = File.open(\"out.txt\");\nFile.write(\"hi\", f);"));
-    }
+    // The disk-write heuristic moved to {@link DestructiveScanner#hasDiskWrites}
+    // in Stage 05 (docs/safe_mode_v2/05_destructive-scanner-expansion.md);
+    // its tests live in {@code DestructiveScannerTest} now.
 
     @Test
     public void boundaryFactoryProducesScriptBoundaryFrame() {

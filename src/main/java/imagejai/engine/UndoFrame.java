@@ -349,23 +349,6 @@ public final class UndoFrame {
         }
     }
 
-    /** Heuristic: does the macro source contain a disk-write call? Used to
-     *  attach a {@code diskSideEffectWarning} to rewind responses so the agent
-     *  knows the file write was not reversed. */
-    public static boolean macroHasDiskWrites(String macro) {
-        if (macro == null) return false;
-        String m = macro.toLowerCase();
-        return m.contains("saveas(")
-            || m.contains("ij.save")
-            || m.contains("file.save")
-            || m.contains("file.copy")
-            || m.contains("file.append")
-            || m.contains("file.write")
-            || m.contains("savetable(")
-            || m.contains("run(\"save\"")
-            || m.contains("run(\"tiff");
-    }
-
     /** Encode a UTF-8 string for inclusion in a diff payload (kept here so
      *  callers don't have to reach for the charset constant). */
     static byte[] utf8(String s) {

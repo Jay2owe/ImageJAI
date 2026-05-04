@@ -42,6 +42,18 @@ final class ErrorReply {
      * {@code caps.safeModeOptions.queueStormGuard} are both on.
      */
     static final String CODE_QUEUE_STORM_BLOCKED    = "QUEUE_STORM_BLOCKED";
+    /**
+     * Stage 05 (docs/safe_mode_v2/05_destructive-scanner-expansion.md): the
+     * scientific-integrity scanner found one or more {@code REJECT}-severity
+     * findings — calibration loss, Z-project overwrite, microscopy →
+     * PNG/JPEG overwrite, opt-in bit-depth narrowing, or opt-in normalize
+     * contrast. Returned by {@code execute_macro} / {@code run_script}
+     * when {@code caps.safeMode} and
+     * {@code caps.safeModeOptions.scientificIntegrityScan} are both on.
+     * The {@code operations[]} array on the structured-error reply names
+     * each finding's rule_id, target, line, and message.
+     */
+    static final String CODE_DESTRUCTIVE_OP_BLOCKED  = "DESTRUCTIVE_OP_BLOCKED";
     static final String CODE_PLUGIN_NOT_FOUND        = "PLUGIN_NOT_FOUND";
     static final String CODE_IMAGE_NOT_OPEN          = "IMAGE_NOT_OPEN";
     static final String CODE_WRONG_IMAGE_TYPE        = "WRONG_IMAGE_TYPE";

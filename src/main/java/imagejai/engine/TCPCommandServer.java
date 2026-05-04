@@ -21,6 +21,8 @@ import ij.process.ImageProcessor;
 import ij.process.ImageStatistics;
 import ij.process.LUT;
 import imagejai.config.Constants;
+import imagejai.engine.safeMode.DestructiveScanner;
+import imagejai.engine.safeMode.RoiAutoBackup;
 import imagejai.ui.ChatPanelController;
 
 import javax.swing.SwingUtilities;
@@ -2696,7 +2698,7 @@ public class TCPCommandServer {
                         ? stateInspector.getResultsTableCSV() : null;
             } catch (Throwable ignore) {}
             RoiManager rm = RoiManager.getInstance();
-            boolean diskWrite = UndoFrame.macroHasDiskWrites(macroSrc);
+            boolean diskWrite = DestructiveScanner.hasDiskWrites(macroSrc);
             UndoFrame f = UndoFrame.capture(callId, imp, rm, csv, diskWrite);
             if (f != null) sessionUndo.pushFrame(f);
             return f;
@@ -2773,7 +2775,7 @@ public class TCPCommandServer {
                         ? stateInspector.getResultsTableCSV() : null;
             } catch (Throwable ignore) {}
             RoiManager rm = RoiManager.getInstance();
-            boolean diskWrite = UndoFrame.macroHasDiskWrites(macroSrc);
+            boolean diskWrite = DestructiveScanner.hasDiskWrites(macroSrc);
             UndoFrame f = UndoFrame.capture(callId, imp, rm, csv, diskWrite);
             return sessionUndo.wrapRescueFrame(f);
         } catch (Throwable t) {
@@ -3006,6 +3008,34 @@ public class TCPCommandServer {
             ActiveMacro inflight = inFlightByImage.get(queueStormTarget);
             if (inflight != null && inflight.state == MacroState.PAUSED_ON_DIALOG) {
                 return queueStormBlockedReply(inflight, queueStormTarget, caps);
+            }
+        }
+
+        // Stage 05 (docs/safe_mode_v2/05_destructive-scanner-expansion.md):
+        // scientific-integrity scanner. Same gating shape as the queue-storm
+        // guard above — master safe-mode AND the per-guard option. Runs
+        // before the test seam so the rejection path is exercised by unit
+        // tests with a witness map. Findings split into REJECT (block the
+        // macro and return a structured-error reply) and BACKUP_THEN_ALLOW
+        // (currently only the ROI wipe rule — write the backup ZIP and
+        // proceed). The macro never runs when any REJECT row is present.
+        if (isScientificIntegrityScanEnabled(caps)) {
+            DestructiveScanner.Context scanCtx = captureScannerContext(caps);
+            List<DestructiveScanner.DestructiveOp> findings =
+                    DestructiveScanner.scan(code, scanCtx);
+            if (!findings.isEmpty()) {
+                List<DestructiveScanner.DestructiveOp> rejects =
+                        DestructiveScanner.rejections(findings);
+                if (!rejects.isEmpty()) {
+                    return destructiveBlockedReply(rejects, caps);
+                }
+                for (DestructiveScanner.DestructiveOp op : DestructiveScanner.backups(findings)) {
+                    if (DestructiveScanner.RULE_ROI_WIPE.equals(op.ruleId)
+                            && caps.safeModeOptions != null
+                            && caps.safeModeOptions.autoBackupRoiOnReset) {
+                        runRoiAutoBackup(op, caps);
+                    }
+                }
             }
         }
 
@@ -3638,6 +3668,181 @@ public class TCPCommandServer {
     }
 
     /**
+     * Stage 05 (docs/safe_mode_v2/05_destructive-scanner-expansion.md): true
+     * when the scientific-integrity scanner should fire for the given caps
+     * — master safe-mode AND the per-guard option both on. Any of the
+     * seven Stage-05 rules can still be tightened or relaxed individually
+     * via the bit-depth / normalize opt-ins on {@link SafeModeOptions}.
+     */
+    private static boolean isScientificIntegrityScanEnabled(AgentCaps caps) {
+        return caps != null
+                && caps.safeMode
+                && caps.safeModeOptions != null
+                && caps.safeModeOptions.scientificIntegrityScan;
+    }
+
+    /**
+     * Stage 05: take a live snapshot of the active image / RoiManager /
+     * Results state into a {@link DestructiveScanner.Context} the scanner
+     * consults. Every probe is wrapped in a try/catch so a flaky Fiji
+     * call (no active image, RoiManager not initialised in headless
+     * tests, …) degrades to a permissive default instead of breaking the
+     * macro path.
+     */
+    private DestructiveScanner.Context captureScannerContext(AgentCaps caps) {
+        String activeImagePath = null;
+        String aiExportsRoot = null;
+        int currentBitDepth = 0;
+        boolean calibrationActive = false;
+        int roiManagerCount = 0;
+        int resultsRowCount = 0;
+
+        try {
+            ImagePlus imp = WindowManager.getCurrentImage();
+            if (imp != null) {
+                try { currentBitDepth = imp.getBitDepth(); } catch (Throwable ignore) {}
+                try {
+                    ij.io.FileInfo fi = imp.getOriginalFileInfo();
+                    if (fi != null && fi.directory != null && fi.fileName != null) {
+                        activeImagePath = fi.directory + fi.fileName;
+                        aiExportsRoot = fi.directory.endsWith("/") || fi.directory.endsWith("\\")
+                                ? fi.directory + "AI_Exports"
+                                : fi.directory + java.io.File.separator + "AI_Exports";
+                    }
+                } catch (Throwable ignore) {}
+                try {
+                    Calibration cal = imp.getCalibration();
+                    if (cal != null) {
+                        boolean nonUnitWidth = Math.abs(cal.pixelWidth - 1.0) > 1e-9;
+                        String unit = cal.getUnit();
+                        boolean physicalUnit = unit != null
+                                && !unit.isEmpty()
+                                && !"pixel".equalsIgnoreCase(unit)
+                                && !"pixels".equalsIgnoreCase(unit);
+                        calibrationActive = nonUnitWidth || physicalUnit;
+                    }
+                } catch (Throwable ignore) {}
+            }
+        } catch (Throwable ignore) {}
+
+        try {
+            RoiManager rm = RoiManager.getInstance();
+            if (rm != null) roiManagerCount = rm.getCount();
+        } catch (Throwable ignore) {}
+
+        try {
+            ResultsTable rt = ResultsTable.getResultsTable();
+            if (rt != null) resultsRowCount = rt.getCounter();
+        } catch (Throwable ignore) {}
+
+        boolean optBitDepth = caps != null && caps.safeModeOptions != null
+                && caps.safeModeOptions.blockBitDepthNarrowing;
+        boolean optNormalize = caps != null && caps.safeModeOptions != null
+                && caps.safeModeOptions.blockNormalizeContrast;
+
+        return new DestructiveScanner.Context(
+                activeImagePath, aiExportsRoot,
+                currentBitDepth, calibrationActive,
+                roiManagerCount, resultsRowCount,
+                optBitDepth, optNormalize,
+                new DestructiveScanner.FileExistsCheck() {
+                    @Override
+                    public boolean exists(String path) {
+                        if (path == null || path.isEmpty()) return false;
+                        try { return java.nio.file.Files.exists(java.nio.file.Paths.get(path)); }
+                        catch (Throwable t) { return false; }
+                    }
+                });
+    }
+
+    /**
+     * Stage 05: process a {@link DestructiveScanner.Severity#BACKUP_THEN_ALLOW}
+     * finding — currently always the ROI-wipe rule. Writes the live
+     * RoiManager to {@code AI_Exports/.safemode_roi_<ts>.zip} via
+     * {@link RoiAutoBackup} and journals the outcome to the friction log
+     * so the Stage 07 status indicator and any post-mortem inspection
+     * can see the backup happened. Never blocks; the caller is expected
+     * to let the macro proceed regardless.
+     */
+    private void runRoiAutoBackup(DestructiveScanner.DestructiveOp op,
+                                  AgentCaps caps) {
+        try {
+            RoiManager rm = RoiManager.getInstance();
+            ImagePlus imp = WindowManager.getCurrentImage();
+            RoiAutoBackup.Result res = RoiAutoBackup.backup(rm, imp);
+            String agentId = caps != null && caps.agentId != null ? caps.agentId : "";
+            String backupTarget = res.path != null
+                    ? res.path.toString()
+                    : "(no backup written)";
+            String summary = "rule=" + op.ruleId + " line=" + op.line
+                    + " target=" + backupTarget;
+            frictionLog.record(agentId, "execute_macro", summary, res.message);
+            try { IJ.log("[ImageJAI-SafeMode] " + res.message); } catch (Throwable ignore) {}
+        } catch (Throwable t) {
+            try { IJ.log("[ImageJAI-SafeMode] ROI auto-backup failed: " + t.getMessage()); }
+            catch (Throwable ignore) {}
+        }
+    }
+
+    /**
+     * Stage 05: build the {@code DESTRUCTIVE_OP_BLOCKED} structured-error
+     * reply. Mirrors {@link #queueStormBlockedReply} — same outer envelope,
+     * same plain-string fallback for clients without {@code structured_errors},
+     * but the inner shape carries an {@code operations[]} array with one
+     * row per finding so the agent can fix exactly what tripped the gate.
+     */
+    private JsonObject destructiveBlockedReply(
+            List<DestructiveScanner.DestructiveOp> rejects,
+            AgentCaps caps) {
+        JsonObject result = new JsonObject();
+        result.addProperty("success", false);
+
+        StringBuilder plain = new StringBuilder("Macro blocked by safe-mode scanner: ");
+        JsonArray opsArr = new JsonArray();
+        for (int i = 0; i < rejects.size(); i++) {
+            DestructiveScanner.DestructiveOp op = rejects.get(i);
+            if (i > 0) plain.append("; ");
+            plain.append(op.ruleId).append(" @ line ").append(op.line);
+            JsonObject row = new JsonObject();
+            row.addProperty("rule_id", op.ruleId);
+            row.addProperty("severity", "reject");
+            row.addProperty("target", op.target);
+            row.addProperty("line", op.line);
+            row.addProperty("message", op.message);
+            opsArr.add(row);
+        }
+        String message = plain.toString();
+        String hint = "Fix the offending lines, or — if the operation is intentional"
+                + " — disable the master safe-mode toggle for this run.";
+
+        if (caps != null && caps.structuredErrors) {
+            JsonObject err = new JsonObject();
+            err.addProperty("code", ErrorReply.CODE_DESTRUCTIVE_OP_BLOCKED);
+            err.addProperty("category", ErrorReply.CAT_BLOCKED);
+            err.addProperty("retry_safe", false);
+            err.addProperty("message", message);
+            err.addProperty("recovery_hint", hint);
+            err.add("operations", opsArr);
+            result.add("error", err);
+        } else {
+            result.addProperty("error", message);
+        }
+
+        // Journal each rejection so the Stage 07 status indicator and
+        // post-mortem inspection can see what the scanner caught.
+        try {
+            String agentId = caps != null && caps.agentId != null ? caps.agentId : "";
+            for (DestructiveScanner.DestructiveOp op : rejects) {
+                frictionLog.record(agentId, "execute_macro",
+                        "rule=" + op.ruleId + " target=" + op.target + " line=" + op.line,
+                        op.message);
+            }
+        } catch (Throwable ignore) {}
+
+        return successResponse(result);
+    }
+
+    /**
      * Stage 04: parse the last {@code selectImage("...")} or
      * {@code selectWindow("...")} call in the macro source to identify the
      * agent's target image. Returns {@code null} when no such call is
@@ -4094,6 +4299,31 @@ public class TCPCommandServer {
         }
         final String code = codeElement.getAsString();
         final long scriptTimeoutMs = resolveTimeoutMs(request, MACRO_TIMEOUT_MS);
+
+        // Stage 05 (docs/safe_mode_v2/05_destructive-scanner-expansion.md):
+        // run the same scientific-integrity scanner the macro path uses.
+        // Scripts are equally capable of writing saveAs / roiManager calls
+        // so the gate has to live here too — otherwise an agent routes
+        // around the macro guard via {@code run_script}.
+        if (isScientificIntegrityScanEnabled(caps)) {
+            DestructiveScanner.Context scanCtx = captureScannerContext(caps);
+            List<DestructiveScanner.DestructiveOp> findings =
+                    DestructiveScanner.scan(code, scanCtx);
+            if (!findings.isEmpty()) {
+                List<DestructiveScanner.DestructiveOp> rejects =
+                        DestructiveScanner.rejections(findings);
+                if (!rejects.isEmpty()) {
+                    return destructiveBlockedReply(rejects, caps);
+                }
+                for (DestructiveScanner.DestructiveOp op : DestructiveScanner.backups(findings)) {
+                    if (DestructiveScanner.RULE_ROI_WIPE.equals(op.ruleId)
+                            && caps.safeModeOptions != null
+                            && caps.safeModeOptions.autoBackupRoiOnReset) {
+                        runRoiAutoBackup(op, caps);
+                    }
+                }
+            }
+        }
 
         JsonObject result = new JsonObject();
         result.addProperty("language", language);
@@ -5219,6 +5449,29 @@ public class TCPCommandServer {
                 ActiveMacro inflight = inFlightByImage.get(target);
                 if (inflight != null && inflight.state == MacroState.PAUSED_ON_DIALOG) {
                     return queueStormBlockedReply(inflight, target, caps);
+                }
+            }
+        }
+
+        // Stage 05 (docs/safe_mode_v2/05_destructive-scanner-expansion.md):
+        // mirror the sync execute_macro guard so async macros cannot route
+        // around the scientific-integrity scanner.
+        if (isScientificIntegrityScanEnabled(caps)) {
+            DestructiveScanner.Context scanCtx = captureScannerContext(caps);
+            List<DestructiveScanner.DestructiveOp> findings =
+                    DestructiveScanner.scan(code, scanCtx);
+            if (!findings.isEmpty()) {
+                List<DestructiveScanner.DestructiveOp> rejects =
+                        DestructiveScanner.rejections(findings);
+                if (!rejects.isEmpty()) {
+                    return destructiveBlockedReply(rejects, caps);
+                }
+                for (DestructiveScanner.DestructiveOp op : DestructiveScanner.backups(findings)) {
+                    if (DestructiveScanner.RULE_ROI_WIPE.equals(op.ruleId)
+                            && caps.safeModeOptions != null
+                            && caps.safeModeOptions.autoBackupRoiOnReset) {
+                        runRoiAutoBackup(op, caps);
+                    }
                 }
             }
         }

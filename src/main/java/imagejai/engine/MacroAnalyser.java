@@ -36,9 +36,40 @@ final class MacroAnalyser {
      */
     static final class PostExec {
         final int nResultsAfter;
+        // Stage 05 (docs/safe_mode_v2/05_destructive-scanner-expansion.md):
+        // before/after snapshots of bit depth, calibration, and ROI count.
+        // Fields are nullable Integer / Double so existing callers using
+        // {@link #PostExec(int)} stay valid; rules that need them check for
+        // null. The pre-execution scanner already catches the rule's
+        // matching macro-string forms — these fields are scaffolding for
+        // future runtime-rollback rules that compare before vs after.
+        Integer bitDepthBefore;
+        Integer bitDepthAfter;
+        Double calibrationBefore;
+        Double calibrationAfter;
+        Integer roiCountBefore;
+        Integer roiCountAfter;
 
         PostExec(int nResultsAfter) {
             this.nResultsAfter = nResultsAfter;
+        }
+
+        /**
+         * Stage 05: builder-style setter so call sites that already snapshot
+         * the values (e.g. handleExecuteMacro) can attach them without
+         * touching every existing constructor. Returns {@code this} so the
+         * chain reads top-down at the call site.
+         */
+        PostExec withSafeModeSnapshot(Integer bitBefore, Integer bitAfter,
+                                      Double calBefore, Double calAfter,
+                                      Integer roiBefore, Integer roiAfter) {
+            this.bitDepthBefore = bitBefore;
+            this.bitDepthAfter = bitAfter;
+            this.calibrationBefore = calBefore;
+            this.calibrationAfter = calAfter;
+            this.roiCountBefore = roiBefore;
+            this.roiCountAfter = roiAfter;
+            return this;
         }
     }
 
