@@ -20,6 +20,7 @@ import imagejai.ui.picker.TierChangeBanner;
 
 import javax.swing.JButton;
 import javax.swing.BoxLayout;
+import javax.swing.JCheckBox;
 import javax.swing.JComboBox;
 import javax.swing.JComponent;
 import javax.swing.JFrame;
@@ -334,6 +335,30 @@ public class AiRootPanel extends JPanel implements ChatSurface {
             }
         });
         leftPanel.add(profileSwitcher);
+
+        // Safe-mode v2 stage 02: master-switch checkbox.
+        // Per plan: docs/safe_mode_v2/02_master-switch-and-caps.md.
+        // When unchecked, the next launched agent will see
+        // {@code IMAGEJAI_SAFE_MODE=0} and pass {@code safe_mode=false}
+        // in its hello handshake — legacy unguarded fast path.
+        final JCheckBox safeModeBox = new JCheckBox("Safe Mode", settings.safeModeEnabled);
+        safeModeBox.setOpaque(false);
+        safeModeBox.setForeground(TEXT_MUTED);
+        safeModeBox.setFont(new Font(Font.SANS_SERIF, Font.PLAIN, 11));
+        safeModeBox.setFocusPainted(false);
+        safeModeBox.setToolTipText(
+                "<html>Block destructive ops + auto-snapshot before every macro."
+              + "<br>Uncheck for a fast, unguarded session."
+              + "<br>Applies to the next agent you launch.</html>");
+        safeModeBox.addActionListener(new ActionListener() {
+            @Override
+            public void actionPerformed(ActionEvent e) {
+                settings.safeModeEnabled = safeModeBox.isSelected();
+                settings.save();
+            }
+        });
+        leftPanel.add(safeModeBox);
+
         header.add(leftPanel, BorderLayout.WEST);
 
         JPanel buttons = new JPanel(new FlowLayout(FlowLayout.RIGHT, 2, 0));

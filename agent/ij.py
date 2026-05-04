@@ -81,6 +81,23 @@ TIMEOUT = 60
 # is disabled here — a server-side pulse would duplicate what the hook feeds.
 # Step 05: state_delta=True keeps the grouped reply shape (diff fields nested
 # under "stateDelta") for Claude — the hook consumes the nested form.
+def _safe_mode_from_env(default=True):
+    """Read IMAGEJAI_SAFE_MODE for safe_mode_v2 stage 02. AgentLauncher
+    sets "1" when the master-switch checkbox is on, "0" when off. Any
+    other value (including unset) falls back to the documented default
+    (True) so command-line invocations get the guarded behaviour without
+    the user opting in. Per plan: docs/safe_mode_v2/02_master-switch-and-caps.md."""
+    raw = os.environ.get("IMAGEJAI_SAFE_MODE")
+    if raw is None:
+        return default
+    raw = raw.strip().lower()
+    if raw in ("0", "false", "off", "no"):
+        return False
+    if raw in ("1", "true", "on", "yes"):
+        return True
+    return default
+
+
 _HELLO_CAPS = {
     "vision": True,
     "output_format": "markdown",
@@ -89,6 +106,20 @@ _HELLO_CAPS = {
     "pulse": False,
     "state_delta": True,
     "accept_events": ["macro.*", "image.*", "dialog.*"],
+    # Safe-mode v2 stage 02: master switch defaults to True, overridden by
+    # the IMAGEJAI_SAFE_MODE env var the AgentLauncher sets from the user's
+    # checkbox. Per-guard option flags are left at server-side defaults
+    # (opt-out for auto-backup / snapshot / queue-storm / source-image /
+    # integrity scan; opt-in for bit-depth narrow + Enhance-Contrast block).
+    # Wrappers that want a stricter posture override these per-call.
+    "safe_mode": _safe_mode_from_env(True),
+    "safe_mode_options": {
+        # All seven server-side defaults are accepted as-is; the entry is
+        # an empty object so the server takes its own per-field defaults.
+        # Override examples (uncomment to enable opt-in guards):
+        # "block_bit_depth_narrowing": True,
+        # "block_normalize_contrast": True,
+    },
 }
 # Cache of the last hello response so `ij.py capabilities` can show the
 # server's enabled features without re-hitting the socket. Best-effort: a

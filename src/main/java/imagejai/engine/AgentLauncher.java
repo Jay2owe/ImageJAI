@@ -225,6 +225,10 @@ public class AgentLauncher {
 
         Map<String, String> env = new LinkedHashMap<String, String>();
         env.put("IMAGEJAI_TCP_PORT", String.valueOf(tcpPort));
+        // Safe-mode v2 stage 02: forward the user's checkbox state so the
+        // Python wrapper can include it in its hello handshake. "1" / "0"
+        // is what the wrappers parse; absence is treated as enabled.
+        env.put("IMAGEJAI_SAFE_MODE", settings.safeModeEnabled ? "1" : "0");
 
         return new AgentLaunchSpec(agent, cmd, new File(agentWorkspace), env);
     }
@@ -251,6 +255,9 @@ public class AgentLauncher {
 
         Map<String, String> env = new LinkedHashMap<String, String>(System.getenv());
         env.put("IMAGEJAI_TCP_PORT", String.valueOf(tcpPort));
+        // Safe-mode v2 stage 02: forward the master-switch state so the
+        // embedded Python wrapper sees the same flag the external path does.
+        env.put("IMAGEJAI_SAFE_MODE", settings.safeModeEnabled ? "1" : "0");
         env.put("TERM", "xterm-256color");
         env.put("COLORTERM", "truecolor");
         env.put("TERMINAL_EMULATOR", "JetBrains-JediTerm");

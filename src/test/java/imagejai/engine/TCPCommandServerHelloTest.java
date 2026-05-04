@@ -255,6 +255,157 @@ public class TCPCommandServerHelloTest {
                 enabledContains(enabled, "response_dedup"));
     }
 
+    // -----------------------------------------------------------------
+    // Safe-mode v2 stage 02 — master switch + per-guard option flags.
+    // Per plan: docs/safe_mode_v2/02_master-switch-and-caps.md.
+    // -----------------------------------------------------------------
+
+    /**
+     * Plain hello with no capabilities block negotiates {@code safe_mode=true}
+     * — Stage 02 makes safe mode the default for any handshake-aware client.
+     */
+    @Test
+    public void helloDefaultsEnableSafeMode() {
+        TCPCommandServer server = newServer();
+        JsonObject req = parse("{\"command\":\"hello\",\"agent\":\"tester\"}");
+
+        JsonObject resp = server.handleHello(req, null);
+
+        JsonArray enabled = resp.getAsJsonObject("result").getAsJsonArray("enabled");
+        assertTrue("safe_mode on by default for handshake clients",
+                enabledContains(enabled, "safe_mode"));
+        // Five opt-out per-guard options must surface; the two opt-ins
+        // stay off until the caller asks for them.
+        assertTrue(enabledContains(enabled, "safe_mode_option:auto_backup_roi_on_reset"));
+        assertTrue(enabledContains(enabled, "safe_mode_option:auto_snapshot_rescue"));
+        assertTrue(enabledContains(enabled, "safe_mode_option:queue_storm_guard"));
+        assertTrue(enabledContains(enabled, "safe_mode_option:auto_source_image_column"));
+        assertTrue(enabledContains(enabled, "safe_mode_option:scientific_integrity_scan"));
+        assertFalse("bit-depth narrowing is opt-in",
+                enabledContains(enabled, "safe_mode_option:block_bit_depth_narrowing"));
+        assertFalse("normalize-contrast block is opt-in",
+                enabledContains(enabled, "safe_mode_option:block_normalize_contrast"));
+    }
+
+    /**
+     * Explicit {@code safe_mode=false} keeps the master switch off and
+     * suppresses every per-guard option name regardless of the per-field
+     * values — the gate trips before the guards can fire.
+     */
+    @Test
+    public void helloCanOptOutOfSafeModeMaster() {
+        TCPCommandServer server = newServer();
+        JsonObject req = parse(
+                "{\"command\":\"hello\",\"agent\":\"tester\","
+              + "\"capabilities\":{\"safe_mode\":false,"
+              + "\"safe_mode_options\":{\"block_bit_depth_narrowing\":true}}}");
+
+        JsonObject resp = server.handleHello(req, null);
+
+        JsonArray enabled = resp.getAsJsonObject("result").getAsJsonArray("enabled");
+        assertFalse("safe_mode explicitly disabled",
+                enabledContains(enabled, "safe_mode"));
+        // The option fields are still parsed onto AgentCaps, but
+        // enabledSafeModeOptions filters through the master switch,
+        // so none of the per-guard names should appear in enabled[].
+        assertFalse("master-off suppresses bit-depth narrowing advertise",
+                enabledContains(enabled, "safe_mode_option:block_bit_depth_narrowing"));
+        assertFalse("master-off suppresses auto-snapshot advertise",
+                enabledContains(enabled, "safe_mode_option:auto_snapshot_rescue"));
+    }
+
+    /**
+     * Opt-in for the two opt-in flags adds them to enabled[] without
+     * disturbing the unspecified per-guard defaults.
+     */
+    @Test
+    public void helloOptsIntoBitDepthAndNormalizeBlocks() {
+        TCPCommandServer server = newServer();
+        JsonObject req = parse(
+                "{\"command\":\"hello\",\"agent\":\"tester\","
+              + "\"capabilities\":{\"safe_mode_options\":{"
+              + "\"block_bit_depth_narrowing\":true,"
+              + "\"block_normalize_contrast\":true}}}");
+
+        JsonObject resp = server.handleHello(req, null);
+
+        JsonArray enabled = resp.getAsJsonObject("result").getAsJsonArray("enabled");
+        assertTrue("safe_mode still on (we didn't touch the master)",
+                enabledContains(enabled, "safe_mode"));
+        assertTrue(enabledContains(enabled, "safe_mode_option:block_bit_depth_narrowing"));
+        assertTrue(enabledContains(enabled, "safe_mode_option:block_normalize_contrast"));
+        // Untouched opt-out fields stay on.
+        assertTrue(enabledContains(enabled, "safe_mode_option:auto_snapshot_rescue"));
+    }
+
+    /**
+     * Opt-out for one of the opt-out guards removes only that guard from
+     * enabled[]; the other defaults stay on, and the master stays on.
+     */
+    @Test
+    public void helloCanOptOutOfSingleSafeModeOption() {
+        TCPCommandServer server = newServer();
+        JsonObject req = parse(
+                "{\"command\":\"hello\",\"agent\":\"tester\","
+              + "\"capabilities\":{\"safe_mode_options\":{"
+              + "\"queue_storm_guard\":false}}}");
+
+        JsonObject resp = server.handleHello(req, null);
+
+        JsonArray enabled = resp.getAsJsonObject("result").getAsJsonArray("enabled");
+        assertTrue(enabledContains(enabled, "safe_mode"));
+        assertFalse("queue-storm guard explicitly disabled",
+                enabledContains(enabled, "safe_mode_option:queue_storm_guard"));
+        assertTrue("siblings unaffected",
+                enabledContains(enabled, "safe_mode_option:auto_snapshot_rescue"));
+        assertTrue(enabledContains(enabled, "safe_mode_option:auto_backup_roi_on_reset"));
+    }
+
+    /**
+     * No-handshake fallback: {@link TCPCommandServer#DEFAULT_CAPS} preserves
+     * the legacy unguarded default so wrappers that never say hello keep
+     * today's behaviour. The breaking-change scope is limited to handshake
+     * clients (documented in the stage's "Known risks" section).
+     */
+    @Test
+    public void noHandshakeDefaultCapsKeepSafeModeOff() {
+        assertFalse("DEFAULT_CAPS.safeMode preserves legacy fast path",
+                TCPCommandServer.DEFAULT_CAPS.safeMode);
+        assertFalse("opt-in fields stay off in DEFAULT_CAPS",
+                TCPCommandServer.DEFAULT_CAPS.safeModeOptions.blockBitDepthNarrowing);
+        // enabledSafeModeOptions on DEFAULT_CAPS must be empty since the
+        // master switch trips first — Stage 07 relies on this.
+        assertTrue("master-off DEFAULT_CAPS produces empty option list",
+                TCPCommandServer.enabledSafeModeOptions(TCPCommandServer.DEFAULT_CAPS).isEmpty());
+    }
+
+    /**
+     * The {@code enabledSafeModeOptions} helper filters strictly through the
+     * master switch — Stage 07's tooltip relies on this to render
+     * "safe-mode off, no guards active" without having to inspect each
+     * per-field flag.
+     */
+    @Test
+    public void enabledSafeModeOptionsHonoursMasterSwitch() {
+        TCPCommandServer server = newServer();
+        JsonObject req = parse(
+                "{\"command\":\"hello\",\"agent\":\"tester\","
+              + "\"capabilities\":{\"safe_mode\":false,"
+              + "\"safe_mode_options\":{\"block_bit_depth_narrowing\":true,"
+              + "\"auto_snapshot_rescue\":true}}}");
+
+        // We don't have direct access to the AgentCaps from the response,
+        // but the enabled[] array is the public contract: it must be empty
+        // of safe_mode_option entries when the master is off.
+        JsonObject resp = server.handleHello(req, null);
+        JsonArray enabled = resp.getAsJsonObject("result").getAsJsonArray("enabled");
+        for (int i = 0; i < enabled.size(); i++) {
+            String s = enabled.get(i).getAsString();
+            assertFalse("master-off must hide every safe_mode_option entry, saw " + s,
+                    s.startsWith("safe_mode_option:"));
+        }
+    }
+
     private static JsonObject parse(String s) {
         return new JsonParser().parse(s).getAsJsonObject();
     }

@@ -107,6 +107,18 @@ public class Settings {
      */
     public boolean persistScrollback = false;
 
+    /**
+     * Safe-mode v2 stage 02 master switch. When true, agent wrappers
+     * negotiate {@code safe_mode=true} in the {@code hello} handshake;
+     * when false, wrappers pass {@code safe_mode=false} so the user
+     * gets the legacy unguarded fast path. Plumbed to launched agents
+     * via the {@code IMAGEJAI_SAFE_MODE} environment variable.
+     *
+     * <p>Default true — Stage 02 makes safe mode the documented default.
+     * Per plan: docs/safe_mode_v2/02_master-switch-and-caps.md.
+     */
+    public boolean safeModeEnabled = true;
+
     // === Multi-provider (Phase D) =====================================
     // Per docs/multi_provider/05_ui_design.md §9.4. Coexist with the v1
     // selectedAgentName above and v2's localAssistantDisambiguationMargin.

@@ -218,7 +218,23 @@ public class TCPCommandServer {
         // dismissedDialogs) into a single "stateDelta" sub-object. Clients
         // that set state_delta=false in hello keep the legacy flat shape.
         boolean stateDelta = true;
+        // Safe-mode master switch. The field default stays false so the
+        // {@link #DEFAULT_CAPS} sentinel — used for any socket that never
+        // calls {@code hello} — preserves today's unguarded behaviour.
+        // Clients that DO say hello get {@code safe_mode=true} as the
+        // negotiated default (see {@link #handleHello}); this is the
+        // breaking-change path documented in
+        // {@code docs/safe_mode_v2/02_master-switch-and-caps.md}.
         boolean safeMode = false;
+        // Per plan: docs/safe_mode_v2/02_master-switch-and-caps.md.
+        // Per-guard option flags. Stages 03–06 each consult the relevant
+        // field on the caller's {@link AgentCaps} before firing; with
+        // safeMode=false the master gate trips first and these are
+        // skipped regardless. Defaults match the stage map: opt-in for
+        // bit-depth narrowing and Enhance-Contrast normalize block (Stage
+        // 05); opt-out for the auto-backup, snapshot, queue-storm,
+        // source-image column, and scientific-integrity scanner.
+        SafeModeOptions safeModeOptions = new SafeModeOptions();
         // Step 02: opt-in to typed error objects
         // (docs/tcp_upgrade/02_structured_errors.md). Off-by-default so clients
         // that never say hello keep receiving plain error strings; the server
@@ -309,6 +325,40 @@ public class TCPCommandServer {
         // branch_switch, branch_delete) reject with UNDO_DISABLED when this
         // flag is off so the failure mode is clear and self-documenting.
         boolean undo = false;
+    }
+
+    /**
+     * Per-guard option flags consumed by safe-mode v2 stages 03-06. Negotiated
+     * under {@code capabilities.safe_mode_options} in the {@code hello}
+     * handshake; see {@code docs/safe_mode_v2/02_master-switch-and-caps.md}.
+     *
+     * <p>Two flags are opt-in (defaults false) — they target situations where
+     * the right policy depends on what the user is measuring:
+     * <ul>
+     *   <li>{@code blockBitDepthNarrowing} — Stage 05 hard-block on 16/32-bit
+     *       to 8-bit conversions before measurement.</li>
+     *   <li>{@code blockNormalizeContrast} — Stage 05 hard-block on
+     *       {@code Enhance Contrast normalize=true} on data being measured.</li>
+     * </ul>
+     *
+     * <p>Five flags are opt-out (defaults true) — they catch silent damage
+     * agents do regardless of intent: ROI Manager wipes (Stage 05),
+     * auto-snapshot of the active image / ROIs / Results before each
+     * mutating macro (Stage 03), per-image macro queueing while a Fiji
+     * dialog is open (Stage 04), Source_Image column on Results (Stage
+     * 06), and the scientific-integrity scanner (Stage 05).
+     *
+     * <p>The fields read every guard; whether a guard fires also depends on
+     * the master {@link AgentCaps#safeMode} switch tripping first.
+     */
+    public static final class SafeModeOptions {
+        public boolean blockBitDepthNarrowing  = false;  // opt-in, Stage 05
+        public boolean blockNormalizeContrast  = false;  // opt-in, Stage 05
+        public boolean autoBackupRoiOnReset    = true;   // Stage 05
+        public boolean autoSnapshotRescue      = true;   // Stage 03
+        public boolean queueStormGuard         = true;   // Stage 04
+        public boolean autoSourceImageColumn   = true;   // Stage 06
+        public boolean scientificIntegrityScan = true;   // Stage 05
     }
 
     /** Fallback caps applied to any request from a socket that never said hello. */
@@ -1697,7 +1747,41 @@ public class TCPCommandServer {
         // already injects the state a pulse string would carry.
         c.pulse        = optBool(caps, "pulse", true);
         c.stateDelta   = optBool(caps, "state_delta", true);
-        c.safeMode     = optBool(caps, "safe_mode", false);
+        // Safe-mode v2 stage 02: default ON for any client that says hello.
+        // Wrappers that need the legacy fast path send {"safe_mode": false}
+        // explicitly. No-handshake clients still hit DEFAULT_CAPS where the
+        // field default is false, so the breaking-change scope is limited
+        // to agents that actually negotiate caps. Per plan:
+        // docs/safe_mode_v2/02_master-switch-and-caps.md.
+        c.safeMode     = optBool(caps, "safe_mode", true);
+        // Per-guard option flags. The sub-object lives at
+        // capabilities.safe_mode_options.{snake_case_field}; missing
+        // sub-objects keep the documented per-field defaults.
+        JsonObject smOpts = (caps.has("safe_mode_options")
+                && caps.get("safe_mode_options").isJsonObject())
+                ? caps.getAsJsonObject("safe_mode_options")
+                : null;
+        c.safeModeOptions.blockBitDepthNarrowing =
+                optBool(smOpts, "block_bit_depth_narrowing",
+                        c.safeModeOptions.blockBitDepthNarrowing);
+        c.safeModeOptions.blockNormalizeContrast =
+                optBool(smOpts, "block_normalize_contrast",
+                        c.safeModeOptions.blockNormalizeContrast);
+        c.safeModeOptions.autoBackupRoiOnReset =
+                optBool(smOpts, "auto_backup_roi_on_reset",
+                        c.safeModeOptions.autoBackupRoiOnReset);
+        c.safeModeOptions.autoSnapshotRescue =
+                optBool(smOpts, "auto_snapshot_rescue",
+                        c.safeModeOptions.autoSnapshotRescue);
+        c.safeModeOptions.queueStormGuard =
+                optBool(smOpts, "queue_storm_guard",
+                        c.safeModeOptions.queueStormGuard);
+        c.safeModeOptions.autoSourceImageColumn =
+                optBool(smOpts, "auto_source_image_column",
+                        c.safeModeOptions.autoSourceImageColumn);
+        c.safeModeOptions.scientificIntegrityScan =
+                optBool(smOpts, "scientific_integrity_scan",
+                        c.safeModeOptions.scientificIntegrityScan);
         c.structuredErrors = optBool(caps, "structured_errors", false);
         c.canonicalMacro = optBool(caps, "canonical_macro", true);
         c.fuzzyMatch = optBool(caps, "fuzzy_match", true);
@@ -1857,7 +1941,58 @@ public class TCPCommandServer {
         arr.add(new JsonPrimitive("branch_list"));
         arr.add(new JsonPrimitive("branch_switch"));
         arr.add(new JsonPrimitive("branch_delete"));
+        // Safe-mode v2 stage 02: advertise "safe_mode" when the master
+        // switch is on, plus one entry per active per-guard option so
+        // clients (and the Stage 07 status indicator) can feature-detect
+        // exactly which guards will fire on this connection. Per plan:
+        // docs/safe_mode_v2/02_master-switch-and-caps.md.
+        if (caps != null && caps.safeMode) {
+            arr.add(new JsonPrimitive("safe_mode"));
+            for (String name : enabledSafeModeOptions(caps)) {
+                arr.add(new JsonPrimitive(name));
+            }
+        }
         return arr;
+    }
+
+    /**
+     * Safe-mode v2 stage 02: names of the per-guard option flags that are
+     * currently active for this caller. The list is filtered through the
+     * master {@link AgentCaps#safeMode} switch — when the master is off
+     * the result is always empty, regardless of the per-guard fields,
+     * because no guard will fire anyway.
+     *
+     * <p>Used in two places:
+     * <ul>
+     *   <li>{@link #enabledCapsFor} surfaces these names in the
+     *       {@code enabled[]} array of the {@code hello} reply so a
+     *       handshake-aware client can report exactly what's protecting
+     *       it.</li>
+     *   <li>Stage 07 (the toolbar status indicator) consumes the same
+     *       list for its tooltip.</li>
+     * </ul>
+     *
+     * <p>Names match the JSON wire form (snake_case) prefixed with
+     * {@code safe_mode_option:} so they don't collide with top-level
+     * capability names.
+     *
+     * @param caps  caller caps; {@code null} or non-safe-mode returns empty
+     * @return ordered list of currently-active option names
+     */
+    static List<String> enabledSafeModeOptions(AgentCaps caps) {
+        List<String> out = new ArrayList<String>();
+        if (caps == null || !caps.safeMode || caps.safeModeOptions == null) {
+            return out;
+        }
+        SafeModeOptions opt = caps.safeModeOptions;
+        if (opt.blockBitDepthNarrowing)  out.add("safe_mode_option:block_bit_depth_narrowing");
+        if (opt.blockNormalizeContrast)  out.add("safe_mode_option:block_normalize_contrast");
+        if (opt.autoBackupRoiOnReset)    out.add("safe_mode_option:auto_backup_roi_on_reset");
+        if (opt.autoSnapshotRescue)      out.add("safe_mode_option:auto_snapshot_rescue");
+        if (opt.queueStormGuard)         out.add("safe_mode_option:queue_storm_guard");
+        if (opt.autoSourceImageColumn)   out.add("safe_mode_option:auto_source_image_column");
+        if (opt.scientificIntegrityScan) out.add("safe_mode_option:scientific_integrity_scan");
+        return out;
     }
 
     // ---- Small JSON option helpers used by the hello handler. ----
