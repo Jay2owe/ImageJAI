@@ -124,6 +124,8 @@ public class HoverCard {
 
     private void applyContent(ModelEntry entry) {
         titleLabel.setText(entry.displayName() + "  ·  " + providerHint(entry.providerId()));
+        // 05 §11.1: TierBadgeIcon reused in the hover-card header.
+        tierLabel.setIcon(TierBadgeIcon.forTier(entry.tier()));
         tierLabel.setText(tierLabel(entry.tier()));
         capabilityLabel.setText("Tools: " + entry.toolCallReliability().name().toLowerCase()
                 + "  │  Vision: " + (entry.visionCapable() ? "yes" : "no")

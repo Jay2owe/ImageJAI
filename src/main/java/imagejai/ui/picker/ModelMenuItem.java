@@ -158,9 +158,15 @@ public class ModelMenuItem extends JMenuItem {
             SoftDeprecationPolicy.State lifecycle =
                     SoftDeprecationPolicy.stateOf(entry, LocalDate.now());
 
-            paintBadge(g2, entry.tier(), lifecycle);
-            paintStatus(g2, statusIcon);
-            paintStar(g2, pinned, starHovered);
+            // Per 05 §11.1 the visual elements are reusable Icon impls. The
+            // static paint helpers below delegate to the same classes so
+            // existing test surface stays addressable.
+            TierBadgeIcon badge = lifecycle == SoftDeprecationPolicy.State.PINNED_DEPRECATED
+                    ? TierBadgeIcon.forTierDeprecated(entry.tier())
+                    : TierBadgeIcon.forTier(entry.tier());
+            badge.paintIcon(this, g2, COL_BADGE, 6);
+            StatusIcon.forStatus(statusIcon).paintIcon(this, g2, COL_STATUS, 4);
+            PinStarIcon.forState(pinned, starHovered).paintIcon(this, g2, COL_STAR, 4);
 
             Font baseFont = getFont();
             Font textFont = lifecycle == SoftDeprecationPolicy.State.SOFT_DEPRECATED
