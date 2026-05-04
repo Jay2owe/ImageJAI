@@ -89,6 +89,13 @@ class BudgetCeilingTracker:
         """Compute cost from local token counts × per-million-token pricing.
 
         Used when LiteLLM does not surface the cost header — see 06 §6.3.
+
+        Applies ``tokenizer_multiplier`` from the pricing table when present so
+        the Opus 4.7 1.35× cost shift (verification report E.8 / risk #24) is
+        reflected in the fallback estimate. Anthropic Opus 4.7's tokenizer
+        consumes ~35% more tokens than 4.5 for the same English text; without
+        the multiplier the ceiling fires too late and the user is over-charged
+        before the pause kicks in.
         """
 
         key = f"{provider_id}/{model_id}"
@@ -97,7 +104,15 @@ class BudgetCeilingTracker:
             return CostBreakdown(cost_usd=0.0, source="fallback")
         in_rate = float(pricing.get("input_usd_per_mtok", 0.0))
         out_rate = float(pricing.get("output_usd_per_mtok", 0.0))
-        cost = (input_tokens / 1_000_000.0) * in_rate + (output_tokens / 1_000_000.0) * out_rate
+        try:
+            multiplier = float(pricing.get("tokenizer_multiplier", 1.0) or 1.0)
+        except (TypeError, ValueError):
+            multiplier = 1.0
+        if multiplier <= 0:
+            multiplier = 1.0
+        scaled_in = input_tokens * multiplier
+        scaled_out = output_tokens * multiplier
+        cost = (scaled_in / 1_000_000.0) * in_rate + (scaled_out / 1_000_000.0) * out_rate
         return CostBreakdown(cost_usd=cost, source="fallback")
 
     def record_call(
@@ -223,8 +238,10 @@ def load_pricing_from_models_yaml(path: str) -> dict[str, dict[str, float]]:
     """Read pricing entries from the unified models.yaml.
 
     Returns a dict keyed by ``provider/model_id`` mapping to
-    ``{input_usd_per_mtok, output_usd_per_mtok}``. Entries without pricing are
-    skipped silently.
+    ``{input_usd_per_mtok, output_usd_per_mtok, tokenizer_multiplier}``.
+    Entries without pricing are skipped silently. ``tokenizer_multiplier`` is
+    pulled from the top-level entry per models.yaml schema (verification
+    report E.8) and defaults to 1.0 when absent.
     """
 
     import yaml  # local import — only used by the fallback path.
@@ -242,8 +259,15 @@ def load_pricing_from_models_yaml(path: str) -> dict[str, dict[str, float]]:
             out_rate = float(pricing.get("output_usd_per_mtok", 0.0))
         except (TypeError, ValueError):
             continue
+        try:
+            multiplier = float(entry.get("tokenizer_multiplier", 1.0) or 1.0)
+        except (TypeError, ValueError):
+            multiplier = 1.0
+        if multiplier <= 0:
+            multiplier = 1.0
         out[f"{provider}/{model_id}"] = {
             "input_usd_per_mtok": in_rate,
             "output_usd_per_mtok": out_rate,
+            "tokenizer_multiplier": multiplier,
         }
     return out

@@ -10,6 +10,7 @@ import pytest
 from agent.ollama_agent.budget_ceiling import (
     BudgetCeilingTracker,
     CostBreakdown,
+    load_pricing_from_models_yaml,
     process_pause_input,
     parse_slash_command,
 )
@@ -181,3 +182,97 @@ def test_parse_slash_command_handles_args():
     assert parse_slash_command("/switch ollama/llama3.2") == ("/switch", "ollama/llama3.2")
     assert parse_slash_command("/resume") == ("/resume", "")
     assert parse_slash_command("hi") == ("", "")
+
+
+def test_fallback_applies_opus_47_tokenizer_multiplier():
+    """Verification report E.8 — Opus 4.7 consumes ~35% more tokens than 4.5.
+
+    The fallback path must scale the local token count by tokenizer_multiplier
+    before pricing math, otherwise the ceiling fires too late.
+    """
+
+    tracker = BudgetCeilingTracker(
+        enabled=True,
+        ceiling_usd=1.00,
+        pricing_table={
+            "anthropic/claude-opus-4-7": {
+                "input_usd_per_mtok": 15.0,
+                "output_usd_per_mtok": 75.0,
+                "tokenizer_multiplier": 1.35,
+            }
+        },
+    )
+    breakdown = tracker.estimate_fallback_usd(
+        "anthropic", "claude-opus-4-7",
+        input_tokens=10_000,
+        output_tokens=5_000,
+    )
+    # Without multiplier: 0.01M*$15 + 0.005M*$75 = $0.150 + $0.375 = $0.525
+    # With 1.35x multiplier: $0.525 * 1.35 = $0.70875
+    assert breakdown.cost_usd == pytest.approx(0.70875)
+    assert breakdown.source == "fallback"
+
+
+def test_fallback_no_multiplier_defaults_to_1x():
+    """Models without the tokenizer_multiplier field stay at 1.0 (no scaling)."""
+
+    tracker = BudgetCeilingTracker(
+        enabled=True,
+        ceiling_usd=1.00,
+        pricing_table={
+            "anthropic/claude-sonnet-4-6": {
+                "input_usd_per_mtok": 3.0,
+                "output_usd_per_mtok": 15.0,
+                # tokenizer_multiplier intentionally absent — Sonnet 4.6 has the
+                # 4.5 tokenizer.
+            }
+        },
+    )
+    breakdown = tracker.estimate_fallback_usd(
+        "anthropic", "claude-sonnet-4-6",
+        input_tokens=10_000,
+        output_tokens=5_000,
+    )
+    # 0.01M*$3 + 0.005M*$15 = $0.03 + $0.075 = $0.105 (unchanged from base test)
+    assert breakdown.cost_usd == pytest.approx(0.105)
+
+
+def test_fallback_invalid_multiplier_falls_back_to_1x():
+    tracker = BudgetCeilingTracker(
+        enabled=True,
+        ceiling_usd=1.00,
+        pricing_table={
+            "x/y": {
+                "input_usd_per_mtok": 1.0,
+                "output_usd_per_mtok": 1.0,
+                "tokenizer_multiplier": 0.0,  # silly value — must clamp to 1.0
+            }
+        },
+    )
+    breakdown = tracker.estimate_fallback_usd("x", "y",
+                                              input_tokens=1_000_000,
+                                              output_tokens=0)
+    assert breakdown.cost_usd == pytest.approx(1.0)
+
+
+def test_load_pricing_from_models_yaml_picks_up_multiplier(tmp_path):
+    yaml_text = """
+models:
+  - provider: anthropic
+    model_id: claude-opus-4-7
+    pricing:
+      input_usd_per_mtok: 15.0
+      output_usd_per_mtok: 75.0
+    tokenizer_multiplier: 1.35
+  - provider: anthropic
+    model_id: claude-sonnet-4-6
+    pricing:
+      input_usd_per_mtok: 3.0
+      output_usd_per_mtok: 15.0
+"""
+    yaml_path = tmp_path / "models.yaml"
+    yaml_path.write_text(yaml_text, encoding="utf-8")
+    table = load_pricing_from_models_yaml(str(yaml_path))
+    assert table["anthropic/claude-opus-4-7"]["tokenizer_multiplier"] == 1.35
+    # Default 1.0 when the field is absent.
+    assert table["anthropic/claude-sonnet-4-6"]["tokenizer_multiplier"] == 1.0
