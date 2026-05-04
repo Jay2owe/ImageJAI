@@ -184,6 +184,56 @@ public class Settings {
         return s;
     }
 
+    /**
+     * Maps legacy {@link #selectedAgentName} display names (the v1 flat
+     * {@code JComboBox} captions) to the new {@code "<provider>:<model_id>"}
+     * key shape introduced by the multi-provider picker. Per
+     * docs/multi_provider/05_ui_design.md §10.5 — used once at first launch on
+     * the new build to seed {@link #selectedProvider} and {@link #selectedModelId}
+     * so users don't lose their pick on the schema flip.
+     *
+     * <p>Visible (package-private) for the unit tests in
+     * {@code SettingsLegacyMigrationTest} that pin every entry.
+     */
+    static java.util.Map<String, String> legacyAgentNameToNewKey() {
+        java.util.Map<String, String> m = new java.util.LinkedHashMap<>();
+        m.put("Claude Code", "cli:claude");
+        m.put("Aider", "cli:aider");
+        m.put("GitHub Copilot CLI", "cli:gh copilot");
+        m.put("Gemini CLI", "cli:gemini");
+        m.put("Open Interpreter", "cli:interpreter");
+        m.put("Cline", "cli:cline");
+        m.put("Codex CLI", "cli:codex");
+        m.put("Gemma 4 31B", "cli:gemma4_31b_agent");
+        m.put("Gemma 4 31B (Claude-style)", "cli:gemma4_31b_agent");
+        m.put("Local Assistant", "cli:gemma4_31b_agent");
+        return m;
+    }
+
+    /**
+     * One-shot seed of {@link #selectedProvider}/{@link #selectedModelId} from
+     * the legacy {@link #selectedAgentName} field. No-op once the new fields
+     * carry a value, so subsequent runs leave the user's pick alone.
+     */
+    void seedMultiProviderFromLegacyAgentName() {
+        if (selectedProvider != null && !selectedProvider.isEmpty()) {
+            return;
+        }
+        if (selectedAgentName == null || selectedAgentName.trim().isEmpty()) {
+            return;
+        }
+        String mapped = legacyAgentNameToNewKey().get(selectedAgentName);
+        if (mapped == null) {
+            return;
+        }
+        int colon = mapped.indexOf(':');
+        if (colon <= 0 || colon == mapped.length() - 1) {
+            return;
+        }
+        selectedProvider = mapped.substring(0, colon);
+        selectedModelId = mapped.substring(colon + 1);
+    }
+
     private void migrateIfNeeded() {
         // If we have old-style settings but no configs list, migrate them
         if (configs.isEmpty() && provider != null) {
@@ -228,6 +278,10 @@ public class Settings {
             gsdInstallDocsUrl =
                     "https://www.claudepluginhub.com/commands/glittercowboy-get-shit-done/commands/gsd/help";
         }
+        // Multi-provider Phase D §10.5: seed (selectedProvider, selectedModelId)
+        // from the legacy selectedAgentName so users who configured an agent
+        // before the new picker shipped don't lose their pick on first launch.
+        seedMultiProviderFromLegacyAgentName();
     }
 
     private void addDefaultConfig() {
