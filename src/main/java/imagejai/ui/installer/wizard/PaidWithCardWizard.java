@@ -16,6 +16,14 @@ public class PaidWithCardWizard extends PureApiKeyWizard {
         super(providerKey, displayName, signupUrl, credentials);
     }
 
+    public PaidWithCardWizard(String providerKey,
+                              String displayName,
+                              String signupUrl,
+                              ProviderCredentials credentials,
+                              CredentialVerifier verifier) {
+        super(providerKey, displayName, signupUrl, credentials, verifier);
+    }
+
     @Override
     protected String headerSubtext() {
         return "<font color='#a06000'>Note:</font> "

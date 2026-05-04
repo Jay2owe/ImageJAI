@@ -14,6 +14,7 @@ import javax.swing.JTextArea;
 import javax.swing.SwingUtilities;
 import javax.swing.border.EmptyBorder;
 import java.awt.BorderLayout;
+import java.awt.Color;
 import java.awt.Component;
 import java.awt.Desktop;
 import java.awt.Dialog;
@@ -33,8 +34,20 @@ import java.net.URI;
  * back. Used today by GitHub Models (which surfaces a PAT after
  * {@code gh auth login}) and Gemini (which surfaces an API key after
  * AI-Studio sign-in).
+ *
+ * <p>This is the paste-token fallback the Phase E plan calls out — the
+ * "browser-auth localhost callback" path is unused for these providers
+ * (no Phase-E provider exposes a redirect URL we can listen on), so the
+ * port-collision risk in the register does not apply here.
+ *
+ * <p>Save flow per Phase E acceptance: persist the token, then synchronously
+ * call the {@link CredentialVerifier} with a 4 s timeout. On success the
+ * dialog disposes; on failure the error message renders inline in red.
  */
 public class BrowserAuthWizard implements InstallerWizard {
+
+    /** 4 s budget per {@code 06 §4.4} manual-refresh timeout. */
+    public static final int VERIFY_TIMEOUT_MS = PureApiKeyWizard.VERIFY_TIMEOUT_MS;
 
     private final String providerKey;
     private final String displayName;
@@ -42,18 +55,29 @@ public class BrowserAuthWizard implements InstallerWizard {
     private final String cliHint;
     private final String envVarName;
     private final ProviderCredentials credentials;
+    private final CredentialVerifier verifier;
 
     public BrowserAuthWizard(String providerKey,
                              String displayName,
                              String signupUrl,
                              String cliHint,
                              ProviderCredentials credentials) {
+        this(providerKey, displayName, signupUrl, cliHint, credentials, CredentialVerifier.noop());
+    }
+
+    public BrowserAuthWizard(String providerKey,
+                             String displayName,
+                             String signupUrl,
+                             String cliHint,
+                             ProviderCredentials credentials,
+                             CredentialVerifier verifier) {
         this.providerKey = providerKey;
         this.displayName = displayName;
         this.signupUrl = signupUrl;
         this.cliHint = cliHint;
         this.envVarName = ProviderCredentials.ENV_VAR_FOR_PROVIDER.get(providerKey);
         this.credentials = credentials;
+        this.verifier = verifier == null ? CredentialVerifier.noop() : verifier;
     }
 
     @Override
@@ -94,6 +118,11 @@ public class BrowserAuthWizard implements InstallerWizard {
         final JPasswordField tokenField = new JPasswordField(28);
         body.add(tokenField, c);
 
+        c.gridx = 0; c.gridy = 2; c.gridwidth = 3; c.weightx = 1.0;
+        final JLabel statusLine = new JLabel(" ");
+        statusLine.setFont(statusLine.getFont().deriveFont(11f));
+        body.add(statusLine, c);
+
         content.add(body, BorderLayout.CENTER);
 
         JPanel buttons = new JPanel(new FlowLayout(FlowLayout.RIGHT, 6, 4));
@@ -107,20 +136,31 @@ public class BrowserAuthWizard implements InstallerWizard {
         save.addActionListener(e -> {
             String value = new String(tokenField.getPassword()).trim();
             if (value.isEmpty()) {
-                JOptionPane.showMessageDialog(dialog,
-                        "Paste the token from the sign-in flow first.",
-                        "Missing token", JOptionPane.WARNING_MESSAGE);
+                setError(statusLine, "Paste the token from the sign-in flow first.");
                 return;
             }
             try {
                 credentials.saveApiKey(providerKey, value);
-                saved[0] = true;
-                dialog.dispose();
             } catch (IOException ex) {
-                JOptionPane.showMessageDialog(dialog,
-                        "Could not save token: " + ex.getMessage(),
-                        "Save failed", JOptionPane.ERROR_MESSAGE);
+                setError(statusLine, "Could not save token: " + ex.getMessage());
+                return;
             }
+            setBusy(statusLine, "Verifying…");
+            CredentialVerifier.Result result;
+            try {
+                result = verifier.verify(providerKey, VERIFY_TIMEOUT_MS);
+            } catch (RuntimeException re) {
+                result = CredentialVerifier.Result.failure(
+                        "verifier threw " + re.getClass().getSimpleName()
+                                + (re.getMessage() == null ? "" : ": " + re.getMessage()));
+            }
+            if (result == null || !result.ok) {
+                String msg = result == null ? "verifier returned null" : result.message;
+                setError(statusLine, "Verification failed: " + msg);
+                return;
+            }
+            saved[0] = true;
+            dialog.dispose();
         });
         buttons.add(openSignin);
         buttons.add(Box.createHorizontalStrut(12));
@@ -148,6 +188,16 @@ public class BrowserAuthWizard implements InstallerWizard {
         sb.append("3. Paste it below — saved locally as ").append(envVarName)
                 .append(" in <config>/secrets/").append(providerKey).append(".env.\n");
         return sb.toString();
+    }
+
+    private static void setError(JLabel label, String message) {
+        label.setForeground(new Color(0xa0, 0x30, 0x30));
+        label.setText(message);
+    }
+
+    private static void setBusy(JLabel label, String message) {
+        label.setForeground(new Color(0x30, 0x30, 0x30));
+        label.setText(message);
     }
 
     private static void openUrl(String url) {

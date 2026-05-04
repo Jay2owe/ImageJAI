@@ -13,6 +13,7 @@ import javax.swing.JPasswordField;
 import javax.swing.SwingUtilities;
 import javax.swing.border.EmptyBorder;
 import java.awt.BorderLayout;
+import java.awt.Color;
 import java.awt.Component;
 import java.awt.Desktop;
 import java.awt.Dialog;
@@ -33,24 +34,42 @@ import java.net.URI;
  * signup gives the user a literal token to paste (Groq, Cerebras, OpenRouter,
  * Mistral, Together, HuggingFace, DeepSeek, xAI, Perplexity, plus Gemini's
  * AI-Studio fallback).
+ *
+ * <p>Save flow per Phase E acceptance: persist the key, then synchronously
+ * call the {@link CredentialVerifier} with a 4 s timeout. On success the
+ * dialog disposes; on failure the error message renders inline in red and
+ * the dialog stays open for a retry.
  */
 public class PureApiKeyWizard implements InstallerWizard {
+
+    /** 4 s budget per {@code 06 §4.4} manual-refresh timeout. */
+    public static final int VERIFY_TIMEOUT_MS = 4000;
 
     protected final String providerKey;
     protected final String displayName;
     protected final String signupUrl;
     protected final String envVarName;
     protected final ProviderCredentials credentials;
+    protected final CredentialVerifier verifier;
 
     public PureApiKeyWizard(String providerKey,
                             String displayName,
                             String signupUrl,
                             ProviderCredentials credentials) {
+        this(providerKey, displayName, signupUrl, credentials, CredentialVerifier.noop());
+    }
+
+    public PureApiKeyWizard(String providerKey,
+                            String displayName,
+                            String signupUrl,
+                            ProviderCredentials credentials,
+                            CredentialVerifier verifier) {
         this.providerKey = providerKey;
         this.displayName = displayName;
         this.signupUrl = signupUrl;
         this.envVarName = ProviderCredentials.ENV_VAR_FOR_PROVIDER.get(providerKey);
         this.credentials = credentials;
+        this.verifier = verifier == null ? CredentialVerifier.noop() : verifier;
     }
 
     @Override
@@ -100,6 +119,11 @@ public class PureApiKeyWizard implements InstallerWizard {
         envHint.setFont(envHint.getFont().deriveFont(11f));
         body.add(envHint, c);
 
+        c.gridx = 0; c.gridy = 2; c.gridwidth = 3;
+        final JLabel statusLine = new JLabel(" ");
+        statusLine.setFont(statusLine.getFont().deriveFont(11f));
+        body.add(statusLine, c);
+
         content.add(body, BorderLayout.CENTER);
 
         JPanel buttons = new JPanel(new FlowLayout(FlowLayout.RIGHT, 6, 4));
@@ -113,20 +137,32 @@ public class PureApiKeyWizard implements InstallerWizard {
         save.addActionListener(e -> {
             String value = new String(keyField.getPassword()).trim();
             if (value.isEmpty()) {
-                JOptionPane.showMessageDialog(dialog,
-                        "Please paste your API key first.",
-                        "Missing key", JOptionPane.WARNING_MESSAGE);
+                setError(statusLine, "Please paste your API key first.");
                 return;
             }
             try {
                 credentials.saveApiKey(providerKey, value);
-                saved[0] = true;
-                dialog.dispose();
             } catch (IOException ex) {
-                JOptionPane.showMessageDialog(dialog,
-                        "Could not save key: " + ex.getMessage(),
-                        "Save failed", JOptionPane.ERROR_MESSAGE);
+                setError(statusLine, "Could not save key: " + ex.getMessage());
+                return;
             }
+            setBusy(statusLine, "Verifying…");
+            // Synchronous call honouring the 4 s budget — see VERIFY_TIMEOUT_MS.
+            CredentialVerifier.Result result;
+            try {
+                result = verifier.verify(providerKey, VERIFY_TIMEOUT_MS);
+            } catch (RuntimeException re) {
+                result = CredentialVerifier.Result.failure(
+                        "verifier threw " + re.getClass().getSimpleName()
+                                + (re.getMessage() == null ? "" : ": " + re.getMessage()));
+            }
+            if (result == null || !result.ok) {
+                String msg = result == null ? "verifier returned null" : result.message;
+                setError(statusLine, "Verification failed: " + msg);
+                return;
+            }
+            saved[0] = true;
+            dialog.dispose();
         });
         buttons.add(getKeyBtn);
         buttons.add(Box.createHorizontalStrut(12));
@@ -147,6 +183,16 @@ public class PureApiKeyWizard implements InstallerWizard {
     /** Subclasses override for "billing required" verbiage. */
     protected String headerSubtext() {
         return "Paste your API key. Stored locally — never uploaded.";
+    }
+
+    private static void setError(JLabel label, String message) {
+        label.setForeground(new Color(0xa0, 0x30, 0x30));
+        label.setText(message);
+    }
+
+    private static void setBusy(JLabel label, String message) {
+        label.setForeground(new Color(0x30, 0x30, 0x30));
+        label.setText(message);
     }
 
     private static void pasteFromClipboard(JPasswordField field) {
