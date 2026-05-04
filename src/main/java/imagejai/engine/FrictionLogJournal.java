@@ -183,6 +183,14 @@ public class FrictionLogJournal implements AutoCloseable {
         m.put("args_summary", e.argsSummary == null ? "" : e.argsSummary);
         m.put("error", e.error == null ? "" : e.error);
         m.put("normalised_error", e.normalisedError == null ? "" : e.normalisedError);
+        // safe_mode_v2 stage 08: structured columns. Null on the entry means
+        // the writing call site did not classify; we omit the key entirely
+        // rather than emit empty strings so the JSONL stays compact and the
+        // reader can distinguish "missing" from "explicitly empty".
+        if (e.outcome != null) m.put("outcome", e.outcome);
+        if (e.severity != null) m.put("severity", e.severity);
+        if (e.ruleId != null) m.put("rule_id", e.ruleId);
+        if (e.target != null) m.put("target", e.target);
         return m;
     }
 
@@ -195,7 +203,25 @@ public class FrictionLogJournal implements AutoCloseable {
             String command = stringValue(o.get("command"));
             String argsSummary = stringValue(o.get("args_summary"));
             String error = stringValue(o.get("error"));
-            return new FrictionLog.FailureEntry(ts, agentId, command, argsSummary, error);
+            // safe_mode_v2 stage 08: tolerate JSONL written before the
+            // schema extension — missing keys deserialise to null on the
+            // entry, preserving the "wasn't classified" distinction.
+            String outcome = optionalString(o, "outcome");
+            String severity = optionalString(o, "severity");
+            String ruleId = optionalString(o, "rule_id");
+            String target = optionalString(o, "target");
+            return new FrictionLog.FailureEntry(ts, agentId, command, argsSummary, error,
+                    outcome, severity, ruleId, target);
+        } catch (Exception ignored) {
+            return null;
+        }
+    }
+
+    private static String optionalString(JsonObject o, String key) {
+        JsonElement el = o.get(key);
+        if (el == null || el.isJsonNull()) return null;
+        try {
+            return el.getAsString();
         } catch (Exception ignored) {
             return null;
         }

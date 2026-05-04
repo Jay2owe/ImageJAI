@@ -21,6 +21,7 @@ import java.util.stream.Stream;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 
 public class FrictionLogJournalTest {
@@ -171,6 +172,105 @@ public class FrictionLogJournalTest {
             try (Stream<FrictionLog.FailureEntry> stream = journal.streamEntries()) {
                 assertEquals(1, stream.count());
             }
+        } finally {
+            journal.close();
+        }
+    }
+
+    /**
+     * safe_mode_v2 stage 08: writing an entry with all four structured
+     * columns must round-trip through JSONL with the values preserved
+     * (no string coercion, no field collision with the legacy keys).
+     */
+    @Test
+    public void structuredEntryRoundTripsThroughJsonl() throws Exception {
+        Path root = newRoot();
+        FrictionLogJournal journal = new FrictionLogJournal(root);
+        try {
+            FrictionLog.FailureEntry written = new FrictionLog.FailureEntry(
+                    42L, "claude", "execute_macro", "code=run(\"X\")",
+                    "blocked: roi_wipe @ line 3",
+                    "blocked", "L1_reject", "roi_wipe", "ROI Manager");
+            journal.append(written);
+            journal.awaitIdle(5, TimeUnit.SECONDS);
+
+            List<FrictionLog.FailureEntry> entries;
+            try (Stream<FrictionLog.FailureEntry> stream = journal.streamEntries()) {
+                entries = stream.collect(Collectors.toList());
+            }
+            assertEquals(1, entries.size());
+            FrictionLog.FailureEntry read = entries.get(0);
+            assertEquals("blocked", read.outcome);
+            assertEquals("L1_reject", read.severity);
+            assertEquals("roi_wipe", read.ruleId);
+            assertEquals("ROI Manager", read.target);
+            assertEquals("claude", read.agentId);
+            assertEquals("execute_macro", read.command);
+        } finally {
+            journal.close();
+        }
+    }
+
+    /**
+     * safe_mode_v2 stage 08: reading a JSONL line written by stage-07-or-
+     * earlier code (no {@code outcome} / {@code severity} / {@code rule_id}
+     * / {@code target} keys) must succeed, with the four new fields all
+     * deserialising to {@code null}. This is the on-disk back-compat
+     * guarantee.
+     */
+    @Test
+    public void prestageEightJsonlReadsBackWithNullStructuredFields() throws Exception {
+        Path root = newRoot();
+        Files.createDirectories(root);
+        Path file = root.resolve(FrictionLogJournal.FILE_NAME);
+        // Hand-crafted line with the pre-stage-08 schema only.
+        String legacyLine = "{\"ts\":7,\"agent_id\":\"old\",\"command\":\"execute_macro\","
+                + "\"args_summary\":\"\",\"error\":\"boom\",\"normalised_error\":\"boom\"}\n";
+        Files.write(file, legacyLine.getBytes(StandardCharsets.UTF_8));
+
+        FrictionLogJournal journal = new FrictionLogJournal(root);
+        try {
+            List<FrictionLog.FailureEntry> entries;
+            try (Stream<FrictionLog.FailureEntry> stream = journal.streamEntries()) {
+                entries = stream.collect(Collectors.toList());
+            }
+            assertEquals(1, entries.size());
+            FrictionLog.FailureEntry e = entries.get(0);
+            assertEquals("old", e.agentId);
+            assertEquals("execute_macro", e.command);
+            assertEquals("boom", e.error);
+            assertNull("outcome should be null on legacy rows", e.outcome);
+            assertNull("severity should be null on legacy rows", e.severity);
+            assertNull("rule_id should be null on legacy rows", e.ruleId);
+            assertNull("target should be null on legacy rows", e.target);
+        } finally {
+            journal.close();
+        }
+    }
+
+    /**
+     * safe_mode_v2 stage 08: a {@link FailureEntry} written via the legacy
+     * five-arg constructor (no structured fields) serialises *without*
+     * {@code outcome} / {@code severity} / {@code rule_id} / {@code target}
+     * keys. Keeps the JSONL compact and lets readers distinguish
+     * "wasn't classified" from "classified, value empty".
+     */
+    @Test
+    public void legacyEntryOmitsStructuredKeysFromJsonl() throws Exception {
+        Path root = newRoot();
+        FrictionLogJournal journal = new FrictionLogJournal(root);
+        try {
+            journal.append(new FrictionLog.FailureEntry(
+                    1L, "claude", "ping", "", "miss"));
+            journal.awaitIdle(5, TimeUnit.SECONDS);
+
+            List<String> lines = Files.readAllLines(journal.file(), StandardCharsets.UTF_8);
+            assertEquals(1, lines.size());
+            String line = lines.get(0);
+            assertFalse("outcome key should be absent: " + line, line.contains("\"outcome\""));
+            assertFalse("severity key should be absent: " + line, line.contains("\"severity\""));
+            assertFalse("rule_id key should be absent: " + line, line.contains("\"rule_id\""));
+            assertFalse("target key should be absent: " + line, line.contains("\"target\""));
         } finally {
             journal.close();
         }

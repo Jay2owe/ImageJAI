@@ -1317,7 +1317,16 @@ public class TCPCommandServer {
         } else if ("get_friction_patterns".equals(command)) {
             return handleGetFrictionPatterns();
         } else if ("clear_friction_log".equals(command)) {
-            return handleClearFrictionLog();
+            // safe_mode_v2 stage 08: removed from the agent-callable surface so
+            // a prompt-injected agent cannot wipe the audit trail. Operators
+            // who want it back start Fiji with
+            // -Dimagejai.allow.clear_friction_log=true.
+            if (clearFrictionLogAllowed()) {
+                return handleClearFrictionLog();
+            }
+            return errorResponse(
+                    "clear_friction_log is no longer agent-callable. "
+                            + "Restart Fiji with -Dimagejai.allow.clear_friction_log=true if you need it.");
         } else if ("intent".equals(command)) {
             return handleIntent(request, caps);
         } else if ("intent_teach".equals(command)) {
@@ -5556,6 +5565,19 @@ public class TCPCommandServer {
         JsonObject result = new JsonObject();
         result.addProperty("cleared", before);
         return successResponse(result);
+    }
+
+    /**
+     * safe_mode_v2 stage 08 — operator-only escape for the now-removed
+     * {@code clear_friction_log} TCP command. Default false; flip with the
+     * JVM startup flag {@code -Dimagejai.allow.clear_friction_log=true}.
+     * Honour-system: an attacker with shell access already owns the
+     * machine, so the protection here is against in-prompt agents
+     * setting the property via a macro or script call.
+     */
+    static boolean clearFrictionLogAllowed() {
+        return "true".equalsIgnoreCase(
+                System.getProperty("imagejai.allow.clear_friction_log", "false"));
     }
 
     // -----------------------------------------------------------------------

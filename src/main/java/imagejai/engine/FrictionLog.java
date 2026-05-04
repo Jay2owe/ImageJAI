@@ -45,13 +45,45 @@ public class FrictionLog {
          */
         public final String agentId;
 
-        FailureEntry(long ts, String agentId, String command, String argsSummary, String error) {
+        // safe_mode_v2 stage 08: structured columns so the Stage 07 status
+        // indicator and any future dashboard can query the journal instead
+        // of grepping the {@code error} string. All four are nullable; rows
+        // written before stage 08 (or by call sites that never negotiated
+        // the new fields) carry {@code null} for each.
+        /** One of {@code passed}, {@code blocked}, {@code confirmed},
+         *  {@code warned}, {@code auto_backup}, {@code rehearsal_failed},
+         *  {@code rehearsal_passed}, {@code snapshot_committed}, or
+         *  {@code null} when the writer did not classify. */
+        public final String outcome;
+        /** {@code L1_reject} / {@code L2_prompt} / {@code L3_warn} (matches
+         *  the destructive-block tier vocabulary), or {@code null}. */
+        public final String severity;
+        /** Stable short id of the rule that produced this row
+         *  ({@code saveas_overwrite}, {@code file_delete}, {@code roi_wipe},
+         *  {@code bit_depth}, {@code calibration_loss},
+         *  {@code z_project_overwrite}, {@code microscopy_overwrite},
+         *  {@code queue_storm}, …). Nullable. */
+        public final String ruleId;
+        /** Path, image title, dialog title — depends on the rule. Nullable. */
+        public final String target;
+
+        public FailureEntry(long ts, String agentId, String command, String argsSummary, String error) {
+            this(ts, agentId, command, argsSummary, error, null, null, null, null);
+        }
+
+        public FailureEntry(long ts, String agentId, String command, String argsSummary,
+                            String error, String outcome, String severity,
+                            String ruleId, String target) {
             this.ts = ts;
             this.agentId = agentId == null ? "" : agentId;
             this.command = command;
             this.argsSummary = argsSummary;
             this.error = error;
             this.normalisedError = normaliseError(error);
+            this.outcome = outcome;
+            this.severity = severity;
+            this.ruleId = ruleId;
+            this.target = target;
         }
     }
 
@@ -110,6 +142,30 @@ public class FrictionLog {
      */
     public synchronized void record(String command, String argsSummary, String error) {
         record("", command, argsSummary, error);
+    }
+
+    /**
+     * safe_mode_v2 stage 08 — structured-record overload. Lets call sites
+     * that already know the rule that fired (destructive scanner, ROI
+     * auto-backup, queue-storm guard) populate the new {@link FailureEntry}
+     * columns so the journal can be queried instead of text-grepped. Any
+     * of {@code outcome} / {@code severity} / {@code ruleId} / {@code target}
+     * may be {@code null}; passing {@code null} for all four matches the
+     * shape of the back-compat overloads.
+     */
+    public synchronized void record(String agentId, String command, String argsSummary,
+                                    String error, String outcome, String severity,
+                                    String ruleId, String target) {
+        if (agentId == null) agentId = "";
+        if (command == null) command = "";
+        if (error == null) error = "";
+        if (argsSummary == null) argsSummary = "";
+        FailureEntry e = new FailureEntry(
+                System.currentTimeMillis(), agentId, command, argsSummary, error,
+                outcome, severity, ruleId, target);
+        if (entries.size() >= CAPACITY) entries.removeFirst();
+        entries.addLast(e);
+        if (journal != null) journal.append(e);
     }
 
     /** Most recent entries first (descending timestamp). */
