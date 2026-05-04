@@ -313,6 +313,68 @@ public final class SessionUndo {
         }
     }
 
+    /**
+     * Stage 03 (docs/safe_mode_v2/03_auto-snapshot-rescue.md): a deferred
+     * push. The caller captures an {@link UndoFrame} before a mutating macro
+     * runs, wraps it via {@link #wrapRescueFrame}, then either {@link #commit}
+     * (push onto the active branch's per-image stack so a later {@code rewind}
+     * can restore it) or {@link #release} (drop the reference). Treating the
+     * snapshot as a closeable lets safe-mode get free undo for the user
+     * without burning memory on the common-case successful macro.
+     *
+     * <p>{@link #close} is wired to {@link #release} so a caller can
+     * {@code try (RescueHandle h = ...) { ... }} as a safety net — if neither
+     * commit nor release fires explicitly the frame is dropped, mirroring the
+     * "successful path discards the rescue" default.
+     *
+     * <p>State transitions are one-way: once committed or released, the
+     * second call is a no-op so out-of-order finally blocks don't
+     * double-push or double-drop.
+     */
+    public static final class RescueHandle implements AutoCloseable {
+        private final SessionUndo undo;
+        private final UndoFrame frame;
+        private boolean committed = false;
+        private boolean released = false;
+
+        RescueHandle(SessionUndo undo, UndoFrame frame) {
+            this.undo = undo;
+            this.frame = frame;
+        }
+
+        /** Push the captured frame onto the active branch's per-image stack.
+         *  No-op if the handle has already been committed or released. */
+        public void commit() {
+            if (committed || released) return;
+            committed = true;
+            undo.pushFrame(frame);
+        }
+
+        /** Drop the captured frame without pushing. No-op if already
+         *  committed or released. The frame becomes unreachable and its
+         *  zlib buffer is reclaimed by the next GC. */
+        public void release() {
+            if (committed || released) return;
+            released = true;
+        }
+
+        public boolean isCommitted() { return committed; }
+        public boolean isReleased()  { return released; }
+        public UndoFrame frame()     { return frame; }
+
+        @Override public void close() { release(); }
+    }
+
+    /** Wrap an already-captured frame as a deferred push. The caller is
+     *  responsible for invoking {@link RescueHandle#commit} or
+     *  {@link RescueHandle#release} on the returned handle. Returns null
+     *  when the input frame is null so the call site can chain on the
+     *  capture without a separate guard. */
+    public RescueHandle wrapRescueFrame(UndoFrame frame) {
+        if (frame == null) return null;
+        return new RescueHandle(this, frame);
+    }
+
     /** Total bytes held across every branch and stack. */
     public long totalBytes() {
         synchronized (lock) {

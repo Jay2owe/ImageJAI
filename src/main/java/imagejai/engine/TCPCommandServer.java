@@ -2669,6 +2669,80 @@ public class TCPCommandServer {
     }
 
     /**
+     * Stage 03 (docs/safe_mode_v2/03_auto-snapshot-rescue.md): take an undo
+     * snapshot the agent never asked for, so that a macro which sneaks past
+     * the destructive scanner and corrupts pixels at full scale is still
+     * recoverable via {@code rewind}. Fires only when:
+     * <ul>
+     *   <li>the master safe-mode switch is on,</li>
+     *   <li>{@code safe_mode_options.auto_snapshot_rescue} is on (default),</li>
+     *   <li>{@code caps.undo} is OFF — the undo path already pushes a frame
+     *       at this point and we must not double-snapshot.</li>
+     * </ul>
+     *
+     * <p>Returns a {@link SessionUndo.RescueHandle} the caller is expected to
+     * either {@link SessionUndo.RescueHandle#commit commit} (on macro failure
+     * or thrown exception, so the user can rewind) or
+     * {@link SessionUndo.RescueHandle#release release} (on macro success, so
+     * we don't grow the undo ring on every successful safe-mode call).
+     *
+     * <p>Returns null when rescue does not apply: caps disabled, no active
+     * image, virtual stack (per plan §Known risks — duplicating a virtual
+     * stack would force a multi-GB read from disk), or capture failure.
+     * Capture failures are swallowed and logged so a flaky snapshot path
+     * never blocks the macro itself.
+     */
+    SessionUndo.RescueHandle captureRescueFrameIfEnabled(String callId,
+                                                         String macroSrc,
+                                                         AgentCaps caps) {
+        if (caps == null) return null;
+        if (!caps.safeMode) return null;
+        SafeModeOptions opt = caps.safeModeOptions;
+        if (opt == null || !opt.autoSnapshotRescue) return null;
+        // The undo path already snapshots at this point. Re-snapshotting via
+        // rescue would push a near-identical frame and double the per-call
+        // memory cost for opt-in undo agents. Skip and let the undo frame
+        // do the recovery work.
+        if (caps.undo) return null;
+        try {
+            ImagePlus imp = WindowManager.getCurrentImage();
+            if (imp == null) return null;
+            try {
+                ij.ImageStack stk = imp.getStack();
+                // VirtualStack.duplicate() reads the whole disk-backed
+                // sequence into RAM — gigabytes for a typical light-sheet
+                // dataset. Plan §Known risks: skip with a logged note rather
+                // than freeze Fiji on a multi-second snapshot.
+                if (stk != null && stk.isVirtual()) {
+                    try {
+                        IJ.log("[ImageJAI-SafeMode] rescue snapshot skipped: "
+                                + "virtual stack (" + imp.getTitle() + ")");
+                    } catch (Throwable ignore) {}
+                    return null;
+                }
+            } catch (Throwable ignore) {
+                // ImageStack.isVirtual is a >= IJ 1.40 API; older Fiji forks
+                // throw NoSuchMethodError. Treat as "not virtual" and proceed.
+            }
+            String csv = null;
+            try {
+                csv = stateInspector != null
+                        ? stateInspector.getResultsTableCSV() : null;
+            } catch (Throwable ignore) {}
+            RoiManager rm = RoiManager.getInstance();
+            boolean diskWrite = UndoFrame.macroHasDiskWrites(macroSrc);
+            UndoFrame f = UndoFrame.capture(callId, imp, rm, csv, diskWrite);
+            return sessionUndo.wrapRescueFrame(f);
+        } catch (Throwable t) {
+            try {
+                IJ.log("[ImageJAI-SafeMode] rescue capture skipped: "
+                        + String.valueOf(t.getMessage()));
+            } catch (Throwable ignore) {}
+            return null;
+        }
+    }
+
+    /**
      * Name for {@link Roi#getType()}. Kept in the server rather than pulled
      * from Roi because Roi only exposes integer constants; a readable string
      * is what agents actually want to see.
@@ -2931,6 +3005,14 @@ public class TCPCommandServer {
         // are swallowed so undo never blocks the macro path.
         final String undoCallId = nextCallId();
         final UndoFrame undoFrame = captureUndoFrameIfEnabled(
+                undoCallId, code, caps);
+
+        // Stage 03 (docs/safe_mode_v2/03_auto-snapshot-rescue.md): take a
+        // deferred-push snapshot for safe-mode callers that have not opted
+        // into the full undo path. Released on a clean success; committed on
+        // failure / Throwable so a {@code rewind} can roll back damage even
+        // when the agent never asked for undo.
+        final SessionUndo.RescueHandle rescue = captureRescueFrameIfEnabled(
                 undoCallId, code, caps);
 
         // Gate image.* events while this macro runs. The agent's event
@@ -3405,12 +3487,36 @@ public class TCPCommandServer {
         if (caps != null && caps.pulse) {
             result.addProperty("pulse", PulseBuilder.build());
         }
+        // Stage 03: settle the rescue handle on the normal return path.
+        // Successful macro → drop the snapshot so the undo ring stays empty
+        // for the no-undo-caps default. Failed macro → push it onto the
+        // active branch so a follow-up {@code rewind to_call_id} can roll
+        // back the damage (see docs/safe_mode_v2/03_auto-snapshot-rescue.md).
+        if (rescue != null) {
+            if (success) {
+                rescue.release();
+            } else {
+                rescue.commit();
+            }
+        }
         return successResponse(result);
         } finally {
             if (recorderCapture != null) {
                 try { recorderCapture.close(); } catch (Throwable ignore) {}
             }
             eventBus.popSuppress("image.*");
+            // Stage 03 safety net: any path that bypassed the explicit
+            // commit/release above (InterruptedException early-return or an
+            // unexpected Throwable propagating out of the synchronized
+            // block) lands here with an unsettled handle. Commit
+            // conservatively — a thrown macro likely mutated pixels, so
+            // preserving the rescue is the safer default than silently
+            // dropping recovery state.
+            if (rescue != null
+                    && !rescue.isCommitted()
+                    && !rescue.isReleased()) {
+                try { rescue.commit(); } catch (Throwable ignore) {}
+            }
         }
     }
 
@@ -3803,6 +3909,16 @@ public class TCPCommandServer {
             } catch (Throwable ignore) {}
         }
 
+        // Stage 03 (docs/safe_mode_v2/03_auto-snapshot-rescue.md): pre-script
+        // snapshot for safe-mode callers. Released on a clean script run;
+        // committed on any failure so the user can rewind even though
+        // run_script does not normally feed the undo stack (caps.undo gates
+        // the pushBoundary above; the rescue path runs when caps.undo is OFF
+        // and only the safe-mode master switch is on).
+        final String scriptCallId = nextCallId();
+        final SessionUndo.RescueHandle rescue = captureRescueFrameIfEnabled(
+                scriptCallId, code, caps);
+
         // Mirror handleExecuteMacro: run the script on a single-thread executor
         // and poll for blocking dialogs every 150 ms. Without this, a Groovy
         // hallucination like IJ.run("setAutoThreshold", ...) opens a command
@@ -3867,6 +3983,12 @@ public class TCPCommandServer {
             Thread.currentThread().interrupt();
             if (future != null && !future.isDone()) future.cancel(true);
             executor.shutdownNow();
+            // Stage 03: thread-interrupt is a forced abort — preserve the
+            // pre-script snapshot so the user can rewind whatever the
+            // script managed to do before we yanked it.
+            if (rescue != null) {
+                try { rescue.commit(); } catch (Throwable ignore) {}
+            }
             return errorResponse("Interrupted");
         } finally {
             if (future != null && !future.isDone()) future.cancel(true);
@@ -3989,6 +4111,21 @@ public class TCPCommandServer {
         } catch (Throwable ignore) {}
         if (caps != null && caps.pulse) {
             result.addProperty("pulse", PulseBuilder.build());
+        }
+        // Stage 03: settle the rescue handle. Successful run drops the
+        // snapshot; any failure path commits so a follow-up rewind can roll
+        // the image back. Re-uses the same overall-success calculation as
+        // the journal record above so script-level success and rescue
+        // behaviour stay aligned.
+        if (rescue != null) {
+            boolean overallOk = completed
+                    && blockingFailure == null
+                    && scriptError == null;
+            if (overallOk) {
+                rescue.release();
+            } else {
+                rescue.commit();
+            }
         }
         return successResponse(result);
     }
@@ -4259,6 +4396,17 @@ public class TCPCommandServer {
             } catch (Throwable ignore) {}
         }
 
+        // Stage 03 (docs/safe_mode_v2/03_auto-snapshot-rescue.md): one
+        // pre-pipeline rescue snapshot for safe-mode callers without
+        // caps.undo. Pipelines run as a single mutex-held block from the
+        // user's perspective — restoring after a half-complete chain is the
+        // realistic recovery story, so one frame at the start (not per step)
+        // matches what the user can act on. Committed on any failure so a
+        // {@code rewind} undoes the whole chain back to the entry state.
+        final String pipelineCallId = nextCallId();
+        final SessionUndo.RescueHandle rescue = captureRescueFrameIfEnabled(
+                pipelineCallId, pipelineMacro.toString(), caps);
+
         // executePipeline calls commandEngine.executeMacro() which handles EDT
         // dispatch internally, so call directly from TCP handler thread.
         // Step 15: announce in-flight + serialise behind MACRO_MUTEX so a
@@ -4269,6 +4417,11 @@ public class TCPCommandServer {
             try {
                 pipelineBuilder.executePipeline(pipeline, null);
             } catch (Exception e) {
+                // Stage 03: pipeline threw mid-run — keep the snapshot so
+                // the user can rewind. Commit before the early return.
+                if (rescue != null) {
+                    try { rescue.commit(); } catch (Throwable ignore) {}
+                }
                 return errorResponse("Pipeline error: " + e.getMessage());
             }
         }
@@ -4326,6 +4479,18 @@ public class TCPCommandServer {
                 }
             }
         } catch (Throwable ignore) {}
+        // Stage 03: settle the rescue handle. PipelineBuilder marks the
+        // pipeline's overall {@code status} field as "completed" only on a
+        // clean run; "failed" / anything-else means at least one step
+        // tripped. Drop the snapshot on the clean path; commit on any
+        // failure so {@code rewind} can roll back to the pre-pipeline state.
+        if (rescue != null) {
+            if ("completed".equals(result.status)) {
+                rescue.release();
+            } else {
+                rescue.commit();
+            }
+        }
         return successResponse(resultJson);
     }
 
