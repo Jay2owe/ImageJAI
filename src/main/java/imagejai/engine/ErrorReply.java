@@ -34,6 +34,14 @@ final class ErrorReply {
     static final String CODE_MACRO_COMPILE_ERROR     = "MACRO_COMPILE_ERROR";
     static final String CODE_MACRO_RUNTIME_ERROR     = "MACRO_RUNTIME_ERROR";
     static final String CODE_MACRO_BLOCKED_ON_DIALOG = "MACRO_BLOCKED_ON_DIALOG";
+    /**
+     * Stage 04 (docs/safe_mode_v2/04_queue-storm-per-image.md): a second
+     * macro arrived for an image whose previous macro is paused on a Fiji
+     * modal dialog. Returned by {@code execute_macro} /
+     * {@code execute_macro_async} when {@code caps.safeMode} and
+     * {@code caps.safeModeOptions.queueStormGuard} are both on.
+     */
+    static final String CODE_QUEUE_STORM_BLOCKED    = "QUEUE_STORM_BLOCKED";
     static final String CODE_PLUGIN_NOT_FOUND        = "PLUGIN_NOT_FOUND";
     static final String CODE_IMAGE_NOT_OPEN          = "IMAGE_NOT_OPEN";
     static final String CODE_WRONG_IMAGE_TYPE        = "WRONG_IMAGE_TYPE";

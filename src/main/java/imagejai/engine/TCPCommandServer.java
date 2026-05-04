@@ -365,6 +365,49 @@ public class TCPCommandServer {
     static final AgentCaps DEFAULT_CAPS = new AgentCaps();
 
     /**
+     * Stage 04 (docs/safe_mode_v2/04_queue-storm-per-image.md): execution
+     * state recorded in {@link #inFlightByImage} for each image that has a
+     * macro currently running through {@code execute_macro}. The
+     * queue-storm guard returns {@code QUEUE_STORM_BLOCKED} when a second
+     * macro arrives targeting an image whose entry is in the
+     * {@link #PAUSED_ON_DIALOG} state.
+     */
+    enum MacroState { RUNNING, PAUSED_ON_DIALOG }
+
+    /**
+     * Stage 04 entry in {@link #inFlightByImage}. {@code state} and
+     * {@code dialogTitle} are {@code volatile} because the worker thread
+     * inside {@code handleExecuteMacro} flips them when a blocking dialog
+     * is detected, and a concurrent {@code execute_macro} on a different
+     * thread reads them when running the queue-storm guard check.
+     */
+    static final class ActiveMacro {
+        final String macroId;
+        volatile MacroState state;
+        volatile String dialogTitle;
+        final long startedAt;
+
+        ActiveMacro(String macroId, MacroState state) {
+            this.macroId = macroId;
+            this.state = state;
+            this.startedAt = System.currentTimeMillis();
+        }
+    }
+
+    /**
+     * Stage 04: per-image in-flight macro tracker. Keyed by ImageJ window
+     * title (taken from the last {@code selectImage("...")} /
+     * {@code selectWindow("...")} call in the macro source, or the active
+     * window title at command entry). Populated when a macro begins
+     * executing inside {@link #handleExecuteMacro}, flipped to
+     * {@link MacroState#PAUSED_ON_DIALOG} when a blocking dialog is
+     * detected, removed on macro return / abort. Package-private so unit
+     * tests can inject synthetic paused-state entries without spinning up
+     * Fiji. Per plan: docs/safe_mode_v2/04_queue-storm-per-image.md.
+     */
+    final Map<String, ActiveMacro> inFlightByImage = new ConcurrentHashMap<String, ActiveMacro>();
+
+    /**
      * Step 05: bookkeeping struct for post-command diffs. Collects the diff
      * keys a mutating handler (execute_macro, run_script) used to emit
      * individually (newImages, resultsTable, logDelta, dismissedDialogs) and
@@ -1283,7 +1326,7 @@ public class TCPCommandServer {
         } else if ("gui_action".equals(command)) {
             return handleGuiAction(request);
         } else if ("execute_macro_async".equals(command)) {
-            return handleExecuteMacroAsync(request);
+            return handleExecuteMacroAsync(request, caps);
         } else if ("job_status".equals(command)) {
             return handleJobStatus(request);
         } else if ("job_cancel".equals(command)) {
@@ -2940,6 +2983,32 @@ public class TCPCommandServer {
         // 03 canonical macro echo, 05 pulse / stateDelta) can shape the reply
         // per agent without another signature sweep.
 
+        JsonElement codeElement = request.get("code");
+        if (codeElement == null || !codeElement.isJsonPrimitive()) {
+            return errorResponse("Missing 'code' field for execute_macro");
+        }
+        final String code = codeElement.getAsString();
+        final long macroTimeoutMs = resolveTimeoutMs(request, MACRO_TIMEOUT_MS);
+
+        // Stage 04 (docs/safe_mode_v2/04_queue-storm-per-image.md): block a
+        // second macro on the same image while a previous macro is paused
+        // on a Fiji modal dialog. Resolves the target image title from the
+        // last selectImage("...")/selectWindow("...") call in the macro
+        // (falling back to the active window) and short-circuits with
+        // QUEUE_STORM_BLOCKED if {@link #inFlightByImage} carries a
+        // PAUSED_ON_DIALOG entry for that title. Macros on a different
+        // image fall through. Runs BEFORE the test seam so unit tests can
+        // verify the early-exit without the seam swallowing the call.
+        final String queueStormTarget = isQueueStormGuardEnabled(caps)
+                ? resolveTargetImageTitleWithFallback(code)
+                : null;
+        if (queueStormTarget != null) {
+            ActiveMacro inflight = inFlightByImage.get(queueStormTarget);
+            if (inflight != null && inflight.state == MacroState.PAUSED_ON_DIALOG) {
+                return queueStormBlockedReply(inflight, queueStormTarget, caps);
+            }
+        }
+
         // Test seam: when set, short-circuit to a stub response so unit tests
         // can verify caps inheritance through batch/run/intent without
         // spinning up a real Fiji session. Production never sets this.
@@ -2947,13 +3016,6 @@ public class TCPCommandServer {
         if (executeMacroForTest != null) {
             return executeMacroForTest.apply(request, caps);
         }
-
-        JsonElement codeElement = request.get("code");
-        if (codeElement == null || !codeElement.isJsonPrimitive()) {
-            return errorResponse("Missing 'code' field for execute_macro");
-        }
-        final String code = codeElement.getAsString();
-        final long macroTimeoutMs = resolveTimeoutMs(request, MACRO_TIMEOUT_MS);
 
         // Step 04: fuzzy plugin-name validation. Gate on caps.fuzzyMatch so
         // clients that opted out (or never said hello — DEFAULT_CAPS has the
@@ -3108,6 +3170,29 @@ public class TCPCommandServer {
         // racing the in-flight macro. Decrement happens in the matching
         // finally below so an exception unwinds the counter cleanly.
         macroInFlight.incrementAndGet();
+        // Stage 04 (docs/safe_mode_v2/04_queue-storm-per-image.md): register
+        // this macro in {@link #inFlightByImage} so a concurrent
+        // {@code execute_macro} on the same image can detect a paused-on-
+        // dialog state and short-circuit with QUEUE_STORM_BLOCKED. The
+        // entry's {@code state} starts as RUNNING; it flips to
+        // PAUSED_ON_DIALOG inside the blocking-dialog branch below. Always
+        // recorded — not gated on caps — so a guarded second-macro
+        // request still sees the in-flight state of an unguarded first
+        // macro that happened to pause. Removed in the matching finally
+        // below so exceptions / interrupts unwind cleanly. Resolved here
+        // (not at handler entry) because the resolution may need the
+        // active-image fallback, which the entry-level guard check
+        // already determined.
+        final String inflightKey = (queueStormTarget != null)
+                ? queueStormTarget
+                : resolveTargetImageTitleWithFallback(code);
+        final ActiveMacro activeEntry;
+        if (inflightKey != null) {
+            activeEntry = new ActiveMacro(Long.toString(macroId), MacroState.RUNNING);
+            inFlightByImage.put(inflightKey, activeEntry);
+        } else {
+            activeEntry = null;
+        }
         try {
         // Serialize every execute_macro call JVM-wide. ImageJ has a single global
         // Interpreter / WindowManager — two overlapping macros (one zombied on a
@@ -3164,6 +3249,16 @@ public class TCPCommandServer {
                     // instead of waiting the full MACRO_TIMEOUT_MS.
                     String blocking = detectBlockingDialog(dialogs);
                     if (blocking != null) {
+                        // Stage 04: flip the in-flight entry to
+                        // PAUSED_ON_DIALOG BEFORE abort/dismiss so any
+                        // concurrent execute_macro for the same image
+                        // sees the paused state during the abort window.
+                        // The dialog title rides along on the entry so
+                        // the QUEUE_STORM_BLOCKED reply can name it.
+                        if (activeEntry != null) {
+                            activeEntry.state = MacroState.PAUSED_ON_DIALOG;
+                            activeEntry.dialogTitle = firstBlockingDialogTitle(dialogs);
+                        }
                         abortMacroFuture(future);
                         // Actively dismiss the blocking dialog so it does not
                         // linger on screen and block subsequent macros. The
@@ -3241,6 +3336,14 @@ public class TCPCommandServer {
             // Step 15: in-flight counter must drop even if the synchronized
             // block threw — otherwise rewind locks out forever.
             macroInFlight.decrementAndGet();
+            // Stage 04: drop our in-flight entry so the queue-storm guard
+            // releases on the next request. Removed by-key only when the
+            // current entry is still ours — defensive against a future
+            // re-entrant register on the same image overwriting us, even
+            // though MACRO_MUTEX precludes that today.
+            if (inflightKey != null && activeEntry != null) {
+                inFlightByImage.remove(inflightKey, activeEntry);
+            }
         }
 
         long elapsed = System.currentTimeMillis() - startTime;
@@ -3518,6 +3621,137 @@ public class TCPCommandServer {
                 try { rescue.commit(); } catch (Throwable ignore) {}
             }
         }
+    }
+
+    /**
+     * Stage 04 (docs/safe_mode_v2/04_queue-storm-per-image.md): true when
+     * the queue-storm guard should fire for the given caps — i.e. master
+     * safe-mode is on AND the per-guard option is on. {@link #DEFAULT_CAPS}
+     * has {@code safeMode=false}, so unhandshaked sockets always fall
+     * through to the legacy unguarded path.
+     */
+    private static boolean isQueueStormGuardEnabled(AgentCaps caps) {
+        return caps != null
+                && caps.safeMode
+                && caps.safeModeOptions != null
+                && caps.safeModeOptions.queueStormGuard;
+    }
+
+    /**
+     * Stage 04: parse the last {@code selectImage("...")} or
+     * {@code selectWindow("...")} call in the macro source to identify the
+     * agent's target image. Returns {@code null} when no such call is
+     * present (the caller falls back to the active window).
+     *
+     * <p>String-arg form only — {@code selectImage(id)} uses an ImageJ
+     * window-id integer which the server cannot map to a title without
+     * touching {@link WindowManager}. Per the plan §Known risks, this is
+     * heuristic — the guard fires on the agent's intended target as best
+     * the static source can reveal.
+     */
+    static String resolveTargetImageTitle(String code) {
+        if (code == null || code.isEmpty()) return null;
+        java.util.regex.Pattern p = java.util.regex.Pattern.compile(
+                "select(?:Image|Window)\\s*\\(\\s*\"([^\"]+)\"\\s*\\)",
+                java.util.regex.Pattern.CASE_INSENSITIVE);
+        java.util.regex.Matcher m = p.matcher(code);
+        String last = null;
+        while (m.find()) last = m.group(1);
+        return last;
+    }
+
+    /**
+     * Stage 04: like {@link #resolveTargetImageTitle(String)} but falls
+     * back to the live active window's title when the macro source has
+     * no {@code selectImage} hint. Returns {@code null} when neither path
+     * yields a title — in test contexts and headless calls Fiji's
+     * {@link WindowManager} may NPE, which we swallow.
+     */
+    String resolveTargetImageTitleWithFallback(String code) {
+        String parsed = resolveTargetImageTitle(code);
+        if (parsed != null) return parsed;
+        try {
+            ImagePlus imp = WindowManager.getCurrentImage();
+            if (imp != null) {
+                String t = imp.getTitle();
+                if (t != null && !t.isEmpty()) return t;
+            }
+        } catch (Throwable ignore) {
+            // No live Fiji — fall through and return null.
+        }
+        return null;
+    }
+
+    /**
+     * Stage 04: title of the first non-error modal dialog in the dialogs
+     * snapshot, or {@code null}. Used to populate
+     * {@link ActiveMacro#dialogTitle} so the QUEUE_STORM_BLOCKED reply
+     * can name the dialog the previous macro is parked on.
+     */
+    private static String firstBlockingDialogTitle(JsonArray dialogs) {
+        if (dialogs == null) return null;
+        for (int i = 0; i < dialogs.size(); i++) {
+            try {
+                JsonElement el = dialogs.get(i);
+                if (el == null || !el.isJsonObject()) continue;
+                JsonObject d = el.getAsJsonObject();
+                JsonElement modalEl = d.get("modal");
+                if (modalEl == null || !modalEl.isJsonPrimitive()
+                        || !modalEl.getAsBoolean()) continue;
+                JsonElement typeEl = d.get("type");
+                if (typeEl != null && typeEl.isJsonPrimitive()
+                        && "error".equals(typeEl.getAsString())) {
+                    continue;
+                }
+                JsonElement tEl = d.get("title");
+                if (tEl != null && tEl.isJsonPrimitive()) {
+                    String t = tEl.getAsString();
+                    if (t != null && !t.isEmpty()) return t;
+                }
+            } catch (Throwable ignore) {}
+        }
+        return null;
+    }
+
+    /**
+     * Stage 04: build the {@code QUEUE_STORM_BLOCKED} response. Carries
+     * the blocking macro's id, the dialog title it is parked on, and the
+     * target image title in addition to the standard structured-error
+     * fields. For legacy clients that did not opt into structured errors
+     * the reply degrades to a plain string in the {@code error} field.
+     * Per plan: docs/safe_mode_v2/04_queue-storm-per-image.md.
+     */
+    private JsonObject queueStormBlockedReply(ActiveMacro inflight,
+                                              String target,
+                                              AgentCaps caps) {
+        JsonObject result = new JsonObject();
+        result.addProperty("success", false);
+
+        String dialogTitle = (inflight.dialogTitle != null && !inflight.dialogTitle.isEmpty())
+                ? inflight.dialogTitle : "(unknown)";
+        String message = "Macro #" + inflight.macroId
+                + " is paused on a '" + dialogTitle
+                + "' dialog targeting '" + target
+                + "'. Refusing to queue another macro on the same image.";
+        String hint = "Either dismiss the dialog (interact_dialog), wait for macro #"
+                + inflight.macroId
+                + " to finish, or run on a different image.";
+
+        if (caps != null && caps.structuredErrors) {
+            JsonObject err = new JsonObject();
+            err.addProperty("code", ErrorReply.CODE_QUEUE_STORM_BLOCKED);
+            err.addProperty("category", ErrorReply.CAT_BLOCKED);
+            err.addProperty("retry_safe", false);
+            err.addProperty("message", message);
+            err.addProperty("recovery_hint", hint);
+            err.addProperty("blocking_macro_id", inflight.macroId);
+            err.addProperty("blocking_dialog_title", dialogTitle);
+            err.addProperty("target_image", target);
+            result.add("error", err);
+        } else {
+            result.addProperty("error", message);
+        }
+        return successResponse(result);
     }
 
     /**
@@ -4964,12 +5198,31 @@ public class TCPCommandServer {
      * {@code execute_macro} — this command only wins when the caller cannot
      * afford to block the socket.
      */
-    private JsonObject handleExecuteMacroAsync(JsonObject request) {
+    private JsonObject handleExecuteMacroAsync(JsonObject request, AgentCaps caps) {
         JsonElement codeEl = request.get("code");
         if (codeEl == null || !codeEl.isJsonPrimitive()) {
             return errorResponse("Missing 'code' field for execute_macro_async");
         }
         String code = codeEl.getAsString();
+
+        // Stage 04 (docs/safe_mode_v2/04_queue-storm-per-image.md): same
+        // per-image guard the sync path runs. The async path does not
+        // populate {@link #inFlightByImage} on its own (the worker thread
+        // lives inside JobRegistry, which has no caps awareness yet) — so
+        // this check only fires when a sync execute_macro on the same
+        // image is currently paused on a Fiji dialog. That covers the
+        // scenario the plan transcript hit: an agent firing async macros
+        // while a sync macro is parked on "Convert Stack?".
+        if (isQueueStormGuardEnabled(caps)) {
+            String target = resolveTargetImageTitleWithFallback(code);
+            if (target != null) {
+                ActiveMacro inflight = inFlightByImage.get(target);
+                if (inflight != null && inflight.state == MacroState.PAUSED_ON_DIALOG) {
+                    return queueStormBlockedReply(inflight, target, caps);
+                }
+            }
+        }
+
         JobRegistry.Job job = jobRegistry.submit(code);
         JsonObject result = new JsonObject();
         result.addProperty("job_id", job.id);
