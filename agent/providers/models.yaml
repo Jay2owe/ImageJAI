@@ -66,6 +66,9 @@ models:
     replacement: null
     native_features:
       prompt_caching: true
+    pricing:
+      input_usd_per_mtok: 15.0
+      output_usd_per_mtok: 75.0
     tokenizer_multiplier: 1.35
     notes: >
       Opus 4.7 tokenizer consumes ~35% more tokens than 4.5 for the same
@@ -74,7 +77,10 @@ models:
       to typical-session estimates (06 §2.4 / §3.2), and to hover-card
       pricing ranges. Cache-hit tests in test_anthropic_native_features.py
       already exercise Opus 4.7 directly so the multiplier is exercised on
-      the request path.
+      the request path. Pricing reflects Anthropic's May 2026 published
+      list rates (input $15 / output $75 per million tokens) — the
+      multiplier scales the local token count *before* this rate is
+      applied, so the fallback ceiling sees the true Opus 4.7 cost shape.
 
   - provider: anthropic
     model_id: claude-sonnet-4-6
