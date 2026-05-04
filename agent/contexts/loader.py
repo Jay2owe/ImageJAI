@@ -68,4 +68,8 @@ if __name__ == "__main__":
     if len(sys.argv) != 2:
         sys.stderr.write("usage: python -m agent.contexts.loader <provider>/<model_id>\n")
         raise SystemExit(2)
+    # Composed context contains characters (μ, em-dash, …) that the default
+    # Windows cp1252 console codec rejects. Reconfigure stdout to utf-8.
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8")
     print(load_context(sys.argv[1]), end="")
