@@ -5,6 +5,10 @@ import imagejai.engine.picker.ModelEntry;
 import imagejai.engine.picker.ProviderEntry;
 import imagejai.engine.picker.ProviderRegistry;
 
+import java.util.LinkedHashMap;
+import java.util.Map;
+import java.util.concurrent.Callable;
+
 import javax.swing.BorderFactory;
 import javax.swing.Box;
 import javax.swing.BoxLayout;
@@ -95,6 +99,13 @@ public class ModelPickerButton extends JButton {
     private JLabel headerStatusLabel;
     private JButton headerRefreshButton;
 
+    /**
+     * Tracks the currently-mounted {@link ProviderMenu} for each provider id so
+     * {@link #applyProviderRefresh} can swap a single submenu in-place rather
+     * than rebuilding the whole popup. Per Phase D acceptance + 05 §3.9.
+     */
+    private final Map<String, ProviderMenu> providerSubmenus = new LinkedHashMap<>();
+
     public ModelPickerButton(ProviderRegistry registry, Settings settings) {
         super(captionFor(settings, registry));
         this.registry = registry == null ? ProviderRegistry.empty() : registry;
@@ -168,6 +179,7 @@ public class ModelPickerButton extends JButton {
 
     private void rebuildPopup() {
         popup.removeAll();
+        providerSubmenus.clear();
         popup.add(buildHeaderStrip());
         popup.add(new JSeparator());
 
@@ -183,29 +195,9 @@ public class ModelPickerButton extends JButton {
         }
 
         for (ProviderEntry provider : registry.providers()) {
-            popup.add(new ProviderMenu(
-                    provider,
-                    new ProviderMenu.ModelLaunchListener() {
-                        @Override
-                        public void onLaunchRequested(ModelEntry entry) {
-                            handleLaunch(entry);
-                        }
-                    },
-                    new ModelMenuItem.PinToggleListener() {
-                        @Override
-                        public void onPinToggled(ModelEntry entry, boolean nowPinned) {
-                            // Phase G persists pins to models_local.yaml; Phase D
-                            // keeps them in-memory so the affordance is visible.
-                        }
-                    },
-                    new ProviderMenu.InstallerListener() {
-                        @Override
-                        public void onCredentialsRequested(String providerId) {
-                            if (installerLink != null) {
-                                installerLink.openInstallerForProvider(providerId);
-                            }
-                        }
-                    }));
+            ProviderMenu submenu = buildProviderMenu(provider);
+            providerSubmenus.put(provider.providerId(), submenu);
+            popup.add(submenu);
         }
 
         popup.add(new JSeparator());
@@ -219,6 +211,106 @@ public class ModelPickerButton extends JButton {
             }
         });
         popup.add(settingsItem);
+    }
+
+    private ProviderMenu buildProviderMenu(ProviderEntry provider) {
+        return new ProviderMenu(
+                provider,
+                new ProviderMenu.ModelLaunchListener() {
+                    @Override
+                    public void onLaunchRequested(ModelEntry entry) {
+                        handleLaunch(entry);
+                    }
+                },
+                new ModelMenuItem.PinToggleListener() {
+                    @Override
+                    public void onPinToggled(ModelEntry entry, boolean nowPinned) {
+                        // Phase G persists pins to models_local.yaml; Phase D
+                        // keeps them in-memory so the affordance is visible.
+                    }
+                },
+                new ProviderMenu.InstallerListener() {
+                    @Override
+                    public void onCredentialsRequested(String providerId) {
+                        if (installerLink != null) {
+                            installerLink.openInstallerForProvider(providerId);
+                        }
+                    }
+                });
+    }
+
+    /**
+     * Per-provider in-place refresh per Phase D acceptance + 05 §3.9. Replaces
+     * just the named provider's submenu instead of calling {@link #rebuildPopup}.
+     * If the popup is currently visible the new submenu inherits its position
+     * so the user doesn't see flicker.
+     *
+     * <p>{@code newEntry} is the {@link ProviderEntry} returned by the per-provider
+     * fetcher; the registry is updated via {@link ProviderRegistry#refreshProvider}
+     * so {@link #lookup} stays consistent with the popup contents.
+     */
+    public void applyProviderRefresh(String providerId, ProviderEntry newEntry) {
+        if (providerId == null || newEntry == null) {
+            return;
+        }
+        registry = registry.refreshProvider(providerId, newEntry);
+        ProviderMenu existing = providerSubmenus.get(providerId);
+        if (existing == null) {
+            // Provider wasn't previously rendered (popup not built yet) — fall
+            // back to a full rebuild so the new entry shows up next time.
+            rebuildPopup();
+            return;
+        }
+        int index = -1;
+        for (int i = 0; i < popup.getComponentCount(); i++) {
+            if (popup.getComponent(i) == existing) {
+                index = i;
+                break;
+            }
+        }
+        ProviderMenu replacement = buildProviderMenu(newEntry);
+        providerSubmenus.put(providerId, replacement);
+        if (index >= 0) {
+            popup.remove(index);
+            popup.insert(replacement, index);
+            popup.revalidate();
+            popup.repaint();
+        } else {
+            // Submenu was tracked but not in the popup component list any more
+            // (race with rebuild). Push it back so the dropdown still shows it.
+            popup.add(replacement);
+        }
+        refreshCaption();
+    }
+
+    /**
+     * Kick off a {@link ProviderRegistry.RefreshWorker} that fetches the named
+     * provider's entry off-EDT then calls {@link #applyProviderRefresh} on the
+     * EDT once {@code fetcher} returns. Any exception swallows the swap and is
+     * surfaced via the header status label.
+     */
+    public void refreshProviderAsync(final String providerId,
+                                     Callable<ProviderEntry> fetcher) {
+        if (providerId == null || fetcher == null) {
+            return;
+        }
+        ProviderRegistry.RefreshWorker worker = new ProviderRegistry.RefreshWorker(
+                providerId, fetcher,
+                new ProviderRegistry.RefreshWorker.Applier() {
+                    @Override
+                    public void apply(String pid, ProviderEntry newEntry, Throwable error) {
+                        if (error != null) {
+                            handleRefreshFailure(error instanceof Exception
+                                    ? (Exception) error
+                                    : new RuntimeException(error));
+                            return;
+                        }
+                        if (newEntry != null) {
+                            applyProviderRefresh(pid, newEntry);
+                        }
+                    }
+                });
+        worker.execute();
     }
 
     private List<ModelMenuItem> collectPinned() {

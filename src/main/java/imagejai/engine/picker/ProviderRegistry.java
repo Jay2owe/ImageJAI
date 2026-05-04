@@ -1,5 +1,6 @@
 package imagejai.engine.picker;
 
+import javax.swing.SwingWorker;
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.file.Path;
@@ -13,6 +14,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.Callable;
 
 /**
  * Phase G: groups merged {@link ModelEntry}s by provider, after running the
@@ -203,5 +205,98 @@ public final class ProviderRegistry {
      */
     public static LocalDate today(Instant now) {
         return now.atZone(ZoneId.systemDefault()).toLocalDate();
+    }
+
+    /**
+     * Returns a new registry where the named provider's {@link ProviderEntry}
+     * has been replaced with {@code newEntry}. All other providers and their
+     * model entries remain identical. Callers (typically {@link ModelPickerButton}
+     * after a successful {@link RefreshWorker} fetch) use this to swap a single
+     * provider's models without rebuilding the whole popup — the flicker-risk
+     * mitigation called out in docs/multi_provider/05_ui_design.md §3.9 and
+     * Phase D acceptance.
+     *
+     * <p>Unknown {@code providerId} (not in {@link #CANONICAL_PROVIDERS}) returns
+     * {@code this} unchanged so callers don't have to pre-validate.
+     */
+    public ProviderRegistry refreshProvider(String providerId, ProviderEntry newEntry) {
+        if (providerId == null || newEntry == null) {
+            return this;
+        }
+        if (!providersByKey.containsKey(providerId)) {
+            return this;
+        }
+        Map<String, ProviderEntry> newProviders =
+                new LinkedHashMap<String, ProviderEntry>(providersByKey);
+        newProviders.put(providerId, newEntry);
+
+        Map<String, ModelEntry> newEntries = new LinkedHashMap<String, ModelEntry>();
+        for (Map.Entry<String, ModelEntry> e : entriesByKey.entrySet()) {
+            // Drop the old provider's keys; we'll add the new ones below.
+            if (!providerId.equals(e.getValue().providerId())) {
+                newEntries.put(e.getKey(), e.getValue());
+            }
+        }
+        for (ModelEntry e : newEntry.models()) {
+            if (e == null || !providerId.equals(e.providerId())) {
+                continue;
+            }
+            newEntries.put(e.providerId() + " " + e.modelId(), e);
+        }
+        return new ProviderRegistry(
+                Collections.unmodifiableMap(newProviders),
+                Collections.unmodifiableMap(newEntries));
+    }
+
+    /**
+     * SwingWorker that fetches one provider's {@link ProviderEntry} off the EDT
+     * and hands the result back to a caller-supplied applier on
+     * {@link #done()} so {@link ModelPickerButton} can swap a single
+     * {@link ProviderMenu}'s children without rebuilding the whole popup.
+     *
+     * <p>Phase D acceptance: per-provider refresh; whole-popup rebuild avoided.
+     * The actual fetch logic is injected — Phase G's
+     * {@link ProviderDiscovery} owns the network calls; Phase D ships this
+     * dispatch shell so the picker has a stable hook to call.
+     */
+    public static final class RefreshWorker extends SwingWorker<ProviderEntry, Void> {
+
+        /** Callback invoked on the EDT once {@link #doInBackground} returns. */
+        public interface Applier {
+            void apply(String providerId, ProviderEntry newEntry, Throwable error);
+        }
+
+        private final String providerId;
+        private final Callable<ProviderEntry> fetcher;
+        private final Applier applier;
+
+        public RefreshWorker(String providerId,
+                             Callable<ProviderEntry> fetcher,
+                             Applier applier) {
+            this.providerId = providerId;
+            this.fetcher = fetcher;
+            this.applier = applier;
+        }
+
+        public String providerId() {
+            return providerId;
+        }
+
+        @Override
+        protected ProviderEntry doInBackground() throws Exception {
+            return fetcher == null ? null : fetcher.call();
+        }
+
+        @Override
+        protected void done() {
+            if (applier == null) {
+                return;
+            }
+            try {
+                applier.apply(providerId, get(), null);
+            } catch (Exception ex) {
+                applier.apply(providerId, null, ex);
+            }
+        }
     }
 }
