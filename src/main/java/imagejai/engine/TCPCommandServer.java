@@ -23,6 +23,7 @@ import ij.process.LUT;
 import imagejai.config.Constants;
 import imagejai.engine.safeMode.DestructiveScanner;
 import imagejai.engine.safeMode.RoiAutoBackup;
+import imagejai.engine.safeMode.SourceImageTagger;
 import imagejai.ui.ChatPanelController;
 
 import javax.swing.SwingUtilities;
@@ -3107,6 +3108,22 @@ public class TCPCommandServer {
         final SessionUndo.RescueHandle rescue = captureRescueFrameIfEnabled(
                 undoCallId, code, caps);
 
+        // Stage 06 (docs/safe_mode_v2/06_results-source-image-column.md):
+        // snapshot ResultsTable.getCounter() and the active image's title
+        // BEFORE the macro runs so postExec can stamp Source_Image on every
+        // newly-added row. Honors the per-call escape hatch
+        // ({@code // @safe_mode allow: legacy_results_format}) by skipping
+        // tagger construction entirely. preExec captures the title NOW; the
+        // post hook prefers the FINAL active image's title (limitation
+        // documented in the plan §Known risks for mid-macro selectImage).
+        final SourceImageTagger sourceImageTagger =
+                (isSourceImageColumnEnabled(caps) && !SourceImageTagger.macroOptsOut(code))
+                        ? new SourceImageTagger() : null;
+        if (sourceImageTagger != null) {
+            try { sourceImageTagger.preExec(WindowManager.getCurrentImage()); }
+            catch (Throwable ignore) {}
+        }
+
         // Gate image.* events while this macro runs. The agent's event
         // subscribers react to image.opened by sending get_image_info /
         // get_histogram — those wrap work in SwingUtilities.invokeLater
@@ -3374,6 +3391,19 @@ public class TCPCommandServer {
             if (inflightKey != null && activeEntry != null) {
                 inFlightByImage.remove(inflightKey, activeEntry);
             }
+        }
+
+        // Stage 06 (docs/safe_mode_v2/06_results-source-image-column.md):
+        // tag every Results row added during this macro with the FINAL
+        // active image's title. Runs on both success and failure so partial
+        // work (e.g. a plugin that pushed rows before a dialog-pause) still
+        // gets attributed. Placed BEFORE the CSV snapshot below so the
+        // {@code resultsTable} field on the TCP response also carries the
+        // {@code Source_Image} column. Best-effort — a Throwable from the
+        // tagger never converts a successful macro into an error reply.
+        if (sourceImageTagger != null) {
+            try { sourceImageTagger.postExec(WindowManager.getCurrentImage()); }
+            catch (Throwable ignore) {}
         }
 
         long elapsed = System.currentTimeMillis() - startTime;
@@ -3650,6 +3680,16 @@ public class TCPCommandServer {
                     && !rescue.isReleased()) {
                 try { rescue.commit(); } catch (Throwable ignore) {}
             }
+            // Stage 06 safety net: when the synchronized block threw before
+            // the inline postExec call could land, run it here so any rows
+            // the macro did manage to push still get the Source_Image
+            // stamp. {@link SourceImageTagger#postExec} is idempotent — the
+            // normal-path call sets a done flag so this is a no-op when
+            // already invoked above.
+            if (sourceImageTagger != null) {
+                try { sourceImageTagger.postExec(WindowManager.getCurrentImage()); }
+                catch (Throwable ignore) {}
+            }
         }
     }
 
@@ -3679,6 +3719,23 @@ public class TCPCommandServer {
                 && caps.safeMode
                 && caps.safeModeOptions != null
                 && caps.safeModeOptions.scientificIntegrityScan;
+    }
+
+    /**
+     * Stage 06 (docs/safe_mode_v2/06_results-source-image-column.md): true
+     * when the auto-{@code Source_Image}-column tagger should run for the
+     * given caps — master safe-mode AND the per-guard option both on. The
+     * tagger writes the {@code Source_Image} column on every Results-table
+     * row added during the call so cross-image aggregation stays
+     * unambiguous. Per-call escape hatch lives on the macro source itself
+     * ({@code // @safe_mode allow: legacy_results_format}) and is checked
+     * by the wiring site, not here.
+     */
+    private static boolean isSourceImageColumnEnabled(AgentCaps caps) {
+        return caps != null
+                && caps.safeMode
+                && caps.safeModeOptions != null
+                && caps.safeModeOptions.autoSourceImageColumn;
     }
 
     /**
