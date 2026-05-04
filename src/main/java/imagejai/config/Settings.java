@@ -344,14 +344,33 @@ public class Settings {
     }
 
     /**
-     * Save current settings to disk.
+     * Save current settings to disk atomically.
+     *
+     * <p>Writes to a sibling tmp file then renames over the live path
+     * (E.7 in docs/multi_provider/08_verification_report.md). Two concurrent
+     * Fiji instances dismissing different tier-change banners or saving
+     * different {@link #lastProviderErrors} cannot race away half-written
+     * files because the rename is the only step that mutates the user's
+     * config.json.
+     *
+     * <p>{@code ATOMIC_MOVE} is best-effort: on filesystems that don't support
+     * it (rare on local NTFS / ext4 / APFS) the rename falls back to a
+     * REPLACE_EXISTING copy, which is still safer than the previous direct
+     * truncate-and-rewrite path.
      */
-    public void save() {
+    public synchronized void save() {
         try {
             Files.createDirectories(configPath.getParent());
-            try (Writer w = new OutputStreamWriter(
-                    new FileOutputStream(configPath.toFile()), StandardCharsets.UTF_8)) {
+            Path tmp = configPath.resolveSibling(configPath.getFileName() + ".tmp");
+            try (Writer w = Files.newBufferedWriter(tmp, StandardCharsets.UTF_8)) {
                 GSON.toJson(this, w);
+            }
+            try {
+                Files.move(tmp, configPath,
+                        StandardCopyOption.REPLACE_EXISTING,
+                        StandardCopyOption.ATOMIC_MOVE);
+            } catch (java.nio.file.AtomicMoveNotSupportedException ignore) {
+                Files.move(tmp, configPath, StandardCopyOption.REPLACE_EXISTING);
             }
         } catch (Exception e) {
             System.err.println("[ImageJAI] Failed to save settings: " + e.getMessage());
