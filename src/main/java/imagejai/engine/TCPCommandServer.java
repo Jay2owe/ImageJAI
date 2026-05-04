@@ -370,6 +370,26 @@ public class TCPCommandServer {
     private final Map<Socket, AgentCaps> capsBySocket = new ConcurrentHashMap<Socket, AgentCaps>();
 
     /**
+     * Test-only seam: when non-null, {@link #dispatchInternal} appends the
+     * caps used for each invocation to this list. Production code never
+     * touches this; tests in {@code TCPCommandServerBatchCapsTest} set it to
+     * verify caps inheritance through nested {@code batch}/{@code run}/
+     * {@code intent} dispatches. Per plan:
+     * {@code docs/safe_mode_v2/01_fix-batch-run-bypass.md}.
+     */
+    java.util.List<AgentCaps> capsWitnessForTest = null;
+
+    /**
+     * Test-only seam: when set, {@link #handleExecuteMacro} returns the
+     * function's result instead of running the macro on the EDT. Lets unit
+     * tests cover the {@code intent} → {@code execute_macro} re-entry path
+     * without a live Fiji classpath. Per plan:
+     * {@code docs/safe_mode_v2/01_fix-batch-run-bypass.md}.
+     */
+    static java.util.function.BiFunction<JsonObject, AgentCaps, JsonObject>
+            executeMacroForTest = null;
+
+    /**
      * Step 13: session-scoped image provenance DAG shared across all
      * sockets. Mutating handlers capture a marker at entry, call
      * {@link ImageGraph#trackMacroChange} at exit, and attach
@@ -433,7 +453,10 @@ public class TCPCommandServer {
     private final ExplorationEngine explorationEngine;
     private final FrictionLog frictionLog = new FrictionLog();
     private final FrictionLogJournal frictionLogJournal = new FrictionLogJournal();
-    private final IntentRouter intentRouter = new IntentRouter();
+    // Package-private and non-final so unit tests can install a temp-pathed
+    // router and avoid teach() writing to the user's home directory. Production
+    // never reassigns this field.
+    IntentRouter intentRouter = new IntentRouter();
     private final JobRegistry jobRegistry;
     // Phase 8: reactive rules engine. Subscribes to the bus, fires rule
     // actions in response to matching events. Lifecycle tied to the TCP
@@ -959,21 +982,45 @@ public class TCPCommandServer {
     }
 
     /**
-     * Internal overload for nested dispatches (batch, run, intent) that have no
-     * client socket of their own. Falls back to {@link #DEFAULT_CAPS} behaviour.
+     * Nested-dispatch overload for {@code batch}, {@code run}, and {@code intent}.
+     * The originating handler passes its own {@link AgentCaps} so every
+     * sub-command inherits the caller's capability negotiation — closing the
+     * batch/run/intent bypass identified in {@code docs/safe_mode_v2/01_fix-batch-run-bypass.md}.
+     * Without this overload the inner dispatch silently falls back to
+     * {@link #DEFAULT_CAPS}, which has every safe-mode flag off; safe-mode
+     * agents could be defeated by wrapping any destructive macro inside a
+     * {@code batch} envelope. Package-private so unit tests can verify caps
+     * inheritance without reflection.
      */
-    private JsonObject dispatch(JsonObject request) {
-        return dispatch(request, null);
+    JsonObject dispatch(JsonObject request, AgentCaps caps) {
+        return dispatchInternal(request, caps, null);
     }
 
     /**
-     * Dispatch a parsed request. Post-processing adds hash dedup for readonly
-     * commands and records friction on failure responses.
+     * Top-level dispatch from a real client socket. Resolves the per-socket
+     * caps once and delegates to the shared internal path.
      *
-     * @param sock originating client socket, or {@code null} for nested calls
-     *             from {@code batch} / {@code run} / {@code intent}.
+     * @param sock originating client socket; {@code null} only for legacy
+     *             callers that have no session — caps fall back to
+     *             {@link #DEFAULT_CAPS}.
      */
     private JsonObject dispatch(JsonObject request, Socket sock) {
+        AgentCaps caps = (sock != null)
+                ? capsBySocket.getOrDefault(sock, DEFAULT_CAPS)
+                : DEFAULT_CAPS;
+        return dispatchInternal(request, caps, sock);
+    }
+
+    /**
+     * Shared dispatch body used by both the socket-bound and the nested
+     * overloads. Caps are supplied by the caller so nested invocations
+     * inherit the originating socket's negotiated capabilities. Per plan:
+     * {@code docs/safe_mode_v2/01_fix-batch-run-bypass.md}.
+     *
+     * <p>Post-processing that depends on a real socket (response dedup short-
+     * circuit, pattern-hint attachment) is skipped when {@code sock} is null.
+     */
+    private JsonObject dispatchInternal(JsonObject request, AgentCaps caps, Socket sock) {
         JsonElement cmdElement = request.get("command");
         if (cmdElement == null || !cmdElement.isJsonPrimitive()) {
             return errorResponse("Missing 'command' field");
@@ -984,7 +1031,15 @@ public class TCPCommandServer {
             listener.onCommandReceived(command);
         }
 
-        JsonObject response = dispatchCore(command, request, sock);
+        // Test seam: when set, every dispatch invocation appends the caps
+        // it actually used so a test can prove caps inheritance through
+        // batch/run/intent. Production code never sets this; default null
+        // = no recording, no overhead. Per plan: safe_mode_v2 stage 01.
+        if (capsWitnessForTest != null) {
+            capsWitnessForTest.add(caps);
+        }
+
+        JsonObject response = dispatchCore(command, request, caps, sock);
 
         // Phase 7: surface a handler-attached gui_action piggyback into the
         // outer response. Handlers may set result.gui_action = {...}; this
@@ -1001,11 +1056,13 @@ public class TCPCommandServer {
         // hasn't changed since this socket last fetched it, we short-circuit
         // with {"ok":true,"unchanged":true,"since":ts,"ageMs":N} and skip
         // the hash-attach path entirely. Per plan: docs/tcp_upgrade/11_dedup_response.md.
+        // Skipped on nested dispatches (sock == null) — the dedup cache is
+        // per-socket and inherited caps may carry the originating socket's
+        // cache, so applying it here would mutate state for the wrong path.
         boolean dedupShortCircuited = false;
         if (response != null
                 && sock != null
                 && DEDUP_COMMANDS.contains(command)) {
-            AgentCaps caps = capsBySocket.getOrDefault(sock, DEFAULT_CAPS);
             if (caps != null
                     && caps.dedup
                     && caps.dedupCache != null
@@ -1027,10 +1084,6 @@ public class TCPCommandServer {
                 && READONLY_COMMANDS.contains(command)) {
             response = applyReadonlyDedup(request, response);
         }
-
-        AgentCaps caps = (sock != null)
-                ? capsBySocket.getOrDefault(sock, DEFAULT_CAPS)
-                : DEFAULT_CAPS;
 
         // Phase 6: record failures to the friction log. Counts both transport-level
         // failures (ok:false) and operation-level failures (ok:true but
@@ -1105,13 +1158,11 @@ public class TCPCommandServer {
         for (PatternDetector.Hint h : hints) arr.add(h.toJson());
     }
 
-    private JsonObject dispatchCore(String command, JsonObject request, Socket sock) {
-        // Look up caps once per request so handlers below can shape responses
-        // without re-reading the map. Nested dispatches (batch, run, intent)
-        // pass sock == null and land on DEFAULT_CAPS.
-        AgentCaps caps = (sock != null)
-                ? capsBySocket.getOrDefault(sock, DEFAULT_CAPS)
-                : DEFAULT_CAPS;
+    private JsonObject dispatchCore(String command, JsonObject request, AgentCaps caps, Socket sock) {
+        // Caps are now supplied by dispatchInternal so nested dispatches
+        // (batch, run, intent) inherit the originating socket's negotiated
+        // caps instead of falling back to DEFAULT_CAPS. Per plan:
+        // docs/safe_mode_v2/01_fix-batch-run-bypass.md.
 
         if ("hello".equals(command)) {
             return handleHello(request, sock);
@@ -1142,9 +1193,9 @@ public class TCPCommandServer {
         } else if ("get_metadata".equals(command)) {
             return handleGetMetadata();
         } else if ("batch".equals(command)) {
-            return handleBatch(request);
+            return handleBatch(request, caps);
         } else if ("run".equals(command)) {
-            return handleRunChain(request);
+            return handleRunChain(request, caps);
         } else if ("get_pixels".equals(command)) {
             return handleGetPixels(request);
         } else if ("3d_viewer".equals(command)) {
@@ -1172,7 +1223,7 @@ public class TCPCommandServer {
         } else if ("clear_friction_log".equals(command)) {
             return handleClearFrictionLog();
         } else if ("intent".equals(command)) {
-            return handleIntent(request);
+            return handleIntent(request, caps);
         } else if ("intent_teach".equals(command)) {
             return handleIntentTeach(request);
         } else if ("intent_list".equals(command)) {
@@ -2679,6 +2730,15 @@ public class TCPCommandServer {
         // Step 01: caps is plumbed in so later steps (02 structured errors,
         // 03 canonical macro echo, 05 pulse / stateDelta) can shape the reply
         // per agent without another signature sweep.
+
+        // Test seam: when set, short-circuit to a stub response so unit tests
+        // can verify caps inheritance through batch/run/intent without
+        // spinning up a real Fiji session. Production never sets this.
+        // Per plan: docs/safe_mode_v2/01_fix-batch-run-bypass.md.
+        if (executeMacroForTest != null) {
+            return executeMacroForTest.apply(request, caps);
+        }
+
         JsonElement codeElement = request.get("code");
         if (codeElement == null || !codeElement.isJsonPrimitive()) {
             return errorResponse("Missing 'code' field for execute_macro");
@@ -4407,7 +4467,13 @@ public class TCPCommandServer {
         return successResponse((JsonObject) holder[0]);
     }
 
-    private JsonObject handleBatch(JsonObject request) {
+    /**
+     * Execute a list of sub-commands sequentially. Each sub-command is
+     * dispatched through {@link #dispatch(JsonObject, AgentCaps)} so it
+     * inherits the originating socket's caps — closing the safe-mode bypass
+     * documented in {@code docs/safe_mode_v2/01_fix-batch-run-bypass.md}.
+     */
+    private JsonObject handleBatch(JsonObject request, AgentCaps caps) {
         JsonElement commandsElement = request.get("commands");
         if (commandsElement == null || !commandsElement.isJsonArray()) {
             return errorResponse("Missing 'commands' array for batch");
@@ -4419,7 +4485,7 @@ public class TCPCommandServer {
         for (int i = 0; i < commands.size(); i++) {
             JsonElement elem = commands.get(i);
             if (elem.isJsonObject()) {
-                JsonObject subResult = dispatch(elem.getAsJsonObject());
+                JsonObject subResult = dispatch(elem.getAsJsonObject(), caps);
                 results.add(subResult);
             } else {
                 results.add(errorResponse("Invalid batch command at index " + i));
@@ -4450,7 +4516,7 @@ public class TCPCommandServer {
      *   {"ok": true, "result": {"results": [...], "executed": N, "total": M, "halted": bool}}
      * </pre>
      */
-    private JsonObject handleRunChain(JsonObject request) {
+    private JsonObject handleRunChain(JsonObject request, AgentCaps caps) {
         JsonElement chainEl = request.get("chain");
         if (chainEl == null || !chainEl.isJsonPrimitive()) {
             return errorResponse("Missing 'chain' string for run command");
@@ -4486,7 +4552,10 @@ public class TCPCommandServer {
 
         for (int i = 0; i < segments.size(); i++) {
             JsonObject subReq = segments.get(i);
-            JsonObject subResp = dispatch(subReq);
+            // Thread caller's caps so each chain segment inherits safe-mode
+            // (and any other negotiated capability). Per plan:
+            // docs/safe_mode_v2/01_fix-batch-run-bypass.md.
+            JsonObject subResp = dispatch(subReq, caps);
             results.add(subResp);
 
             boolean failed = isFailure(subResp);
@@ -4658,7 +4727,7 @@ public class TCPCommandServer {
      * {@code mapped_to} describing which mapping fired. On miss, returns
      * {@code {ok: false, miss: true, suggestion: null}}.
      */
-    private JsonObject handleIntent(JsonObject request) {
+    private JsonObject handleIntent(JsonObject request, AgentCaps caps) {
         JsonElement phraseEl = request.get("phrase");
         if (phraseEl == null || !phraseEl.isJsonPrimitive()) {
             return errorResponse("Missing 'phrase' field for intent");
@@ -4678,9 +4747,11 @@ public class TCPCommandServer {
         JsonObject macroReq = new JsonObject();
         macroReq.addProperty("command", "execute_macro");
         macroReq.addProperty("code", resolved.macro);
-        // intent currently has no originating socket, so caps fall back to
-        // DEFAULT_CAPS. If a future step routes caps through intent, swap here.
-        JsonObject execResp = handleExecuteMacro(macroReq, DEFAULT_CAPS);
+        // Re-enter dispatch with the caller's caps so the resolved macro runs
+        // through the same capability-aware pipeline as a direct
+        // execute_macro call. Without this, intent silently bypassed every
+        // safe-mode guard. Per plan: docs/safe_mode_v2/01_fix-batch-run-bypass.md.
+        JsonObject execResp = dispatch(macroReq, caps);
 
         JsonObject mappedTo = new JsonObject();
         mappedTo.addProperty("pattern", resolved.mapping.patternSrc);
