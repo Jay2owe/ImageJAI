@@ -8,8 +8,13 @@ import imagejai.engine.AgentSession;
 import imagejai.engine.EmbeddedAgentSession;
 import imagejai.engine.ExternalAgentSession;
 import imagejai.engine.picker.AgentLaunchOrchestrator;
+import imagejai.engine.picker.MergeFunction;
 import imagejai.engine.picker.ModelEntry;
+import imagejai.engine.picker.ModelsCache;
+import imagejai.engine.picker.ModelsLocalLoader;
+import imagejai.engine.picker.ModelsYamlLoader;
 import imagejai.engine.picker.NativeAgentLauncher;
+import imagejai.engine.picker.ProviderDiscovery;
 import imagejai.engine.picker.ProviderRegistry;
 import imagejai.engine.picker.ProxyAgentLauncher;
 import imagejai.engine.safeMode.SafeModeIndicator;
@@ -46,8 +51,16 @@ import java.awt.event.ActionListener;
 import java.awt.event.ComponentAdapter;
 import java.awt.event.ComponentEvent;
 import java.io.File;
+import java.io.InputStream;
+import java.time.Duration;
+import java.time.Instant;
+import java.time.LocalDate;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
+import java.util.Set;
 
 /**
  * Plugin root panel: header controls plus a CardLayout body that swaps
@@ -320,6 +333,13 @@ public class AiRootPanel extends JPanel implements ChatSurface {
                 openSettings();
             }
         });
+        if (settings.useMultiProviderPicker) {
+            // Phase G cross-phase carry-over: feed the dropdown's ↻ refresh
+            // button a real RefreshTask backed by ProviderDiscovery + ModelsCache
+            // so the user can refresh model lists at any time. Without this hook
+            // the refresh button is permanently disabled (Phase G acceptance).
+            modelPicker.setRefreshTask(buildRefreshTask());
+        }
 
         if (settings.useMultiProviderPicker) {
             leftPanel.add(modelPicker);
@@ -901,6 +921,170 @@ public class AiRootPanel extends JPanel implements ChatSurface {
             settings.multiProviderFlipNoticeShown = true;
             settings.save();
         }
+    }
+
+    /**
+     * Build the {@link ModelPickerButton.RefreshTask} wired to production
+     * {@link ProviderDiscovery} + {@link ModelsCache} + {@link MergeFunction}.
+     *
+     * <p>Phase G acceptance §3 calls for the dropdown's ↻ button to fan out
+     * over the fifteen provider {@code /models} endpoints with a 4 s
+     * per-provider budget (06 §4.4), persist successful results to the 24 h
+     * cache, fall back to cache for failed providers, and merge curated +
+     * live + user overrides into the new dropdown contents.
+     *
+     * <p>Failed providers are reported via
+     * {@link ModelPickerButton.RefreshOutcome#failedProviders} so the header
+     * strip can render the "Couldn't reach … — using cached list" affordance
+     * (05 §8.4) without a JOptionPane interrupt.
+     */
+    private ModelPickerButton.RefreshTask buildRefreshTask() {
+        return new ModelPickerButton.RefreshTask() {
+            @Override
+            public ModelPickerButton.RefreshOutcome refresh() {
+                return runRefreshOffEdt();
+            }
+        };
+    }
+
+    private ModelPickerButton.RefreshOutcome runRefreshOffEdt() {
+        ProviderRegistry oldRegistry = providerRegistry == null
+                ? ProviderRegistry.empty()
+                : providerRegistry;
+
+        Map<String, String> creds = readProviderCredentials();
+        Map<String, ProviderDiscovery.Endpoint> endpoints =
+                ProviderDiscovery.defaultEndpoints(creds);
+        ProviderDiscovery discovery = new ProviderDiscovery(
+                endpoints, ProviderDiscovery.defaultFetcher());
+
+        ModelsCache cache = new ModelsCache(modelsCacheRoot());
+        Instant fetchedAt = Instant.now();
+        Duration timeout = Duration.ofMillis(4000);
+
+        Map<String, MergeFunction.LiveResult> live =
+                new LinkedHashMap<String, MergeFunction.LiveResult>();
+        List<String> failed = new ArrayList<String>();
+
+        for (String providerId : endpoints.keySet()) {
+            if (ProviderDiscovery.CURATED_ONLY.contains(providerId)) {
+                live.put(providerId, MergeFunction.LiveResult.failure());
+                continue;
+            }
+            MergeFunction.LiveResult result = discovery.discover(providerId, timeout);
+            if (result.successful()) {
+                try {
+                    cache.write(providerId, fetchedAt,
+                            endpoints.get(providerId).url(), result.modelIds());
+                } catch (Exception ex) {
+                    IJ.log("[ImageJAI] Failed to write cache for "
+                            + providerId + ": " + ex.getMessage());
+                }
+                live.put(providerId, result);
+            } else {
+                ModelsCache.Snapshot snap = cache.read(providerId);
+                if (snap != null) {
+                    Set<String> ids = new LinkedHashSet<String>(snap.modelIds());
+                    live.put(providerId, MergeFunction.LiveResult.success(ids));
+                } else {
+                    live.put(providerId, MergeFunction.LiveResult.failure());
+                }
+                failed.add(providerId);
+            }
+        }
+
+        List<ModelEntry> curated = loadCuratedEntries();
+        Map<String, ModelsLocalLoader.Override> overrides = loadUserOverrides();
+        LocalDate today = LocalDate.now();
+        List<ModelEntry> merged = MergeFunction.merge(curated, live, overrides, today);
+        List<ModelEntry> visible = MergeFunction.applyVisibility(merged, overrides, today);
+        ProviderRegistry newRegistry = ProviderRegistry.fromMerged(visible, today);
+
+        int newCount = 0;
+        int removedCount = 0;
+        Set<String> oldKeys = collectModelKeys(oldRegistry);
+        Set<String> newKeys = collectModelKeys(newRegistry);
+        for (String k : newKeys) {
+            if (!oldKeys.contains(k)) newCount++;
+        }
+        for (String k : oldKeys) {
+            if (!newKeys.contains(k)) removedCount++;
+        }
+
+        // Update the cached registry on the panel so launch-button lookups
+        // and tier-change checks see the same view as the popup.
+        providerRegistry = newRegistry;
+        return new ModelPickerButton.RefreshOutcome(
+                newRegistry, newCount, removedCount, failed);
+    }
+
+    private Map<String, String> readProviderCredentials() {
+        Map<String, String> out = new LinkedHashMap<String, String>();
+        imagejai.ui.installer.ProviderCredentials store;
+        try {
+            store = settings.providerCredentials();
+        } catch (Exception ex) {
+            return out;
+        }
+        if (store == null) {
+            return out;
+        }
+        for (Map.Entry<String, String> e
+                : imagejai.ui.installer.ProviderCredentials
+                        .ENV_VAR_FOR_PROVIDER.entrySet()) {
+            String providerId = e.getKey();
+            String envName = e.getValue();
+            try {
+                Map<String, String> entries = store.read(providerId);
+                String value = entries.get(envName);
+                if (value != null && !value.isEmpty()) {
+                    out.put(providerId, value);
+                }
+            } catch (Exception ignored) {
+                // Missing or unreadable env file — provider just gets no auth header.
+            }
+        }
+        return out;
+    }
+
+    private java.nio.file.Path modelsCacheRoot() {
+        return imagejai.config.Settings.getConfigDir()
+                .resolve("cache").resolve("models");
+    }
+
+    private List<ModelEntry> loadCuratedEntries() {
+        try (InputStream in = ProviderRegistry.class
+                .getResourceAsStream(ProviderRegistry.BUNDLED_RESOURCE)) {
+            if (in == null) {
+                return java.util.Collections.emptyList();
+            }
+            return ModelsYamlLoader.loadFromStream(in);
+        } catch (Exception ex) {
+            return java.util.Collections.emptyList();
+        }
+    }
+
+    private Map<String, ModelsLocalLoader.Override> loadUserOverrides() {
+        try {
+            ModelsLocalLoader loader = new ModelsLocalLoader(
+                    ModelsLocalLoader.resolveDefaultPath());
+            return loader.loadAsMap();
+        } catch (Exception ex) {
+            return java.util.Collections.emptyMap();
+        }
+    }
+
+    private static Set<String> collectModelKeys(ProviderRegistry registry) {
+        Set<String> keys = new LinkedHashSet<String>();
+        if (registry == null) {
+            return keys;
+        }
+        for (imagejai.engine.picker.ProviderEntry provider : registry.providers()) {
+            for (ModelEntry entry : provider.models()) {
+                keys.add(entry.providerId() + " " + entry.modelId());
+            }
+        }
+        return keys;
     }
 
     private void runStartupTierChangeCheck() {
