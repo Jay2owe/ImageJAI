@@ -692,7 +692,9 @@ models:
     pinned: false
     curated: true
     harness: tool_loop
-    family: other
+    # Perplexity Sonar is a Llama-derived grounded-search wrapper — overlay
+    # picks up Llama family tone, not a separate "other" sentinel.
+    family: llama
     context_size: large
     deprecated_since: null
     replacement: null
@@ -710,7 +712,7 @@ models:
     pinned: false
     curated: true
     harness: tool_loop
-    family: other
+    family: llama
     context_size: large
     deprecated_since: null
     replacement: null
