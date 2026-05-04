@@ -15,6 +15,7 @@ import imagejai.engine.LiteLlmProxyService;
 import imagejai.engine.PipelineBuilder;
 import imagejai.engine.StateInspector;
 import imagejai.engine.TCPCommandServer;
+import imagejai.engine.safeMode.SafeModeIndicator;
 import imagejai.ui.AiRootPanel;
 import imagejai.ui.ChatPanel;
 import imagejai.ui.ChatPanelController;
@@ -118,6 +119,23 @@ public class ImageJAIPlugin implements Command {
         // / results events flow to any connected subscribers, independent of
         // whether the chat panel or TCP is active.
         startEventPublishers();
+
+        // Stage 07 (docs/safe_mode_v2/07_status-indicator-ui.md): mount the
+        // toolbar dot + status-bar overlay once Fiji is up. Idempotent and
+        // headless-safe so a CLI / test invocation that already started the
+        // bus publishers above can call this without checking the mode.
+        // The Stage-02 master toggle on AiRootPanel reaches the indicator
+        // via {@link AiRootPanel#setSafeModeIndicator}.
+        try {
+            SafeModeIndicator indicator = SafeModeIndicator.getInstance();
+            indicator.setMasterEnabled(settings.safeModeEnabled);
+            indicator.installOnStartup();
+            if (rootPanel != null) {
+                rootPanel.setSafeModeIndicator(indicator);
+            }
+        } catch (Throwable t) {
+            IJ.log("[ImageJAI-SafeMode] indicator install failed: " + t.getMessage());
+        }
 
         chatFrame = new JFrame(Constants.PLUGIN_NAME + " v" + Constants.VERSION);
         chatFrame.setDefaultCloseOperation(JFrame.DISPOSE_ON_CLOSE);

@@ -3655,11 +3655,12 @@ public class TCPCommandServer {
         // for the no-undo-caps default. Failed macro → push it onto the
         // active branch so a follow-up {@code rewind to_call_id} can roll
         // back the damage (see docs/safe_mode_v2/03_auto-snapshot-rescue.md).
+        // Stage 07: helpers also publish safe_mode.snapshot.{released,committed}.
         if (rescue != null) {
             if (success) {
-                rescue.release();
+                releaseRescueAndPublish(rescue);
             } else {
-                rescue.commit();
+                commitRescueAndPublish(rescue);
             }
         }
         return successResponse(result);
@@ -3678,7 +3679,7 @@ public class TCPCommandServer {
             if (rescue != null
                     && !rescue.isCommitted()
                     && !rescue.isReleased()) {
-                try { rescue.commit(); } catch (Throwable ignore) {}
+                commitRescueAndPublish(rescue);
             }
             // Stage 06 safety net: when the synchronized block threw before
             // the inline postExec call could land, run it here so any rows
@@ -3835,6 +3836,17 @@ public class TCPCommandServer {
                     + " target=" + backupTarget;
             frictionLog.record(agentId, "execute_macro", summary, res.message);
             try { IJ.log("[ImageJAI-SafeMode] " + res.message); } catch (Throwable ignore) {}
+
+            // Stage 07: notify the indicator. ROI auto-backup is non-blocking
+            // (the macro proceeds) but we still want the dot to flick amber
+            // so the biologist sees that we touched the ROI manager state.
+            int roiCount = -1;
+            try { if (rm != null) roiCount = rm.getCount(); } catch (Throwable ignore) {}
+            JsonObject ev = new JsonObject();
+            ev.addProperty("rule_id", op.ruleId);
+            ev.addProperty("backup_path", backupTarget);
+            if (roiCount >= 0) ev.addProperty("roi_count", roiCount);
+            publishSafeModeEvent("safe_mode.roi_auto_backup", ev);
         } catch (Throwable t) {
             try { IJ.log("[ImageJAI-SafeMode] ROI auto-backup failed: " + t.getMessage()); }
             catch (Throwable ignore) {}
@@ -3895,6 +3907,18 @@ public class TCPCommandServer {
                         op.message);
             }
         } catch (Throwable ignore) {}
+
+        // Stage 07: push the first rejection onto EventBus so the indicator
+        // can flip red. We carry the calibration_loss rule id verbatim so a
+        // future indicator-side filter can colour it amber rather than red
+        // if the user opts in (currently every reject paints the dot red).
+        DestructiveScanner.DestructiveOp head = rejects.get(0);
+        JsonObject ev = new JsonObject();
+        ev.addProperty("rule_id", head.ruleId);
+        ev.addProperty("target", head.target);
+        ev.addProperty("line", head.line);
+        ev.addProperty("count", rejects.size());
+        publishSafeModeEvent("safe_mode.blocked", ev);
 
         return successResponse(result);
     }
@@ -4013,7 +4037,68 @@ public class TCPCommandServer {
         } else {
             result.addProperty("error", message);
         }
+
+        // Stage 07 (docs/safe_mode_v2/07_status-indicator-ui.md): also push an
+        // EventBus frame so the toolbar / status-bar indicator turns red on
+        // the next paint. Indicator state is the same FrictionLog row above
+        // viewed through a different lens, so a publish failure must never
+        // change the reply.
+        JsonObject ev = new JsonObject();
+        ev.addProperty("blocking_macro_id", inflight.macroId);
+        ev.addProperty("blocking_dialog_title", dialogTitle);
+        ev.addProperty("target_image", target);
+        publishSafeModeEvent("safe_mode.queue_storm_blocked", ev);
+
         return successResponse(result);
+    }
+
+    /**
+     * Stage 07 (docs/safe_mode_v2/07_status-indicator-ui.md): one helper to
+     * publish a {@code safe_mode.*} event onto {@link EventBus}. Call sites:
+     * every safe-mode reject reply ({@link #destructiveBlockedReply},
+     * {@link #queueStormBlockedReply}), the auto-backup write
+     * ({@link #runRoiAutoBackup}), and the rescue-handle settle points where
+     * a macro's pre-run snapshot is committed or released. The toolbar /
+     * status-bar indicator subscribes to {@code safe_mode.*} and flips
+     * colour from this single channel.
+     *
+     * <p>EventBus has a 200 ms per-topic coalesce window. The bursts we
+     * publish here are one-per-reply, so coalesce will only fire if two
+     * different rejects collide on the same topic in that window — in which
+     * case the first one is enough to colour the indicator red.
+     *
+     * <p>Wrapped in try/catch so a faulty subscriber on the bus can never
+     * abort the underlying TCP reply or the rescue-handle settle.
+     */
+    private void publishSafeModeEvent(String topic, JsonObject data) {
+        if (topic == null || topic.isEmpty()) return;
+        try {
+            eventBus.publish(topic, data == null ? new JsonObject() : data);
+        } catch (Throwable ignore) {
+            // Indicator UX must not block the macro path.
+        }
+    }
+
+    /**
+     * Stage 07: drop the rescue snapshot AND publish
+     * {@code safe_mode.snapshot.released} so the indicator paints green again.
+     * No-op when the handle is null (caps.safeMode off, no rescue captured).
+     */
+    private void releaseRescueAndPublish(SessionUndo.RescueHandle rescue) {
+        if (rescue == null) return;
+        try { rescue.release(); } catch (Throwable ignore) {}
+        publishSafeModeEvent("safe_mode.snapshot.released", null);
+    }
+
+    /**
+     * Stage 07: keep the rescue snapshot AND publish
+     * {@code safe_mode.snapshot.committed} so the indicator paints red — a
+     * committed rescue means the macro failed and the user can rewind.
+     */
+    private void commitRescueAndPublish(SessionUndo.RescueHandle rescue) {
+        if (rescue == null) return;
+        try { rescue.commit(); } catch (Throwable ignore) {}
+        publishSafeModeEvent("safe_mode.snapshot.committed", null);
     }
 
     /**
@@ -4507,9 +4592,8 @@ public class TCPCommandServer {
             // Stage 03: thread-interrupt is a forced abort — preserve the
             // pre-script snapshot so the user can rewind whatever the
             // script managed to do before we yanked it.
-            if (rescue != null) {
-                try { rescue.commit(); } catch (Throwable ignore) {}
-            }
+            // Stage 07: helper also publishes safe_mode.snapshot.committed.
+            commitRescueAndPublish(rescue);
             return errorResponse("Interrupted");
         } finally {
             if (future != null && !future.isDone()) future.cancel(true);
@@ -4638,14 +4722,15 @@ public class TCPCommandServer {
         // the image back. Re-uses the same overall-success calculation as
         // the journal record above so script-level success and rescue
         // behaviour stay aligned.
+        // Stage 07: helpers also publish safe_mode.snapshot.{released,committed}.
         if (rescue != null) {
             boolean overallOk = completed
                     && blockingFailure == null
                     && scriptError == null;
             if (overallOk) {
-                rescue.release();
+                releaseRescueAndPublish(rescue);
             } else {
-                rescue.commit();
+                commitRescueAndPublish(rescue);
             }
         }
         return successResponse(result);
@@ -4940,9 +5025,8 @@ public class TCPCommandServer {
             } catch (Exception e) {
                 // Stage 03: pipeline threw mid-run — keep the snapshot so
                 // the user can rewind. Commit before the early return.
-                if (rescue != null) {
-                    try { rescue.commit(); } catch (Throwable ignore) {}
-                }
+                // Stage 07: helper also publishes safe_mode.snapshot.committed.
+                commitRescueAndPublish(rescue);
                 return errorResponse("Pipeline error: " + e.getMessage());
             }
         }
@@ -5005,11 +5089,12 @@ public class TCPCommandServer {
         // clean run; "failed" / anything-else means at least one step
         // tripped. Drop the snapshot on the clean path; commit on any
         // failure so {@code rewind} can roll back to the pre-pipeline state.
+        // Stage 07: helpers also publish safe_mode.snapshot.{released,committed}.
         if (rescue != null) {
             if ("completed".equals(result.status)) {
-                rescue.release();
+                releaseRescueAndPublish(rescue);
             } else {
-                rescue.commit();
+                commitRescueAndPublish(rescue);
             }
         }
         return successResponse(resultJson);

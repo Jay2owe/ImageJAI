@@ -12,6 +12,7 @@ import imagejai.engine.picker.ModelEntry;
 import imagejai.engine.picker.NativeAgentLauncher;
 import imagejai.engine.picker.ProviderRegistry;
 import imagejai.engine.picker.ProxyAgentLauncher;
+import imagejai.engine.safeMode.SafeModeIndicator;
 import imagejai.engine.usage.UsageTracker;
 import imagejai.ui.picker.MainNotificationCheck;
 import imagejai.ui.picker.ModelPickerButton;
@@ -73,6 +74,8 @@ public class AiRootPanel extends JPanel implements ChatSurface {
     private final List<AgentSession> liveSessions = new ArrayList<AgentSession>();
 
     private AgentLauncher agentLauncher;
+    private SafeModeIndicator safeModeIndicator;
+    private JCheckBox safeModeBox;
     private JComboBox<Settings.ModelConfig> profileSwitcher;
     private JComboBox<String> agentSelector;
     private ModelPickerButton modelPicker;
@@ -171,6 +174,21 @@ public class AiRootPanel extends JPanel implements ChatSurface {
         launchOrchestrator = new AgentLaunchOrchestrator(
                 launcher, new NativeAgentLauncher(), new ProxyAgentLauncher());
         refreshAgentSelectorAsync();
+    }
+
+    /**
+     * Stage 07 (docs/safe_mode_v2/07_status-indicator-ui.md): wire the safe
+     * mode toolbar / status-bar indicator. {@link ImageJAIPlugin} calls this
+     * once the indicator has been mounted on the Fiji toolbar so that
+     * flipping the Safe Mode checkbox in this header repaints the dot grey
+     * (off) or restores the live colour (on) without waiting for the next
+     * agent launch.
+     */
+    public void setSafeModeIndicator(SafeModeIndicator indicator) {
+        this.safeModeIndicator = indicator;
+        if (indicator != null && safeModeBox != null) {
+            indicator.setMasterEnabled(safeModeBox.isSelected());
+        }
     }
 
     public void refreshProfileSwitcher() {
@@ -341,7 +359,10 @@ public class AiRootPanel extends JPanel implements ChatSurface {
         // When unchecked, the next launched agent will see
         // {@code IMAGEJAI_SAFE_MODE=0} and pass {@code safe_mode=false}
         // in its hello handshake — legacy unguarded fast path.
-        final JCheckBox safeModeBox = new JCheckBox("Safe Mode", settings.safeModeEnabled);
+        // Stage 07: also drives the toolbar / status-bar indicator's master
+        // grey state so the biologist's at-a-glance signal matches the
+        // checkbox without waiting for the next agent launch.
+        safeModeBox = new JCheckBox("Safe Mode", settings.safeModeEnabled);
         safeModeBox.setOpaque(false);
         safeModeBox.setForeground(TEXT_MUTED);
         safeModeBox.setFont(new Font(Font.SANS_SERIF, Font.PLAIN, 11));
@@ -353,8 +374,12 @@ public class AiRootPanel extends JPanel implements ChatSurface {
         safeModeBox.addActionListener(new ActionListener() {
             @Override
             public void actionPerformed(ActionEvent e) {
-                settings.safeModeEnabled = safeModeBox.isSelected();
+                boolean on = safeModeBox.isSelected();
+                settings.safeModeEnabled = on;
                 settings.save();
+                if (safeModeIndicator != null) {
+                    safeModeIndicator.setMasterEnabled(on);
+                }
             }
         });
         leftPanel.add(safeModeBox);
