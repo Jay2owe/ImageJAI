@@ -11,6 +11,7 @@ import java.util.Map;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 
 /**
@@ -162,5 +163,78 @@ public class ProviderDiscoveryTest {
                 ProviderDiscovery.defaultEndpoints(Collections.<String, String>emptyMap());
         assertEquals(13, endpoints.size());
         assertEquals(2, ProviderDiscovery.CURATED_ONLY.size());
+    }
+
+    @Test
+    public void lastErrorFor_capturesIoExceptionMessage() {
+        Map<String, ProviderDiscovery.Endpoint> endpoints = new LinkedHashMap<String, ProviderDiscovery.Endpoint>();
+        endpoints.put("xai", new ProviderDiscovery.Endpoint("xai",
+                "https://api.x.ai/v1/models",
+                Collections.<String, String>emptyMap()));
+        ProviderDiscovery.HttpFetcher fetcher = (endpoint, timeout) ->
+                new ProviderDiscovery.HttpFetcher.HttpResult(new IOException("connect timed out"));
+        ProviderDiscovery discovery = new ProviderDiscovery(endpoints, fetcher);
+        discovery.discover("xai", Duration.ofSeconds(4));
+        String reason = discovery.lastErrorFor("xai");
+        assertNotNull("error string should be populated after a failed discover", reason);
+        assertTrue("expected IOException class name in error: " + reason,
+                reason.contains("IOException"));
+        assertTrue("expected error message in error: " + reason,
+                reason.contains("connect timed out"));
+    }
+
+    @Test
+    public void lastErrorFor_capturesHttp4xxBody() {
+        Map<String, ProviderDiscovery.Endpoint> endpoints = new LinkedHashMap<String, ProviderDiscovery.Endpoint>();
+        endpoints.put("openai", new ProviderDiscovery.Endpoint("openai",
+                "https://api.openai.com/v1/models",
+                Collections.<String, String>emptyMap()));
+        ProviderDiscovery.HttpFetcher fetcher = (endpoint, timeout) ->
+                new ProviderDiscovery.HttpFetcher.HttpResult(401,
+                        "{\"error\": {\"message\": \"invalid api key\"}}");
+        ProviderDiscovery discovery = new ProviderDiscovery(endpoints, fetcher);
+        discovery.discover("openai", Duration.ofSeconds(4));
+        String reason = discovery.lastErrorFor("openai");
+        assertNotNull(reason);
+        assertTrue("expected HTTP 401 in error: " + reason,
+                reason.contains("401"));
+        assertTrue("expected upstream message in error: " + reason,
+                reason.contains("invalid api key"));
+    }
+
+    @Test
+    public void lastErrorFor_clearsOnSuccess() {
+        Map<String, ProviderDiscovery.Endpoint> endpoints = new LinkedHashMap<String, ProviderDiscovery.Endpoint>();
+        endpoints.put("groq", new ProviderDiscovery.Endpoint("groq",
+                "https://api.groq.com/openai/v1/models",
+                Collections.<String, String>emptyMap()));
+        // First call fails, second succeeds — second must clear the cached
+        // error so the ✗ icon reverts to ✓ on the next refresh.
+        java.util.concurrent.atomic.AtomicInteger calls =
+                new java.util.concurrent.atomic.AtomicInteger();
+        ProviderDiscovery.HttpFetcher fetcher = (endpoint, timeout) -> {
+            int n = calls.incrementAndGet();
+            if (n == 1) {
+                return new ProviderDiscovery.HttpFetcher.HttpResult(503, "service unavailable");
+            }
+            return new ProviderDiscovery.HttpFetcher.HttpResult(200,
+                    "{\"data\": [{\"id\": \"llama-3.3-70b-versatile\"}]}");
+        };
+        ProviderDiscovery discovery = new ProviderDiscovery(endpoints, fetcher);
+        discovery.discover("groq", Duration.ofSeconds(4));
+        assertNotNull(discovery.lastErrorFor("groq"));
+        discovery.discover("groq", Duration.ofSeconds(4));
+        assertNull("success must clear the cached error",
+                discovery.lastErrorFor("groq"));
+    }
+
+    @Test
+    public void lastErrorFor_curatedOnlyProvidersStayClear() {
+        ProviderDiscovery discovery = new ProviderDiscovery(
+                Collections.<String, ProviderDiscovery.Endpoint>emptyMap(),
+                (endpoint, timeout) -> new ProviderDiscovery.HttpFetcher.HttpResult(200, ""));
+        discovery.discover("ollama-cloud", Duration.ofSeconds(4));
+        assertNull("curated-only providers never produce a discovery error",
+                discovery.lastErrorFor("ollama-cloud"));
     }
 }

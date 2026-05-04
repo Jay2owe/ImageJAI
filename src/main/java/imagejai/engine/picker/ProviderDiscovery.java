@@ -157,6 +157,7 @@ public final class ProviderDiscovery {
 
     private final Map<String, Endpoint> endpoints;
     private final HttpFetcher fetcher;
+    private final Map<String, String> lastErrors = new ConcurrentHashMap<String, String>();
 
     public ProviderDiscovery(Map<String, Endpoint> endpoints, HttpFetcher fetcher) {
         this.endpoints = endpoints == null
@@ -169,21 +170,60 @@ public final class ProviderDiscovery {
         return endpoints;
     }
 
+    /**
+     * Most recent error string for {@code providerId}, or {@code null} if the
+     * last {@link #discover(String, Duration)} call succeeded (or has not run).
+     *
+     * <p>Cleared on every successful call. Surfaced so {@code AiRootPanel} can
+     * persist the failure reason via {@code Settings.setLastError} — which is
+     * what {@code CachedErrorDialog} renders when the user clicks the ✗ status
+     * icon. Without this method the {@code Settings.lastProviderErrors} map
+     * stayed empty in production and the cached-error dialog had no body to
+     * show.
+     */
+    public String lastErrorFor(String providerId) {
+        return lastErrors.get(providerId);
+    }
+
     /** Fetch a single provider, parse the response, return a merge-ready result. */
     public MergeFunction.LiveResult discover(String providerId, Duration timeout) {
         if (CURATED_ONLY.contains(providerId)) {
+            // Curated-only providers never produce a discovery error — clear
+            // any stale message left from a prior misconfiguration.
+            lastErrors.remove(providerId);
             return MergeFunction.LiveResult.failure();
         }
         Endpoint endpoint = endpoints.get(providerId);
         if (endpoint == null) {
+            lastErrors.put(providerId, "no endpoint configured for provider " + providerId);
             return MergeFunction.LiveResult.failure();
         }
         HttpFetcher.HttpResult response = fetcher.fetch(endpoint, timeout);
         if (!response.ok()) {
+            lastErrors.put(providerId, describeFailure(response));
             return MergeFunction.LiveResult.failure();
         }
+        lastErrors.remove(providerId);
         Set<String> ids = parseModelIds(providerId, response.body);
         return MergeFunction.LiveResult.success(ids);
+    }
+
+    private static String describeFailure(HttpFetcher.HttpResult response) {
+        if (response.error != null) {
+            String message = response.error.getMessage();
+            String name = response.error.getClass().getSimpleName();
+            return message == null || message.isEmpty()
+                    ? name
+                    : name + ": " + message;
+        }
+        String body = response.body == null ? "" : response.body.trim();
+        if (body.length() > 240) {
+            body = body.substring(0, 240) + "…";
+        }
+        if (body.isEmpty()) {
+            return "HTTP " + response.status + " from provider";
+        }
+        return "HTTP " + response.status + " — " + body;
     }
 
     /**

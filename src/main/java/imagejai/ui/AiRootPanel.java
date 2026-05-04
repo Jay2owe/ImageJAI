@@ -981,6 +981,9 @@ public class AiRootPanel extends JPanel implements ChatSurface {
                             + providerId + ": " + ex.getMessage());
                 }
                 live.put(providerId, result);
+                // Discovery succeeded — clear any stale error so the ✗ status
+                // icon reverts to ✓ on the next render.
+                settings.setLastError(providerId, null);
             } else {
                 ModelsCache.Snapshot snap = cache.read(providerId);
                 if (snap != null) {
@@ -990,6 +993,17 @@ public class AiRootPanel extends JPanel implements ChatSurface {
                     live.put(providerId, MergeFunction.LiveResult.failure());
                 }
                 failed.add(providerId);
+                // Persist the discovery failure reason so CachedErrorDialog
+                // (Phase E §4.3) can render a meaningful body when the user
+                // clicks the ✗ status icon. Settings.setLastError debounces
+                // the write — keys never reach the JSON file because credentials
+                // live in <imagej-ai>/secrets/<provider>.env, not config.json.
+                String reason = discovery.lastErrorFor(providerId);
+                settings.setLastError(providerId,
+                        reason == null || reason.isEmpty()
+                                ? "Provider did not respond within "
+                                        + timeout.toMillis() + " ms"
+                                : reason);
             }
         }
 
