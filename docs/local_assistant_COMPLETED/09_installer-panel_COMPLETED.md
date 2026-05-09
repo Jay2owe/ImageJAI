@@ -21,11 +21,11 @@ unconditional `--dangerously-skip-permissions` flag in
 - `docs/local_assistant/00_overview.md`
 - `docs/local_assistant/PLAN.md` §12 ("Models and Agents Installer
   Panel")
-- `src/main/java/uk/ac/ucl/imagej/ai/engine/AgentLauncher.java` —
+- `src/main/java/imagejai/engine/AgentLauncher.java` —
   `KNOWN_AGENTS`, `detectAgents()`. **Note the unconditional
   `--dangerously-skip-permissions` for Claude Code; this stage
   replaces it with conditional behaviour.**
-- `src/main/java/uk/ac/ucl/imagej/ai/ui/SettingsDialog.java` — how
+- `src/main/java/imagejai/ui/SettingsDialog.java` — how
   tabs / panels are added today
 - ImageJAI's `agent/CLAUDE.md` and `CLAUDE.md` for "do not modify
   update sites programmatically" — the same caution applies to npm
@@ -63,7 +63,7 @@ Implementation notes for the install action:
 
 ### GSD detection for Claude
 
-Add `GsdDetector.java` with a single static method
+Add `AgentPlannerDetector.java` with a single static method
 `isInstalled() -> boolean`. Detection order:
 
 1. Check `~/.claude/skills/gsd/` exists.
@@ -76,7 +76,7 @@ In `AgentLauncher`:
 
 - Remove the unconditional `--dangerously-skip-permissions` from
   the Claude Code entry in `KNOWN_AGENTS`.
-- At launch time, if the agent is Claude Code and `GsdDetector.
+- At launch time, if the agent is Claude Code and `AgentPlannerDetector.
   isInstalled()` is true, append `--dangerously-skip-permissions`
   to the command line. Otherwise launch without it.
 
@@ -119,13 +119,13 @@ public boolean claudeUseGsdFlag = true;   // user override of GSD detection
 
 | Path | Action | Reason |
 |---|---|---|
-| `src/main/java/uk/ac/ucl/imagej/ai/ui/InstallerPanel.java` | NEW | Models & Agents tab |
-| `src/main/java/uk/ac/ucl/imagej/ai/ui/SettingsDialog.java` | MODIFY | Add the tab |
-| `src/main/java/uk/ac/ucl/imagej/ai/engine/GsdDetector.java` | NEW | Probe for GSD |
-| `src/main/java/uk/ac/ucl/imagej/ai/engine/AgentLauncher.java` | MODIFY | Remove unconditional `--dangerously-skip-permissions`; conditional pass at launch time |
-| `src/main/java/uk/ac/ucl/imagej/ai/config/Settings.java` | MODIFY | Add `miniLmInstalled`, `miniLmModelSha256`, `claudeUseGsdFlag` |
-| `src/main/java/uk/ac/ucl/imagej/ai/install/MiniLmDownloader.java` | NEW | Streamed download + SHA-256 verify |
-| `src/main/java/uk/ac/ucl/imagej/ai/install/ProcessRunner.java` | NEW | Confirm + run + stream-to-log dialog |
+| `src/main/java/imagejai/ui/InstallerPanel.java` | NEW | Models & Agents tab |
+| `src/main/java/imagejai/ui/SettingsDialog.java` | MODIFY | Add the tab |
+| `src/main/java/imagejai/engine/AgentPlannerDetector.java` | NEW | Probe for optional planning toolchain |
+| `src/main/java/imagejai/engine/AgentLauncher.java` | MODIFY | Remove unconditional `--dangerously-skip-permissions`; conditional pass at launch time |
+| `src/main/java/imagejai/config/Settings.java` | MODIFY | Add `miniLmInstalled`, `miniLmModelSha256`, `claudeUseGsdFlag` |
+| `src/main/java/imagejai/install/MiniLmDownloader.java` | NEW | Streamed download + SHA-256 verify |
+| `src/main/java/imagejai/install/ProcessRunner.java` | NEW | Confirm + run + stream-to-log dialog |
 
 ## Implementation sketch
 
@@ -135,7 +135,7 @@ public AgentSession launch(AgentInfo agent, Mode mode) {
   List<String> cmd = new ArrayList<>(baseCommand(agent));
   if ("Claude Code".equals(agent.name)
       && settings.claudeUseGsdFlag
-      && GsdDetector.isInstalled()) {
+      && AgentPlannerDetector.isInstalled()) {
     cmd.add("--dangerously-skip-permissions");
   }
   return spawn(cmd, mode);
