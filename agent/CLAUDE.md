@@ -210,7 +210,8 @@ The 3D Viewer TCP API is useful for interactive volume rendering. Types:
 8. **Verify results**: `python ij.py results` — check measurements
 9. **Check log**: `python ij.py log` — look for warnings from plugins
 10. **Audit**: `python auditor.py` — validate measurements after analysis
-11. **Iterate**: if something looks wrong, fix the macro, retry
+11. **Methods**: `python methods_table.py` — emit QUAREP-LiMi-aligned methods.md
+12. **Iterate**: if something looks wrong, fix the macro, retry
 
 ---
 

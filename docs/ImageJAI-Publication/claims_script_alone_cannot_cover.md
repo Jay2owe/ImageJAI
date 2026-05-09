@@ -140,3 +140,35 @@ Paper framing: indirect-prompt-injection mitigation is presented as a
 modest, testable boundary — not a sandbox. Trusted-surface attacks (e.g.
 recipe-YAML signing) remain `Planned`.
 
+## 11. QUAREP-LiMi-Aligned Methods Table Auto-Emission
+
+A script can write whatever methods paragraph its author types. ImageJAI
+walks the session log + Bio-Formats metadata + the provenance graph and
+emits a Markdown methods table aligned with QUAREP-LiMi WG11 *Bare
+Minimum Microscopy Methods Reporting* fields. Populated values come
+verbatim from structured data, not from an LLM paraphrase; missing
+fields stay `[unknown]` and two fields are marked `[unknown - human
+only]` (statistical-test protocol, acquisition rationale).
+
+**Status: Implemented (modest, draft-tool) — 2026-05-09.**
+`agent/methods_table.py` (~270 LOC, stdlib-only) emits 33 WG11-aligned
+fields with a per-image field-coverage statistic. Three example outputs
+in `docs/imagejai-publication/supplements/exported_macros/methods_examples/`
+demonstrate count + measure (15/33), segment + classify (13/33), and
+time-series (13/33) on synthesised public-benchmark inputs. The TCP
+command `emit_methods_table` triggers the exporter from the agent side.
+
+Local sources:
+
+- `agent/methods_table.py`
+- `agent/methods_table_template.md`
+- `docs/imagejai-publication/unique-features/methods_paragraph_export.md`
+- `docs/imagejai-publication/supplements/exported_macros/methods_examples/`
+- `src/main/java/imagejai/engine/TCPCommandServer.java` —
+  `handleEmitMethodsTable` + dispatch entry
+
+Paper framing: a draft tool, not an oracle. Citation harvesting (DOI
+lookup, BibTeX) is explicitly out of scope (Option D in D8). The point
+is what IS automated — analysis-side fields that take dozens of clicks
+to chase down by hand — not 100% coverage.
+

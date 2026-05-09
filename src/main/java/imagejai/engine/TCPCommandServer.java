@@ -1241,6 +1241,8 @@ public class TCPCommandServer {
             return handleHello(request, sock);
         } else if ("ping".equals(command)) {
             return handlePing();
+        } else if ("emit_methods_table".equals(command)) {
+            return handleEmitMethodsTable(request);
         } else if ("execute_macro".equals(command)) {
             return handleExecuteMacro(request, caps);
         } else if ("get_state".equals(command)) {
@@ -4547,6 +4549,59 @@ public class TCPCommandServer {
             return errorResponse("No active image");
         }
         return successResponse((JsonObject) holder[0]);
+    }
+
+    /**
+     * D8: shell out to {@code agent/methods_table.py} so the agent can emit a
+     * QUAREP-LiMi WG11-aligned Markdown methods table from the side. The
+     * exporter walks the latest session log + Bio-Formats metadata + the
+     * provenance graph itself; this handler just runs it and parses its
+     * stdout. Mutating (writes a Markdown file) — NOT a readonly command.
+     *
+     * <p>Response shape: {@code {"ok":true,"result":{"path":"AI_Exports/methods.md","fieldCoverage":"21/33"}}}.
+     */
+    JsonObject handleEmitMethodsTable(JsonObject request) {
+        try {
+            ProcessBuilder pb = new ProcessBuilder(
+                    "python", "agent/methods_table.py");
+            pb.redirectErrorStream(true);
+            Process proc = pb.start();
+            StringBuilder sb = new StringBuilder();
+            try (BufferedReader rdr = new BufferedReader(new InputStreamReader(
+                    proc.getInputStream(), StandardCharsets.UTF_8))) {
+                String line;
+                while ((line = rdr.readLine()) != null) {
+                    sb.append(line).append('\n');
+                }
+            }
+            int exit = proc.waitFor();
+            String output = sb.toString();
+            if (exit != 0) {
+                return errorResponse("methods_table.py exited " + exit + ": "
+                        + output.trim());
+            }
+            // stdout looks like:
+            //   "emitted methods.md: 21/33 WG11 fields populated, 12 marked [unknown] -> /path/methods.md"
+            String coverage = null;
+            String path = null;
+            java.util.regex.Matcher m = java.util.regex.Pattern.compile(
+                    "(\\d+/\\d+) WG11 fields populated.*?-> (.+?)\\s*$",
+                    java.util.regex.Pattern.MULTILINE).matcher(output);
+            if (m.find()) {
+                coverage = m.group(1);
+                path = m.group(2).trim();
+            }
+            JsonObject result = new JsonObject();
+            if (path != null) result.addProperty("path", path);
+            if (coverage != null) result.addProperty("fieldCoverage", coverage);
+            result.addProperty("output", output.trim());
+            return successResponse(result);
+        } catch (IOException | InterruptedException e) {
+            if (e instanceof InterruptedException) {
+                Thread.currentThread().interrupt();
+            }
+            return errorResponse("emit_methods_table failed: " + e.getMessage());
+        }
     }
 
     private JsonObject handleBatch(JsonObject request) {
