@@ -5,11 +5,15 @@ import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.regex.Pattern;
 
 /**
  * Process-local file-selection brief delivered to an agent by pseudonym only.
  */
 public final class Brief {
+    private static final Pattern TOKEN_PATTERN = Pattern.compile(
+            "(?i)image-[0-9a-f]{4,12}(?:\\.[A-Za-z0-9.]+)?(?::\\d+)?");
+
     private final String sessionId;
     private final List<String> tokens;
     private final String tag;
@@ -49,7 +53,7 @@ public final class Brief {
         if (values != null) {
             for (String value : values) {
                 String cleaned = value == null ? "" : value.trim();
-                if (!cleaned.isEmpty()) {
+                if (!cleaned.isEmpty() && TOKEN_PATTERN.matcher(cleaned).matches()) {
                     out.add(cleaned);
                 }
             }

@@ -1,5 +1,6 @@
 package imagejai.engine.security;
 
+import imagejai.ui.BrowseFilesDialog;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.TemporaryFolder;
@@ -8,6 +9,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Arrays;
+import java.util.List;
 import java.util.Map;
 
 import static org.junit.Assert.assertEquals;
@@ -45,9 +47,11 @@ public class TagSuggestionEngineTest {
                 "    format: '{1}-{2}'"),
                 StandardCharsets.UTF_8);
         TagSuggestionEngine engine = new TagSuggestionEngine();
+        List<TagSuggestionEngine.Rule> rules =
+                BrowseFilesDialog.loadTagRules(folder, engine);
 
         String tag = engine.suggest(Arrays.asList("SCN42_cell_a", "SCN42_cell_b"),
-                folder);
+                rules);
 
         assertEquals("SCN-42", tag);
         assertFalse("override contents must not be returned as a tag",

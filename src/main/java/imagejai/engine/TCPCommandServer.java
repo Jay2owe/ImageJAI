@@ -1582,8 +1582,16 @@ public class TCPCommandServer {
         if (notes.length() > 0) {
             notes.append(' ');
         }
+        String cleaned = ("token".equals(key) || "tokens".equals(key))
+                ? scrubAuditTokenNote(value)
+                : scrubAuditNote(value);
         notes.append(key).append('=').append('\'')
-                .append(scrubAuditNote(value)).append('\'');
+                .append(cleaned).append('\'');
+    }
+
+    private static String scrubAuditTokenNote(String value) {
+        String raw = value == null ? "" : value.trim();
+        return raw.replaceAll("[^A-Za-z0-9_.:,-]+", "_");
     }
 
     private String scrubAuditNote(String value) {

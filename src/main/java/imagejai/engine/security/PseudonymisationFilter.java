@@ -31,6 +31,8 @@ public class PseudonymisationFilter {
             "(?i)([A-Za-z]:[\\\\/][^\\r\\n\"'<>|]+?\\.(?:lif|tif|tiff|czi|nd2|lsm|oib|oif|vsi|svs|png|jpe?g|csv|tsv|md|pdf|json|xml|txt)"
                     + "|/[A-Za-z0-9._~+()\\- /]+?\\.(?:lif|tif|tiff|czi|nd2|lsm|oib|oif|vsi|svs|png|jpe?g|csv|tsv|md|pdf|json|xml|txt)"
                     + "|\\b(?!image-[0-9a-f]{4}\\b)[A-Za-z0-9._+()\\- ]+\\.(?:lif|tif|tiff|czi|nd2|lsm|oib|oif|vsi|svs|png|jpe?g|csv|tsv|md|pdf|json|xml|txt))");
+    private static final Pattern PATH_TOKEN = Pattern.compile(
+            "(?i)image-[0-9a-f]{4,12}(?:\\.[A-Za-z0-9.]+)?(?::\\d+)?");
 
     private final PathTokenMap pathTokenMap;
     private final OmeXmlScrubber omeXmlScrubber;
@@ -330,7 +332,11 @@ public class PseudonymisationFilter {
         boolean changed = false;
         while (matcher.find()) {
             String match = matcher.group(1);
-            if (looksLikePathToken(match)) {
+            int start = matcher.start(1);
+            int end = matcher.end(1);
+            if (looksLikePathToken(match)
+                    || (couldBeInsidePathToken(value, start, end)
+                    && isInsidePathToken(value, start, end))) {
                 matcher.appendReplacement(out, Matcher.quoteReplacement(match));
                 continue;
             }
@@ -397,7 +403,15 @@ public class PseudonymisationFilter {
 
         StringBuilder out = new StringBuilder(value.length());
         int i = 0;
+        Matcher tokenMatcher = PATH_TOKEN.matcher(value);
+        boolean hasToken = tokenMatcher.find();
         while (i < value.length()) {
+            if (hasToken && tokenMatcher.start() == i) {
+                out.append(value, tokenMatcher.start(), tokenMatcher.end());
+                i = tokenMatcher.end();
+                hasToken = tokenMatcher.find();
+                continue;
+            }
             Map.Entry<String, String> match = null;
             for (Map.Entry<String, String> entry : entries) {
                 String original = entry.getKey();
@@ -482,7 +496,33 @@ public class PseudonymisationFilter {
     }
 
     private static boolean looksLikePathToken(String value) {
-        return value != null && value.matches("(?i)image-[0-9a-f]{4,12}(?:\\.[A-Za-z0-9.]+)?(?::\\d+)?");
+        return value != null && PATH_TOKEN.matcher(value).matches();
+    }
+
+    private static boolean isInsidePathToken(String value, int start, int end) {
+        if (value == null || start < 0 || end < start) {
+            return false;
+        }
+        Matcher matcher = PATH_TOKEN.matcher(value);
+        while (matcher.find()) {
+            if (matcher.start() <= start && matcher.end() >= end) {
+                return true;
+            }
+            if (matcher.start() > start) {
+                return false;
+            }
+        }
+        return false;
+    }
+
+    private static boolean couldBeInsidePathToken(String value, int start, int end) {
+        if (value == null) {
+            return false;
+        }
+        int from = Math.max(0, start - 8);
+        int to = Math.min(value.length(), end + 8);
+        return value.substring(from, to).toLowerCase(java.util.Locale.ROOT)
+                .contains("image-");
     }
 
     private static int indexOfIgnoreCase(List<String> values, String needle) {

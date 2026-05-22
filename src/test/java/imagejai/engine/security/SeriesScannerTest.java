@@ -8,8 +8,10 @@ import org.junit.rules.TemporaryFolder;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.Arrays;
 import java.util.Hashtable;
 import java.util.List;
+import java.util.Locale;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.Assert.assertEquals;
@@ -65,6 +67,19 @@ public class SeriesScannerTest {
         scanner.scan(file);
 
         assertEquals(2, created.get());
+    }
+
+    @Test
+    public void metadataReaderInterfaceDoesNotExposePixelPlaneReads() {
+        List<String> forbiddenFragments = Arrays.asList(
+                "openbytes", "openplane", "openthumb", "getpixels", "readpixels");
+        for (java.lang.reflect.Method method : SeriesScanner.MetadataReader.class.getMethods()) {
+            String name = method.getName().toLowerCase(Locale.ROOT);
+            for (String forbidden : forbiddenFragments) {
+                assertTrue(method.getName() + " must not expose pixel reads",
+                        !name.contains(forbidden));
+            }
+        }
     }
 
     private static byte[] bytes(int value) {

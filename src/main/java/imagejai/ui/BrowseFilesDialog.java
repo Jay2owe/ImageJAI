@@ -6,6 +6,7 @@ import imagejai.engine.security.BriefNudger;
 import imagejai.engine.security.SelectionBroker;
 import imagejai.engine.security.SeriesScanner;
 import imagejai.engine.security.TagSuggestionEngine;
+import org.yaml.snakeyaml.Yaml;
 
 import javax.swing.AbstractAction;
 import javax.swing.BorderFactory;
@@ -42,8 +43,11 @@ import java.awt.GridBagLayout;
 import java.awt.Insets;
 import java.awt.Window;
 import java.awt.event.ActionEvent;
+import java.io.InputStream;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -63,6 +67,7 @@ public final class BrowseFilesDialog extends JDialog {
     private final AgentSession activeSession;
     private final SeriesScanner scanner;
     private final TagSuggestionEngine tagEngine;
+    private final List<TagSuggestionEngine.Rule> tagRules;
     private final SelectionBroker broker;
     private final BriefNudger nudger;
     private final BrowserTableModel model;
@@ -94,6 +99,7 @@ public final class BrowseFilesDialog extends JDialog {
         this.activeSession = activeSession;
         this.scanner = scanner == null ? new SeriesScanner() : scanner;
         this.tagEngine = tagEngine == null ? new TagSuggestionEngine() : tagEngine;
+        this.tagRules = loadTagRules(folder, this.tagEngine);
         this.broker = broker == null ? SelectionBroker.getInstance() : broker;
         this.nudger = nudger == null ? new BriefNudger(null, new BriefNudger.Toast() {
             @Override
@@ -238,7 +244,7 @@ public final class BrowseFilesDialog extends JDialog {
         List<Row> rows = new ArrayList<Row>();
         if (infos != null) {
             for (SeriesScanner.SeriesInfo info : infos) {
-                rows.add(new Row(info, tagEngine.parseLabel(info.label(), folder)));
+                rows.add(new Row(info, tagEngine.parseLabel(info.label(), tagRules)));
             }
         }
         return rows;
@@ -268,7 +274,7 @@ public final class BrowseFilesDialog extends JDialog {
         for (Row row : rows) {
             labels.add(row.info.label());
         }
-        tag.setText(tagEngine.suggest(labels, folder));
+        tag.setText(tagEngine.suggest(labels, tagRules));
         updatePreviewOnly();
     }
 
@@ -398,6 +404,53 @@ public final class BrowseFilesDialog extends JDialog {
         label.setForeground(strong ? TEXT : MUTED);
         label.setFont(new Font(Font.SANS_SERIF, strong ? Font.BOLD : Font.PLAIN, 11));
         return label;
+    }
+
+    public static List<TagSuggestionEngine.Rule> loadTagRules(Path folder,
+                                                              TagSuggestionEngine engine) {
+        TagSuggestionEngine e = engine == null ? new TagSuggestionEngine() : engine;
+        if (folder == null) {
+            return e.defaultRules();
+        }
+        Path override = folder.resolve(".imagejai-tags.yml");
+        if (!Files.isRegularFile(override)) {
+            return e.defaultRules();
+        }
+        try (InputStream in = Files.newInputStream(override)) {
+            List<TagSuggestionEngine.Rule> loaded = parseTagRuleYaml(new Yaml().load(in));
+            return loaded.isEmpty() ? e.defaultRules() : loaded;
+        } catch (Exception ignored) {
+            return e.defaultRules();
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    private static List<TagSuggestionEngine.Rule> parseTagRuleYaml(Object root) {
+        Object listObject = root;
+        if (root instanceof Map) {
+            listObject = ((Map<?, ?>) root).get("patterns");
+        }
+        if (!(listObject instanceof Iterable)) {
+            return Collections.emptyList();
+        }
+        List<TagSuggestionEngine.Rule> rules = new ArrayList<TagSuggestionEngine.Rule>();
+        for (Object item : (Iterable<?>) listObject) {
+            if (!(item instanceof Map)) {
+                continue;
+            }
+            Map<Object, Object> map = (Map<Object, Object>) item;
+            String name = stringValue(map.get("name"));
+            String pattern = stringValue(map.get("pattern"));
+            String format = stringValue(map.get("format"));
+            if (!name.isEmpty() && !pattern.isEmpty()) {
+                rules.add(new TagSuggestionEngine.Rule(name, pattern, format));
+            }
+        }
+        return Collections.unmodifiableList(rules);
+    }
+
+    private static String stringValue(Object value) {
+        return value == null ? "" : value.toString();
     }
 
     private static final class Row {

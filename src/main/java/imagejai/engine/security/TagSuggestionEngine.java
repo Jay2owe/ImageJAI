@@ -1,11 +1,5 @@
 package imagejai.engine.security;
 
-import org.yaml.snakeyaml.Yaml;
-
-import java.io.IOException;
-import java.io.InputStream;
-import java.nio.file.Files;
-import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.LinkedHashMap;
@@ -16,22 +10,22 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 /**
- * Local-only regex parser for user-facing labels. Override patterns may live
- * in {@code .imagejai-tags.yml}; the file is never included in briefs.
+ * Local-only regex parser for user-facing labels. Callers may pass override
+ * rules loaded from local UI state; this class does not read files.
  */
 public final class TagSuggestionEngine {
     private final List<Rule> defaultRules;
 
     public TagSuggestionEngine() {
-        defaultRules = defaultRules();
+        defaultRules = buildDefaultRules();
     }
 
     public String suggest(List<String> labels) {
-        return suggest(labels, null);
+        return suggest(labels, defaultRules);
     }
 
-    public String suggest(List<String> labels, Path folder) {
-        Map<String, String> common = commonTags(labels, rulesFor(folder));
+    public String suggest(List<String> labels, List<Rule> rules) {
+        Map<String, String> common = commonTags(labels, usableRules(rules));
         StringBuilder out = new StringBuilder();
         String[] order = {"timepoint", "genotype", "sex", "condition"};
         for (String key : order) {
@@ -51,27 +45,19 @@ public final class TagSuggestionEngine {
     }
 
     public Map<String, String> parseLabel(String label) {
-        return parseLabel(label, null);
+        return parseLabel(label, defaultRules);
     }
 
-    public Map<String, String> parseLabel(String label, Path folder) {
-        return parseLabelWithRules(label, rulesFor(folder));
+    public Map<String, String> parseLabel(String label, List<Rule> rules) {
+        return parseLabelWithRules(label, usableRules(rules));
     }
 
-    public List<Rule> rulesFor(Path folder) {
-        if (folder == null) {
-            return defaultRules;
-        }
-        Path override = folder.resolve(".imagejai-tags.yml");
-        if (!Files.isRegularFile(override)) {
-            return defaultRules;
-        }
-        try {
-            List<Rule> loaded = loadRules(override);
-            return loaded.isEmpty() ? defaultRules : loaded;
-        } catch (Exception e) {
-            return defaultRules;
-        }
+    public List<Rule> defaultRules() {
+        return defaultRules;
+    }
+
+    private List<Rule> usableRules(List<Rule> rules) {
+        return rules == null || rules.isEmpty() ? defaultRules : rules;
     }
 
     private Map<String, String> commonTags(List<String> labels, List<Rule> rules) {
@@ -166,40 +152,7 @@ public final class TagSuggestionEngine {
         return v;
     }
 
-    @SuppressWarnings("unchecked")
-    private List<Rule> loadRules(Path yamlPath) throws IOException {
-        Object root;
-        try (InputStream in = Files.newInputStream(yamlPath)) {
-            root = new Yaml().load(in);
-        }
-        Object listObject = root;
-        if (root instanceof Map) {
-            listObject = ((Map<?, ?>) root).get("patterns");
-        }
-        if (!(listObject instanceof Iterable)) {
-            return Collections.emptyList();
-        }
-        List<Rule> rules = new ArrayList<Rule>();
-        for (Object item : (Iterable<?>) listObject) {
-            if (!(item instanceof Map)) {
-                continue;
-            }
-            Map<Object, Object> map = (Map<Object, Object>) item;
-            String name = stringValue(map.get("name"));
-            String pattern = stringValue(map.get("pattern"));
-            String format = stringValue(map.get("format"));
-            if (!name.isEmpty() && !pattern.isEmpty()) {
-                rules.add(new Rule(name, pattern, format));
-            }
-        }
-        return Collections.unmodifiableList(rules);
-    }
-
-    private static String stringValue(Object value) {
-        return value == null ? "" : value.toString();
-    }
-
-    private static List<Rule> defaultRules() {
+    private static List<Rule> buildDefaultRules() {
         List<Rule> rules = new ArrayList<Rule>();
         rules.add(new Rule("timepoint",
                 "(?i)(?<![A-Za-z0-9])(\\d+)\\s*([wd])(?:k|eeks?|ays?)?(?![A-Za-z0-9])",
@@ -221,7 +174,7 @@ public final class TagSuggestionEngine {
         private final Pattern pattern;
         private final String format;
 
-        Rule(String name, String pattern, String format) {
+        public Rule(String name, String pattern, String format) {
             this.name = name == null ? "" : name.trim().toLowerCase(Locale.ROOT);
             this.pattern = Pattern.compile(pattern);
             this.format = format == null ? "" : format;

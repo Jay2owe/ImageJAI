@@ -36,17 +36,32 @@ public class BriefNudgerTest {
     @Test
     public void tcpPollingDoesNothing() {
         final StringBuilder clipboard = new StringBuilder();
+        final StringBuilder toast = new StringBuilder();
         BriefNudger nudger = new BriefNudger(
                 new BriefNudger.ClipboardWriter() {
                     @Override public void write(String text) { clipboard.append(text); }
                 },
                 new BriefNudger.Toast() {
-                    @Override public void show(String message) { }
+                    @Override public void show(String message) { toast.append(message); }
                 });
 
         nudger.deliver(brief(), BriefNudger.NudgeMechanism.TCP_POLLING, null);
 
         assertEquals("", clipboard.toString());
+        assertEquals("", toast.toString());
+    }
+
+    @Test
+    public void embeddedPtyDeliveryUsesPtySendText() {
+        BriefNudger nudger = new BriefNudger();
+        FakeEmbeddedSession session = new FakeEmbeddedSession();
+
+        nudger.deliver(brief(), BriefNudger.NudgeMechanism.EMBEDDED_PTY, session);
+
+        assertTrue(session.pty.sent.toString().contains("image-7a3f.lif:1"));
+        assertTrue(session.pty.sent.toString().contains("get_pending_brief"));
+        assertTrue(session.pty.sent.toString().endsWith("\n"));
+        assertEquals("", session.input.toString());
     }
 
     @Test
@@ -78,5 +93,26 @@ public class BriefNudgerTest {
         @Override public int exitValue() { return -1; }
         @Override public void interrupt() { }
         @Override public void destroy() { }
+    }
+
+    private static final class FakeEmbeddedSession implements AgentSession {
+        private final FakePty pty = new FakePty();
+        final StringBuilder input = new StringBuilder();
+
+        @Override public AgentLauncher.AgentInfo info() { return null; }
+        @Override public void writeInput(String s) { input.append(s); }
+        @Override public InputStream output() { return new ByteArrayInputStream(new byte[0]); }
+        @Override public boolean isAlive() { return true; }
+        @Override public int exitValue() { return -1; }
+        @Override public void interrupt() { }
+        @Override public void destroy() { }
+    }
+
+    public static final class FakePty {
+        final StringBuilder sent = new StringBuilder();
+
+        public void sendText(String text) {
+            sent.append(text);
+        }
     }
 }

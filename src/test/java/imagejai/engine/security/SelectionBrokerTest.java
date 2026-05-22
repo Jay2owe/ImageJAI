@@ -24,4 +24,14 @@ public class SelectionBrokerTest {
         assertFalse(broker.consume("s1").isPresent());
         assertFalse(broker.hasPending("s1"));
     }
+
+    @Test
+    public void briefRejectsNonTokenPaths() {
+        Brief brief = new Brief("s1", Arrays.asList(
+                "C:/MOAB2/subject_017_visit3.lif",
+                "image-7a3f.lif:1"),
+                "8 weeks, wild-type", Collections.<String, Object>emptyMap());
+
+        assertEquals(Collections.singletonList("image-7a3f.lif:1"), brief.tokens());
+    }
 }
