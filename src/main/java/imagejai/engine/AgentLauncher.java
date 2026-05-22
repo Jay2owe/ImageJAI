@@ -1,6 +1,7 @@
 package imagejai.engine;
 
 import ij.IJ;
+import imagejai.config.PrivacyPosture;
 import imagejai.config.Settings;
 
 import java.io.File;
@@ -8,6 +9,7 @@ import java.io.IOException;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 
 /**
@@ -40,14 +42,39 @@ public class AgentLauncher {
         public final String description;
         public final String executablePath;
         public final String contextFlags;
+        private final boolean local;
+        private final String defaultOllamaModel;
 
         public AgentInfo(String name, String command, String description,
                          String executablePath, String contextFlags) {
+            this(name, command, description, executablePath, contextFlags, false, "");
+        }
+
+        public AgentInfo(String name, String command, String description,
+                         String executablePath, String contextFlags,
+                         boolean local, String defaultOllamaModel) {
             this.name = name;
             this.command = command;
             this.description = description;
             this.executablePath = executablePath;
             this.contextFlags = contextFlags;
+            this.local = local;
+            this.defaultOllamaModel = defaultOllamaModel == null ? "" : defaultOllamaModel;
+        }
+
+        public boolean isLocal() {
+            return local;
+        }
+
+        public boolean isOllama() {
+            String commandText = command == null ? "" : command.toLowerCase(Locale.ROOT);
+            return commandText.contains("ollama")
+                    || commandText.contains("gemma4_31b_agent")
+                    || !defaultOllamaModel.trim().isEmpty();
+        }
+
+        public String defaultOllamaModel() {
+            return defaultOllamaModel;
         }
 
         @Override
@@ -56,24 +83,29 @@ public class AgentLauncher {
         }
     }
 
-    // Known CLI agents: {display name, command, description, context flags}
+    // Known CLI agents: {display name, command, description, context flags, local, default Ollama model}
     // Context flags tell the agent where to find project context.
     // Empty string means the agent auto-reads its own file (e.g., CLAUDE.md, GEMINI.md).
     private static final String[][] KNOWN_AGENTS = {
-        {"Claude Code", "claude", "Anthropic's Claude CLI agent", ""},
-        {"Aider", "aider", "AI pair programming in your terminal", "--read .aider.conventions.md"},
-        {"GitHub Copilot CLI", "gh copilot", "GitHub Copilot in the terminal", ""},
-        {"Gemini CLI", "gemini", "Google's Gemini CLI agent", "--yolo"},
-        {"Open Interpreter", "interpreter", "Open-source code interpreter", "--system_message \"$(cat CLAUDE.md)\""},
-        {"Cline", "cline", "Autonomous coding agent", ""},
-        {"Codex CLI", "codex", "OpenAI Codex CLI", "--full-auto"},
-        {"Gemma 4 31B", "gemma4_31b_agent", "Local Ollama agent (free, no API key)", ""},
-        {"Gemma 4 31B (Claude-style)", "gemma4_31b_agent", "Gemma with Claude-style narrative prompt (A/B test)", "--style claude"},
+        {"Claude Code", "claude", "Anthropic's Claude CLI agent", "", "false", ""},
+        {"Aider", "aider", "AI pair programming in your terminal", "--read .aider.conventions.md", "false", ""},
+        {"GitHub Copilot CLI", "gh copilot", "GitHub Copilot in the terminal", "", "false", ""},
+        {"Gemini CLI", "gemini", "Google's Gemini CLI agent", "--yolo", "false", ""},
+        {"Open Interpreter", "interpreter", "Open-source code interpreter", "--system_message \"$(cat CLAUDE.md)\"", "false", ""},
+        {"Cline", "cline", "Autonomous coding agent", "", "false", ""},
+        {"Codex CLI", "codex", "OpenAI Codex CLI", "--full-auto", "false", ""},
+        {"Gemma 4 31B", "gemma4_31b_agent", "Ollama-backed Gemma agent", "", "true", "gemma4:31b-cloud"},
+        {"Gemma 4 31B (Claude-style)", "gemma4_31b_agent", "Gemma with Claude-style narrative prompt (A/B test)", "--style claude", "true", "gemma4:31b-cloud"},
     };
+
+    static final String CLOUD_OLLAMA_REFUSAL =
+            "On-premises mode cannot use cloud-hosted Ollama models. "
+          + "Switch to a local tag (e.g. gemma3:27b) or change the posture for this folder.";
 
     private final String agentWorkspace;
     private final int tcpPort;
     private final Settings settings;
+    private final PostureController postureController;
     private List<AgentInfo> cachedAgents;
 
     /**
@@ -85,9 +117,17 @@ public class AgentLauncher {
     }
 
     public AgentLauncher(String agentWorkspace, int tcpPort, Settings settings) {
+        this(agentWorkspace, tcpPort, settings, PostureController.getInstance());
+    }
+
+    AgentLauncher(String agentWorkspace, int tcpPort, Settings settings,
+                  PostureController postureController) {
         this.agentWorkspace = agentWorkspace;
         this.tcpPort = tcpPort;
         this.settings = settings == null ? Settings.load() : settings;
+        this.postureController = postureController == null
+                ? PostureController.getInstance()
+                : postureController;
     }
 
     /**
@@ -95,26 +135,28 @@ public class AgentLauncher {
      * Checks PATH and common install locations.
      */
     public List<AgentInfo> detectAgents() {
-        if (cachedAgents != null) {
-            return cachedAgents;
-        }
+        if (cachedAgents == null) {
+            List<AgentInfo> agents = new ArrayList<AgentInfo>();
 
-        List<AgentInfo> agents = new ArrayList<AgentInfo>();
+            for (String[] known : KNOWN_AGENTS) {
+                String name = known[0];
+                String command = known[1];
+                String description = known[2];
+                String flags = known.length > 3 ? known[3] : "";
+                boolean local = known.length > 4 && Boolean.parseBoolean(known[4]);
+                String defaultOllamaModel = known.length > 5 ? known[5] : "";
 
-        for (String[] known : KNOWN_AGENTS) {
-            String name = known[0];
-            String command = known[1];
-            String description = known[2];
-            String flags = known.length > 3 ? known[3] : "";
-
-            String path = findExecutable(command);
-            if (path != null) {
-                agents.add(new AgentInfo(name, command, description, path, flags));
+                String path = findExecutable(command);
+                if (path != null) {
+                    agents.add(new AgentInfo(name, command, description, path,
+                            flags, local, defaultOllamaModel));
+                }
             }
+
+            cachedAgents = agents;
         }
 
-        cachedAgents = agents;
-        return agents;
+        return filterAgentsForPosture(cachedAgents);
     }
 
     /**
@@ -134,6 +176,7 @@ public class AgentLauncher {
      */
     public AgentSession launch(AgentInfo agent, Mode mode) {
         try {
+            refuseCloudTagIfOnPremises(agent, null);
             syncContextFiles();
 
             if (mode == Mode.EMBEDDED) {
@@ -165,6 +208,7 @@ public class AgentLauncher {
      * shape without cross-contaminating shell quoting.
      */
     AgentLaunchSpec buildExternalLaunchSpec(AgentInfo agent) {
+        refuseCloudTagIfOnPremises(agent, null);
         String fullCommand = buildAgentCommandString(agent);
 
         String os = System.getProperty("os.name", "").toLowerCase();
@@ -207,6 +251,7 @@ public class AgentLauncher {
      * existing external-terminal path.
      */
     AgentLaunchSpec buildEmbeddedLaunchSpec(AgentInfo agent) {
+        refuseCloudTagIfOnPremises(agent, null);
         String fullCommand = buildAgentCommandString(agent);
 
         String os = System.getProperty("os.name", "").toLowerCase();
@@ -275,7 +320,7 @@ public class AgentLauncher {
     /**
      * Find an executable on PATH or in common locations.
      */
-    private String findExecutable(String command) {
+    String findExecutable(String command) {
         // Handle compound commands like "gh copilot"
         String baseCommand = command.split(" ")[0];
 
@@ -330,6 +375,130 @@ public class AgentLauncher {
         }
 
         return null;
+    }
+
+    private List<AgentInfo> filterAgentsForPosture(List<AgentInfo> agents) {
+        List<AgentInfo> filtered = new ArrayList<AgentInfo>();
+        PrivacyPosture posture = currentPosture();
+        for (AgentInfo agent : agents) {
+            if (posture == PrivacyPosture.ON_PREMISES && !agent.isLocal()) {
+                continue;
+            }
+            filtered.add(agent);
+        }
+        return filtered;
+    }
+
+    private PrivacyPosture currentPosture() {
+        if (postureController != null) {
+            return postureController.current();
+        }
+        return settings.getPrivacyPosture();
+    }
+
+    void refuseCloudTagIfOnPremises(AgentInfo agent, Map<String, String> env) {
+        if (currentPosture() != PrivacyPosture.ON_PREMISES || agent == null
+                || !agent.isOllama()) {
+            return;
+        }
+        String tag = resolveOllamaModelTag(agent, env);
+        if (isCloudOllamaTag(tag)) {
+            throw new PostureViolation(CLOUD_OLLAMA_REFUSAL);
+        }
+    }
+
+    String resolveOllamaModelTag(AgentInfo agent, Map<String, String> env) {
+        String fromEnv = env == null ? null : env.get("OLLAMA_MODEL");
+        if (isBlank(fromEnv)) {
+            fromEnv = System.getenv("OLLAMA_MODEL");
+        }
+        if (!isBlank(fromEnv)) {
+            return cleanModelTag(fromEnv);
+        }
+
+        String fromFlags = modelFromFlags(agent == null ? null : agent.contextFlags);
+        if (!isBlank(fromFlags)) {
+            return cleanModelTag(fromFlags);
+        }
+
+        return cleanModelTag(agent == null ? null : agent.defaultOllamaModel());
+    }
+
+    static boolean isCloudOllamaTag(String tag) {
+        return !isBlank(tag)
+                && cleanModelTag(tag).toLowerCase(Locale.ROOT).endsWith("-cloud");
+    }
+
+    private static String modelFromFlags(String flags) {
+        if (isBlank(flags)) {
+            return "";
+        }
+        List<String> tokens = shellLikeTokens(flags);
+        for (int i = 0; i < tokens.size(); i++) {
+            String token = tokens.get(i);
+            if ("--model".equals(token) || "-m".equals(token)) {
+                return i + 1 < tokens.size() ? tokens.get(i + 1) : "";
+            }
+            if (token.startsWith("--model=")) {
+                return token.substring("--model=".length());
+            }
+        }
+        return "";
+    }
+
+    private static List<String> shellLikeTokens(String text) {
+        List<String> tokens = new ArrayList<String>();
+        if (text == null) {
+            return tokens;
+        }
+        StringBuilder current = new StringBuilder();
+        boolean quoted = false;
+        char quote = 0;
+        for (int i = 0; i < text.length(); i++) {
+            char c = text.charAt(i);
+            if (quoted) {
+                if (c == quote) {
+                    quoted = false;
+                } else {
+                    current.append(c);
+                }
+                continue;
+            }
+            if (c == '\'' || c == '"') {
+                quoted = true;
+                quote = c;
+                continue;
+            }
+            if (Character.isWhitespace(c)) {
+                if (current.length() > 0) {
+                    tokens.add(current.toString());
+                    current.setLength(0);
+                }
+            } else {
+                current.append(c);
+            }
+        }
+        if (current.length() > 0) {
+            tokens.add(current.toString());
+        }
+        return tokens;
+    }
+
+    private static String cleanModelTag(String tag) {
+        if (tag == null) {
+            return "";
+        }
+        String cleaned = tag.trim();
+        if (cleaned.length() >= 2
+                && ((cleaned.startsWith("\"") && cleaned.endsWith("\""))
+                || (cleaned.startsWith("'") && cleaned.endsWith("'")))) {
+            cleaned = cleaned.substring(1, cleaned.length() - 1).trim();
+        }
+        return cleaned;
+    }
+
+    private static boolean isBlank(String value) {
+        return value == null || value.trim().isEmpty();
     }
 
     /**
