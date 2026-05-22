@@ -2,6 +2,14 @@
 
 A single Fiji plugin that adds a conversational AI assistant to ImageJ. Install by dragging a JAR into `plugins/`. Free to use with Google Gemini or local with Ollama.
 
+## Data Governance
+
+ImageJAI includes a per-folder Privacy Posture for labs using external agent CLIs. New folders default to Pseudonymised; supervisors can set sensitive folders to On-premises, which filters the agent list to local binaries and refuses cloud-hosted Ollama tags.
+
+> *"ImageJAI applies UK GDPR Art. 4(5) pseudonymisation to all outbound responses by default, differentiates microscopy pixels (downsampled, burn-in masked) from GUI screenshots (refused), refuses cloud-hosted model endpoints in On-premises posture, and emits an append-only audit trail per project."*
+
+The audit trail is written to `AI_Exports/imagejai_audit.csv`, and the launcher can generate a Data Handling Statement PDF for ethics or grant paperwork. See [`docs/data-governance/README.md`](docs/data-governance/README.md) for the biologist-facing workflow and limits.
+
 ## Features
 
 - **Natural language control** — "Open the blobs image", "Apply a Gaussian blur with sigma 2", "Count all cells"

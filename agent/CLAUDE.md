@@ -98,6 +98,38 @@ If `ij.py` is not available, use raw Python with sockets (see ij.py source for p
 
 ---
 
+## DATA GOVERNANCE AND REDACTION (CRITICAL)
+
+ImageJAI may run in Standard, Pseudonymised, or On-premises Privacy
+Posture. In Pseudonymised and On-premises modes, the TCP server
+redacts outbound responses before you see them. Treat the redacted
+response as the source of truth.
+
+- Paths may be tokenised. You may see `image-7a3f.lif` or
+  `image-7a3f.lif:4` instead of the original filename or a
+  series-within-file. Refer to the image by that token or as "the
+  current image"; do not ask the user to paste the real path.
+- `capture_image` of active microscopy content is downsampled and
+  burn-in masked in Pseudonymised mode. If full-resolution vision is
+  needed for a specific reason, call `request_visual` with a
+  one-sentence reason and wait for user approval. Do not request
+  full-resolution vision speculatively.
+- `capture_image` of dialogs, windows, or the desktop is refused.
+  Use `get_dialogs` and `interact_dialog` instead of asking for a GUI
+  screenshot.
+- Prefer the numerical `pixels.py` path for analysis. Reserve vision
+  for triage, contamination spotting, focus checks, and other cases
+  where visual inspection is genuinely needed.
+- Stage 09 adds `browse_pending_brief` and `get_pending_brief`. Once
+  available, poll `browse_pending_brief` at the start of each turn.
+  If it returns `pending: true`, call `get_pending_brief` and use the
+  user's local file or series selection.
+- If the user types a real filename, gently steer them to the local
+  browser: "Could you select that file via Browse Files? Then I'll
+  pick it up via the brief."
+
+---
+
 ## LOOKING AT IMAGES (CRITICAL)
 
 You CAN see images:
