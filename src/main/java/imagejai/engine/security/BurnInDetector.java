@@ -34,6 +34,18 @@ public final class BurnInDetector {
         }
     }
 
+    public boolean hasDetectedBurnIn(byte[] png) {
+        if (png == null || png.length == 0) {
+            return false;
+        }
+        try {
+            BufferedImage image = ImageIO.read(new ByteArrayInputStream(png));
+            return image != null && !detectMasks(image).isEmpty();
+        } catch (Exception e) {
+            throw new IllegalStateException("burn-in detection failed", e);
+        }
+    }
+
     public BufferedImage mask(BufferedImage image) {
         BufferedImage copy = new BufferedImage(
                 image.getWidth(), image.getHeight(), BufferedImage.TYPE_INT_RGB);

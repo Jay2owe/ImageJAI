@@ -33,6 +33,8 @@
         <scijava.jvm.build.version>[11,)</scijava.jvm.build.version>
         <!-- Override scijava's enforcer to allow building with newer JDKs -->
         <enforcer.skip>true</enforcer.skip>
+        <!-- pom-scijava 37 pins JaCoCo 0.8.10, which cannot instrument JDK 23 classes. -->
+        <jacoco-maven-plugin.version>0.8.13</jacoco-maven-plugin.version>
         <!-- pty4j / JediTerm resolve Kotlin 2.x transitive artifacts. Keep this
              explicit so SciJava's older BOM does not pull a mismatched stdlib. -->
         <kotlin.version>2.1.21</kotlin.version>

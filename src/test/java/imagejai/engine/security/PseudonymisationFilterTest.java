@@ -155,6 +155,28 @@ public class PseudonymisationFilterTest {
         assertEquals(3, target.series());
     }
 
+    @Test
+    public void fiftyKilobytePayloadFiltersUnderTenMillisecondsOnAverage() {
+        PathTokenMap map = new PathTokenMap(bytes(18));
+        PseudonymisationFilter filter = filter(map);
+        map.tokenForPathString("C:\\study\\MOAB2_subject_017.lif");
+
+        for (int i = 0; i < 10; i++) {
+            filter.apply(realisticPayload(), "get_state",
+                    PrivacyPosture.PSEUDONYMISED, "s");
+        }
+
+        int runs = 80;
+        long start = System.nanoTime();
+        for (int i = 0; i < runs; i++) {
+            filter.apply(realisticPayload(), "get_state",
+                    PrivacyPosture.PSEUDONYMISED, "s");
+        }
+        double averageMs = (System.nanoTime() - start) / 1_000_000.0 / runs;
+
+        assertTrue("average filter time was " + averageMs + " ms", averageMs < 10.0);
+    }
+
     private static PseudonymisationFilter filter(PathTokenMap map) {
         return new PseudonymisationFilter(map, new OmeXmlScrubber(),
                 new CaptureHandler(new BurnInDetector(), new VisualOverrideRegistry()));
@@ -164,6 +186,28 @@ public class PseudonymisationFilterTest {
         JsonObject response = new JsonObject();
         response.addProperty("ok", true);
         response.add("result", new JsonObject());
+        return response;
+    }
+
+    private static JsonObject realisticPayload() {
+        JsonObject response = okObject();
+        JsonObject result = response.getAsJsonObject("result");
+        result.addProperty("path", "C:\\study\\MOAB2_subject_017.lif");
+        result.addProperty("info", "<OME><Experimenter>Jane</Experimenter>"
+                + "<Pixels SizeX=\"512\" SizeY=\"512\"/></OME>");
+        JsonArray rows = new JsonArray();
+        JsonObject row = new JsonObject();
+        row.addProperty("Label", "MOAB2_subject_017_cell_3");
+        row.addProperty("Slice", "12");
+        row.addProperty("Area", "44");
+        rows.add(row);
+        result.add("results", rows);
+        StringBuilder log = new StringBuilder(50 * 1024);
+        while (log.length() < 50 * 1024) {
+            log.append("Processed C:\\study\\MOAB2_subject_017.lif with channel=2; ");
+            log.append("mean=123.4 area=44.0 status=ok\n");
+        }
+        result.addProperty("log", log.toString());
         return response;
     }
 

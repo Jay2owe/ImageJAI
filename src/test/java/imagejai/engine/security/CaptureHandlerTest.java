@@ -12,6 +12,7 @@ import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.util.Base64;
 
+import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 
@@ -50,6 +51,24 @@ public class CaptureHandlerTest {
         JsonObject result = response.getAsJsonObject("result");
         assertFalse(result.has("base64"));
         assertTrue(result.has("placeholder"));
+    }
+
+    @Test
+    public void activeImageWithOverlayIsRefusedWhenBurnInIsDetected() throws Exception {
+        CaptureHandler handler = new CaptureHandler(
+                new BurnInDetector(), new VisualOverrideRegistry());
+        JsonObject response = captureResponse(png(700, 500, true),
+                "ACTIVE_IMAGE_WITH_OVERLAY");
+
+        handler.apply(response, PrivacyPosture.PSEUDONYMISED, "s",
+                RedactionReport.builder().posture(PrivacyPosture.PSEUDONYMISED));
+
+        assertFalse(response.get("ok").getAsBoolean());
+        JsonObject result = response.getAsJsonObject("result");
+        assertEquals("ACTIVE_IMAGE_WITH_OVERLAY", result.get("source").getAsString());
+        assertFalse(result.has("base64"));
+        assertEquals("overlay_burn_in_detected_by_privacy_posture",
+                result.get("reason").getAsString());
     }
 
     @Test

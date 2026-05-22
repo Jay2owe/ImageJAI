@@ -52,6 +52,12 @@ public final class CaptureHandler {
         }
 
         byte[] png = Base64.getDecoder().decode(b64Element.getAsString());
+        if (source == CaptureSource.ACTIVE_IMAGE_WITH_OVERLAY
+                && burnInDetector.hasDetectedBurnIn(png)) {
+            refuse(response, result, source, report);
+            result.addProperty("reason", "overlay_burn_in_detected_by_privacy_posture");
+            return;
+        }
         boolean consumeOverride = posture == PrivacyPosture.PSEUDONYMISED
                 && source == CaptureSource.ACTIVE_IMAGE_CONTENT
                 && visualOverrideRegistry.consumeIfPresent(sessionId);
