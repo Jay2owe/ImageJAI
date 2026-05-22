@@ -14,7 +14,9 @@ import java.util.List;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
@@ -37,6 +39,15 @@ public class AuditLogTest {
         assertEquals(2, lines.size());
         assertEquals("ping", AuditRow.fromCsvLine(lines.get(1)).command());
         log.shutdownAndAwait(100);
+    }
+
+    @Test
+    public void headerMatchesStage04ColumnOrderExactly() {
+        assertEquals("timestamp_utc,session_id,command,posture,model_endpoint,"
+                        + "capture_source,bytes_out,bytes_in,image_hash,"
+                        + "redaction_applied,fields_redacted,notes",
+                AuditLog.HEADER);
+        assertEquals(12, AuditRow.parseCsvLine(AuditLog.HEADER).size());
     }
 
     @Test
@@ -101,6 +112,46 @@ public class AuditLogTest {
     }
 
     @Test
+    public void appendDoesNotWaitForSlowReceiptListener() throws Exception {
+        Path csv = tmp.newFolder("audit").toPath().resolve(AuditLog.FILE_NAME);
+        final AuditLog log = new AuditLog(csv);
+        final CountDownLatch releaseListener = new CountDownLatch(1);
+        AutoCloseable subscription = log.subscribeRecent(new AuditLog.Listener() {
+            @Override
+            public void auditRowsUpdated(List<AuditRow> recentRows) {
+                if (recentRows.isEmpty()) {
+                    return;
+                }
+                try {
+                    releaseListener.await(5, TimeUnit.SECONDS);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+            }
+        });
+        ExecutorService caller = Executors.newSingleThreadExecutor();
+
+        Future<?> append = caller.submit(new Runnable() {
+            @Override
+            public void run() {
+                log.append(row("s1", "ping", "", ""));
+            }
+        });
+
+        try {
+            append.get(500, TimeUnit.MILLISECONDS);
+        } catch (TimeoutException e) {
+            releaseListener.countDown();
+            throw new AssertionError("AuditLog.append blocked on a receipt listener", e);
+        } finally {
+            releaseListener.countDown();
+            caller.shutdownNow();
+            subscription.close();
+            log.shutdownAndAwait(1000);
+        }
+    }
+
+    @Test
     public void csvEscapesNotesWithCommaAndQuotes() {
         AuditRow original = row("s1", "capture_image", "active_image_content",
                 "reason='contains, comma and \"quote\"'");
@@ -160,9 +211,27 @@ public class AuditLogTest {
         });
 
         log.append(row("s1", "ping", "", ""));
+        log.flushForTest();
 
         assertEquals(1, sizes[0]);
         subscription.close();
+        log.shutdownAndAwait(100);
+    }
+
+    @Test
+    public void recentReturnsRequestedTailAndZeroRowsForZeroLimit() throws Exception {
+        Path csv = tmp.newFolder("audit").toPath().resolve(AuditLog.FILE_NAME);
+        AuditLog log = new AuditLog(csv);
+
+        log.append(row("s1", "first", "", ""));
+        log.append(row("s1", "second", "", ""));
+        log.append(row("s1", "third", "", ""));
+
+        List<AuditRow> recent = log.recent(2);
+        assertEquals(2, recent.size());
+        assertEquals("second", recent.get(0).command());
+        assertEquals("third", recent.get(1).command());
+        assertEquals(0, log.recent(0).size());
         log.shutdownAndAwait(100);
     }
 

@@ -57,6 +57,7 @@ public final class AuditLog {
 
     private final PathResolver pathResolver;
     private final ExecutorService writer;
+    private final ExecutorService notifier;
     private final ArrayDeque<AuditRow> recentRows = new ArrayDeque<AuditRow>();
     private final CopyOnWriteArrayList<Listener> listeners =
             new CopyOnWriteArrayList<Listener>();
@@ -69,14 +70,8 @@ public final class AuditLog {
         this.pathResolver = pathResolver == null
                 ? new CurrentImagePathResolver()
                 : pathResolver;
-        this.writer = Executors.newSingleThreadExecutor(new ThreadFactory() {
-            @Override
-            public Thread newThread(Runnable runnable) {
-                Thread thread = new Thread(runnable, "ImageJAI-audit-log");
-                thread.setDaemon(true);
-                return thread;
-            }
-        });
+        this.writer = daemonExecutor("ImageJAI-audit-log");
+        this.notifier = daemonExecutor("ImageJAI-audit-log-listener");
         Runtime.getRuntime().addShutdownHook(new Thread(new Runnable() {
             @Override
             public void run() {
@@ -94,21 +89,25 @@ public final class AuditLog {
             return;
         }
         remember(row);
-        notifyListeners();
-        writer.submit(new Runnable() {
-            @Override
-            public void run() {
-                Path csvPath = resolveCsvPath();
-                if (csvPath == null) {
-                    return;
+        notifyListenersAsync();
+        try {
+            writer.submit(new Runnable() {
+                @Override
+                public void run() {
+                    Path csvPath = resolveCsvPath();
+                    if (csvPath == null) {
+                        return;
+                    }
+                    try {
+                        writeSync(csvPath, row);
+                    } catch (IOException e) {
+                        System.err.println("[ImageJAI-Audit] append failed: " + e.getMessage());
+                    }
                 }
-                try {
-                    writeSync(csvPath, row);
-                } catch (IOException e) {
-                    System.err.println("[ImageJAI-Audit] append failed: " + e.getMessage());
-                }
-            }
-        });
+            });
+        } catch (RuntimeException e) {
+            System.err.println("[ImageJAI-Audit] append scheduling failed: " + e.getMessage());
+        }
     }
 
     public void open() throws IOException {
@@ -127,7 +126,10 @@ public final class AuditLog {
         int limit = Math.max(0, n);
         synchronized (recentRows) {
             List<AuditRow> all = new ArrayList<AuditRow>(recentRows);
-            if (limit == 0 || all.size() <= limit) {
+            if (limit == 0) {
+                return Collections.unmodifiableList(new ArrayList<AuditRow>());
+            }
+            if (all.size() <= limit) {
                 return Collections.unmodifiableList(all);
             }
             return Collections.unmodifiableList(
@@ -157,18 +159,26 @@ public final class AuditLog {
     }
 
     public void flushForTest() throws Exception {
-        Future<?> future = writer.submit(new Runnable() {
+        Future<?> writeFuture = writer.submit(new Runnable() {
             @Override
             public void run() {
             }
         });
-        future.get(5, TimeUnit.SECONDS);
+        writeFuture.get(5, TimeUnit.SECONDS);
+        Future<?> notifyFuture = notifier.submit(new Runnable() {
+            @Override
+            public void run() {
+            }
+        });
+        notifyFuture.get(5, TimeUnit.SECONDS);
     }
 
     public void shutdownAndAwait(long millis) {
         writer.shutdown();
+        notifier.shutdown();
         try {
             writer.awaitTermination(Math.max(0L, millis), TimeUnit.MILLISECONDS);
+            notifier.awaitTermination(Math.max(0L, millis), TimeUnit.MILLISECONDS);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
         }
@@ -249,17 +259,40 @@ public final class AuditLog {
         }
     }
 
-    private void notifyListeners() {
+    private void notifyListenersAsync() {
         if (listeners.isEmpty()) {
             return;
         }
-        List<AuditRow> snapshot = recent(DEFAULT_RECENT_LIMIT);
+        final List<AuditRow> snapshot = recent(DEFAULT_RECENT_LIMIT);
+        try {
+            notifier.submit(new Runnable() {
+                @Override
+                public void run() {
+                    notifyListeners(snapshot);
+                }
+            });
+        } catch (RuntimeException ignore) {
+        }
+    }
+
+    private void notifyListeners(List<AuditRow> snapshot) {
         for (Listener listener : listeners) {
             try {
                 listener.auditRowsUpdated(snapshot);
             } catch (Throwable ignore) {
             }
         }
+    }
+
+    private static ExecutorService daemonExecutor(final String name) {
+        return Executors.newSingleThreadExecutor(new ThreadFactory() {
+            @Override
+            public Thread newThread(Runnable runnable) {
+                Thread thread = new Thread(runnable, name);
+                thread.setDaemon(true);
+                return thread;
+            }
+        });
     }
 
     private Path resolveCsvPath() {

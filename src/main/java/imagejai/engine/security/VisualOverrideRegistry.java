@@ -130,11 +130,11 @@ public final class VisualOverrideRegistry {
                 .replace('\r', ' ')
                 .replace('\n', ' ')
                 .trim();
-        if (!scrubbedReason.isEmpty()) {
-            notes.append("reason='").append(scrubbedReason).append('\'');
-        }
+        notes.append("reason='")
+                .append(scrubbedReason.isEmpty() ? "not specified" : scrubbedReason)
+                .append('\'');
         if (imageToken != null && !imageToken.trim().isEmpty()) {
-            if (notes.length() > 0) notes.append(' ');
+            notes.append(' ');
             notes.append("on=").append(imageToken.trim());
         }
         return notes.toString();
