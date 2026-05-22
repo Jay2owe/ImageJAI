@@ -11,7 +11,7 @@ The summary strings below must match the registry exactly.
 | OpenAI API / Codex CLI | No training on business API data; 30-day abuse logs. | https://openai.com/enterprise-privacy/ |
 | Google Gemini API (paid) | No training; 55-day abuse logs. | https://cloud.google.com/gemini/docs/discover/data-governance |
 | Google Gemini API / AI Studio (free tier) | PROMPTS AND OUTPUTS ARE USED FOR TRAINING. NOT RECOMMENDED FOR RESEARCH DATA. | https://ai.google.dev/gemini-api/terms |
-| Ollama (local) | No outbound network traffic. Recommended for Restricted data. | n/a |
+| Ollama (local) | No outbound network traffic. Recommended for Restricted data. |  |
 | Ollama Cloud (*-cloud model tags) | Routes inference to Ollama's US-hosted servers. Not a local execution. | https://ollama.com/privacy |
 
 Use On-premises posture for work that must stay off cloud-hosted model

@@ -16,9 +16,9 @@ OME-XML metadata fields, results-table `Label` columns, and dialog
 identifiers may constitute personal data under UK GDPR Art. 4(1)
 where they contain participant identifiers.
 
-ImageJAI uses pseudonymisation, not anonymisation. The local JVM keeps
-the token map during the live session so the plugin can resolve image
-tokens back to real files and Bio-Formats series when needed.
+The local JVM keeps the pseudonymisation token map during the live
+session so the plugin can resolve image tokens back to real files and
+Bio-Formats series when needed.
 
 ## 3. Necessity and proportionality
 

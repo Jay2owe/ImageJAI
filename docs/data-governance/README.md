@@ -48,10 +48,10 @@ pseudonym shown by ImageJAI.
 
 ## What "Pseudonymised" means here
 
-Pseudonymisation is not anonymisation. ImageJAI follows the UK GDPR
-Art. 4(5) framing: identifiers are replaced with tokens, but the
-mapping can still be reversed inside the live JVM session so the
-software can open the right file and series.
+ImageJAI follows the UK GDPR Art. 4(5) pseudonymisation framing:
+identifiers are replaced with tokens, but the mapping can still be
+reversed inside the live JVM session so the software can open the
+right file and series.
 
 The token map is held in JVM memory only. It is not written to the
 audit CSV and is not serialised to disk.
