@@ -108,6 +108,7 @@ public class AgentLauncher {
     private final Settings settings;
     private final PostureController postureController;
     private List<AgentInfo> cachedAgents;
+    private volatile String lastSessionId = "";
 
     /**
      * @param agentWorkspace the directory to use as working directory for launched agents
@@ -299,6 +300,10 @@ public class AgentLauncher {
         return agentWorkspace;
     }
 
+    public String lastSessionId() {
+        return lastSessionId == null ? "" : lastSessionId;
+    }
+
     // --- Private helpers ---
 
     String buildAgentCommandString(AgentInfo agent) {
@@ -436,7 +441,9 @@ public class AgentLauncher {
         if (env == null) {
             return;
         }
-        env.put("IMAGEJAI_SESSION_ID", newAuditSessionId());
+        String sessionId = newAuditSessionId();
+        lastSessionId = sessionId;
+        env.put("IMAGEJAI_SESSION_ID", sessionId);
         String endpoint = modelEndpointFor(agent);
         if (!endpoint.isEmpty()) {
             env.put("IMAGEJAI_MODEL_ENDPOINT", endpoint);

@@ -25,10 +25,12 @@ import imagejai.config.PrivacyPosture;
 import imagejai.engine.security.AgentContextSanitizer;
 import imagejai.engine.security.AuditLog;
 import imagejai.engine.security.AuditRow;
+import imagejai.engine.security.Brief;
 import imagejai.engine.security.CaptureSource;
 import imagejai.engine.security.PathTokenMap;
 import imagejai.engine.security.PseudonymisationFilter;
 import imagejai.engine.security.RedactionReport;
+import imagejai.engine.security.SelectionBroker;
 import imagejai.engine.security.VisualOverrideRegistry;
 import imagejai.engine.safeMode.DestructiveScanner;
 import imagejai.engine.safeMode.RoiAutoBackup;
@@ -64,6 +66,7 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Properties;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
@@ -115,6 +118,8 @@ public class TCPCommandServer {
                     "request_visual",
                     "open_image",
                     "open_image_by_token",
+                    "browse_pending_brief",
+                    "get_pending_brief",
                     "run_pipeline",
                     "explore_thresholds",
                     "get_state_context",
@@ -1337,6 +1342,9 @@ public class TCPCommandServer {
                                 RedactionReport report,
                                 int requestBytes) {
         try {
+            if ("browse_pending_brief".equals(command) && !responsePending(response)) {
+                return;
+            }
             RedactionReport effectiveReport = report == null
                     ? RedactionReport.passthrough(command)
                     : report;
@@ -1490,6 +1498,17 @@ public class TCPCommandServer {
             if (target.matches("(?i)image-[0-9a-f]{4,12}.*")) {
                 appendNote(notes, "token", target);
             }
+        } else if ("get_pending_brief".equals(command)) {
+            String tokens = responseTokens(response);
+            if (!tokens.isEmpty()) {
+                appendNote(notes, "tokens", tokens);
+            }
+            String tag = responseTag(response);
+            if (!tag.isEmpty()) {
+                appendNote(notes, "tag", tag);
+            }
+        } else if ("browse_pending_brief".equals(command) && responsePending(response)) {
+            appendNote(notes, "pending", "true");
         }
         if (report != null && report.failed()) {
             appendNote(notes, "redaction", "failed_closed");
@@ -1512,6 +1531,48 @@ public class TCPCommandServer {
             }
         }
         return "";
+    }
+
+    private static boolean responsePending(JsonObject response) {
+        JsonObject result = responseResultObject(response);
+        return result != null && result.has("pending")
+                && result.get("pending").isJsonPrimitive()
+                && result.get("pending").getAsBoolean();
+    }
+
+    private static String responseTokens(JsonObject response) {
+        JsonObject result = responseResultObject(response);
+        if (result == null || !result.has("tokens")
+                || !result.get("tokens").isJsonArray()) {
+            return "";
+        }
+        StringBuilder out = new StringBuilder();
+        JsonArray tokens = result.getAsJsonArray("tokens");
+        for (JsonElement token : tokens) {
+            if (token == null || !token.isJsonPrimitive()) {
+                continue;
+            }
+            if (out.length() > 0) {
+                out.append(',');
+            }
+            out.append(token.getAsString());
+        }
+        return out.toString();
+    }
+
+    private static String responseTag(JsonObject response) {
+        JsonObject result = responseResultObject(response);
+        return result == null ? "" : optString(result, "tag", "");
+    }
+
+    private static JsonObject responseResultObject(JsonObject response) {
+        if (response == null) {
+            return null;
+        }
+        JsonElement result = response.get("result");
+        return result != null && result.isJsonObject()
+                ? result.getAsJsonObject()
+                : response;
     }
 
     private void appendNote(StringBuilder notes, String key, String value) {
@@ -1685,6 +1746,10 @@ public class TCPCommandServer {
             return handleOpenImage(request, false);
         } else if ("open_image_by_token".equals(command)) {
             return handleOpenImage(request, true);
+        } else if ("browse_pending_brief".equals(command)) {
+            return handleBrowsePendingBrief(request, caps, sock);
+        } else if ("get_pending_brief".equals(command)) {
+            return handleGetPendingBrief(request, caps, sock);
         } else if ("run_pipeline".equals(command)) {
             return handleRunPipeline(request, caps);
         } else if ("explore_thresholds".equals(command)) {
@@ -5010,7 +5075,45 @@ public class TCPCommandServer {
         return successResponse(result);
     }
 
-    PathTokenMap.ResolvedTarget openImageByToken(String token) {
+    private JsonObject handleBrowsePendingBrief(JsonObject request, AgentCaps caps, Socket sock) {
+        JsonObject result = new JsonObject();
+        result.addProperty("pending",
+                SelectionBroker.getInstance().hasPending(briefSessionKey(request, caps, sock)));
+        return successResponse(result);
+    }
+
+    private JsonObject handleGetPendingBrief(JsonObject request, AgentCaps caps, Socket sock) {
+        Optional<Brief> brief = SelectionBroker.getInstance()
+                .consume(briefSessionKey(request, caps, sock));
+        JsonObject result = new JsonObject();
+        if (!brief.isPresent()) {
+            result.addProperty("pending", false);
+            return successResponse(result);
+        }
+        Brief b = brief.get();
+        result.addProperty("pending", true);
+        JsonArray tokens = new JsonArray();
+        for (String token : b.tokens()) {
+            tokens.add(new JsonPrimitive(token));
+        }
+        result.add("tokens", tokens);
+        result.addProperty("tag", b.tag());
+        JsonElement metadata = GSON.toJsonTree(b.metadata());
+        result.add("metadata", metadata == null || metadata.isJsonNull()
+                ? new JsonObject()
+                : metadata);
+        return successResponse(result);
+    }
+
+    private String briefSessionKey(JsonObject request, AgentCaps caps, Socket sock) {
+        String fromRequest = optString(request, "session_id", "");
+        if (!fromRequest.trim().isEmpty()) {
+            return fromRequest.trim();
+        }
+        return sessionKey(caps, sock);
+    }
+
+    public PathTokenMap.ResolvedTarget openImageByToken(String token) {
         return pseudonymisationFilter.pathTokenMap().resolve(token).orElse(null);
     }
 

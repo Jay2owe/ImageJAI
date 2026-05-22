@@ -118,6 +118,24 @@
             <artifactId>scijava-common</artifactId>
             <scope>provided</scope>
         </dependency>
+        <dependency>
+            <groupId>ome</groupId>
+            <artifactId>formats-gpl</artifactId>
+            <version>8.1.1</version>
+            <scope>provided</scope>
+        </dependency>
+        <dependency>
+            <groupId>ome</groupId>
+            <artifactId>formats-api</artifactId>
+            <version>8.1.1</version>
+            <scope>provided</scope>
+        </dependency>
+        <dependency>
+            <groupId>ome</groupId>
+            <artifactId>formats-bsd</artifactId>
+            <version>8.1.1</version>
+            <scope>provided</scope>
+        </dependency>
 
         <!-- Gson (provided by Fiji at runtime — ships as jars/gson-2.10.1.jar) -->
         <dependency>
@@ -266,9 +284,7 @@
                             <includes>
                                 <include>**/*IntegrationTest.java</include>
                             </includes>
-                            <excludes combine.self="override">
-                                <exclude>**/BrowseBriefIntegrationTest.java</exclude>
-                            </excludes>
+                            <excludes combine.self="override" />
                         </configuration>
                     </plugin>
                 </plugins>

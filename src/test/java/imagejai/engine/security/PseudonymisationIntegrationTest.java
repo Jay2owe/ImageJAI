@@ -184,6 +184,12 @@ public class PseudonymisationIntegrationTest {
             request.addProperty("maxSize", 64);
         } else if ("request_visual".equals(command)) {
             request.addProperty("reason", "inspect " + rawImagePath.toString());
+        } else if ("browse_pending_brief".equals(command)) {
+            enqueueStage08Brief(rawImagePath);
+        } else if ("get_pending_brief".equals(command)) {
+            if (!SelectionBroker.getInstance().hasPending("stage08-session")) {
+                enqueueStage08Brief(rawImagePath);
+            }
         } else if ("3d_viewer".equals(command)) {
             request.addProperty("action", "status");
         } else if ("interact_dialog".equals(command)) {
@@ -219,6 +225,16 @@ public class PseudonymisationIntegrationTest {
             request.addProperty("action", "noop");
         }
         return request;
+    }
+
+    private static void enqueueStage08Brief(Path rawImagePath) {
+        java.util.Map<String, Object> metadata = new java.util.LinkedHashMap<String, Object>();
+        metadata.put("channels", 1);
+        metadata.put("dimensions", "64x64");
+        SelectionBroker.getInstance().enqueue(new Brief("stage08-session",
+                java.util.Collections.singletonList(
+                        PathTokenMap.getInstance().tokenForSeries(rawImagePath, 1)),
+                "stage08 brief", metadata));
     }
 
     private static String send(int port, JsonObject request) throws Exception {

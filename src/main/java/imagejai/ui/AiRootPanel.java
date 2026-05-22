@@ -1,7 +1,10 @@
 package imagejai.ui;
 
 import ij.IJ;
+import ij.ImagePlus;
 import ij.Prefs;
+import ij.WindowManager;
+import ij.io.FileInfo;
 import imagejai.config.PrivacyPosture;
 import imagejai.config.Settings;
 import imagejai.engine.AgentLauncher;
@@ -36,6 +39,7 @@ import javax.swing.JCheckBox;
 import javax.swing.JComboBox;
 import javax.swing.JComponent;
 import javax.swing.JFrame;
+import javax.swing.JFileChooser;
 import javax.swing.JOptionPane;
 import javax.swing.JPanel;
 import javax.swing.SwingUtilities;
@@ -501,9 +505,15 @@ public class AiRootPanel extends JPanel implements ChatSurface {
         buttons.add(new PostureBadge(PostureController.getInstance()));
         egressIndicator = new EgressIndicator();
         buttons.add(egressIndicator);
-        buttons.add(createGovernancePlaceholderButton("Browse Files...",
-                "<html>Stage 09 placeholder: the Browse Files steward flow will"
-              + "<br>pre-select files and hand agents pseudonymised tags only.</html>"));
+        buttons.add(createGovernanceActionButton("Browse Files...",
+                "<html>Select files and series locally."
+              + "<br>The agent receives only pseudonym tokens and your tag.</html>",
+                new Runnable() {
+                    @Override
+                    public void run() {
+                        openBrowseFilesDialog();
+                    }
+                }));
         buttons.add(createGovernanceActionButton("View Audit Log",
                 "<html>Audit trail of outbound calls to the agent."
               + "<br>CSV format. Suitable for ethics applications.</html>",
@@ -614,6 +624,60 @@ public class AiRootPanel extends JPanel implements ChatSurface {
                 }
             }
         }.execute();
+    }
+
+    private void openBrowseFilesDialog() {
+        Path folder = currentImageFolder();
+        if (folder == null) {
+            JFileChooser chooser = new JFileChooser(
+                    agentLauncher == null ? new File(".") : new File(agentLauncher.getAgentWorkspace()));
+            chooser.setFileSelectionMode(JFileChooser.DIRECTORIES_ONLY);
+            chooser.setDialogTitle("Choose folder to browse");
+            if (chooser.showOpenDialog(this) != JFileChooser.APPROVE_OPTION) {
+                return;
+            }
+            folder = chooser.getSelectedFile().toPath().toAbsolutePath().normalize();
+        }
+        BrowseFilesDialog dialog = new BrowseFilesDialog(
+                SwingUtilities.getWindowAncestor(this),
+                folder,
+                activeSessionId(),
+                activeSession());
+        dialog.setVisible(true);
+    }
+
+    private Path currentImageFolder() {
+        try {
+            ImagePlus image = WindowManager.getCurrentImage();
+            if (image == null) {
+                return null;
+            }
+            FileInfo info = image.getOriginalFileInfo();
+            if (info == null || info.directory == null
+                    || info.directory.trim().isEmpty()) {
+                return null;
+            }
+            return new File(info.directory).toPath().toAbsolutePath().normalize();
+        } catch (Throwable t) {
+            return null;
+        }
+    }
+
+    private AgentSession activeSession() {
+        synchronized (liveSessions) {
+            for (int i = liveSessions.size() - 1; i >= 0; i--) {
+                AgentSession session = liveSessions.get(i);
+                if (session != null) {
+                    return session;
+                }
+            }
+        }
+        return null;
+    }
+
+    private String activeSessionId() {
+        String id = agentLauncher == null ? "" : agentLauncher.lastSessionId();
+        return id == null || id.trim().isEmpty() ? "default" : id.trim();
     }
 
     private JPanel createTerminalFallbackNotice() {

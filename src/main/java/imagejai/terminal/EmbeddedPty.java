@@ -95,6 +95,10 @@ public final class EmbeddedPty {
         connector.write(text);
     }
 
+    public void sendText(String text) throws IOException {
+        connector.write(text == null ? "" : text);
+    }
+
     public void interrupt() throws IOException {
         connector.write(new byte[] { 0x03 });
     }
