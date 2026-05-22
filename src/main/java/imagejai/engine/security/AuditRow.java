@@ -7,6 +7,7 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.Objects;
+import java.nio.charset.StandardCharsets;
 
 /**
  * Immutable row value for {@code AI_Exports/imagejai_audit.csv}.
@@ -15,6 +16,8 @@ import java.util.Objects;
  * record-style accessors without using the Java {@code record} syntax.
  */
 public final class AuditRow {
+    public static final int MAX_REDACTED_PAYLOAD_BYTES = 8 * 1024;
+
     private final Instant timestampUtc;
     private final String sessionId;
     private final String command;
@@ -27,6 +30,7 @@ public final class AuditRow {
     private final boolean redactionApplied;
     private final List<String> fieldsRedacted;
     private final String notes;
+    private final String redactedPayloadJson;
 
     public AuditRow(Instant timestampUtc,
                     String sessionId,
@@ -40,6 +44,24 @@ public final class AuditRow {
                     boolean redactionApplied,
                     List<String> fieldsRedacted,
                     String notes) {
+        this(timestampUtc, sessionId, command, posture, modelEndpoint,
+                captureSource, bytesOut, bytesIn, imageHash, redactionApplied,
+                fieldsRedacted, notes, "");
+    }
+
+    public AuditRow(Instant timestampUtc,
+                    String sessionId,
+                    String command,
+                    PrivacyPosture posture,
+                    String modelEndpoint,
+                    String captureSource,
+                    int bytesOut,
+                    int bytesIn,
+                    String imageHash,
+                    boolean redactionApplied,
+                    List<String> fieldsRedacted,
+                    String notes,
+                    String redactedPayloadJson) {
         this.timestampUtc = timestampUtc == null ? Instant.now() : timestampUtc;
         this.sessionId = safe(sessionId);
         this.command = safe(command);
@@ -52,6 +74,7 @@ public final class AuditRow {
         this.redactionApplied = redactionApplied;
         this.fieldsRedacted = immutableCleanList(fieldsRedacted);
         this.notes = safe(notes);
+        this.redactedPayloadJson = capRedactedPayload(redactedPayloadJson);
     }
 
     public Instant timestampUtc() {
@@ -102,6 +125,10 @@ public final class AuditRow {
         return notes;
     }
 
+    public String redactedPayloadJson() {
+        return redactedPayloadJson;
+    }
+
     public String toCsvLine() {
         List<String> cells = new ArrayList<String>(12);
         cells.add(timestampUtc.toString());
@@ -145,6 +172,31 @@ public final class AuditRow {
                 Boolean.parseBoolean(cells.get(9)),
                 splitFields(cells.get(10)),
                 cells.get(11));
+    }
+
+    public static String capRedactedPayload(String value) {
+        String v = safe(value);
+        if (v.getBytes(StandardCharsets.UTF_8).length <= MAX_REDACTED_PAYLOAD_BYTES) {
+            return v;
+        }
+        String suffix = "\n...(truncated)...";
+        int suffixBytes = suffix.getBytes(StandardCharsets.UTF_8).length;
+        int limit = Math.max(0, MAX_REDACTED_PAYLOAD_BYTES - suffixBytes);
+        StringBuilder out = new StringBuilder();
+        int used = 0;
+        for (int i = 0; i < v.length();) {
+            int cp = v.codePointAt(i);
+            String chunk = new String(Character.toChars(cp));
+            int bytes = chunk.getBytes(StandardCharsets.UTF_8).length;
+            if (used + bytes > limit) {
+                break;
+            }
+            out.append(chunk);
+            used += bytes;
+            i += Character.charCount(cp);
+        }
+        out.append(suffix);
+        return out.toString();
     }
 
     static List<String> parseCsvLine(String line) {
@@ -282,13 +334,14 @@ public final class AuditRow {
                 && captureSource.equals(row.captureSource)
                 && imageHash.equals(row.imageHash)
                 && fieldsRedacted.equals(row.fieldsRedacted)
-                && notes.equals(row.notes);
+                && notes.equals(row.notes)
+                && redactedPayloadJson.equals(row.redactedPayloadJson);
     }
 
     @Override
     public int hashCode() {
         return Objects.hash(timestampUtc, sessionId, command, posture,
                 modelEndpoint, captureSource, bytesOut, bytesIn, imageHash,
-                redactionApplied, fieldsRedacted, notes);
+                redactionApplied, fieldsRedacted, notes, redactedPayloadJson);
     }
 }

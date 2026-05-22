@@ -51,8 +51,8 @@ public final class PostureBadge extends JLabel implements PostureController.List
         setText(p.label());
         setToolTipText("<html><b>Privacy Posture:</b> " + p.label()
                 + "<br>" + p.description()
-                + "<br><br>Data Governance steward signal: outbound replies follow this folder's"
-                + "<br>pseudonymisation scheme, and later stages attach the audit trail.</html>");
+                + "<br><br>Data Governance steward signal: this folder's posture governs"
+                + "<br>pseudonymisation, local-agent allowlisting, and the audit trail.</html>");
         switch (p) {
             case STANDARD:
                 setBackground(STANDARD_BG);

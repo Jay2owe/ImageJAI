@@ -23,6 +23,7 @@ import imagejai.engine.picker.ProviderRegistry;
 import imagejai.engine.picker.ProxyAgentLauncher;
 import imagejai.engine.safeMode.SafeModeIndicator;
 import imagejai.engine.security.AuditLog;
+import imagejai.engine.security.OutboundPromptScrubber;
 import imagejai.engine.usage.UsageTracker;
 import imagejai.ui.picker.MainNotificationCheck;
 import imagejai.ui.picker.ModelPickerButton;
@@ -104,6 +105,11 @@ public class AiRootPanel extends JPanel implements ChatSurface {
     private UsageTracker usageTracker;
     private TierChangeBanner tierChangeBanner;
     private JPanel terminalFallbackNotice;
+    private ConfigurationPane configurationPane;
+    private ReceiptsPane receiptsPane;
+    private PseudonymisationToast pseudonymisationToast;
+    private AutoCloseable promptToastSubscription;
+    private EgressIndicator egressIndicator;
     private JButton agentBtn;
     private JFrame frame;
     private String currentCard = CARD_CHAT;
@@ -130,6 +136,17 @@ public class AiRootPanel extends JPanel implements ChatSurface {
         cards.setOpaque(false);
         cards.add(chatView, CARD_CHAT);
         cards.add(terminalView, CARD_TERMINAL);
+        pseudonymisationToast = new PseudonymisationToast();
+        promptToastSubscription = OutboundPromptScrubber.getInstance()
+                .addNotifier(pseudonymisationToast);
+        JPanel toastRow = new JPanel(new FlowLayout(FlowLayout.RIGHT, 0, 0));
+        toastRow.setOpaque(false);
+        toastRow.add(pseudonymisationToast);
+
+        JPanel body = new JPanel(new BorderLayout(0, 4));
+        body.setOpaque(false);
+        body.add(cards, BorderLayout.CENTER);
+        body.add(toastRow, BorderLayout.SOUTH);
 
         // Top stack: header + tier-change banner (06 Â§7.4). Banner sits below
         // the header so it pushes the chat/terminal down without blocking the
@@ -151,10 +168,15 @@ public class AiRootPanel extends JPanel implements ChatSurface {
         notices.setLayout(new BoxLayout(notices, BoxLayout.Y_AXIS));
         notices.add(tierChangeBanner);
         notices.add(terminalFallbackNotice);
+        configurationPane = new ConfigurationPane(PostureController.getInstance(),
+                AuditLog.getInstance());
+        receiptsPane = new ReceiptsPane(AuditLog.getInstance());
+        notices.add(configurationPane);
+        notices.add(receiptsPane);
         top.add(notices, BorderLayout.CENTER);
 
         add(top, BorderLayout.NORTH);
-        add(cards, BorderLayout.CENTER);
+        add(body, BorderLayout.CENTER);
         showChatCard();
         runFirstRunFlipNoticeIfNeeded();
         runStartupTierChangeCheck();
@@ -270,6 +292,31 @@ public class AiRootPanel extends JPanel implements ChatSurface {
     }
 
     @Override
+    public void removeNotify() {
+        disposeGovernanceUi();
+        super.removeNotify();
+    }
+
+    private void disposeGovernanceUi() {
+        if (configurationPane != null) {
+            configurationPane.dispose();
+        }
+        if (receiptsPane != null) {
+            receiptsPane.dispose();
+        }
+        if (egressIndicator != null) {
+            egressIndicator.dispose();
+        }
+        if (promptToastSubscription != null) {
+            try {
+                promptToastSubscription.close();
+            } catch (Exception ignore) {
+            }
+            promptToastSubscription = null;
+        }
+    }
+
+    @Override
     public void setThinking(boolean thinking) {
         chatView.setThinking(thinking);
     }
@@ -309,9 +356,8 @@ public class AiRootPanel extends JPanel implements ChatSurface {
         agentSelector = new JComboBox<String>();
         agentSelector.setPreferredSize(new Dimension(140, 22));
         agentSelector.setFont(new Font(Font.SANS_SERIF, Font.PLAIN, 11));
-        agentSelector.setToolTipText("<html>Agent allowlist follows the folder Privacy Posture."
-                + "<br>On-premises shows local agents only; the steward can review this"
-                + "<br>choice against the Data Governance audit trail.</html>");
+        agentSelector.setToolTipText("<html>Agent CLI to launch."
+                + "<br>In On-premises posture, only local-binary agents are selectable.</html>");
         refreshAgentSelector(new ArrayList<AgentLauncher.AgentInfo>());
         agentSelector.addActionListener(new ActionListener() {
             @Override
@@ -332,8 +378,8 @@ public class AiRootPanel extends JPanel implements ChatSurface {
         modelPicker.setTierGate(tierGate);
         modelPicker.setPreferredSize(new Dimension(220, 22));
         modelPicker.setFont(new Font(Font.SANS_SERIF, Font.PLAIN, 11));
-        modelPicker.setToolTipText("<html>Model picker for the current Privacy Posture."
-                + "<br>Stage 05 will expose the full Data Governance configuration pane.</html>");
+        modelPicker.setToolTipText("<html>Agent CLI to launch."
+                + "<br>In On-premises posture, only local-binary agents are selectable.</html>");
         modelPicker.setSelectionListener(new ModelPickerButton.SelectionListener() {
             @Override
             public void onSelectionChanged(ModelEntry entry) {
@@ -436,11 +482,8 @@ public class AiRootPanel extends JPanel implements ChatSurface {
         JPanel buttons = new JPanel(new FlowLayout(FlowLayout.RIGHT, 2, 0));
         buttons.setOpaque(false);
 
-        String agentBtnTooltip = settings.useMultiProviderPicker
-                ? "<html>Re-run the last launched model under the current Privacy Posture."
-                        + "<br>On-premises launch checks refuse cloud-hosted Ollama tags.</html>"
-                : "<html>Launch selected external agent under the current Privacy Posture."
-                        + "<br>On-premises launch checks refuse cloud-hosted Ollama tags.</html>";
+        String agentBtnTooltip = "<html>Launch the selected agent."
+                + "<br>The current Privacy Posture governs what data may leave the machine.</html>";
         agentBtn = createHeaderButton("\u25B6", agentBtnTooltip);
         agentBtn.addActionListener(new ActionListener() {
             @Override
@@ -456,16 +499,14 @@ public class AiRootPanel extends JPanel implements ChatSurface {
         buttons.add(agentBtn);
 
         buttons.add(new PostureBadge(PostureController.getInstance()));
+        egressIndicator = new EgressIndicator();
+        buttons.add(egressIndicator);
         buttons.add(createGovernancePlaceholderButton("Browse Files...",
                 "<html>Stage 09 placeholder: the Browse Files steward flow will"
               + "<br>pre-select files and hand agents pseudonymised tags only.</html>"));
-        buttons.add(createGovernancePlaceholderButton("Configuration Pane \u25BE",
-                "<html>Stage 05 placeholder: Data Governance configuration,"
-              + "<br>pseudonymisation scheme details, egress checks, and audit trail receipts.</html>"));
         buttons.add(createGovernanceActionButton("View Audit Log",
-                "<html>Open AI_Exports/imagejai_audit.csv for the current image folder."
-              + "<br>The log records Privacy Posture, pseudonymisation fields,"
-              + "<br>and visual override events.</html>",
+                "<html>Audit trail of outbound calls to the agent."
+              + "<br>CSV format. Suitable for ethics applications.</html>",
                 new Runnable() {
                     @Override
                     public void run() {
@@ -672,9 +713,8 @@ public class AiRootPanel extends JPanel implements ChatSurface {
             boolean enabled = entry != null;
             agentBtn.setEnabled(enabled);
             agentBtn.setToolTipText(enabled
-                    ? "<html>Re-run " + entry.displayName()
-                            + " under the current Privacy Posture."
-                            + "<br>Cloud-hosted Ollama tags are refused in On-premises mode.</html>"
+                    ? "<html>Launch the selected agent."
+                            + "<br>The current Privacy Posture governs what data may leave the machine.</html>"
                     : "<html>Pick a model from the dropdown first."
                             + "<br>The Data Governance posture badge shows the active policy.</html>");
             return;
@@ -684,9 +724,8 @@ public class AiRootPanel extends JPanel implements ChatSurface {
         boolean externalSelected = agentLauncher != null && agent != null;
         agentBtn.setEnabled(externalSelected);
         agentBtn.setToolTipText(externalSelected
-                ? "<html>Launch " + selected
-                        + " under the current Privacy Posture."
-                        + "<br>On-premises mode keeps this allowlist local-only.</html>"
+                ? "<html>Launch the selected agent."
+                        + "<br>The current Privacy Posture governs what data may leave the machine.</html>"
                 : "<html>Local Assistant is built in."
                         + "<br>The Data Governance steward can use the posture badge to verify policy.</html>");
     }

@@ -835,12 +835,13 @@ public class TCPCommandServer {
             // Read one line (max 1MB enforced by checking length)
             String line = readLine(reader);
             if (line == null || line.trim().isEmpty()) {
-                writer.println(errorJson("Empty request"));
+                writeOutbound(writer, "error", errorJson("Empty request"));
                 return;
             }
 
             if (line.length() > Constants.TCP_MAX_MESSAGE_SIZE) {
-                writer.println(errorJson("Request too large (max " + Constants.TCP_MAX_MESSAGE_SIZE + " bytes)"));
+                writeOutbound(writer, "error", errorJson("Request too large (max "
+                        + Constants.TCP_MAX_MESSAGE_SIZE + " bytes)"));
                 return;
             }
 
@@ -852,7 +853,8 @@ public class TCPCommandServer {
                 try {
                     req = new JsonParser().parse(trimmed).getAsJsonObject();
                 } catch (Exception e) {
-                    writer.println(errorJson("Invalid JSON: " + e.getMessage()));
+                    writeOutbound(writer, "error", errorJson("Invalid JSON: "
+                            + e.getMessage()));
                     return;
                 }
                 if (listener != null) {
@@ -863,14 +865,16 @@ public class TCPCommandServer {
             }
 
             // Parse and dispatch
+            String commandName = commandNameFromRequest(trimmed);
             JsonObject response = dispatch(trimmed, socket);
-            writer.println(GSON.toJson(response));
+            writeOutbound(writer, commandName, GSON.toJson(response));
 
         } catch (Exception e) {
             System.err.println("[ImageJAI-TCP] Client error: " + e.getMessage());
             if (writer != null) {
                 try {
-                    writer.println(errorJson("Server error: " + e.getMessage()));
+                    writeOutbound(writer, "error", errorJson("Server error: "
+                            + e.getMessage()));
                 } catch (Exception ignored) {
                     // Client may have disconnected
                 }
@@ -1069,6 +1073,14 @@ public class TCPCommandServer {
             out.write(bytes);
             out.flush();
         }
+        String command = "stream";
+        try {
+            if (frame != null && frame.has("event")) {
+                command = "stream:" + frame.get("event").getAsString();
+            }
+        } catch (Exception ignore) {
+        }
+        OutboundEvent.publish(command, bytes.length);
     }
 
     /** Best-effort raw JSON write — swallows IO errors. Used for rejection frames. */
@@ -1200,6 +1212,8 @@ public class TCPCommandServer {
                 && !dedupShortCircuited
                 && READONLY_COMMANDS.contains(command)) {
             response = applyReadonlyDedup(request, response);
+            pseudonymisationFilter.attachGovernanceIfNeeded(response, command,
+                    privacyPosture);
         }
 
         // Phase 6: record failures to the friction log. Counts both transport-level
@@ -1262,9 +1276,10 @@ public class TCPCommandServer {
             List<String> fields = new ArrayList<String>(
                     effectiveReport.fieldsPseudonymised());
             boolean redactionApplied = effectiveReport.failed() || !fields.isEmpty();
+            String sessionId = auditSessionId(request, caps, sock);
             AuditLog.getInstance().append(new AuditRow(
                     java.time.Instant.now(),
-                    auditSessionId(request, caps, sock),
+                    sessionId,
                     command,
                     rowPosture,
                     auditModelEndpoint(request, caps),
@@ -1274,11 +1289,55 @@ public class TCPCommandServer {
                     currentImageHash(),
                     redactionApplied,
                     fields,
-                    auditNotes(command, request, response, effectiveReport)));
+                    auditNotes(command, request, response, effectiveReport),
+                    receiptPayload(command, response, rowPosture,
+                            sessionKey(caps, sock))));
         } catch (Throwable t) {
             // Audit logging is mandatory in design but best-effort in the hot
             // response path: a CSV fault must not corrupt the TCP protocol.
             System.err.println("[ImageJAI-Audit] row build failed: " + t.getMessage());
+        }
+    }
+
+    private String receiptPayload(String command, JsonObject response,
+                                  PrivacyPosture posture, String sessionId) {
+        if (response == null) {
+            return "";
+        }
+        try {
+            JsonObject copy = new JsonParser().parse(GSON.toJson(response)).getAsJsonObject();
+            PrivacyPosture receiptPosture = posture == PrivacyPosture.STANDARD
+                    ? PrivacyPosture.PSEUDONYMISED
+                    : posture;
+            if (receiptPosture != null && receiptPosture != PrivacyPosture.STANDARD) {
+                if (!copy.has("_governance")) {
+                    pseudonymisationFilter.apply(copy, command, receiptPosture, sessionId);
+                }
+                pseudonymisationFilter.attachGovernanceIfNeeded(copy, command, receiptPosture);
+            }
+            return AuditRow.capRedactedPayload(GSON.toJson(copy));
+        } catch (Throwable t) {
+            JsonObject fallback = new JsonObject();
+            fallback.addProperty("command", command == null ? "" : command);
+            fallback.addProperty("receipt_error", "redacted_payload_unavailable");
+            return AuditRow.capRedactedPayload(fallback.toString());
+        }
+    }
+
+    private void writeOutbound(PrintWriter writer, String command, String payload) {
+        String body = payload == null ? "" : payload;
+        writer.println(body);
+        writer.flush();
+        int newlineBytes = System.lineSeparator().getBytes(UTF8).length;
+        OutboundEvent.publish(command, body.getBytes(UTF8).length + newlineBytes);
+    }
+
+    private String commandNameFromRequest(String rawJson) {
+        try {
+            JsonObject request = new JsonParser().parse(rawJson).getAsJsonObject();
+            return optString(request, "cmd", optString(request, "command", ""));
+        } catch (Exception e) {
+            return "";
         }
     }
 

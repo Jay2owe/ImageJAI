@@ -3,6 +3,10 @@ package imagejai.engine.security;
 import ij.IJ;
 
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
+import java.util.concurrent.CopyOnWriteArrayList;
 
 /**
  * Embedded-PTY outbound guard. It keeps a best-effort line buffer and, when
@@ -11,7 +15,30 @@ import java.nio.charset.StandardCharsets;
 public final class OutboundPromptScrubber {
     public interface Notifier {
         void pseudonymised(int replacementCount);
+
+        default void pseudonymised(List<Replacement> replacements) {
+            pseudonymised(replacements == null ? 0 : replacements.size());
+        }
+
         void sentRaw();
+    }
+
+    public static final class Replacement {
+        private final String original;
+        private final String token;
+
+        public Replacement(String original, String token) {
+            this.original = original == null ? "" : original;
+            this.token = token == null ? "" : token;
+        }
+
+        public String original() {
+            return original;
+        }
+
+        public String token() {
+            return token;
+        }
     }
 
     private static final OutboundPromptScrubber INSTANCE = new OutboundPromptScrubber(
@@ -31,6 +58,8 @@ public final class OutboundPromptScrubber {
 
     private final PathTokenMap pathTokenMap;
     private final Notifier notifier;
+    private final CopyOnWriteArrayList<Notifier> extraNotifiers =
+            new CopyOnWriteArrayList<Notifier>();
     private final StringBuilder lineBuffer = new StringBuilder();
     private boolean nextEnterRaw;
 
@@ -41,6 +70,23 @@ public final class OutboundPromptScrubber {
 
     public static OutboundPromptScrubber getInstance() {
         return INSTANCE;
+    }
+
+    public AutoCloseable addNotifier(final Notifier notifier) {
+        if (notifier == null) {
+            return new AutoCloseable() {
+                @Override
+                public void close() {
+                }
+            };
+        }
+        extraNotifiers.addIfAbsent(notifier);
+        return new AutoCloseable() {
+            @Override
+            public void close() {
+                extraNotifiers.remove(notifier);
+            }
+        };
     }
 
     public synchronized byte[] filter(byte[] bytes) {
@@ -56,13 +102,13 @@ public final class OutboundPromptScrubber {
                 lineBuffer.setLength(0);
                 if (nextEnterRaw) {
                     nextEnterRaw = false;
-                    if (notifier != null) notifier.sentRaw();
+                    notifySentRaw();
                     out.append(c);
                     continue;
                 }
                 Scrubbed scrubbed = scrubOutgoing(line);
                 if (scrubbed.changed) {
-                    if (notifier != null) notifier.pseudonymised(scrubbed.replacements);
+                    notifyPseudonymised(scrubbed);
                     out.append('\u0015'); // terminal line kill before sending replacement
                     out.append(scrubbed.text);
                 }
@@ -89,42 +135,91 @@ public final class OutboundPromptScrubber {
     }
 
     private Scrubbed scrubOutgoing(String userTyped) {
-        String out = userTyped == null ? "" : userTyped;
-        int replacements = 0;
-        for (java.util.Map.Entry<String, String> entry
-                : pathTokenMap.snapshotSensitiveStringsLongestFirst()) {
-            String original = entry.getKey();
-            if (original == null || original.isEmpty()) {
-                continue;
+        String input = userTyped == null ? "" : userTyped;
+        StringBuilder out = new StringBuilder(input.length());
+        List<Replacement> replacements = new ArrayList<Replacement>();
+        java.util.List<java.util.Map.Entry<String, String>> entries =
+                pathTokenMap.snapshotSensitiveStringsLongestFirst();
+
+        int i = 0;
+        while (i < input.length()) {
+            java.util.Map.Entry<String, String> match = null;
+            for (java.util.Map.Entry<String, String> entry : entries) {
+                String original = entry.getKey();
+                if (original == null || original.isEmpty()) {
+                    continue;
+                }
+                if (startsWithAt(input, original, i)) {
+                    match = entry;
+                    break;
+                }
             }
-            int count = countOccurrences(out, original);
-            if (count > 0) {
-                out = out.replace(original, entry.getValue());
-                replacements += count;
+            if (match != null) {
+                out.append(match.getValue());
+                i += match.getKey().length();
+                replacements.add(new Replacement(match.getKey(), match.getValue()));
+            } else {
+                out.append(input.charAt(i));
+                i++;
             }
         }
-        return new Scrubbed(out, replacements > 0, replacements);
+        return new Scrubbed(out.toString(), replacements);
     }
 
-    private static int countOccurrences(String value, String needle) {
-        int count = 0;
-        int idx = 0;
-        while ((idx = value.indexOf(needle, idx)) >= 0) {
-            count++;
-            idx += needle.length();
+    private void notifyPseudonymised(Scrubbed scrubbed) {
+        if (scrubbed == null || !scrubbed.changed) {
+            return;
         }
-        return count;
+        if (notifier != null) {
+            safePseudonymised(notifier, scrubbed.replacements);
+        }
+        for (Notifier listener : extraNotifiers) {
+            safePseudonymised(listener, scrubbed.replacements);
+        }
+    }
+
+    private void notifySentRaw() {
+        if (notifier != null) {
+            safeSentRaw(notifier);
+        }
+        for (Notifier listener : extraNotifiers) {
+            safeSentRaw(listener);
+        }
+    }
+
+    private static void safePseudonymised(Notifier notifier,
+                                          List<Replacement> replacements) {
+        try {
+            notifier.pseudonymised(replacements);
+        } catch (Throwable ignore) {
+        }
+    }
+
+    private static void safeSentRaw(Notifier notifier) {
+        try {
+            notifier.sentRaw();
+        } catch (Throwable ignore) {
+        }
+    }
+
+    private static boolean startsWithAt(String value, String needle, int index) {
+        int n = needle.length();
+        if (index < 0 || n == 0 || index + n > value.length()) {
+            return false;
+        }
+        return value.regionMatches(index, needle, 0, n);
     }
 
     private static final class Scrubbed {
         final String text;
         final boolean changed;
-        final int replacements;
+        final List<Replacement> replacements;
 
-        Scrubbed(String text, boolean changed, int replacements) {
+        Scrubbed(String text, List<Replacement> replacements) {
             this.text = text;
-            this.changed = changed;
-            this.replacements = replacements;
+            this.replacements = Collections.unmodifiableList(
+                    new ArrayList<Replacement>(replacements));
+            this.changed = !this.replacements.isEmpty();
         }
     }
 }

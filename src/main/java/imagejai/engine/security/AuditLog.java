@@ -138,6 +138,10 @@ public final class AuditLog {
     }
 
     public AutoCloseable subscribeRecent(final Listener listener) {
+        return subscribeRecent(DEFAULT_RECENT_LIMIT, listener);
+    }
+
+    public AutoCloseable subscribeRecent(final int limit, final Listener listener) {
         if (listener == null) {
             return new AutoCloseable() {
                 @Override
@@ -145,15 +149,21 @@ public final class AuditLog {
                 }
             };
         }
-        listeners.addIfAbsent(listener);
+        final Listener limitingListener = new Listener() {
+            @Override
+            public void auditRowsUpdated(List<AuditRow> recentRows) {
+                listener.auditRowsUpdated(limitRows(recentRows, limit));
+            }
+        };
+        listeners.addIfAbsent(limitingListener);
         try {
-            listener.auditRowsUpdated(recent(DEFAULT_RECENT_LIMIT));
+            listener.auditRowsUpdated(recent(limit));
         } catch (Throwable ignore) {
         }
         return new AutoCloseable() {
             @Override
             public void close() {
-                listeners.remove(listener);
+                listeners.remove(limitingListener);
             }
         };
     }
@@ -282,6 +292,18 @@ public final class AuditLog {
             } catch (Throwable ignore) {
             }
         }
+    }
+
+    private static List<AuditRow> limitRows(List<AuditRow> rows, int limit) {
+        int n = Math.max(0, limit);
+        if (rows == null || rows.isEmpty() || n == 0) {
+            return Collections.unmodifiableList(new ArrayList<AuditRow>());
+        }
+        if (rows.size() <= n) {
+            return Collections.unmodifiableList(new ArrayList<AuditRow>(rows));
+        }
+        return Collections.unmodifiableList(
+                new ArrayList<AuditRow>(rows.subList(rows.size() - n, rows.size())));
     }
 
     private static ExecutorService daemonExecutor(final String name) {
