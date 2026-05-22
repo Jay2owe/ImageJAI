@@ -1,7 +1,14 @@
 package imagejai.engine.security;
 
-import java.time.Duration;
+import ij.ImagePlus;
+import ij.WindowManager;
+import ij.io.FileInfo;
+import imagejai.config.PrivacyPosture;
+import imagejai.engine.PostureController;
+
 import java.time.Instant;
+import java.util.Collections;
+import java.time.Duration;
 import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
@@ -35,12 +42,14 @@ public final class VisualOverrideRegistry {
         String session = normaliseSession(sessionId);
         requests.remove(session);
         grants.put(session, new Grant(session, safe(reason), Instant.now()));
+        auditVisual("visual.granted", session, reason, "");
     }
 
     public void deny(String sessionId) {
         String session = normaliseSession(sessionId);
-        requests.remove(session);
+        PendingRequest request = requests.remove(session);
         grants.remove(session);
+        auditVisual("visual.denied", session, request == null ? "" : request.reason, "");
     }
 
     public Optional<PendingRequest> pending(String sessionId) {
@@ -69,7 +78,11 @@ public final class VisualOverrideRegistry {
     public boolean consumeIfPresent(String sessionId) {
         String session = normaliseSession(sessionId);
         Grant grant = grants.remove(session);
-        return grant != null && !expired(grant.createdAt);
+        boolean consumed = grant != null && !expired(grant.createdAt);
+        if (consumed) {
+            auditVisual("visual.consumed", session, grant.reason, currentImageToken());
+        }
+        return consumed;
     }
 
     public void clear() {
@@ -87,6 +100,63 @@ public final class VisualOverrideRegistry {
 
     private static String safe(String reason) {
         return reason == null ? "" : reason;
+    }
+
+    private static void auditVisual(String command, String sessionId,
+                                    String reason, String imageToken) {
+        try {
+            PrivacyPosture posture = PostureController.getInstance().current();
+            AuditLog.getInstance().append(new AuditRow(
+                    Instant.now(),
+                    normaliseSession(sessionId),
+                    command,
+                    posture,
+                    "",
+                    "",
+                    0,
+                    0,
+                    "",
+                    false,
+                    Collections.<String>emptyList(),
+                    visualNotes(reason, imageToken)));
+        } catch (Throwable ignore) {
+        }
+    }
+
+    private static String visualNotes(String reason, String imageToken) {
+        StringBuilder notes = new StringBuilder();
+        String scrubbedReason = PseudonymisationFilter.getInstance()
+                .freeTextScrubString(reason == null ? "" : reason)
+                .replace('\r', ' ')
+                .replace('\n', ' ')
+                .trim();
+        if (!scrubbedReason.isEmpty()) {
+            notes.append("reason='").append(scrubbedReason).append('\'');
+        }
+        if (imageToken != null && !imageToken.trim().isEmpty()) {
+            if (notes.length() > 0) notes.append(' ');
+            notes.append("on=").append(imageToken.trim());
+        }
+        return notes.toString();
+    }
+
+    private static String currentImageToken() {
+        try {
+            ImagePlus image = WindowManager.getCurrentImage();
+            if (image == null) {
+                return "";
+            }
+            FileInfo fileInfo = image.getOriginalFileInfo();
+            if (fileInfo != null && fileInfo.directory != null
+                    && fileInfo.fileName != null) {
+                return PathTokenMap.getInstance().tokenForPathString(
+                        fileInfo.directory + fileInfo.fileName);
+            }
+            return PathTokenMap.getInstance().tokenForSensitiveText(
+                    image.getTitle() == null ? "" : image.getTitle(), "image");
+        } catch (Throwable t) {
+            return "";
+        }
     }
 
     public static final class PendingRequest {

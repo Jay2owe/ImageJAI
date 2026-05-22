@@ -22,6 +22,7 @@ import imagejai.engine.picker.ProviderEntry;
 import imagejai.engine.picker.ProviderRegistry;
 import imagejai.engine.picker.ProxyAgentLauncher;
 import imagejai.engine.safeMode.SafeModeIndicator;
+import imagejai.engine.security.AuditLog;
 import imagejai.engine.usage.UsageTracker;
 import imagejai.ui.picker.MainNotificationCheck;
 import imagejai.ui.picker.ModelPickerButton;
@@ -461,6 +462,16 @@ public class AiRootPanel extends JPanel implements ChatSurface {
         buttons.add(createGovernancePlaceholderButton("Configuration Pane \u25BE",
                 "<html>Stage 05 placeholder: Data Governance configuration,"
               + "<br>pseudonymisation scheme details, egress checks, and audit trail receipts.</html>"));
+        buttons.add(createGovernanceActionButton("View Audit Log",
+                "<html>Open AI_Exports/imagejai_audit.csv for the current image folder."
+              + "<br>The log records Privacy Posture, pseudonymisation fields,"
+              + "<br>and visual override events.</html>",
+                new Runnable() {
+                    @Override
+                    public void run() {
+                        openAuditLogAsync();
+                    }
+                }));
 
         JButton clearBtn = createHeaderButton("\u2718", "Clear conversation");
         clearBtn.addActionListener(new ActionListener() {
@@ -515,6 +526,53 @@ public class AiRootPanel extends JPanel implements ChatSurface {
         button.setMargin(new Insets(1, 6, 1, 6));
         button.setToolTipText(tooltip);
         return button;
+    }
+
+    private JButton createGovernanceActionButton(String text, String tooltip,
+                                                 final Runnable action) {
+        JButton button = new JButton(text);
+        button.setFont(new Font(Font.SANS_SERIF, Font.PLAIN, 11));
+        button.setForeground(TEXT_MUTED);
+        button.setFocusPainted(false);
+        button.setMargin(new Insets(1, 6, 1, 6));
+        button.setToolTipText(tooltip);
+        button.addActionListener(new ActionListener() {
+            @Override
+            public void actionPerformed(ActionEvent e) {
+                if (action != null) {
+                    action.run();
+                }
+            }
+        });
+        return button;
+    }
+
+    private void openAuditLogAsync() {
+        new SwingWorker<Void, Void>() {
+            private Exception error;
+
+            @Override
+            protected Void doInBackground() {
+                try {
+                    AuditLog.getInstance().open();
+                } catch (Exception e) {
+                    error = e;
+                }
+                return null;
+            }
+
+            @Override
+            protected void done() {
+                if (error != null) {
+                    JOptionPane.showMessageDialog(
+                            AiRootPanel.this,
+                            "Could not open the Data Governance audit log:\n"
+                                    + error.getMessage(),
+                            "View Audit Log",
+                            JOptionPane.WARNING_MESSAGE);
+                }
+            }
+        }.execute();
     }
 
     private JPanel createTerminalFallbackNotice() {

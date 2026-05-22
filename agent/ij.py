@@ -75,6 +75,8 @@ try:
 except ValueError:
     PORT = 7746
 TIMEOUT = 60
+SESSION_ID = os.environ.get("IMAGEJAI_SESSION_ID", "").strip()
+MODEL_ENDPOINT = os.environ.get("IMAGEJAI_MODEL_ENDPOINT", "").strip()
 
 # Step 01 (docs/tcp_upgrade): capabilities Claude's ij.py declares on first
 # contact. Claude Code hooks already inject per-turn session state, so pulse
@@ -167,6 +169,15 @@ def imagej_command(cmd, host=HOST, port=PORT, timeout=TIMEOUT):
             cmd = dict(cmd)  # don't mutate caller's dict
             cmd["if_none_match"] = cached[0]
 
+    if isinstance(cmd, dict):
+        if (SESSION_ID and cmd.get("session_id") != SESSION_ID) or (
+                MODEL_ENDPOINT and cmd.get("model_endpoint") != MODEL_ENDPOINT):
+            cmd = dict(cmd)
+            if SESSION_ID:
+                cmd.setdefault("session_id", SESSION_ID)
+            if MODEL_ENDPOINT:
+                cmd.setdefault("model_endpoint", MODEL_ENDPOINT)
+
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     s.settimeout(timeout)
     try:
@@ -249,6 +260,10 @@ def hello(host=HOST, port=PORT, timeout=10):
     global _HELLO_RESULT, _HELLO_SENT
     req = {"command": "hello", "agent": "claude-code",
            "capabilities": _HELLO_CAPS}
+    if SESSION_ID:
+        req["session_id"] = SESSION_ID
+    if MODEL_ENDPOINT:
+        req["model_endpoint"] = MODEL_ENDPOINT
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         s.settimeout(timeout)

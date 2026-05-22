@@ -6,11 +6,17 @@ import ij.io.FileInfo;
 import imagejai.config.FolderPostureStore;
 import imagejai.config.PrivacyPosture;
 import imagejai.config.Settings;
+import imagejai.engine.security.AuditLog;
+import imagejai.engine.security.AuditRow;
+import imagejai.engine.security.PathTokenMap;
+import imagejai.engine.security.PseudonymisationFilter;
 
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.time.Instant;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Optional;
@@ -177,6 +183,7 @@ public final class PostureController {
                     from, target, normalised, reason);
             notifyEvent("data_governance.posture.override_logged",
                     from, target, normalised, reason);
+            auditPostureEvent("posture.override", from, target, normalised, reason);
         }
     }
 
@@ -233,6 +240,9 @@ public final class PostureController {
         }
         publish(eventType, from, target, folder, reason);
         notifyEvent(eventType, from, target, folder, reason);
+        if ("data_governance.posture.downshifted".equals(eventType)) {
+            auditPostureEvent("posture.downshift", from, target, folder, reason);
+        }
         if (changed) {
             notifyChanged(from, target, folder);
         }
@@ -286,6 +296,54 @@ public final class PostureController {
         }
         data.addProperty("reason", reason == null ? "" : reason);
         bus.publish(eventType, data);
+    }
+
+    private void auditPostureEvent(String command, PrivacyPosture from,
+                                   PrivacyPosture to, Path folder, String reason) {
+        try {
+            PrivacyPosture posture = to == null ? current() : to;
+            AuditLog.getInstance().append(new AuditRow(
+                    Instant.now(),
+                    "",
+                    command,
+                    posture,
+                    "",
+                    "",
+                    0,
+                    0,
+                    "",
+                    false,
+                    Collections.<String>emptyList(),
+                    postureNotes(from, to, folder, reason)));
+        } catch (Throwable ignore) {
+        }
+    }
+
+    private String postureNotes(PrivacyPosture from, PrivacyPosture to,
+                                Path folder, String reason) {
+        StringBuilder notes = new StringBuilder();
+        if (from != null) {
+            notes.append("from=").append(from.label());
+        }
+        if (to != null) {
+            if (notes.length() > 0) notes.append(' ');
+            notes.append("to=").append(to.label());
+        }
+        if (folder != null) {
+            if (notes.length() > 0) notes.append(' ');
+            notes.append("folder_token=")
+                    .append(PathTokenMap.getInstance().tokenForPathString(folder.toString()));
+        }
+        String scrubbedReason = PseudonymisationFilter.getInstance()
+                .freeTextScrubString(reason == null ? "" : reason)
+                .replace('\r', ' ')
+                .replace('\n', ' ')
+                .trim();
+        if (!scrubbedReason.isEmpty()) {
+            if (notes.length() > 0) notes.append(' ');
+            notes.append("reason='").append(scrubbedReason).append('\'');
+        }
+        return notes.toString();
     }
 
     private boolean isDebounced(Path folder) {

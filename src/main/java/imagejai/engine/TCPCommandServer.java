@@ -23,9 +23,12 @@ import ij.process.LUT;
 import imagejai.config.Constants;
 import imagejai.config.PrivacyPosture;
 import imagejai.engine.security.AgentContextSanitizer;
+import imagejai.engine.security.AuditLog;
+import imagejai.engine.security.AuditRow;
 import imagejai.engine.security.CaptureSource;
 import imagejai.engine.security.PathTokenMap;
 import imagejai.engine.security.PseudonymisationFilter;
+import imagejai.engine.security.RedactionReport;
 import imagejai.engine.security.VisualOverrideRegistry;
 import imagejai.engine.safeMode.DestructiveScanner;
 import imagejai.engine.safeMode.RoiAutoBackup;
@@ -58,6 +61,7 @@ import java.util.Arrays;
 import java.util.Enumeration;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Properties;
 import java.util.Set;
@@ -297,6 +301,8 @@ public class TCPCommandServer {
     static final class AgentCaps {
         String agent = "unknown";
         String agentId = null;
+        String sessionId = "";
+        String modelEndpoint = "";
         // True when the connecting client presented the correct shared token
         // in its hello handshake. Read by dispatchCore to gate non-hello
         // commands when token auth is required (system property
@@ -1126,6 +1132,7 @@ public class TCPCommandServer {
     }
 
     private JsonObject dispatchInternal(JsonObject request, AgentCaps caps, Socket sock) {
+        final int requestBytes = jsonBytes(request);
         JsonElement cmdElement = request.get("command");
         if (cmdElement == null || !cmdElement.isJsonPrimitive()) {
             return errorResponse("Missing 'command' field");
@@ -1153,8 +1160,9 @@ public class TCPCommandServer {
         }
 
         PrivacyPosture privacyPosture = PostureController.getInstance().current();
+        RedactionReport redactionReport = RedactionReport.passthrough(command);
         if (response != null) {
-            pseudonymisationFilter.apply(response, command, privacyPosture,
+            redactionReport = pseudonymisationFilter.apply(response, command, privacyPosture,
                     sessionKey(caps, sock));
         }
 
@@ -1225,7 +1233,246 @@ public class TCPCommandServer {
             }
         }
 
+        if (response != null) {
+            appendAuditRow(command, request, response, caps, sock, privacyPosture,
+                    redactionReport, requestBytes);
+        }
+
         return response;
+    }
+
+    private void appendAuditRow(String command,
+                                JsonObject request,
+                                JsonObject response,
+                                AgentCaps caps,
+                                Socket sock,
+                                PrivacyPosture privacyPosture,
+                                RedactionReport report,
+                                int requestBytes) {
+        try {
+            RedactionReport effectiveReport = report == null
+                    ? RedactionReport.passthrough(command)
+                    : report;
+            PrivacyPosture rowPosture = effectiveReport.posture() == null
+                    ? privacyPosture
+                    : effectiveReport.posture();
+            if (rowPosture == null) {
+                rowPosture = PrivacyPosture.defaultPosture();
+            }
+            List<String> fields = new ArrayList<String>(
+                    effectiveReport.fieldsPseudonymised());
+            boolean redactionApplied = effectiveReport.failed() || !fields.isEmpty();
+            AuditLog.getInstance().append(new AuditRow(
+                    java.time.Instant.now(),
+                    auditSessionId(request, caps, sock),
+                    command,
+                    rowPosture,
+                    auditModelEndpoint(request, caps),
+                    auditCaptureSource(command, response),
+                    jsonBytes(response),
+                    requestBytes,
+                    currentImageHash(),
+                    redactionApplied,
+                    fields,
+                    auditNotes(command, request, response, effectiveReport)));
+        } catch (Throwable t) {
+            // Audit logging is mandatory in design but best-effort in the hot
+            // response path: a CSV fault must not corrupt the TCP protocol.
+            System.err.println("[ImageJAI-Audit] row build failed: " + t.getMessage());
+        }
+    }
+
+    private String auditSessionId(JsonObject request, AgentCaps caps, Socket sock) {
+        String fromRequest = optString(request, "session_id", "");
+        if (!fromRequest.trim().isEmpty()) {
+            return auditToken(fromRequest);
+        }
+        if (caps != null && caps.sessionId != null && !caps.sessionId.trim().isEmpty()) {
+            return auditToken(caps.sessionId);
+        }
+        return auditToken(sessionKey(caps, sock));
+    }
+
+    private String auditModelEndpoint(JsonObject request, AgentCaps caps) {
+        String endpoint = optString(request, "model_endpoint", "");
+        if (endpoint.trim().isEmpty() && caps != null) {
+            endpoint = caps.modelEndpoint == null ? "" : caps.modelEndpoint;
+        }
+        if (endpoint.trim().isEmpty() && caps != null) {
+            endpoint = endpointForAgent(caps.agent);
+        }
+        return endpoint.trim();
+    }
+
+    private static String endpointForAgent(String agent) {
+        String raw = agent == null ? "" : agent.trim();
+        if (raw.isEmpty() || "unknown".equalsIgnoreCase(raw)) {
+            return "";
+        }
+        String lower = raw.toLowerCase(Locale.ROOT);
+        if (lower.contains("claude")) {
+            return "anthropic.claude-code";
+        }
+        if (lower.contains("codex")) {
+            return "openai.codex";
+        }
+        if (lower.contains("gemini")) {
+            return "google.gemini-cli";
+        }
+        if (lower.contains("gemma") || lower.contains("ollama")) {
+            return "ollama.local:" + raw;
+        }
+        return raw;
+    }
+
+    private static String auditCaptureSource(String command, JsonObject response) {
+        if (!"capture_image".equals(command)) {
+            return "";
+        }
+        JsonObject sourceObject = response;
+        JsonElement result = response == null ? null : response.get("result");
+        if (result != null && result.isJsonObject()) {
+            sourceObject = result.getAsJsonObject();
+        }
+        String source = optString(sourceObject, "source", "");
+        return CaptureSource.from(source).name().toLowerCase(Locale.ROOT);
+    }
+
+    private String auditNotes(String command, JsonObject request, JsonObject response,
+                              RedactionReport report) {
+        StringBuilder notes = new StringBuilder();
+        if ("request_visual".equals(command)) {
+            appendNote(notes, "reason", optString(request, "reason", ""));
+        } else if ("capture_image".equals(command)) {
+            appendNote(notes, "source", auditCaptureSource(command, response));
+        } else if ("open_image_by_token".equals(command)) {
+            String token = auditOpenTarget(request);
+            if (!token.isEmpty()) {
+                appendNote(notes, "token", token);
+            }
+        } else if ("open_image".equals(command)) {
+            String target = auditOpenTarget(request);
+            if (target.matches("(?i)image-[0-9a-f]{4,12}.*")) {
+                appendNote(notes, "token", target);
+            }
+        }
+        if (report != null && report.failed()) {
+            appendNote(notes, "redaction", "failed_closed");
+        }
+        if (response != null && response.has("error")) {
+            appendNote(notes, "error", String.valueOf(response.get("error")));
+        }
+        return truncateAuditNote(notes.toString());
+    }
+
+    private static String auditOpenTarget(JsonObject request) {
+        if (request == null) {
+            return "";
+        }
+        String[] keys = {"token", "image_token", "path", "file"};
+        for (String key : keys) {
+            String value = optString(request, key, "");
+            if (!value.trim().isEmpty()) {
+                return value.trim();
+            }
+        }
+        return "";
+    }
+
+    private void appendNote(StringBuilder notes, String key, String value) {
+        if (value == null || value.trim().isEmpty()) {
+            return;
+        }
+        if (notes.length() > 0) {
+            notes.append(' ');
+        }
+        notes.append(key).append('=').append('\'')
+                .append(scrubAuditNote(value)).append('\'');
+    }
+
+    private String scrubAuditNote(String value) {
+        String scrubbed = PseudonymisationFilter.getInstance().freeTextScrubString(
+                value == null ? "" : value);
+        return scrubbed.replace('\r', ' ').replace('\n', ' ').trim();
+    }
+
+    private static String truncateAuditNote(String value) {
+        if (value == null) {
+            return "";
+        }
+        return value.length() <= 500 ? value : value.substring(0, 500);
+    }
+
+    private static String auditToken(String value) {
+        String raw = value == null ? "" : value.trim();
+        if (raw.isEmpty()) {
+            return "";
+        }
+        String cleaned = raw.replaceAll("[^A-Za-z0-9_.:-]+", "_");
+        return cleaned.length() <= 80 ? cleaned : cleaned.substring(0, 80);
+    }
+
+    private static int jsonBytes(JsonObject object) {
+        return object == null
+                ? 0
+                : object.toString().getBytes(StandardCharsets.UTF_8).length;
+    }
+
+    private String currentImageHash() {
+        try {
+            ImagePlus image = WindowManager.getCurrentImage();
+            if (image == null || image.getProcessor() == null) {
+                return "";
+            }
+            MessageDigest digest = MessageDigest.getInstance("SHA-256");
+            updateDigest(digest, image.getWidth() + "x" + image.getHeight()
+                    + "x" + image.getBitDepth() + ";");
+            Object pixels = image.getProcessor().getPixels();
+            if (pixels instanceof byte[]) {
+                digest.update((byte[]) pixels);
+            } else if (pixels instanceof short[]) {
+                for (short value : (short[]) pixels) {
+                    digest.update((byte) ((value >>> 8) & 0xff));
+                    digest.update((byte) (value & 0xff));
+                }
+            } else if (pixels instanceof int[]) {
+                for (int value : (int[]) pixels) {
+                    digest.update((byte) ((value >>> 24) & 0xff));
+                    digest.update((byte) ((value >>> 16) & 0xff));
+                    digest.update((byte) ((value >>> 8) & 0xff));
+                    digest.update((byte) (value & 0xff));
+                }
+            } else if (pixels instanceof float[]) {
+                for (float value : (float[]) pixels) {
+                    int bits = Float.floatToIntBits(value);
+                    digest.update((byte) ((bits >>> 24) & 0xff));
+                    digest.update((byte) ((bits >>> 16) & 0xff));
+                    digest.update((byte) ((bits >>> 8) & 0xff));
+                    digest.update((byte) (bits & 0xff));
+                }
+            } else {
+                updateDigest(digest, String.valueOf(image.getStatistics().mean));
+            }
+            return toHex(digest.digest());
+        } catch (Throwable t) {
+            return "";
+        }
+    }
+
+    private static void updateDigest(MessageDigest digest, String value) {
+        digest.update((value == null ? "" : value).getBytes(StandardCharsets.UTF_8));
+    }
+
+    private static String toHex(byte[] bytes) {
+        StringBuilder out = new StringBuilder(bytes.length * 2);
+        for (byte b : bytes) {
+            int value = b & 0xff;
+            if (value < 0x10) {
+                out.append('0');
+            }
+            out.append(Integer.toHexString(value));
+        }
+        return out.toString();
     }
 
     /**
@@ -1830,6 +2077,10 @@ public class TCPCommandServer {
                 && request.get("capabilities").isJsonObject())
                 ? request.getAsJsonObject("capabilities")
                 : new JsonObject();
+        c.sessionId = optString(request, "session_id",
+                optString(caps, "session_id", ""));
+        c.modelEndpoint = optString(request, "model_endpoint",
+                optString(caps, "model_endpoint", ""));
         c.vision       = optBool(caps, "vision", false);
         c.outputFormat = optString(caps, "output_format", "json");
         c.tokenBudget  = optInt(caps, "token_budget", Integer.MAX_VALUE);
@@ -1915,7 +2166,9 @@ public class TCPCommandServer {
 
         JsonObject result = new JsonObject();
         result.addProperty("server_version", SERVER_VERSION);
-        result.addProperty("session_id", sessionIdFor(sock));
+        result.addProperty("session_id", c.sessionId == null || c.sessionId.trim().isEmpty()
+                ? sessionIdFor(sock)
+                : c.sessionId.trim());
         result.add("enabled", enabledCapsFor(c));
         result.addProperty("server_time_ms", System.currentTimeMillis());
         return successResponse(result);
@@ -1931,6 +2184,9 @@ public class TCPCommandServer {
     }
 
     private String sessionKey(AgentCaps caps, Socket sock) {
+        if (caps != null && caps.sessionId != null && !caps.sessionId.trim().isEmpty()) {
+            return caps.sessionId.trim();
+        }
         if (caps != null && caps.agentId != null && !caps.agentId.trim().isEmpty()) {
             return caps.agentId.trim();
         }

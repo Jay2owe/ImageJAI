@@ -11,6 +11,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.UUID;
 
 /**
  * Detects and launches external AI CLI agents (Claude Code, Aider, etc.)
@@ -241,6 +242,7 @@ public class AgentLauncher {
 
         Map<String, String> env = new LinkedHashMap<>();
         env.put("IMAGEJAI_TCP_PORT", String.valueOf(tcpPort));
+        addAuditEnvironment(env, agent);
 
         return new AgentLaunchSpec(agent, cmd, new File(agentWorkspace), env);
     }
@@ -271,6 +273,7 @@ public class AgentLauncher {
         env.put("TERM", "xterm-256color");
         env.put("COLORTERM", "truecolor");
         env.put("TERMINAL_EMULATOR", "JetBrains-JediTerm");
+        addAuditEnvironment(env, agent);
 
         return new AgentLaunchSpec(agent, cmd, new File(agentWorkspace), env);
     }
@@ -427,6 +430,44 @@ public class AgentLauncher {
     static boolean isCloudOllamaTag(String tag) {
         return !isBlank(tag)
                 && cleanModelTag(tag).toLowerCase(Locale.ROOT).endsWith("-cloud");
+    }
+
+    private void addAuditEnvironment(Map<String, String> env, AgentInfo agent) {
+        if (env == null) {
+            return;
+        }
+        env.put("IMAGEJAI_SESSION_ID", newAuditSessionId());
+        String endpoint = modelEndpointFor(agent);
+        if (!endpoint.isEmpty()) {
+            env.put("IMAGEJAI_MODEL_ENDPOINT", endpoint);
+        }
+    }
+
+    private static String newAuditSessionId() {
+        return UUID.randomUUID().toString().replace("-", "").substring(0, 8);
+    }
+
+    private String modelEndpointFor(AgentInfo agent) {
+        if (agent == null) {
+            return "";
+        }
+        String name = agent.name == null ? "" : agent.name.toLowerCase(Locale.ROOT);
+        String command = agent.command == null ? "" : agent.command.toLowerCase(Locale.ROOT);
+        if (name.contains("claude") || command.contains("claude")) {
+            return "anthropic.claude-code";
+        }
+        if (name.contains("codex") || command.contains("codex")) {
+            return "openai.codex";
+        }
+        if (name.contains("gemini") || command.contains("gemini")) {
+            return "google.gemini-cli";
+        }
+        if (agent.isOllama()) {
+            String tag = resolveOllamaModelTag(agent, null);
+            String host = isCloudOllamaTag(tag) ? "ollama.cloud:" : "ollama.local:";
+            return host + (tag == null || tag.trim().isEmpty() ? agent.command : tag.trim());
+        }
+        return command.isEmpty() ? name : command;
     }
 
     private static String modelFromFlags(String flags) {
