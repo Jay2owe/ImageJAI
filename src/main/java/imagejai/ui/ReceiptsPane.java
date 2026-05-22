@@ -6,6 +6,7 @@ import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
+import imagejai.config.PrivacyPosture;
 import imagejai.engine.security.AuditLog;
 import imagejai.engine.security.AuditRow;
 import imagejai.engine.security.PseudonymisationFilter;
@@ -225,7 +226,7 @@ public final class ReceiptsPane extends JPanel implements AuditLog.Listener {
         }
         String payload = row.redactedPayloadJson();
         if (payload != null && !payload.trim().isEmpty()) {
-            return AuditRow.capRedactedPayload(payload);
+            return scrubPayloadJson(payload, row);
         }
 
         JsonObject fallback = new JsonObject();
@@ -247,12 +248,37 @@ public final class ReceiptsPane extends JPanel implements AuditLog.Listener {
         return AuditRow.capRedactedPayload(fallback.toString());
     }
 
+    private static String scrubPayloadJson(String payload, AuditRow row) {
+        try {
+            JsonElement element = JsonParser.parseString(payload);
+            if (element != null && element.isJsonObject()) {
+                JsonObject copy = element.getAsJsonObject();
+                PrivacyPosture posture = row.posture() == PrivacyPosture.STANDARD
+                        ? PrivacyPosture.PSEUDONYMISED
+                        : row.posture();
+                if (posture != PrivacyPosture.STANDARD) {
+                    PseudonymisationFilter.getInstance().apply(copy, row.command(),
+                            posture, row.sessionId());
+                }
+                return AuditRow.capRedactedPayload(PRETTY.toJson(copy));
+            }
+        } catch (Exception ignored) {
+        }
+        String scrubbed = PseudonymisationFilter.getInstance()
+                .freeTextScrubString(payload);
+        return AuditRow.capRedactedPayload(scrubbed);
+    }
+
     int rowCountForTest() {
         return model.getRowCount();
     }
 
     JComponent createReceiptDetailPanelForTest(int modelRow) {
         return createReceiptDetailPanel(model.receiptAt(modelRow));
+    }
+
+    String redactedJsonForTest(int modelRow) {
+        return model.receiptAt(modelRow).redactedJson;
     }
 
     private static final class Receipt {

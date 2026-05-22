@@ -3,6 +3,9 @@ package imagejai.engine.security;
 import org.junit.Test;
 
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.List;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
@@ -19,6 +22,18 @@ public class OutboundPromptScrubberTest {
 
         assertFalse(out.contains("subject_017"));
         assertTrue(out.contains(token));
+    }
+
+    @Test
+    public void scrubDoesNotRescanInsertedTokens() {
+        PathTokenMap map = new PathTokenMap(bytes(4));
+        String longToken = map.tokenForSensitiveText("alpha beta", "alpha");
+        String shortToken = map.tokenForSensitiveText("alpha", "label");
+        OutboundPromptScrubber scrubber = new OutboundPromptScrubber(map, null);
+
+        String out = scrubber.scrub("alpha beta alpha");
+
+        assertEquals(longToken + " " + shortToken, out);
     }
 
     @Test
@@ -48,6 +63,33 @@ public class OutboundPromptScrubberTest {
                 StandardCharsets.UTF_8);
 
         assertEquals("\r", enter);
+    }
+
+    @Test
+    public void promptReplacementEmitsRedactedAuditRowOnly() throws Exception {
+        Path csv = Files.createTempDirectory("imagejai-prompt-audit")
+                .resolve(AuditLog.FILE_NAME);
+        AuditLog log = new AuditLog(csv);
+        PathTokenMap map = new PathTokenMap(bytes(5));
+        String raw = "C:\\study\\subject_017.lif";
+        String token = map.tokenForPathString(raw);
+        OutboundPromptScrubber scrubber = new OutboundPromptScrubber(map, null, log);
+
+        scrubber.filter(("open " + raw).getBytes(StandardCharsets.UTF_8));
+        scrubber.filter("\r".getBytes(StandardCharsets.UTF_8));
+        log.flushForTest();
+
+        List<AuditRow> rows = log.recent(1);
+        assertEquals(1, rows.size());
+        AuditRow row = rows.get(0);
+        assertEquals("prompt.outbound", row.command());
+        assertTrue(row.redactionApplied());
+        assertEquals("prompt", row.fieldsRedacted().get(0));
+        assertTrue(row.redactedPayloadJson().contains(token));
+        assertFalse(row.redactedPayloadJson().contains("subject_017"));
+        assertFalse(row.notes().contains("subject_017"));
+
+        log.shutdownAndAwait(100);
     }
 
     private static byte[] bytes(int value) {

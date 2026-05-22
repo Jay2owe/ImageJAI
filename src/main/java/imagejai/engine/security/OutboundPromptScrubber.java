@@ -1,8 +1,13 @@
 package imagejai.engine.security;
 
 import ij.IJ;
+import imagejai.config.PrivacyPosture;
+import imagejai.engine.PostureController;
 
+import com.google.gson.JsonArray;
+import com.google.gson.JsonObject;
 import java.nio.charset.StandardCharsets;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
@@ -54,18 +59,26 @@ public final class OutboundPromptScrubber {
                 public void sentRaw() {
                     IJ.log("[ImageJAI-Term] Sent raw embedded-terminal prompt by user override.");
                 }
-            });
+            },
+            AuditLog.getInstance());
 
     private final PathTokenMap pathTokenMap;
     private final Notifier notifier;
+    private final AuditLog auditLog;
     private final CopyOnWriteArrayList<Notifier> extraNotifiers =
             new CopyOnWriteArrayList<Notifier>();
     private final StringBuilder lineBuffer = new StringBuilder();
     private boolean nextEnterRaw;
 
     public OutboundPromptScrubber(PathTokenMap pathTokenMap, Notifier notifier) {
+        this(pathTokenMap, notifier, null);
+    }
+
+    public OutboundPromptScrubber(PathTokenMap pathTokenMap, Notifier notifier,
+                                  AuditLog auditLog) {
         this.pathTokenMap = pathTokenMap == null ? PathTokenMap.getInstance() : pathTokenMap;
         this.notifier = notifier;
+        this.auditLog = auditLog;
     }
 
     public static OutboundPromptScrubber getInstance() {
@@ -102,7 +115,7 @@ public final class OutboundPromptScrubber {
                 lineBuffer.setLength(0);
                 if (nextEnterRaw) {
                     nextEnterRaw = false;
-                    notifySentRaw();
+                    notifySentRaw(line);
                     out.append(c);
                     continue;
                 }
@@ -170,6 +183,7 @@ public final class OutboundPromptScrubber {
         if (scrubbed == null || !scrubbed.changed) {
             return;
         }
+        appendPromptAudit(scrubbed);
         if (notifier != null) {
             safePseudonymised(notifier, scrubbed.replacements);
         }
@@ -178,13 +192,80 @@ public final class OutboundPromptScrubber {
         }
     }
 
-    private void notifySentRaw() {
+    private void notifySentRaw(String line) {
+        appendRawOverrideAudit(line);
         if (notifier != null) {
             safeSentRaw(notifier);
         }
         for (Notifier listener : extraNotifiers) {
             safeSentRaw(listener);
         }
+    }
+
+    private void appendPromptAudit(Scrubbed scrubbed) {
+        if (auditLog == null || scrubbed == null || !scrubbed.changed) {
+            return;
+        }
+        try {
+            JsonObject payload = new JsonObject();
+            payload.addProperty("command", "prompt.outbound");
+            payload.addProperty("replacement_count", scrubbed.replacements.size());
+            payload.addProperty("redacted_prompt", scrubbed.text);
+            JsonArray tokens = new JsonArray();
+            for (Replacement replacement : scrubbed.replacements) {
+                tokens.add(replacement.token());
+            }
+            payload.add("tokens", tokens);
+            auditLog.append(new AuditRow(
+                    Instant.now(),
+                    "",
+                    "prompt.outbound",
+                    currentPosture(),
+                    "",
+                    "",
+                    bytes(scrubbed.text),
+                    0,
+                    "",
+                    true,
+                    Collections.singletonList("prompt"),
+                    "replacements=" + scrubbed.replacements.size(),
+                    payload.toString()));
+        } catch (Throwable ignore) {
+        }
+    }
+
+    private void appendRawOverrideAudit(String line) {
+        if (auditLog == null) {
+            return;
+        }
+        try {
+            auditLog.append(new AuditRow(
+                    Instant.now(),
+                    "",
+                    "prompt.raw_override",
+                    currentPosture(),
+                    "",
+                    "",
+                    bytes(line),
+                    0,
+                    "",
+                    false,
+                    Collections.<String>emptyList(),
+                    "user_override=sent_raw"));
+        } catch (Throwable ignore) {
+        }
+    }
+
+    private static PrivacyPosture currentPosture() {
+        try {
+            return PostureController.getInstance().current();
+        } catch (Throwable t) {
+            return PrivacyPosture.defaultPosture();
+        }
+    }
+
+    private static int bytes(String value) {
+        return (value == null ? "" : value).getBytes(StandardCharsets.UTF_8).length;
     }
 
     private static void safePseudonymised(Notifier notifier,
