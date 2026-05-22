@@ -23,6 +23,7 @@ public final class AuditSummary {
     private final int visualGrantRows;
     private final int visualConsumeRows;
     private final int postureEventRows;
+    private final int downshiftRows;
     private final Map<String, Integer> commandCounts;
     private final Map<String, Integer> postureCounts;
     private final Set<String> fieldsRedacted;
@@ -40,6 +41,26 @@ public final class AuditSummary {
                         Map<String, Integer> commandCounts,
                         Map<String, Integer> postureCounts,
                         Set<String> fieldsRedacted) {
+        this(sourcePath, totalRows, firstTimestampUtc, lastTimestampUtc,
+                totalBytesOut, totalBytesIn, redactedRows, visualGrantRows,
+                visualConsumeRows, postureEventRows, postureEventRows,
+                commandCounts, postureCounts, fieldsRedacted);
+    }
+
+    public AuditSummary(Path sourcePath,
+                        int totalRows,
+                        Instant firstTimestampUtc,
+                        Instant lastTimestampUtc,
+                        long totalBytesOut,
+                        long totalBytesIn,
+                        int redactedRows,
+                        int visualGrantRows,
+                        int visualConsumeRows,
+                        int postureEventRows,
+                        int downshiftRows,
+                        Map<String, Integer> commandCounts,
+                        Map<String, Integer> postureCounts,
+                        Set<String> fieldsRedacted) {
         this.sourcePath = sourcePath;
         this.totalRows = Math.max(0, totalRows);
         this.firstTimestampUtc = firstTimestampUtc;
@@ -50,6 +71,7 @@ public final class AuditSummary {
         this.visualGrantRows = Math.max(0, visualGrantRows);
         this.visualConsumeRows = Math.max(0, visualConsumeRows);
         this.postureEventRows = Math.max(0, postureEventRows);
+        this.downshiftRows = Math.max(0, downshiftRows);
         this.commandCounts = immutableMap(commandCounts);
         this.postureCounts = immutableMap(postureCounts);
         this.fieldsRedacted = immutableSet(fieldsRedacted);
@@ -63,11 +85,23 @@ public final class AuditSummary {
         return totalRows;
     }
 
+    public int rowCount() {
+        return totalRows;
+    }
+
     public Instant firstTimestampUtc() {
         return firstTimestampUtc;
     }
 
+    public Instant first() {
+        return firstTimestampUtc;
+    }
+
     public Instant lastTimestampUtc() {
+        return lastTimestampUtc;
+    }
+
+    public Instant last() {
         return lastTimestampUtc;
     }
 
@@ -83,7 +117,19 @@ public final class AuditSummary {
         return redactedRows;
     }
 
+    public int pseudonymised() {
+        return redactedRows;
+    }
+
+    public int pseudonymisedCount() {
+        return redactedRows;
+    }
+
     public int visualGrantRows() {
+        return visualGrantRows;
+    }
+
+    public int visualOverrideGrants() {
         return visualGrantRows;
     }
 
@@ -93,6 +139,14 @@ public final class AuditSummary {
 
     public int postureEventRows() {
         return postureEventRows;
+    }
+
+    public int downshiftRows() {
+        return downshiftRows;
+    }
+
+    public int downshifts() {
+        return downshiftRows;
     }
 
     public Map<String, Integer> commandCounts() {
@@ -139,6 +193,7 @@ public final class AuditSummary {
                 && visualGrantRows == that.visualGrantRows
                 && visualConsumeRows == that.visualConsumeRows
                 && postureEventRows == that.postureEventRows
+                && downshiftRows == that.downshiftRows
                 && Objects.equals(sourcePath, that.sourcePath)
                 && Objects.equals(firstTimestampUtc, that.firstTimestampUtc)
                 && Objects.equals(lastTimestampUtc, that.lastTimestampUtc)
@@ -151,7 +206,7 @@ public final class AuditSummary {
     public int hashCode() {
         return Objects.hash(sourcePath, totalRows, firstTimestampUtc,
                 lastTimestampUtc, totalBytesOut, totalBytesIn, redactedRows,
-                visualGrantRows, visualConsumeRows, postureEventRows,
+                visualGrantRows, visualConsumeRows, postureEventRows, downshiftRows,
                 commandCounts, postureCounts, fieldsRedacted);
     }
 }

@@ -216,6 +216,7 @@ public final class AuditLog {
         int visualGrants = 0;
         int visualConsumes = 0;
         int postureEvents = 0;
+        int downshifts = 0;
         Instant first = null;
         Instant last = null;
 
@@ -253,10 +254,14 @@ public final class AuditLog {
             if (row.command().startsWith("posture.")) {
                 postureEvents++;
             }
+            if ("posture.downshift".equals(row.command())) {
+                downshifts++;
+            }
         }
 
         return new AuditSummary(csvPath, rows, first, last, bytesOut, bytesIn,
                 redactedRows, visualGrants, visualConsumes, postureEvents,
+                downshifts,
                 commandCounts, postureCounts, fields);
     }
 
@@ -422,7 +427,7 @@ public final class AuditLog {
 
     private static AuditSummary emptySummary(Path csvPath) {
         return new AuditSummary(csvPath, 0, null, null, 0L, 0L,
-                0, 0, 0, 0,
+                0, 0, 0, 0, 0,
                 new LinkedHashMap<String, Integer>(),
                 new LinkedHashMap<String, Integer>(),
                 new LinkedHashSet<String>());

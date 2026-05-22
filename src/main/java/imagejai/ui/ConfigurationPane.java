@@ -7,6 +7,7 @@ import imagejai.config.PrivacyPosture;
 import imagejai.engine.PostureController;
 import imagejai.engine.security.AuditLog;
 import imagejai.engine.security.AuditRow;
+import imagejai.engine.security.DataHandlingStatementGenerator;
 
 import javax.swing.BorderFactory;
 import javax.swing.DefaultListCellRenderer;
@@ -171,11 +172,7 @@ public final class ConfigurationPane extends JPanel
         JButton generate = smallButton("Generate");
         generate.setToolTipText("<html>Produces a printable statement summarising vendor terms,"
                 + "<br>pseudonymisation scheme, and audit trail for this project.</html>");
-        generate.addActionListener(e -> JOptionPane.showMessageDialog(
-                ConfigurationPane.this,
-                "The Data Handling Statement generator is wired in stage 06.",
-                "Generate Data Handling Statement",
-                JOptionPane.INFORMATION_MESSAGE));
+        generate.addActionListener(e -> generateStatementAsync());
         row.add(generate);
         return row;
     }
@@ -222,6 +219,57 @@ public final class ConfigurationPane extends JPanel
                             "Audit log",
                             JOptionPane.WARNING_MESSAGE);
                 }
+            }
+        }.execute();
+    }
+
+    private void generateStatementAsync() {
+        final Path folder = currentImageFolder();
+        if (folder == null) {
+            JOptionPane.showMessageDialog(
+                    ConfigurationPane.this,
+                    "Open an image from the project folder before generating the "
+                            + "Data Handling Statement.",
+                    "Generate Data Handling Statement",
+                    JOptionPane.WARNING_MESSAGE);
+            return;
+        }
+        final PrivacyPosture posture = postureController.current();
+        new SwingWorker<Path, Void>() {
+            private Exception error;
+
+            @Override
+            protected Path doInBackground() {
+                try {
+                    return new DataHandlingStatementGenerator(folder, posture).generate();
+                } catch (Exception e) {
+                    error = e;
+                    return null;
+                }
+            }
+
+            @Override
+            protected void done() {
+                Path generated = null;
+                try {
+                    generated = get();
+                } catch (Exception e) {
+                    error = e;
+                }
+                if (error != null) {
+                    JOptionPane.showMessageDialog(
+                            ConfigurationPane.this,
+                            "Could not generate the Data Handling Statement:\n"
+                                    + error.getMessage(),
+                            "Generate Data Handling Statement",
+                            JOptionPane.WARNING_MESSAGE);
+                    return;
+                }
+                JOptionPane.showMessageDialog(
+                        ConfigurationPane.this,
+                        "Generated Data Handling Statement:\n" + generated,
+                        "Generate Data Handling Statement",
+                        JOptionPane.INFORMATION_MESSAGE);
             }
         }.execute();
     }

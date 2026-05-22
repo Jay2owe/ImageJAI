@@ -192,8 +192,14 @@ public class AuditLogTest {
         AuditSummary summary = AuditLog.summaryFor(folder);
 
         assertEquals(3, summary.totalRows());
+        assertEquals(3, summary.rowCount());
+        assertEquals(1, summary.pseudonymised());
+        assertEquals(Instant.parse("2026-05-22T12:00:00Z"), summary.first());
+        assertEquals(Instant.parse("2026-05-22T12:00:02Z"), summary.last());
         assertEquals(1, summary.visualGrantRows());
+        assertEquals(1, summary.visualOverrideGrants());
         assertEquals(1, summary.postureEventRows());
+        assertEquals(1, summary.downshifts());
         assertEquals(Integer.valueOf(1), summary.commandCounts().get("ping"));
         log.shutdownAndAwait(100);
     }
