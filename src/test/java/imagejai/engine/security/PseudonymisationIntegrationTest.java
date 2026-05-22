@@ -7,6 +7,7 @@ import ij.IJ;
 import ij.ImagePlus;
 import ij.WindowManager;
 import ij.io.FileInfo;
+import ij.measure.ResultsTable;
 import ij.process.ByteProcessor;
 import imagejai.config.PrivacyPosture;
 import imagejai.config.Settings;
@@ -55,6 +56,7 @@ import static org.junit.Assert.assertTrue;
 public class PseudonymisationIntegrationTest {
     private static final String SENSITIVE_ID = "MOAB2_subject_017_visit3";
     private static final String OME_PHI = "Jane Donor subject_017 visit3";
+    private static final String RESULT_LABEL = "Stage08LabelCellAlpha";
 
     @Test
     public void everyTcpCommandResponseCarriesGovernanceAndNoOriginalStrings()
@@ -67,7 +69,7 @@ public class PseudonymisationIntegrationTest {
         Path csv = sensitiveFolder.resolve("AI_Exports").resolve(AuditLog.FILE_NAME);
         String originalUserDir = System.getProperty("user.dir");
 
-        registerSensitive(rawImagePath, sensitiveFolder);
+        String resultLabelToken = registerSensitive(rawImagePath, sensitiveFolder);
         ImagePlus image = syntheticImage(rawImagePath);
         Settings settings = new Settings();
         settings.setPrivacyPosture(PrivacyPosture.PSEUDONYMISED);
@@ -75,6 +77,9 @@ public class PseudonymisationIntegrationTest {
         WindowManager.setTempCurrentImage(image);
         System.setProperty("user.dir", sensitiveFolder.toString());
         IJ.log("registered path " + rawImagePath.toString());
+        seedResultsTable();
+        assertTrue("integration fixture did not seed a Label value",
+                new StateInspector().getResultsTableCSV().contains(RESULT_LABEL));
 
         CommandEngine engine = new StubCommandEngine();
         TCPCommandServer server = new TCPCommandServer(0, engine,
@@ -145,9 +150,12 @@ public class PseudonymisationIntegrationTest {
 
             assertEquals("socket response count", TCPCommandServer.knownCommands().size(),
                     rawResponses.size());
+            assertTrue("socket proof never exercised Label redaction",
+                    rawResponses.toString().contains(resultLabelToken));
         } finally {
             server.stop();
             WindowManager.setTempCurrentImage(null);
+            ResultsTable.getResultsTable().reset();
             if (originalUserDir != null) {
                 System.setProperty("user.dir", originalUserDir);
             }
@@ -227,12 +235,21 @@ public class PseudonymisationIntegrationTest {
         }
     }
 
-    private static void registerSensitive(Path rawImagePath, Path sensitiveFolder) {
+    private static String registerSensitive(Path rawImagePath, Path sensitiveFolder) {
         PathTokenMap map = PathTokenMap.getInstance();
         map.tokenForPathString(rawImagePath.toString());
         map.tokenForPathString(sensitiveFolder.toString());
         map.tokenForSensitiveText(SENSITIVE_ID, "label");
         map.tokenForSensitiveText(OME_PHI, "ome");
+        return map.tokenForSensitiveText(RESULT_LABEL, "label");
+    }
+
+    private static void seedResultsTable() {
+        ResultsTable table = ResultsTable.getResultsTable();
+        table.reset();
+        table.incrementCounter();
+        table.addValue("Label", RESULT_LABEL);
+        table.addValue("Area", 42.0);
     }
 
     private static ImagePlus syntheticImage(Path rawImagePath) {
@@ -287,6 +304,8 @@ public class PseudonymisationIntegrationTest {
                 out.contains("subject_017"));
         assertFalse(label + " leaked visit3 in " + out, out.contains("visit3"));
         assertFalse(label + " leaked OME PHI in " + out, out.contains(OME_PHI));
+        assertFalse(label + " leaked Label value in " + out,
+                out.contains(RESULT_LABEL));
         assertFalse(label + " leaked absolute image path in " + out,
                 out.contains(rawImagePath.toString()));
         assertFalse(label + " leaked absolute parent path in " + out,

@@ -12,7 +12,6 @@ import java.awt.Color;
 import java.awt.Graphics2D;
 import java.awt.image.BufferedImage;
 import java.io.ByteArrayOutputStream;
-import java.util.ArrayList;
 import java.util.Base64;
 import java.util.LinkedHashMap;
 import java.util.Map;
@@ -34,10 +33,7 @@ public class PseudonymisationFilterExhaustiveTest {
     @Test
     public void everyKnownCommandHasPseudonymisedRedactionPositiveFixture()
             throws Exception {
-        LinkedHashMap<String, JsonObject> fixtures = fixtures();
-        assertEquals(TCPCommandServer.knownCommands(),
-                new ArrayList<String>(fixtures.keySet()));
-
+        Map<String, JsonObject> fixtures = fixtures();
         int salt = 1;
         for (Map.Entry<String, JsonObject> entry : fixtures.entrySet()) {
             PathTokenMap map = new PathTokenMap(bytes(salt++));
@@ -68,10 +64,7 @@ public class PseudonymisationFilterExhaustiveTest {
     @Test
     public void everyKnownCommandFixturePassesThroughInStandardMode()
             throws Exception {
-        LinkedHashMap<String, JsonObject> fixtures = fixtures();
-        assertEquals(TCPCommandServer.knownCommands(),
-                new ArrayList<String>(fixtures.keySet()));
-
+        Map<String, JsonObject> fixtures = fixtures();
         int salt = 100;
         for (Map.Entry<String, JsonObject> entry : fixtures.entrySet()) {
             PseudonymisationFilter filter = filter(new PathTokenMap(bytes(salt++)));
@@ -91,64 +84,9 @@ public class PseudonymisationFilterExhaustiveTest {
     private static LinkedHashMap<String, JsonObject> fixtures() throws Exception {
         LinkedHashMap<String, JsonObject> out =
                 new LinkedHashMap<String, JsonObject>();
-        put(out, "hello");
-        put(out, "ping");
-        put(out, "emit_methods_table");
-        put(out, "execute_macro");
-        put(out, "get_state");
-        put(out, "get_image_info");
-        put(out, "get_results_table");
-        put(out, "capture_image");
-        put(out, "request_visual");
-        put(out, "open_image");
-        put(out, "open_image_by_token");
-        put(out, "run_pipeline");
-        put(out, "explore_thresholds");
-        put(out, "get_state_context");
-        put(out, "get_log");
-        put(out, "get_histogram");
-        put(out, "get_open_windows");
-        put(out, "get_metadata");
-        put(out, "batch");
-        put(out, "run");
-        put(out, "get_pixels");
-        put(out, "3d_viewer");
-        put(out, "get_dialogs");
-        put(out, "close_dialogs");
-        put(out, "close_windows");
-        put(out, "probe_command");
-        put(out, "list_commands");
-        put(out, "run_script");
-        put(out, "interact_dialog");
-        put(out, "get_progress");
-        put(out, "get_friction_log");
-        put(out, "get_friction_patterns");
-        put(out, "clear_friction_log");
-        put(out, "intent");
-        put(out, "intent_teach");
-        put(out, "intent_list");
-        put(out, "intent_forget");
-        put(out, "gui_action");
-        put(out, "execute_macro_async");
-        put(out, "job_status");
-        put(out, "job_cancel");
-        put(out, "job_list");
-        put(out, "list_reactive_rules");
-        put(out, "reactive_stats");
-        put(out, "reactive_enable");
-        put(out, "reactive_disable");
-        put(out, "reactive_reload");
-        put(out, "get_roi_state");
-        put(out, "get_display_state");
-        put(out, "get_console");
-        put(out, "get_image_graph");
-        put(out, "ledger_lookup");
-        put(out, "ledger_confirm");
-        put(out, "rewind");
-        put(out, "branch");
-        put(out, "branch_list");
-        put(out, "branch_switch");
-        put(out, "branch_delete");
+        for (String command : TCPCommandServer.knownCommands()) {
+            put(out, command);
+        }
         return out;
     }
 
