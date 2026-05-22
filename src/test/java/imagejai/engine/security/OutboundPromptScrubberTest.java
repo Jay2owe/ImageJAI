@@ -37,6 +37,17 @@ public class OutboundPromptScrubberTest {
     }
 
     @Test
+    public void nonMatchingPromptPassesThroughUnchanged() {
+        PathTokenMap map = new PathTokenMap(bytes(6));
+        map.tokenForPathString("C:\\study\\subject_017.lif");
+        OutboundPromptScrubber scrubber = new OutboundPromptScrubber(map, null);
+
+        String out = scrubber.scrub("measure the current image");
+
+        assertEquals("measure the current image", out);
+    }
+
+    @Test
     public void enterRewritesBufferedLineBeforeSending() {
         PathTokenMap map = new PathTokenMap(bytes(2));
         String token = map.tokenForPathString("C:\\study\\subject_017.lif");

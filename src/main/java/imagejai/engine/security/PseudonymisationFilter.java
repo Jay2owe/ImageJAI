@@ -26,11 +26,11 @@ public class PseudonymisationFilter {
 
     private static final Pattern NUMERIC = Pattern.compile("[-+]?\\d+(?:\\.\\d+)?");
     private static final Pattern IMAGE_EXTENSION = Pattern.compile(
-            "(?i).+\\.(?:lif|tif|tiff|czi|nd2|lsm|oib|oif|vsi|svs|png|jpe?g|ome\\.tif|ome\\.tiff)$");
+            "(?i).+\\.(?:lif|tif|tiff|czi|nd2|lsm|oib|oif|vsi|svs|png|jpe?g|ome\\.tif|ome\\.tiff|csv|tsv|md|pdf|json|xml|txt)$");
     private static final Pattern PATH_SUBSTRING = Pattern.compile(
-            "(?i)([A-Za-z]:[\\\\/][^\\r\\n\"'<>|]+?\\.(?:lif|tif|tiff|czi|nd2|lsm|oib|oif|vsi|svs|png|jpe?g)"
-                    + "|/[A-Za-z0-9._~+()\\- /]+?\\.(?:lif|tif|tiff|czi|nd2|lsm|oib|oif|vsi|svs|png|jpe?g)"
-                    + "|\\b(?!image-[0-9a-f]{4}\\b)[A-Za-z0-9._+()\\- ]+\\.(?:lif|tif|tiff|czi|nd2|lsm|oib|oif|vsi|svs|png|jpe?g))");
+            "(?i)([A-Za-z]:[\\\\/][^\\r\\n\"'<>|]+?\\.(?:lif|tif|tiff|czi|nd2|lsm|oib|oif|vsi|svs|png|jpe?g|csv|tsv|md|pdf|json|xml|txt)"
+                    + "|/[A-Za-z0-9._~+()\\- /]+?\\.(?:lif|tif|tiff|czi|nd2|lsm|oib|oif|vsi|svs|png|jpe?g|csv|tsv|md|pdf|json|xml|txt)"
+                    + "|\\b(?!image-[0-9a-f]{4}\\b)[A-Za-z0-9._+()\\- ]+\\.(?:lif|tif|tiff|czi|nd2|lsm|oib|oif|vsi|svs|png|jpe?g|csv|tsv|md|pdf|json|xml|txt))");
 
     private final PathTokenMap pathTokenMap;
     private final OmeXmlScrubber omeXmlScrubber;
@@ -389,15 +389,43 @@ public class PseudonymisationFilter {
         if (value == null || value.isEmpty()) {
             return value;
         }
-        String out = value;
-        for (Map.Entry<String, String> entry : pathTokenMap.snapshotSensitiveStringsLongestFirst()) {
-            String original = entry.getKey();
-            if (original == null || original.isEmpty()) {
-                continue;
-            }
-            out = out.replace(original, entry.getValue());
+        List<Map.Entry<String, String>> entries =
+                pathTokenMap.snapshotSensitiveStringsLongestFirst();
+        if (entries.isEmpty()) {
+            return value;
         }
-        return out;
+
+        StringBuilder out = new StringBuilder(value.length());
+        int i = 0;
+        while (i < value.length()) {
+            Map.Entry<String, String> match = null;
+            for (Map.Entry<String, String> entry : entries) {
+                String original = entry.getKey();
+                if (original == null || original.isEmpty()) {
+                    continue;
+                }
+                if (startsWithAt(value, original, i)) {
+                    match = entry;
+                    break;
+                }
+            }
+            if (match != null) {
+                out.append(match.getValue());
+                i += match.getKey().length();
+            } else {
+                out.append(value.charAt(i));
+                i++;
+            }
+        }
+        return out.toString();
+    }
+
+    private static boolean startsWithAt(String value, String needle, int index) {
+        int n = needle.length();
+        if (index < 0 || n == 0 || index + n > value.length()) {
+            return false;
+        }
+        return value.regionMatches(index, needle, 0, n);
     }
 
     private static boolean looksLikeOmeField(String key, String value) {

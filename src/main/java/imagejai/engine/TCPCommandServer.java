@@ -58,6 +58,7 @@ import java.awt.Rectangle;
 import java.awt.Window;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.Enumeration;
 import java.util.HashSet;
 import java.util.List;
@@ -101,6 +102,66 @@ public class TCPCommandServer {
 
     private static final Gson GSON = new GsonBuilder().create();
     private static final Charset UTF8 = Charset.forName("UTF-8");
+    private static final List<String> KNOWN_COMMANDS = Collections.unmodifiableList(
+            Arrays.asList(
+                    "hello",
+                    "ping",
+                    "emit_methods_table",
+                    "execute_macro",
+                    "get_state",
+                    "get_image_info",
+                    "get_results_table",
+                    "capture_image",
+                    "request_visual",
+                    "open_image",
+                    "open_image_by_token",
+                    "run_pipeline",
+                    "explore_thresholds",
+                    "get_state_context",
+                    "get_log",
+                    "get_histogram",
+                    "get_open_windows",
+                    "get_metadata",
+                    "batch",
+                    "run",
+                    "get_pixels",
+                    "3d_viewer",
+                    "get_dialogs",
+                    "close_dialogs",
+                    "close_windows",
+                    "probe_command",
+                    "list_commands",
+                    "run_script",
+                    "interact_dialog",
+                    "get_progress",
+                    "get_friction_log",
+                    "get_friction_patterns",
+                    "clear_friction_log",
+                    "intent",
+                    "intent_teach",
+                    "intent_list",
+                    "intent_forget",
+                    "gui_action",
+                    "execute_macro_async",
+                    "job_status",
+                    "job_cancel",
+                    "job_list",
+                    "list_reactive_rules",
+                    "reactive_stats",
+                    "reactive_enable",
+                    "reactive_disable",
+                    "reactive_reload",
+                    "get_roi_state",
+                    "get_display_state",
+                    "get_console",
+                    "get_image_graph",
+                    "ledger_lookup",
+                    "ledger_confirm",
+                    "rewind",
+                    "branch",
+                    "branch_list",
+                    "branch_switch",
+                    "branch_delete"));
     // 10-minute synchronous-macro ceiling. Long enough for batch 3D Object
     // Counter runs on dense masks without blocking the TCP thread forever.
     // Callers can override per-request with `"timeout_ms": N` (pass 0 or a
@@ -732,7 +793,18 @@ public class TCPCommandServer {
     }
 
     public int getPort() {
+        if (serverSocket != null && !serverSocket.isClosed()) {
+            return serverSocket.getLocalPort();
+        }
         return port;
+    }
+
+    /**
+     * Canonical TCP protocol command names. Stage 08 tests use this list so a
+     * new dispatcher branch requires a matching governance fixture.
+     */
+    public static List<String> knownCommands() {
+        return KNOWN_COMMANDS;
     }
 
     /** Phase 2: number of active subscribe-stream sockets. Primarily used for tests. */
@@ -770,10 +842,11 @@ public class TCPCommandServer {
             // and a TLS-or-equivalent transport.
             serverSocket = new ServerSocket(port, 50, InetAddress.getLoopbackAddress());
             serverSocket.setReuseAddress(true);
+            int boundPort = serverSocket.getLocalPort();
             System.err.println("[ImageJAI-TCP] Server listening on " +
-                    InetAddress.getLoopbackAddress().getHostAddress() + ":" + port);
+                    InetAddress.getLoopbackAddress().getHostAddress() + ":" + boundPort);
             if (listener != null) {
-                listener.onServerStarted(port);
+                listener.onServerStarted(boundPort);
             }
 
             while (running) {
@@ -1275,7 +1348,10 @@ public class TCPCommandServer {
             }
             List<String> fields = new ArrayList<String>(
                     effectiveReport.fieldsPseudonymised());
-            boolean redactionApplied = effectiveReport.failed() || !fields.isEmpty();
+            boolean redactionApplied = effectiveReport.failed()
+                    || !fields.isEmpty()
+                    || (rowPosture != PrivacyPosture.STANDARD
+                    && response != null && response.has("_governance"));
             String sessionId = auditSessionId(request, caps, sock);
             AuditLog.getInstance().append(new AuditRow(
                     java.time.Instant.now(),

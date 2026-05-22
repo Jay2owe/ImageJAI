@@ -11,18 +11,64 @@
         <relativePath />
     </parent>
 
-    <groupId>uk.ac.ucl.imagej</groupId>
+    <groupId>imagejai</groupId>
     <artifactId>imagej-ai</artifactId>
     <version>0.2.0</version>
     <packaging>jar</packaging>
 
     <name>ImageJ AI Assistant</name>
     <description>AI-powered assistant for ImageJ/Fiji. Natural language control of image analysis.</description>
+    <url>https://github.com/Jay2owe/ImageJAI</url>
+    <inceptionYear>2026</inceptionYear>
+    <organization>
+        <name>UK Dementia Research Institute at Imperial College London</name>
+        <url>https://ukdri.ac.uk/centres/imperial</url>
+    </organization>
+
+    <licenses>
+        <license>
+            <name>BSD 3-Clause License</name>
+            <url>https://opensource.org/licenses/BSD-3-Clause</url>
+            <distribution>repo</distribution>
+        </license>
+    </licenses>
+
+    <developers>
+        <developer>
+            <id>Jay2owe</id>
+            <name>Jamie Malcolm</name>
+            <email>jamiemalcolm12@gmail.com</email>
+            <url>https://github.com/Jay2owe</url>
+            <organization>UK Dementia Research Institute at Imperial College London</organization>
+            <organizationUrl>https://www.ukdri.ac.uk/labs/brancaccio-lab</organizationUrl>
+            <properties>
+                <orcid>0009-0008-3862-2776</orcid>
+            </properties>
+            <roles>
+                <role>founder</role>
+                <role>lead</role>
+                <role>developer</role>
+                <role>maintainer</role>
+            </roles>
+        </developer>
+    </developers>
+
+    <scm>
+        <connection>scm:git:https://github.com/Jay2owe/ImageJAI.git</connection>
+        <developerConnection>scm:git:git@github.com:Jay2owe/ImageJAI.git</developerConnection>
+        <tag>HEAD</tag>
+        <url>https://github.com/Jay2owe/ImageJAI</url>
+    </scm>
+
+    <issueManagement>
+        <system>GitHub Issues</system>
+        <url>https://github.com/Jay2owe/ImageJAI/issues</url>
+    </issueManagement>
 
     <properties>
-        <package-name>uk.ac.ucl.imagej.ai</package-name>
-        <license.licenseName>bsd_2</license.licenseName>
-        <license.copyrightOwners>Jamie / UCL</license.copyrightOwners>
+        <package-name>imagejai</package-name>
+        <license.licenseName>bsd_3</license.licenseName>
+        <license.copyrightOwners>Jamie Malcolm</license.copyrightOwners>
         <!-- Java 11 target: required by pty4j / JediTerm (stage 05).
              Fiji ships a JRE 21+ so runtime is fine; build JDK stays at 25.
              NB: pom-scijava sets maven.compiler.release=8 in its BOM, and
@@ -100,6 +146,15 @@
             <scope>compile</scope>
         </dependency>
 
+        <!-- SnakeYAML for ProviderRegistry (Phase D). SafeConstructor only;
+             see risk #16 in docs/multi_provider/07_implementation_plan.md. -->
+        <dependency>
+            <groupId>org.yaml</groupId>
+            <artifactId>snakeyaml</artifactId>
+            <version>2.2</version>
+            <scope>compile</scope>
+        </dependency>
+
         <!-- Data Governance statement PDF generation (stage 06). -->
         <dependency>
             <groupId>org.apache.pdfbox</groupId>
@@ -114,16 +169,54 @@
             <artifactId>junit</artifactId>
             <scope>test</scope>
         </dependency>
+        <dependency>
+            <groupId>org.junit.jupiter</groupId>
+            <artifactId>junit-jupiter-api</artifactId>
+            <version>5.10.2</version>
+            <scope>test</scope>
+        </dependency>
     </dependencies>
 
     <build>
+        <resources>
+            <resource>
+                <directory>src/main/resources</directory>
+            </resource>
+            <resource>
+                <directory>agent/providers</directory>
+                <targetPath>agent/providers</targetPath>
+                <includes>
+                    <include>proxy.py</include>
+                    <include>litellm.config.yaml</include>
+                    <include>requirements.txt</include>
+                    <include>models.yaml</include>
+                    <include>ollama_model_sizes.json</include>
+                </includes>
+            </resource>
+        </resources>
         <plugins>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <version>3.2.5</version>
+                <configuration>
+                    <excludes>
+                        <exclude>**/*IntegrationTest.java</exclude>
+                    </excludes>
+                </configuration>
+            </plugin>
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-compiler-plugin</artifactId>
                 <configuration>
                     <source>11</source>
                     <target>11</target>
+                    <excludes>
+                        <exclude>**/*conflicted copy*.java</exclude>
+                    </excludes>
+                    <testExcludes>
+                        <testExclude>**/*conflicted copy*.java</testExclude>
+                    </testExcludes>
                 </configuration>
             </plugin>
             <!-- Generate SciJava plugin annotation index -->
@@ -132,7 +225,7 @@
                 <configuration>
                     <archive>
                         <manifest>
-                            <packageName>uk.ac.ucl.imagej.ai</packageName>
+                            <packageName>imagejai</packageName>
                         </manifest>
                     </archive>
                 </configuration>
@@ -160,4 +253,26 @@
             </plugin>
         </plugins>
     </build>
+    <profiles>
+        <profile>
+            <id>integration</id>
+            <build>
+                <plugins>
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-surefire-plugin</artifactId>
+                        <version>3.2.5</version>
+                        <configuration>
+                            <includes>
+                                <include>**/*IntegrationTest.java</include>
+                            </includes>
+                            <excludes combine.self="override">
+                                <exclude>**/BrowseBriefIntegrationTest.java</exclude>
+                            </excludes>
+                        </configuration>
+                    </plugin>
+                </plugins>
+            </build>
+        </profile>
+    </profiles>
 </project>

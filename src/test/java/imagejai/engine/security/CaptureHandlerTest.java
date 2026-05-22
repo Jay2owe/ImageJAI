@@ -54,6 +54,46 @@ public class CaptureHandlerTest {
     }
 
     @Test
+    public void windowAndDesktopScreenshotsAreRefusedWithoutBase64() throws Exception {
+        CaptureHandler handler = new CaptureHandler(
+                new BurnInDetector(), new VisualOverrideRegistry());
+        String[] sources = new String[] { "WINDOW_SCREENSHOT", "DESKTOP_SCREENSHOT" };
+
+        for (String source : sources) {
+            JsonObject response = captureResponse(png(300, 200, false), source);
+            RedactionReport.Builder report = RedactionReport.builder()
+                    .posture(PrivacyPosture.PSEUDONYMISED);
+
+            handler.apply(response, PrivacyPosture.PSEUDONYMISED, "s", report);
+
+            assertFalse(response.get("ok").getAsBoolean());
+            JsonObject result = response.getAsJsonObject("result");
+            assertEquals(source, result.get("source").getAsString());
+            assertFalse(result.has("base64"));
+            assertTrue(result.has("placeholder"));
+        }
+    }
+
+    @Test
+    public void activeImageWithOverlayIsAllowedWhenClean() throws Exception {
+        CaptureHandler handler = new CaptureHandler(
+                new BurnInDetector(), new VisualOverrideRegistry());
+        JsonObject response = captureResponse(png(700, 500, false),
+                "ACTIVE_IMAGE_WITH_OVERLAY");
+
+        handler.apply(response, PrivacyPosture.PSEUDONYMISED, "s",
+                RedactionReport.builder().posture(PrivacyPosture.PSEUDONYMISED));
+
+        assertTrue(response.get("ok").getAsBoolean());
+        JsonObject result = response.getAsJsonObject("result");
+        assertEquals("ACTIVE_IMAGE_WITH_OVERLAY", result.get("source").getAsString());
+        assertTrue(result.has("base64"));
+        BufferedImage out = decode(result.get("base64").getAsString());
+        assertTrue(out.getWidth() <= 512);
+        assertTrue(out.getHeight() <= 512);
+    }
+
+    @Test
     public void activeImageWithOverlayIsRefusedWhenBurnInIsDetected() throws Exception {
         CaptureHandler handler = new CaptureHandler(
                 new BurnInDetector(), new VisualOverrideRegistry());
@@ -80,16 +120,19 @@ public class CaptureHandlerTest {
         JsonObject first = captureResponse(png(900, 700, false), "ACTIVE_IMAGE_CONTENT");
         handler.apply(first, PrivacyPosture.PSEUDONYMISED, "session-a",
                 RedactionReport.builder().posture(PrivacyPosture.PSEUDONYMISED));
-        BufferedImage full = decode(first.getAsJsonObject("result").get("base64").getAsString());
+        JsonObject firstResult = first.getAsJsonObject("result");
+        BufferedImage full = decode(firstResult.get("base64").getAsString());
 
         JsonObject second = captureResponse(png(900, 700, false), "ACTIVE_IMAGE_CONTENT");
         handler.apply(second, PrivacyPosture.PSEUDONYMISED, "session-a",
                 RedactionReport.builder().posture(PrivacyPosture.PSEUDONYMISED));
-        BufferedImage downsampled = decode(second.getAsJsonObject("result")
-                .get("base64").getAsString());
+        JsonObject secondResult = second.getAsJsonObject("result");
+        BufferedImage downsampled = decode(secondResult.get("base64").getAsString());
 
         assertTrue(full.getWidth() == 900 && full.getHeight() == 700);
+        assertEquals("consumed", firstResult.get("visual_override").getAsString());
         assertTrue(downsampled.getWidth() <= 512);
+        assertEquals(512, secondResult.get("downsampled_to").getAsInt());
         assertFalse(registry.hasGrant("session-a"));
     }
 
