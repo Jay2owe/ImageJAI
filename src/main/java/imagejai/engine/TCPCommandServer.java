@@ -21,7 +21,14 @@ import ij.process.ImageProcessor;
 import ij.process.ImageStatistics;
 import ij.process.LUT;
 import imagejai.config.Constants;
+import imagejai.config.PrivacyPosture;
 import imagejai.engine.security.AgentContextSanitizer;
+import imagejai.engine.security.CaptureSource;
+import imagejai.engine.security.PathTokenMap;
+import imagejai.engine.security.PseudonymisationFilter;
+import imagejai.engine.security.VisualOverrideRegistry;
+import imagejai.engine.safeMode.DestructiveScanner;
+import imagejai.engine.safeMode.RoiAutoBackup;
 import imagejai.ui.ChatPanelController;
 
 import javax.swing.SwingUtilities;
@@ -37,6 +44,8 @@ import java.net.Socket;
 import java.net.SocketException;
 import java.nio.charset.Charset;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.security.MessageDigest;
 import java.awt.Component;
 import java.awt.Container;
@@ -316,6 +325,7 @@ public class TCPCommandServer {
         // safe_mode_v2 package is partial — see docs/safe_mode_v2/ — so
         // this is a defence-in-depth default, not a sandbox.
         boolean safeMode = true;
+        SafeModeOptions safeModeOptions = new SafeModeOptions();
         // Step 02: opt-in to typed error objects
         // (docs/tcp_upgrade/02_structured_errors.md). Off-by-default so clients
         // that never say hello keep receiving plain error strings; the server
@@ -408,8 +418,36 @@ public class TCPCommandServer {
         boolean undo = false;
     }
 
+    public static final class SafeModeOptions {
+        public boolean blockBitDepthNarrowing = false;
+        public boolean blockNormalizeContrast = false;
+        public boolean autoBackupRoiOnReset = true;
+        public boolean autoSnapshotRescue = true;
+        public boolean queueStormGuard = true;
+        public boolean autoSourceImageColumn = true;
+        public boolean scientificIntegrityScan = true;
+    }
+
     /** Fallback caps applied to any request from a socket that never said hello. */
     static final AgentCaps DEFAULT_CAPS = new AgentCaps();
+
+    enum MacroState { RUNNING, PAUSED_ON_DIALOG }
+
+    static final class ActiveMacro {
+        final String macroId;
+        volatile MacroState state;
+        volatile String dialogTitle;
+        final long startedAt;
+
+        ActiveMacro(String macroId, MacroState state) {
+            this.macroId = macroId;
+            this.state = state;
+            this.startedAt = System.currentTimeMillis();
+        }
+    }
+
+    final Map<String, ActiveMacro> inFlightByImage =
+            new ConcurrentHashMap<String, ActiveMacro>();
 
     /**
      * Step 05: bookkeeping struct for post-command diffs. Collects the diff
@@ -465,6 +503,11 @@ public class TCPCommandServer {
      * {@link #handleClient}'s finally block on disconnect.
      */
     private final Map<Socket, AgentCaps> capsBySocket = new ConcurrentHashMap<Socket, AgentCaps>();
+
+    java.util.List<AgentCaps> capsWitnessForTest = null;
+
+    static java.util.function.BiFunction<JsonObject, AgentCaps, JsonObject>
+            executeMacroForTest = null;
 
     /**
      * Step 13: session-scoped image provenance DAG shared across all
@@ -533,7 +576,9 @@ public class TCPCommandServer {
     private final PipelineBuilder pipelineBuilder;
     private final ExplorationEngine explorationEngine;
     private final FrictionLog frictionLog = new FrictionLog();
-    private final IntentRouter intentRouter = new IntentRouter();
+    private final PseudonymisationFilter pseudonymisationFilter =
+            PseudonymisationFilter.getInstance();
+    IntentRouter intentRouter = new IntentRouter();
     private final JobRegistry jobRegistry;
     // Phase 8: reactive rules engine. Subscribes to the bus, fires rule
     // actions in response to matching events. Lifecycle tied to the TCP
@@ -1069,22 +1114,18 @@ public class TCPCommandServer {
         return dispatch(request, sock);
     }
 
-    /**
-     * Internal overload for nested dispatches (batch, run, intent) that have no
-     * client socket of their own. Falls back to {@link #DEFAULT_CAPS} behaviour.
-     */
-    private JsonObject dispatch(JsonObject request) {
-        return dispatch(request, null);
+    JsonObject dispatch(JsonObject request, AgentCaps caps) {
+        return dispatchInternal(request, caps == null ? DEFAULT_CAPS : caps, null);
     }
 
-    /**
-     * Dispatch a parsed request. Post-processing adds hash dedup for readonly
-     * commands and records friction on failure responses.
-     *
-     * @param sock originating client socket, or {@code null} for nested calls
-     *             from {@code batch} / {@code run} / {@code intent}.
-     */
     private JsonObject dispatch(JsonObject request, Socket sock) {
+        AgentCaps caps = (sock != null)
+                ? capsBySocket.getOrDefault(sock, DEFAULT_CAPS)
+                : DEFAULT_CAPS;
+        return dispatchInternal(request, caps, sock);
+    }
+
+    private JsonObject dispatchInternal(JsonObject request, AgentCaps caps, Socket sock) {
         JsonElement cmdElement = request.get("command");
         if (cmdElement == null || !cmdElement.isJsonPrimitive()) {
             return errorResponse("Missing 'command' field");
@@ -1095,7 +1136,11 @@ public class TCPCommandServer {
             listener.onCommandReceived(command);
         }
 
-        JsonObject response = dispatchCore(command, request, sock);
+        if (capsWitnessForTest != null) {
+            capsWitnessForTest.add(caps);
+        }
+
+        JsonObject response = dispatchCore(command, request, caps, sock);
 
         // Phase 7: surface a handler-attached gui_action piggyback into the
         // outer response. Handlers may set result.gui_action = {...}; this
@@ -1107,6 +1152,12 @@ public class TCPCommandServer {
             promoteGuiActionPiggyback(response);
         }
 
+        PrivacyPosture privacyPosture = PostureController.getInstance().current();
+        if (response != null) {
+            pseudonymisationFilter.apply(response, command, privacyPosture,
+                    sessionKey(caps, sock));
+        }
+
         // Step 11: automatic per-socket response dedup for read-only polls.
         // Runs BEFORE the legacy if_none_match hash layer so that if the body
         // hasn't changed since this socket last fetched it, we short-circuit
@@ -1116,7 +1167,6 @@ public class TCPCommandServer {
         if (response != null
                 && sock != null
                 && DEDUP_COMMANDS.contains(command)) {
-            AgentCaps caps = capsBySocket.getOrDefault(sock, DEFAULT_CAPS);
             if (caps != null
                     && caps.dedup
                     && caps.dedupCache != null
@@ -1129,7 +1179,12 @@ public class TCPCommandServer {
             }
         }
 
-        // Phase 1: readonly fast-path — hash successful readonly results and
+        if (response != null && dedupShortCircuited) {
+            pseudonymisationFilter.attachGovernanceIfNeeded(response, command,
+                    privacyPosture);
+        }
+
+        // Phase 1 readonly fast-path: hash successful readonly results and
         // short-circuit repeat callers that supply a matching if_none_match.
         // Skipped when Step 11 already returned a short-form envelope (no
         // {@code result} field to hash).
@@ -1138,10 +1193,6 @@ public class TCPCommandServer {
                 && READONLY_COMMANDS.contains(command)) {
             response = applyReadonlyDedup(request, response);
         }
-
-        AgentCaps caps = (sock != null)
-                ? capsBySocket.getOrDefault(sock, DEFAULT_CAPS)
-                : DEFAULT_CAPS;
 
         // Phase 6: record failures to the friction log. Counts both transport-level
         // failures (ok:false) and operation-level failures (ok:true but
@@ -1216,14 +1267,7 @@ public class TCPCommandServer {
         for (PatternDetector.Hint h : hints) arr.add(h.toJson());
     }
 
-    private JsonObject dispatchCore(String command, JsonObject request, Socket sock) {
-        // Look up caps once per request so handlers below can shape responses
-        // without re-reading the map. Nested dispatches (batch, run, intent)
-        // pass sock == null and land on DEFAULT_CAPS.
-        AgentCaps caps = (sock != null)
-                ? capsBySocket.getOrDefault(sock, DEFAULT_CAPS)
-                : DEFAULT_CAPS;
-
+    private JsonObject dispatchCore(String command, JsonObject request, AgentCaps caps, Socket sock) {
         // Token auth gate. Off by default — see tokenAuthRequired() for the
         // env-var/system-property switches. When on, only hello and ping are
         // allowed before authentication; every other handler refuses with a
@@ -1252,7 +1296,13 @@ public class TCPCommandServer {
         } else if ("get_results_table".equals(command)) {
             return handleGetResultsTable();
         } else if ("capture_image".equals(command)) {
-            return handleCaptureImage(request);
+            return handleCaptureImage(request, caps, sock);
+        } else if ("request_visual".equals(command)) {
+            return handleRequestVisual(request, caps, sock);
+        } else if ("open_image".equals(command)) {
+            return handleOpenImage(request, false);
+        } else if ("open_image_by_token".equals(command)) {
+            return handleOpenImage(request, true);
         } else if ("run_pipeline".equals(command)) {
             return handleRunPipeline(request, caps);
         } else if ("explore_thresholds".equals(command)) {
@@ -1268,9 +1318,9 @@ public class TCPCommandServer {
         } else if ("get_metadata".equals(command)) {
             return handleGetMetadata();
         } else if ("batch".equals(command)) {
-            return handleBatch(request);
+            return handleBatch(request, caps);
         } else if ("run".equals(command)) {
-            return handleRunChain(request);
+            return handleRunChain(request, caps);
         } else if ("get_pixels".equals(command)) {
             return handleGetPixels(request);
         } else if ("3d_viewer".equals(command)) {
@@ -1296,9 +1346,14 @@ public class TCPCommandServer {
         } else if ("get_friction_patterns".equals(command)) {
             return handleGetFrictionPatterns();
         } else if ("clear_friction_log".equals(command)) {
-            return handleClearFrictionLog();
+            if (clearFrictionLogAllowed()) {
+                return handleClearFrictionLog();
+            }
+            return errorResponse(
+                    "clear_friction_log is no longer agent-callable. "
+                            + "Restart Fiji with -Dimagejai.allow.clear_friction_log=true if you need it.");
         } else if ("intent".equals(command)) {
-            return handleIntent(request);
+            return handleIntent(request, caps);
         } else if ("intent_teach".equals(command)) {
             return handleIntentTeach(request);
         } else if ("intent_list".equals(command)) {
@@ -1787,6 +1842,31 @@ public class TCPCommandServer {
         c.stateDelta   = optBool(caps, "state_delta", true);
         // Default ON. See AgentCaps default (line 221) for rationale.
         c.safeMode     = optBool(caps, "safe_mode", true);
+        JsonObject smOpts = (caps.has("safe_mode_options")
+                && caps.get("safe_mode_options").isJsonObject())
+                ? caps.getAsJsonObject("safe_mode_options")
+                : null;
+        c.safeModeOptions.blockBitDepthNarrowing =
+                optBool(smOpts, "block_bit_depth_narrowing",
+                        c.safeModeOptions.blockBitDepthNarrowing);
+        c.safeModeOptions.blockNormalizeContrast =
+                optBool(smOpts, "block_normalize_contrast",
+                        c.safeModeOptions.blockNormalizeContrast);
+        c.safeModeOptions.autoBackupRoiOnReset =
+                optBool(smOpts, "auto_backup_roi_on_reset",
+                        c.safeModeOptions.autoBackupRoiOnReset);
+        c.safeModeOptions.autoSnapshotRescue =
+                optBool(smOpts, "auto_snapshot_rescue",
+                        c.safeModeOptions.autoSnapshotRescue);
+        c.safeModeOptions.queueStormGuard =
+                optBool(smOpts, "queue_storm_guard",
+                        c.safeModeOptions.queueStormGuard);
+        c.safeModeOptions.autoSourceImageColumn =
+                optBool(smOpts, "auto_source_image_column",
+                        c.safeModeOptions.autoSourceImageColumn);
+        c.safeModeOptions.scientificIntegrityScan =
+                optBool(smOpts, "scientific_integrity_scan",
+                        c.safeModeOptions.scientificIntegrityScan);
         c.structuredErrors = optBool(caps, "structured_errors", false);
         c.canonicalMacro = optBool(caps, "canonical_macro", true);
         c.fuzzyMatch = optBool(caps, "fuzzy_match", true);
@@ -1848,6 +1928,16 @@ public class TCPCommandServer {
         int sockPort = (sock != null) ? sock.getPort() : 0;
         return "s-" + Integer.toHexString(sockPort) + "-"
                 + Long.toHexString(System.currentTimeMillis() & 0xffffL);
+    }
+
+    private String sessionKey(AgentCaps caps, Socket sock) {
+        if (caps != null && caps.agentId != null && !caps.agentId.trim().isEmpty()) {
+            return caps.agentId.trim();
+        }
+        if (caps != null && caps.agent != null && !"unknown".equals(caps.agent)) {
+            return caps.agent;
+        }
+        return sock == null ? "default" : "socket-" + sock.getPort();
     }
 
     /**
@@ -2135,8 +2225,8 @@ public class TCPCommandServer {
         String stdout = ConsoleCapture.tailStdout(tail);
         String stderr = ConsoleCapture.tailStderr(tail);
         JsonObject out = new JsonObject();
-        out.addProperty("stdout", AgentContextSanitizer.wrap(stdout, "CONSOLE"));
-        out.addProperty("stderr", AgentContextSanitizer.wrap(stderr, "CONSOLE"));
+        out.addProperty("stdout", stdout);
+        out.addProperty("stderr", stderr);
         out.addProperty("combined",
                 AgentContextSanitizer.wrap(combineConsoleStreams(stdout, stderr), "CONSOLE"));
         long stdoutBuffered = ConsoleCapture.stdoutSize();
@@ -2827,6 +2917,40 @@ public class TCPCommandServer {
         final String code = codeElement.getAsString();
         final long macroTimeoutMs = resolveTimeoutMs(request, MACRO_TIMEOUT_MS);
 
+        final String queueStormTarget = isQueueStormGuardEnabled(caps)
+                ? resolveTargetImageTitleWithFallback(code)
+                : null;
+        if (queueStormTarget != null) {
+            ActiveMacro inflight = inFlightByImage.get(queueStormTarget);
+            if (inflight != null && inflight.state == MacroState.PAUSED_ON_DIALOG) {
+                return queueStormBlockedReply(inflight, queueStormTarget, caps);
+            }
+        }
+
+        if (isScientificIntegrityScanEnabled(caps)) {
+            DestructiveScanner.Context scanCtx = captureScannerContext(caps);
+            List<DestructiveScanner.DestructiveOp> findings =
+                    DestructiveScanner.scan(code, scanCtx);
+            if (!findings.isEmpty()) {
+                List<DestructiveScanner.DestructiveOp> rejects =
+                        DestructiveScanner.rejections(findings);
+                if (!rejects.isEmpty()) {
+                    return destructiveBlockedReply(rejects, caps);
+                }
+                for (DestructiveScanner.DestructiveOp op : DestructiveScanner.backups(findings)) {
+                    if (DestructiveScanner.RULE_ROI_WIPE.equals(op.ruleId)
+                            && caps.safeModeOptions != null
+                            && caps.safeModeOptions.autoBackupRoiOnReset) {
+                        runRoiAutoBackup(op, caps);
+                    }
+                }
+            }
+        }
+
+        if (executeMacroForTest != null) {
+            return executeMacroForTest.apply(request, caps);
+        }
+
         // Step 04: fuzzy plugin-name validation. Gate on caps.fuzzyMatch so
         // clients that opted out (or never said hello — DEFAULT_CAPS has the
         // field at its default, true) still get the backwards-compatible
@@ -3358,6 +3482,241 @@ public class TCPCommandServer {
             }
             eventBus.popSuppress("image.*");
         }
+    }
+
+    private static boolean isQueueStormGuardEnabled(AgentCaps caps) {
+        return caps != null
+                && caps.safeMode
+                && caps.safeModeOptions != null
+                && caps.safeModeOptions.queueStormGuard;
+    }
+
+    private static boolean isScientificIntegrityScanEnabled(AgentCaps caps) {
+        return caps != null
+                && caps.safeMode
+                && caps.safeModeOptions != null
+                && caps.safeModeOptions.scientificIntegrityScan;
+    }
+
+    private DestructiveScanner.Context captureScannerContext(AgentCaps caps) {
+        String activeImagePath = null;
+        String aiExportsRoot = null;
+        int currentBitDepth = 0;
+        boolean calibrationActive = false;
+        int roiManagerCount = 0;
+        int resultsRowCount = 0;
+
+        try {
+            ImagePlus imp = WindowManager.getCurrentImage();
+            if (imp != null) {
+                try { currentBitDepth = imp.getBitDepth(); } catch (Throwable ignore) {}
+                try {
+                    ij.io.FileInfo fi = imp.getOriginalFileInfo();
+                    if (fi != null && fi.directory != null && fi.fileName != null) {
+                        activeImagePath = fi.directory + fi.fileName;
+                        aiExportsRoot = fi.directory.endsWith("/") || fi.directory.endsWith("\\")
+                                ? fi.directory + "AI_Exports"
+                                : fi.directory + java.io.File.separator + "AI_Exports";
+                    }
+                } catch (Throwable ignore) {}
+                try {
+                    Calibration cal = imp.getCalibration();
+                    if (cal != null) {
+                        boolean nonUnitWidth = Math.abs(cal.pixelWidth - 1.0) > 1e-9;
+                        String unit = cal.getUnit();
+                        boolean physicalUnit = unit != null
+                                && !unit.isEmpty()
+                                && !"pixel".equalsIgnoreCase(unit)
+                                && !"pixels".equalsIgnoreCase(unit);
+                        calibrationActive = nonUnitWidth || physicalUnit;
+                    }
+                } catch (Throwable ignore) {}
+            }
+        } catch (Throwable ignore) {}
+
+        try {
+            RoiManager rm = RoiManager.getInstance();
+            if (rm != null) roiManagerCount = rm.getCount();
+        } catch (Throwable ignore) {}
+
+        try {
+            ResultsTable rt = ResultsTable.getResultsTable();
+            if (rt != null) resultsRowCount = rt.getCounter();
+        } catch (Throwable ignore) {}
+
+        boolean optBitDepth = caps != null && caps.safeModeOptions != null
+                && caps.safeModeOptions.blockBitDepthNarrowing;
+        boolean optNormalize = caps != null && caps.safeModeOptions != null
+                && caps.safeModeOptions.blockNormalizeContrast;
+
+        return new DestructiveScanner.Context(
+                activeImagePath, aiExportsRoot,
+                currentBitDepth, calibrationActive,
+                roiManagerCount, resultsRowCount,
+                optBitDepth, optNormalize,
+                new DestructiveScanner.FileExistsCheck() {
+                    @Override
+                    public boolean exists(String path) {
+                        if (path == null || path.isEmpty()) return false;
+                        try {
+                            return java.nio.file.Files.exists(java.nio.file.Paths.get(path));
+                        } catch (Throwable t) {
+                            return false;
+                        }
+                    }
+                });
+    }
+
+    private void runRoiAutoBackup(DestructiveScanner.DestructiveOp op,
+                                  AgentCaps caps) {
+        try {
+            RoiManager rm = RoiManager.getInstance();
+            ImagePlus imp = WindowManager.getCurrentImage();
+            RoiAutoBackup.Result res = RoiAutoBackup.backup(rm, imp);
+            String agentId = caps != null && caps.agentId != null ? caps.agentId : "";
+            String backupTarget = res.path != null
+                    ? res.path.toString()
+                    : "(no backup written)";
+            String summary = "rule=" + op.ruleId + " line=" + op.line
+                    + " target=" + backupTarget;
+            frictionLog.record(agentId, "execute_macro", summary, res.message);
+            try { IJ.log("[ImageJAI-SafeMode] " + res.message); } catch (Throwable ignore) {}
+            JsonObject ev = new JsonObject();
+            ev.addProperty("rule_id", op.ruleId);
+            ev.addProperty("backup_path", backupTarget);
+            publishSafeModeEvent("safe_mode.roi_auto_backup", ev);
+        } catch (Throwable t) {
+            try { IJ.log("[ImageJAI-SafeMode] ROI auto-backup failed: " + t.getMessage()); }
+            catch (Throwable ignore) {}
+        }
+    }
+
+    private JsonObject destructiveBlockedReply(
+            List<DestructiveScanner.DestructiveOp> rejects,
+            AgentCaps caps) {
+        JsonObject result = new JsonObject();
+        result.addProperty("success", false);
+
+        StringBuilder plain = new StringBuilder("Macro blocked by safe-mode scanner: ");
+        JsonArray opsArr = new JsonArray();
+        for (int i = 0; i < rejects.size(); i++) {
+            DestructiveScanner.DestructiveOp op = rejects.get(i);
+            if (i > 0) plain.append("; ");
+            plain.append(op.ruleId).append(" @ line ").append(op.line);
+            JsonObject row = new JsonObject();
+            row.addProperty("rule_id", op.ruleId);
+            row.addProperty("severity", "reject");
+            row.addProperty("target", op.target);
+            row.addProperty("line", op.line);
+            row.addProperty("message", op.message);
+            opsArr.add(row);
+        }
+        String message = plain.toString();
+        String hint = "Fix the offending lines, or disable safe mode for this intentional run.";
+
+        if (caps != null && caps.structuredErrors) {
+            JsonObject err = new JsonObject();
+            err.addProperty("code", ErrorReply.CODE_DESTRUCTIVE_OP_BLOCKED);
+            err.addProperty("category", ErrorReply.CAT_BLOCKED);
+            err.addProperty("retry_safe", false);
+            err.addProperty("message", message);
+            err.addProperty("recovery_hint", hint);
+            err.add("operations", opsArr);
+            result.add("error", err);
+        } else {
+            result.addProperty("error", message);
+        }
+
+        try {
+            String agentId = caps != null && caps.agentId != null ? caps.agentId : "";
+            for (DestructiveScanner.DestructiveOp op : rejects) {
+                frictionLog.record(agentId, "execute_macro",
+                        "rule=" + op.ruleId + " target=" + op.target + " line=" + op.line,
+                        op.message);
+            }
+        } catch (Throwable ignore) {}
+
+        if (!rejects.isEmpty()) {
+            DestructiveScanner.DestructiveOp head = rejects.get(0);
+            JsonObject ev = new JsonObject();
+            ev.addProperty("rule_id", head.ruleId);
+            ev.addProperty("target", head.target);
+            ev.addProperty("line", head.line);
+            ev.addProperty("count", rejects.size());
+            publishSafeModeEvent("safe_mode.blocked", ev);
+        }
+
+        return successResponse(result);
+    }
+
+    static String resolveTargetImageTitle(String code) {
+        if (code == null || code.isEmpty()) return null;
+        java.util.regex.Pattern p = java.util.regex.Pattern.compile(
+                "select(?:Image|Window)\\s*\\(\\s*\"([^\"]+)\"\\s*\\)",
+                java.util.regex.Pattern.CASE_INSENSITIVE);
+        java.util.regex.Matcher m = p.matcher(code);
+        String last = null;
+        while (m.find()) last = m.group(1);
+        return last;
+    }
+
+    String resolveTargetImageTitleWithFallback(String code) {
+        String parsed = resolveTargetImageTitle(code);
+        if (parsed != null) return parsed;
+        try {
+            ImagePlus imp = WindowManager.getCurrentImage();
+            if (imp != null) {
+                String title = imp.getTitle();
+                if (title != null && !title.isEmpty()) return title;
+            }
+        } catch (Throwable ignore) {}
+        return null;
+    }
+
+    private JsonObject queueStormBlockedReply(ActiveMacro inflight,
+                                              String target,
+                                              AgentCaps caps) {
+        JsonObject result = new JsonObject();
+        result.addProperty("success", false);
+
+        String dialogTitle = (inflight.dialogTitle != null && !inflight.dialogTitle.isEmpty())
+                ? inflight.dialogTitle : "(unknown)";
+        String message = "Macro #" + inflight.macroId
+                + " is paused on a '" + dialogTitle
+                + "' dialog targeting '" + target
+                + "'. Refusing to queue another macro on the same image.";
+        String hint = "Either dismiss the dialog (interact_dialog), wait for macro #"
+                + inflight.macroId
+                + " to finish, or run on a different image.";
+
+        if (caps != null && caps.structuredErrors) {
+            JsonObject err = new JsonObject();
+            err.addProperty("code", ErrorReply.CODE_QUEUE_STORM_BLOCKED);
+            err.addProperty("category", ErrorReply.CAT_BLOCKED);
+            err.addProperty("retry_safe", false);
+            err.addProperty("message", message);
+            err.addProperty("recovery_hint", hint);
+            err.addProperty("blocking_macro_id", inflight.macroId);
+            err.addProperty("blocking_dialog_title", dialogTitle);
+            err.addProperty("target_image", target);
+            result.add("error", err);
+        } else {
+            result.addProperty("error", message);
+        }
+
+        JsonObject ev = new JsonObject();
+        ev.addProperty("blocking_macro_id", inflight.macroId);
+        ev.addProperty("blocking_dialog_title", dialogTitle);
+        ev.addProperty("target_image", target);
+        publishSafeModeEvent("safe_mode.queue_storm_blocked", ev);
+        return successResponse(result);
+    }
+
+    private void publishSafeModeEvent(String topic, JsonObject data) {
+        if (topic == null || topic.isEmpty()) return;
+        try {
+            eventBus.publish(topic, data == null ? new JsonObject() : data);
+        } catch (Throwable ignore) {}
     }
 
     /**
@@ -4073,11 +4432,24 @@ public class TCPCommandServer {
         return successResponse(new JsonPrimitive((String) holder[0]));
     }
 
-    private JsonObject handleCaptureImage(JsonObject request) {
+    private JsonObject handleCaptureImage(JsonObject request, AgentCaps caps, Socket sock) {
         JsonElement maxSizeElement = request.get("maxSize");
-        final int maxSize = (maxSizeElement != null && maxSizeElement.isJsonPrimitive())
+        int requestedMaxSize = (maxSizeElement != null && maxSizeElement.isJsonPrimitive())
                 ? maxSizeElement.getAsInt()
                 : Constants.MAX_THUMBNAIL_SIZE;
+        final CaptureSource source = CaptureSource.from(
+                request.has("source") ? request.get("source").getAsString() : null);
+        PrivacyPosture posture = PostureController.getInstance().current();
+        boolean fullResolutionOverride = posture == PrivacyPosture.PSEUDONYMISED
+                && source == CaptureSource.ACTIVE_IMAGE_CONTENT
+                && VisualOverrideRegistry.getInstance().hasGrant(sessionKey(caps, sock));
+        final int maxSize = fullResolutionOverride ? Integer.MAX_VALUE : requestedMaxSize;
+
+        if (source.isRefusedScreenshot()) {
+            JsonObject result = new JsonObject();
+            result.addProperty("source", source.name());
+            return successResponse(result);
+        }
 
         final Object[] holder = new Object[1];
         final CountDownLatch latch = new CountDownLatch(1);
@@ -4090,7 +4462,9 @@ public class TCPCommandServer {
                     if (imp == null) {
                         holder[0] = "NO_IMAGE";
                     } else {
-                        byte[] png = ImageCapture.captureImage(imp, maxSize);
+                        byte[] png = source == CaptureSource.ACTIVE_IMAGE_WITH_OVERLAY
+                                ? ImageCapture.captureWithOverlays(imp, maxSize)
+                                : ImageCapture.captureImage(imp, maxSize);
                         if (png == null) {
                             holder[0] = "CAPTURE_FAILED";
                         } else {
@@ -4098,6 +4472,7 @@ public class TCPCommandServer {
                             result.addProperty("base64", base64Encode(png));
                             result.addProperty("width", imp.getWidth());
                             result.addProperty("height", imp.getHeight());
+                            result.addProperty("source", source.name());
                             holder[0] = result;
                         }
                     }
@@ -4128,6 +4503,134 @@ public class TCPCommandServer {
             return errorResponse("Failed to capture image");
         }
         return successResponse((JsonObject) holder[0]);
+    }
+
+    private JsonObject handleRequestVisual(JsonObject request, AgentCaps caps, Socket sock) {
+        PrivacyPosture posture = PostureController.getInstance().current();
+        JsonObject result = new JsonObject();
+        result.addProperty("posture", posture.label());
+        if (posture == PrivacyPosture.ON_PREMISES) {
+            return errorResponse("visual_override_refused_on_premises");
+        }
+        if (posture == PrivacyPosture.STANDARD) {
+            result.addProperty("status", "not_required");
+            return successResponse(result);
+        }
+
+        String reason = request.has("reason") && request.get("reason").isJsonPrimitive()
+                ? request.get("reason").getAsString()
+                : "";
+        String session = sessionKey(caps, sock);
+        VisualOverrideRegistry.PendingRequest pending =
+                VisualOverrideRegistry.getInstance().request(session, reason);
+        JsonObject event = new JsonObject();
+        event.addProperty("session", session);
+        event.addProperty("request_id", pending.requestId);
+        event.addProperty("reason", reason);
+        eventBus.publish("data_governance.visual.requested", event);
+
+        result.addProperty("status", "pending_user_consent");
+        result.addProperty("request_id", pending.requestId);
+        result.addProperty("expires_in_seconds", 60);
+        return successResponse(result);
+    }
+
+    private JsonObject handleOpenImage(JsonObject request, boolean tokenOnly) {
+        JsonElement targetElement = firstPresent(request, "token", "image_token", "path", "file");
+        if (targetElement == null || !targetElement.isJsonPrimitive()) {
+            return errorResponse(tokenOnly
+                    ? "Missing token for open_image_by_token"
+                    : "Missing path or token for open_image");
+        }
+
+        String target = targetElement.getAsString();
+        PathTokenMap.ResolvedTarget resolved = openImageByToken(target);
+        if (tokenOnly && resolved == null) {
+            return errorResponse("Unknown image token");
+        }
+
+        Path realPath;
+        int series = -1;
+        boolean tokenResolved = resolved != null;
+        if (resolved != null) {
+            realPath = resolved.realPath();
+            series = resolved.series();
+        } else {
+            realPath = Paths.get(target);
+            if (request.has("series") && request.get("series").isJsonPrimitive()) {
+                try {
+                    series = request.get("series").getAsInt();
+                } catch (Exception ignored) {
+                    series = -1;
+                }
+            }
+        }
+
+        final String realPathString = realPath.toString();
+        final int requestedSeries = series;
+        final Object[] holder = new Object[1];
+        final CountDownLatch latch = new CountDownLatch(1);
+        SwingUtilities.invokeLater(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    if (requestedSeries >= 0) {
+                        String options = "open=[" + realPathString.replace("]", "\\]") + "] "
+                                + "autoscale color_mode=Default view=Hyperstack "
+                                + "stack_order=XYCZT series_" + requestedSeries;
+                        IJ.run("Bio-Formats Importer", options);
+                    } else {
+                        IJ.open(realPathString);
+                    }
+                    ImagePlus imp = WindowManager.getCurrentImage();
+                    holder[0] = imp == null ? "OPEN_FAILED" : imp.getTitle();
+                } catch (Exception e) {
+                    holder[0] = e;
+                } finally {
+                    latch.countDown();
+                }
+            }
+        });
+
+        try {
+            if (!latch.await(30000, TimeUnit.MILLISECONDS)) {
+                return errorResponse("Timed out opening image");
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return errorResponse("Interrupted");
+        }
+        if (holder[0] instanceof Exception) {
+            return errorResponse("open_image_failed");
+        }
+        if ("OPEN_FAILED".equals(holder[0])) {
+            return errorResponse("open_image_failed");
+        }
+
+        String baseToken = pseudonymisationFilter.pathTokenMap().tokenForPath(realPath);
+        JsonObject result = new JsonObject();
+        result.addProperty("opened", true);
+        result.addProperty("path_token", requestedSeries >= 0
+                ? pseudonymisationFilter.pathTokenMap().tokenForSeries(realPath, requestedSeries)
+                : baseToken);
+        result.addProperty("series", requestedSeries);
+        result.addProperty("resolved_from_token", tokenResolved);
+        result.addProperty("title", String.valueOf(holder[0]));
+        return successResponse(result);
+    }
+
+    PathTokenMap.ResolvedTarget openImageByToken(String token) {
+        return pseudonymisationFilter.pathTokenMap().resolve(token).orElse(null);
+    }
+
+    private static JsonElement firstPresent(JsonObject request, String... keys) {
+        for (String key : keys) {
+            JsonElement value = request.get(key);
+            if (value != null) {
+                return value;
+            }
+        }
+        return null;
     }
 
     private JsonObject handleRunPipeline(JsonObject request, AgentCaps caps) {
@@ -4604,7 +5107,7 @@ public class TCPCommandServer {
         }
     }
 
-    private JsonObject handleBatch(JsonObject request) {
+    private JsonObject handleBatch(JsonObject request, AgentCaps caps) {
         JsonElement commandsElement = request.get("commands");
         if (commandsElement == null || !commandsElement.isJsonArray()) {
             return errorResponse("Missing 'commands' array for batch");
@@ -4616,7 +5119,7 @@ public class TCPCommandServer {
         for (int i = 0; i < commands.size(); i++) {
             JsonElement elem = commands.get(i);
             if (elem.isJsonObject()) {
-                JsonObject subResult = dispatch(elem.getAsJsonObject());
+                JsonObject subResult = dispatch(elem.getAsJsonObject(), caps);
                 results.add(subResult);
             } else {
                 results.add(errorResponse("Invalid batch command at index " + i));
@@ -4647,7 +5150,7 @@ public class TCPCommandServer {
      *   {"ok": true, "result": {"results": [...], "executed": N, "total": M, "halted": bool}}
      * </pre>
      */
-    private JsonObject handleRunChain(JsonObject request) {
+    private JsonObject handleRunChain(JsonObject request, AgentCaps caps) {
         JsonElement chainEl = request.get("chain");
         if (chainEl == null || !chainEl.isJsonPrimitive()) {
             return errorResponse("Missing 'chain' string for run command");
@@ -4683,7 +5186,7 @@ public class TCPCommandServer {
 
         for (int i = 0; i < segments.size(); i++) {
             JsonObject subReq = segments.get(i);
-            JsonObject subResp = dispatch(subReq);
+            JsonObject subResp = dispatch(subReq, caps);
             results.add(subResp);
 
             boolean failed = isFailure(subResp);
@@ -4780,6 +5283,11 @@ public class TCPCommandServer {
         return successResponse(result);
     }
 
+    static boolean clearFrictionLogAllowed() {
+        return "true".equalsIgnoreCase(
+                System.getProperty("imagejai.allow.clear_friction_log", "false"));
+    }
+
     // -----------------------------------------------------------------------
     // Phase 3: async job commands
     // -----------------------------------------------------------------------
@@ -4855,7 +5363,7 @@ public class TCPCommandServer {
      * {@code mapped_to} describing which mapping fired. On miss, returns
      * {@code {ok: false, miss: true, suggestion: null}}.
      */
-    private JsonObject handleIntent(JsonObject request) {
+    private JsonObject handleIntent(JsonObject request, AgentCaps caps) {
         JsonElement phraseEl = request.get("phrase");
         if (phraseEl == null || !phraseEl.isJsonPrimitive()) {
             return errorResponse("Missing 'phrase' field for intent");
@@ -4875,9 +5383,7 @@ public class TCPCommandServer {
         JsonObject macroReq = new JsonObject();
         macroReq.addProperty("command", "execute_macro");
         macroReq.addProperty("code", resolved.macro);
-        // intent currently has no originating socket, so caps fall back to
-        // DEFAULT_CAPS. If a future step routes caps through intent, swap here.
-        JsonObject execResp = handleExecuteMacro(macroReq, DEFAULT_CAPS);
+        JsonObject execResp = dispatch(macroReq, caps);
 
         JsonObject mappedTo = new JsonObject();
         mappedTo.addProperty("pattern", resolved.mapping.patternSrc);

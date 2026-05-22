@@ -1,0 +1,539 @@
+package imagejai.engine.security;
+
+import com.google.gson.JsonArray;
+import com.google.gson.JsonElement;
+import com.google.gson.JsonNull;
+import com.google.gson.JsonObject;
+import com.google.gson.JsonPrimitive;
+import imagejai.config.PrivacyPosture;
+
+import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+
+/**
+ * Outbound counterpart to {@link AgentContextSanitizer}. In Pseudonymised and
+ * On-premises modes it tokenises identifiers before JSON leaves the JVM.
+ */
+public class PseudonymisationFilter {
+    private static final PseudonymisationFilter INSTANCE = new PseudonymisationFilter(
+            PathTokenMap.getInstance(),
+            new OmeXmlScrubber(),
+            new CaptureHandler(new BurnInDetector(), VisualOverrideRegistry.getInstance()));
+
+    private static final Pattern NUMERIC = Pattern.compile("[-+]?\\d+(?:\\.\\d+)?");
+    private static final Pattern IMAGE_EXTENSION = Pattern.compile(
+            "(?i).+\\.(?:lif|tif|tiff|czi|nd2|lsm|oib|oif|vsi|svs|png|jpe?g|ome\\.tif|ome\\.tiff)$");
+    private static final Pattern PATH_SUBSTRING = Pattern.compile(
+            "(?i)([A-Za-z]:[\\\\/][^\\r\\n\"'<>|]+?\\.(?:lif|tif|tiff|czi|nd2|lsm|oib|oif|vsi|svs|png|jpe?g)"
+                    + "|/[A-Za-z0-9._~+()\\- /]+?\\.(?:lif|tif|tiff|czi|nd2|lsm|oib|oif|vsi|svs|png|jpe?g)"
+                    + "|\\b(?!image-[0-9a-f]{4}\\b)[A-Za-z0-9._+()\\- ]+\\.(?:lif|tif|tiff|czi|nd2|lsm|oib|oif|vsi|svs|png|jpe?g))");
+
+    private final PathTokenMap pathTokenMap;
+    private final OmeXmlScrubber omeXmlScrubber;
+    private final CaptureHandler captureHandler;
+
+    public PseudonymisationFilter(PathTokenMap pathTokenMap,
+                                  OmeXmlScrubber omeXmlScrubber,
+                                  CaptureHandler captureHandler) {
+        this.pathTokenMap = pathTokenMap == null ? PathTokenMap.getInstance() : pathTokenMap;
+        this.omeXmlScrubber = omeXmlScrubber == null ? new OmeXmlScrubber() : omeXmlScrubber;
+        this.captureHandler = captureHandler == null
+                ? new CaptureHandler(new BurnInDetector(), VisualOverrideRegistry.getInstance())
+                : captureHandler;
+    }
+
+    public static PseudonymisationFilter getInstance() {
+        return INSTANCE;
+    }
+
+    public PathTokenMap pathTokenMap() {
+        return pathTokenMap;
+    }
+
+    public RedactionReport apply(JsonObject response, String command,
+                                 PrivacyPosture posture, String sessionId) {
+        PrivacyPosture effective = posture == null ? PrivacyPosture.defaultPosture() : posture;
+        if (effective == PrivacyPosture.STANDARD) {
+            return RedactionReport.passthrough(command);
+        }
+        RedactionReport.Builder report = RedactionReport.builder()
+                .command(command)
+                .posture(effective)
+                .bytesBefore(response == null ? 0 : response.toString()
+                        .getBytes(StandardCharsets.UTF_8).length);
+        try {
+            beforeFiltering(response, command, effective);
+            if (response == null) {
+                return report.build();
+            }
+            if ("capture_image".equals(command)) {
+                captureHandler.apply(response, effective, sessionId, report);
+            }
+            scrubOmeXml(response, report);
+            tokeniseResultsTables(response, command, report);
+            tokenisePathTypedFields(response, report);
+            freeTextScrub(response, report);
+            RedactionReport built = report
+                    .bytesAfter(response.toString().getBytes(StandardCharsets.UTF_8).length)
+                    .build();
+            response.add("_governance", built.governanceBlock());
+            return built;
+        } catch (Exception e) {
+            return failClosed(response, command, effective, report);
+        }
+    }
+
+    protected void beforeFiltering(JsonObject response, String command,
+                                   PrivacyPosture posture) {
+    }
+
+    public void attachGovernanceIfNeeded(JsonObject response, String command,
+                                         PrivacyPosture posture) {
+        if (response == null || posture == null || posture == PrivacyPosture.STANDARD
+                || response.has("_governance")) {
+            return;
+        }
+        RedactionReport report = RedactionReport.builder()
+                .command(command)
+                .posture(posture)
+                .build();
+        response.add("_governance", report.governanceBlock());
+    }
+
+    private RedactionReport failClosed(JsonObject response, String command,
+                                       PrivacyPosture posture,
+                                       RedactionReport.Builder report) {
+        if (response != null) {
+            clear(response);
+            response.addProperty("ok", false);
+            response.addProperty("error", "redaction_failed");
+        }
+        RedactionReport failed = report.command(command)
+                .posture(posture)
+                .failed(true)
+                .fieldPseudonymised("redaction_failed")
+                .bytesAfter(response == null ? 0 : response.toString()
+                        .getBytes(StandardCharsets.UTF_8).length)
+                .build();
+        if (response != null) {
+            response.add("_governance", failed.governanceBlock());
+        }
+        return failed;
+    }
+
+    private void scrubOmeXml(JsonElement element, RedactionReport.Builder report) {
+        if (element == null || element instanceof JsonNull) {
+            return;
+        }
+        if (element.isJsonObject()) {
+            JsonObject object = element.getAsJsonObject();
+            for (String key : keys(object)) {
+                JsonElement child = object.get(key);
+                if (child != null && child.isJsonPrimitive()
+                        && child.getAsJsonPrimitive().isString()) {
+                    String value = child.getAsString();
+                    if (looksLikeOmeField(key, value)) {
+                        String scrubbed = omeXmlScrubber.scrub(value);
+                        if (!scrubbed.equals(value)) {
+                            object.addProperty(key, scrubbed);
+                            report.fieldPseudonymised("ome_xml");
+                        }
+                    }
+                } else {
+                    scrubOmeXml(child, report);
+                }
+            }
+        } else if (element.isJsonArray()) {
+            JsonArray array = element.getAsJsonArray();
+            for (JsonElement child : array) {
+                scrubOmeXml(child, report);
+            }
+        }
+    }
+
+    private void tokeniseResultsTables(JsonObject response, String command,
+                                       RedactionReport.Builder report) {
+        if ("get_results_table".equals(command)) {
+            JsonElement result = response.get("result");
+            if (result != null && result.isJsonPrimitive()
+                    && result.getAsJsonPrimitive().isString()) {
+                String tokenised = tokeniseResultsCsv(result.getAsString(), report);
+                if (!tokenised.equals(result.getAsString())) {
+                    response.addProperty("result", tokenised);
+                }
+            }
+        }
+        tokeniseResultsTablesRecursive(response, report);
+    }
+
+    private void tokeniseResultsTablesRecursive(JsonElement element,
+                                                RedactionReport.Builder report) {
+        if (element == null || element instanceof JsonNull) {
+            return;
+        }
+        if (element.isJsonObject()) {
+            JsonObject object = element.getAsJsonObject();
+            for (String key : keys(object)) {
+                JsonElement child = object.get(key);
+                if (child != null && child.isJsonPrimitive()
+                        && child.getAsJsonPrimitive().isString()
+                        && "resultsTable".equalsIgnoreCase(key)) {
+                    String value = child.getAsString();
+                    String tokenised = tokeniseResultsCsv(value, report);
+                    if (!tokenised.equals(value)) {
+                        object.addProperty(key, tokenised);
+                    }
+                } else if ("results".equalsIgnoreCase(key) && child != null
+                        && child.isJsonArray()) {
+                    tokeniseResultsArray(child.getAsJsonArray(), report);
+                } else {
+                    tokeniseResultsTablesRecursive(child, report);
+                }
+            }
+        } else if (element.isJsonArray()) {
+            for (JsonElement child : element.getAsJsonArray()) {
+                tokeniseResultsTablesRecursive(child, report);
+            }
+        }
+    }
+
+    private void tokeniseResultsArray(JsonArray array, RedactionReport.Builder report) {
+        for (JsonElement element : array) {
+            if (element == null || !element.isJsonObject()) {
+                continue;
+            }
+            JsonObject row = element.getAsJsonObject();
+            for (String key : keys(row)) {
+                JsonElement value = row.get(key);
+                if (value == null || !value.isJsonPrimitive()
+                        || !value.getAsJsonPrimitive().isString()) {
+                    continue;
+                }
+                if ("Label".equalsIgnoreCase(key)) {
+                    row.addProperty(key, pathTokenMap.tokenForSensitiveText(
+                            value.getAsString(), "label"));
+                    report.fieldPseudonymised("results_table");
+                } else if ("Slice".equalsIgnoreCase(key) && shouldTokeniseSlice(value.getAsString())) {
+                    row.addProperty(key, tokenForSlice(value.getAsString()));
+                    report.fieldPseudonymised("results_table");
+                }
+            }
+        }
+    }
+
+    private String tokeniseResultsCsv(String csv, RedactionReport.Builder report) {
+        if (csv == null || csv.trim().isEmpty()) {
+            return csv;
+        }
+        List<List<String>> rows = parseCsv(csv);
+        if (rows.isEmpty()) {
+            return csv;
+        }
+        List<String> header = rows.get(0);
+        int labelIndex = indexOfIgnoreCase(header, "Label");
+        int sliceIndex = indexOfIgnoreCase(header, "Slice");
+        if (labelIndex < 0 && sliceIndex < 0) {
+            return csv;
+        }
+        boolean changed = false;
+        for (int r = 1; r < rows.size(); r++) {
+            List<String> row = rows.get(r);
+            if (labelIndex >= 0 && labelIndex < row.size()) {
+                String value = row.get(labelIndex);
+                if (value != null && !value.isEmpty()) {
+                    row.set(labelIndex, pathTokenMap.tokenForSensitiveText(value, "label"));
+                    changed = true;
+                }
+            }
+            if (sliceIndex >= 0 && sliceIndex < row.size()) {
+                String value = row.get(sliceIndex);
+                if (shouldTokeniseSlice(value)) {
+                    row.set(sliceIndex, tokenForSlice(value));
+                    changed = true;
+                }
+            }
+        }
+        if (changed) {
+            report.fieldPseudonymised("results_table");
+        }
+        return changed ? writeCsv(rows) : csv;
+    }
+
+    private void tokenisePathTypedFields(JsonElement element,
+                                         RedactionReport.Builder report) {
+        tokenisePathTypedFields(element, "", report);
+    }
+
+    private void tokenisePathTypedFields(JsonElement element, String key,
+                                         RedactionReport.Builder report) {
+        if (element == null || element instanceof JsonNull) {
+            return;
+        }
+        if (element.isJsonObject()) {
+            JsonObject object = element.getAsJsonObject();
+            for (String childKey : keys(object)) {
+                JsonElement child = object.get(childKey);
+                if (child != null && child.isJsonPrimitive()
+                        && child.getAsJsonPrimitive().isString()
+                        && !isBinaryField(childKey)) {
+                    String value = child.getAsString();
+                    String replaced = tokeniseStringForPathFields(childKey, value, report);
+                    if (!value.equals(replaced)) {
+                        object.addProperty(childKey, replaced);
+                    }
+                } else {
+                    tokenisePathTypedFields(child, childKey, report);
+                }
+            }
+        } else if (element.isJsonArray()) {
+            JsonArray array = element.getAsJsonArray();
+            for (int i = 0; i < array.size(); i++) {
+                JsonElement child = array.get(i);
+                if (child != null && child.isJsonPrimitive()
+                        && child.getAsJsonPrimitive().isString()
+                        && !isBinaryField(key)) {
+                    String value = child.getAsString();
+                    String replaced = tokeniseStringForPathFields(key, value, report);
+                    if (!value.equals(replaced)) {
+                        array.set(i, new JsonPrimitive(replaced));
+                    }
+                } else {
+                    tokenisePathTypedFields(child, key, report);
+                }
+            }
+        }
+    }
+
+    private String tokeniseStringForPathFields(String key, String value,
+                                               RedactionReport.Builder report) {
+        if (value == null || value.isEmpty()) {
+            return value;
+        }
+        if (isPathTypedKey(key) && isPathLike(value)) {
+            report.fieldPseudonymised("path");
+            return pathTokenMap.tokenForPathString(value);
+        }
+        String replaced = replacePathLikeSubstrings(value, report);
+        if (!replaced.equals(value)) {
+            report.fieldPseudonymised("path");
+        }
+        return replaced;
+    }
+
+    private String replacePathLikeSubstrings(String value, RedactionReport.Builder report) {
+        Matcher matcher = PATH_SUBSTRING.matcher(value);
+        StringBuffer out = new StringBuffer();
+        boolean changed = false;
+        while (matcher.find()) {
+            String match = matcher.group(1);
+            if (looksLikePathToken(match)) {
+                matcher.appendReplacement(out, Matcher.quoteReplacement(match));
+                continue;
+            }
+            String token = pathTokenMap.tokenForPathString(match.trim());
+            matcher.appendReplacement(out, Matcher.quoteReplacement(token));
+            changed = true;
+        }
+        matcher.appendTail(out);
+        if (changed) {
+            report.fieldPseudonymised("path");
+        }
+        return out.toString();
+    }
+
+    private void freeTextScrub(JsonElement element, RedactionReport.Builder report) {
+        if (element == null || element instanceof JsonNull) {
+            return;
+        }
+        if (element.isJsonObject()) {
+            JsonObject object = element.getAsJsonObject();
+            for (String key : keys(object)) {
+                JsonElement child = object.get(key);
+                if (child != null && child.isJsonPrimitive()
+                        && child.getAsJsonPrimitive().isString()
+                        && !isBinaryField(key)) {
+                    String value = child.getAsString();
+                    String scrubbed = freeTextScrubString(value);
+                    if (!scrubbed.equals(value)) {
+                        object.addProperty(key, scrubbed);
+                        report.fieldPseudonymised("free_text");
+                    }
+                } else {
+                    freeTextScrub(child, report);
+                }
+            }
+        } else if (element.isJsonArray()) {
+            JsonArray array = element.getAsJsonArray();
+            for (int i = 0; i < array.size(); i++) {
+                JsonElement child = array.get(i);
+                if (child != null && child.isJsonPrimitive()
+                        && child.getAsJsonPrimitive().isString()) {
+                    String value = child.getAsString();
+                    String scrubbed = freeTextScrubString(value);
+                    if (!scrubbed.equals(value)) {
+                        array.set(i, new JsonPrimitive(scrubbed));
+                        report.fieldPseudonymised("free_text");
+                    }
+                } else {
+                    freeTextScrub(child, report);
+                }
+            }
+        }
+    }
+
+    public String freeTextScrubString(String value) {
+        if (value == null || value.isEmpty()) {
+            return value;
+        }
+        String out = value;
+        for (Map.Entry<String, String> entry : pathTokenMap.snapshotSensitiveStringsLongestFirst()) {
+            String original = entry.getKey();
+            if (original == null || original.isEmpty()) {
+                continue;
+            }
+            out = out.replace(original, entry.getValue());
+        }
+        return out;
+    }
+
+    private static boolean looksLikeOmeField(String key, String value) {
+        if (key != null) {
+            String k = key.toLowerCase();
+            if (k.contains("ome") || "info".equals(k) || k.contains("metadata")) {
+                return true;
+            }
+        }
+        return value != null && value.contains("<") && value.matches("(?is).*<(?:\\w+:)?(?:OME|Pixels|Experimenter|StageLabel|AcquisitionDate|.*Annotation)\\b.*");
+    }
+
+    private static boolean isPathTypedKey(String key) {
+        if (key == null) {
+            return false;
+        }
+        String k = key.toLowerCase();
+        return k.equals("path") || k.endsWith("_path") || k.contains("filepath")
+                || k.contains("filename") || k.equals("file") || k.equals("directory")
+                || k.equals("folder") || k.equals("sourcefile") || k.equals("source_file")
+                || k.equals("title") || k.equals("windowtitle");
+    }
+
+    public static boolean isPathLike(String value) {
+        if (value == null || value.trim().isEmpty() || looksLikePathToken(value.trim())) {
+            return false;
+        }
+        String trimmed = value.trim();
+        return trimmed.contains("/") || trimmed.contains("\\")
+                || IMAGE_EXTENSION.matcher(trimmed).matches();
+    }
+
+    private static boolean shouldTokeniseSlice(String value) {
+        if (value == null || value.trim().isEmpty()) {
+            return false;
+        }
+        String trimmed = value.trim();
+        return !NUMERIC.matcher(trimmed).matches() || isPathLike(trimmed);
+    }
+
+    private String tokenForSlice(String value) {
+        return isPathLike(value)
+                ? pathTokenMap.tokenForPathString(value)
+                : pathTokenMap.tokenForSensitiveText(value, "slice");
+    }
+
+    private static boolean isBinaryField(String key) {
+        if (key == null) {
+            return false;
+        }
+        String k = key.toLowerCase();
+        return "base64".equals(k) || "image_base64".equals(k) || "data".equals(k)
+                || "pixels".equals(k) || "thumbnail".equals(k) || k.endsWith("_base64");
+    }
+
+    private static boolean looksLikePathToken(String value) {
+        return value != null && value.matches("(?i)image-[0-9a-f]{4,12}(?:\\.[A-Za-z0-9.]+)?(?::\\d+)?");
+    }
+
+    private static int indexOfIgnoreCase(List<String> values, String needle) {
+        for (int i = 0; i < values.size(); i++) {
+            if (needle.equalsIgnoreCase(values.get(i))) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    private static List<List<String>> parseCsv(String csv) {
+        List<List<String>> rows = new ArrayList<List<String>>();
+        List<String> row = new ArrayList<String>();
+        StringBuilder cell = new StringBuilder();
+        boolean quoted = false;
+        for (int i = 0; i < csv.length(); i++) {
+            char c = csv.charAt(i);
+            if (quoted) {
+                if (c == '"') {
+                    if (i + 1 < csv.length() && csv.charAt(i + 1) == '"') {
+                        cell.append('"');
+                        i++;
+                    } else {
+                        quoted = false;
+                    }
+                } else {
+                    cell.append(c);
+                }
+            } else {
+                if (c == '"') {
+                    quoted = true;
+                } else if (c == ',') {
+                    row.add(cell.toString());
+                    cell.setLength(0);
+                } else if (c == '\n') {
+                    row.add(cell.toString());
+                    rows.add(row);
+                    row = new ArrayList<String>();
+                    cell.setLength(0);
+                } else if (c != '\r') {
+                    cell.append(c);
+                }
+            }
+        }
+        row.add(cell.toString());
+        rows.add(row);
+        return rows;
+    }
+
+    private static String writeCsv(List<List<String>> rows) {
+        StringBuilder out = new StringBuilder();
+        for (int r = 0; r < rows.size(); r++) {
+            List<String> row = rows.get(r);
+            for (int c = 0; c < row.size(); c++) {
+                if (c > 0) out.append(',');
+                out.append(escapeCsv(row.get(c)));
+            }
+            if (r < rows.size() - 1) out.append('\n');
+        }
+        return out.toString();
+    }
+
+    private static String escapeCsv(String value) {
+        String v = value == null ? "" : value;
+        boolean quote = v.contains(",") || v.contains("\"") || v.contains("\n") || v.contains("\r");
+        if (!quote) {
+            return v;
+        }
+        return "\"" + v.replace("\"", "\"\"") + "\"";
+    }
+
+    private static List<String> keys(JsonObject object) {
+        return new ArrayList<String>(object.keySet());
+    }
+
+    private static void clear(JsonObject object) {
+        for (String key : keys(object)) {
+            object.remove(key);
+        }
+    }
+}
