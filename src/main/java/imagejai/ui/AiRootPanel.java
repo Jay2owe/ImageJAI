@@ -112,6 +112,7 @@ public class AiRootPanel extends JPanel implements ChatSurface {
     private ConfigurationPane configurationPane;
     private ReceiptsPane receiptsPane;
     private PseudonymisationToast pseudonymisationToast;
+    private VisualOverrideNotice visualOverrideNotice;
     private AutoCloseable promptToastSubscription;
     private EgressIndicator egressIndicator;
     private JButton agentBtn;
@@ -175,6 +176,8 @@ public class AiRootPanel extends JPanel implements ChatSurface {
         configurationPane = new ConfigurationPane(PostureController.getInstance(),
                 AuditLog.getInstance());
         receiptsPane = new ReceiptsPane(AuditLog.getInstance());
+        visualOverrideNotice = new VisualOverrideNotice();
+        notices.add(visualOverrideNotice);
         notices.add(configurationPane);
         notices.add(receiptsPane);
         top.add(notices, BorderLayout.CENTER);
@@ -310,6 +313,9 @@ public class AiRootPanel extends JPanel implements ChatSurface {
         }
         if (egressIndicator != null) {
             egressIndicator.dispose();
+        }
+        if (visualOverrideNotice != null) {
+            visualOverrideNotice.dispose();
         }
         if (promptToastSubscription != null) {
             try {
