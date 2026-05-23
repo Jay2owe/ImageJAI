@@ -329,6 +329,7 @@ public class PseudonymisationFilter {
     private String replacePathLikeSubstrings(String value, RedactionReport.Builder report) {
         Matcher matcher = PATH_SUBSTRING.matcher(value);
         StringBuffer out = new StringBuffer();
+        Map<String, String> replacements = new java.util.HashMap<String, String>();
         boolean changed = false;
         while (matcher.find()) {
             String match = matcher.group(1);
@@ -340,7 +341,12 @@ public class PseudonymisationFilter {
                 matcher.appendReplacement(out, Matcher.quoteReplacement(match));
                 continue;
             }
-            String token = pathTokenMap.tokenForPathString(match.trim());
+            String trimmed = match.trim();
+            String token = replacements.get(trimmed);
+            if (token == null) {
+                token = pathTokenMap.tokenForPathString(trimmed);
+                replacements.put(trimmed, token);
+            }
             matcher.appendReplacement(out, Matcher.quoteReplacement(token));
             changed = true;
         }
@@ -398,6 +404,18 @@ public class PseudonymisationFilter {
         List<Map.Entry<String, String>> entries =
                 pathTokenMap.snapshotSensitiveStringsLongestFirst();
         if (entries.isEmpty()) {
+            return value;
+        }
+        boolean possibleMatch = false;
+        for (Map.Entry<String, String> entry : entries) {
+            String original = entry.getKey();
+            if (original != null && !original.isEmpty()
+                    && value.indexOf(original) >= 0) {
+                possibleMatch = true;
+                break;
+            }
+        }
+        if (!possibleMatch) {
             return value;
         }
 
