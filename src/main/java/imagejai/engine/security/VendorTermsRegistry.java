@@ -5,9 +5,9 @@ import java.util.Collections;
 import java.util.List;
 
 /**
- * Shared vendor-term strings for the Data Handling Statement and stage 07
- * documentation. TODO(stage 07): update vendor_terms_summary.md whenever this
- * registry changes.
+ * Shared vendor-term strings for the Data Handling Statement and Data
+ * Governance documentation; keep vendor_terms_summary.md in sync with this
+ * registry whenever the vendor list changes.
  */
 public final class VendorTermsRegistry {
     public static final List<VendorTerm> ALL = Collections.unmodifiableList(Arrays.asList(
