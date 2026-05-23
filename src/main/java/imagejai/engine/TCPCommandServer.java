@@ -929,7 +929,7 @@ public class TCPCommandServer {
             if (isSubscribeCommand(trimmed)) {
                 JsonObject req;
                 try {
-                    req = new JsonParser().parse(trimmed).getAsJsonObject();
+                    req = JsonParser.parseString(trimmed).getAsJsonObject();
                 } catch (Exception e) {
                     writeOutbound(writer, "error", errorJson("Invalid JSON: "
                             + e.getMessage()));
@@ -1203,7 +1203,7 @@ public class TCPCommandServer {
     private JsonObject dispatch(String jsonStr, Socket sock) {
         JsonObject request;
         try {
-            request = new JsonParser().parse(jsonStr).getAsJsonObject();
+            request = JsonParser.parseString(jsonStr).getAsJsonObject();
         } catch (Exception e) {
             return errorResponse("Invalid JSON: " + e.getMessage());
         }
@@ -1389,7 +1389,7 @@ public class TCPCommandServer {
             return "";
         }
         try {
-            JsonObject copy = new JsonParser().parse(GSON.toJson(response)).getAsJsonObject();
+            JsonObject copy = JsonParser.parseString(GSON.toJson(response)).getAsJsonObject();
             PrivacyPosture receiptPosture = posture == PrivacyPosture.STANDARD
                     ? PrivacyPosture.PSEUDONYMISED
                     : posture;
@@ -1418,7 +1418,7 @@ public class TCPCommandServer {
 
     private String commandNameFromRequest(String rawJson) {
         try {
-            JsonObject request = new JsonParser().parse(rawJson).getAsJsonObject();
+            JsonObject request = JsonParser.parseString(rawJson).getAsJsonObject();
             return optString(request, "cmd", optString(request, "command", ""));
         } catch (Exception e) {
             return "";

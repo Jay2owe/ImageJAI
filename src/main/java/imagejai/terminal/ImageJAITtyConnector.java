@@ -56,7 +56,7 @@ public final class ImageJAITtyConnector implements TtyConnector {
 
     @Override
     public boolean isConnected() {
-        return !closed && process.isRunning();
+        return !closed && process.isAlive();
     }
 
     @Override

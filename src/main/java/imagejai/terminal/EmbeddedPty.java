@@ -329,6 +329,7 @@ public final class EmbeddedPty {
         }
 
         @Override
+        @SuppressWarnings("deprecation")
         public TextStyle getDefaultStyle() {
             return new TextStyle(getDefaultForeground(), getDefaultBackground());
         }
