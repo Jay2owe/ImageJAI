@@ -122,8 +122,14 @@ public class PseudonymisationIntegrationTest {
 
             List<String> rawResponses = new ArrayList<String>();
             for (String command : TCPCommandServer.knownCommands()) {
-                String raw = send(boundPort.get(), requestFor(command,
-                        rawImagePath, sensitiveFolder));
+                String raw;
+                try {
+                    raw = send(boundPort.get(), requestFor(command,
+                            rawImagePath, sensitiveFolder));
+                } catch (Exception e) {
+                    throw new AssertionError(
+                            "TCP command timed out or failed: " + command, e);
+                }
                 rawResponses.add(raw);
                 JsonObject response = new JsonParser().parse(raw).getAsJsonObject();
                 assertTrue(command + " missing _governance in " + raw,
