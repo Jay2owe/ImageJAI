@@ -186,8 +186,8 @@ public final class DataHandlingStatementGenerator {
 
     private void writeSection7Limitations(PdfWriter writer) throws IOException {
         writer.section("7. Limitations");
-        writer.bullet("Pseudonymisation is not anonymisation. The mapping is "
-                + "reversible to anyone with live JVM access during a session.", 0);
+        writer.bullet("Pseudonymisation remains reversible inside the live JVM "
+                + "session so ImageJAI can resolve tokens back to local files.", 0);
         writer.bullet("The pseudonymisation filter governs TCP responses. For "
                 + "external CLIs (Claude Code in a separate terminal), filenames "
                 + "typed directly into the agent chat are NOT intercepted. The "
