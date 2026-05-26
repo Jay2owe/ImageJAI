@@ -167,9 +167,13 @@ public class PseudonymisationFilterTest {
         }
 
         int runs = 80;
+        JsonObject[] payloads = new JsonObject[runs];
+        for (int i = 0; i < runs; i++) {
+            payloads[i] = realisticPayload();
+        }
         long start = System.nanoTime();
         for (int i = 0; i < runs; i++) {
-            filter.apply(realisticPayload(), "get_state",
+            filter.apply(payloads[i], "get_state",
                     PrivacyPosture.PSEUDONYMISED, "s");
         }
         double averageMs = (System.nanoTime() - start) / 1_000_000.0 / runs;

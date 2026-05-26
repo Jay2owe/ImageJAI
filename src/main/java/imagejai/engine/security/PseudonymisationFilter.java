@@ -7,7 +7,6 @@ import com.google.gson.JsonObject;
 import com.google.gson.JsonPrimitive;
 import imagejai.config.PrivacyPosture;
 
-import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -33,6 +32,11 @@ public class PseudonymisationFilter {
                     + "|\\b(?!image-[0-9a-f]{4}\\b)[A-Za-z0-9._+()\\- ]+\\.(?:lif|tif|tiff|czi|nd2|lsm|oib|oif|vsi|svs|png|jpe?g|csv|tsv|md|pdf|json|xml|txt))");
     private static final Pattern PATH_TOKEN = Pattern.compile(
             "(?i)image-[0-9a-f]{4,12}(?:\\.[A-Za-z0-9.]+)?(?::\\d+)?");
+    private static final String[] PATH_EXTENSIONS = {
+            ".lif", ".tif", ".tiff", ".czi", ".nd2", ".lsm", ".oib", ".oif",
+            ".vsi", ".svs", ".png", ".jpg", ".jpeg", ".csv", ".tsv", ".md",
+            ".pdf", ".json", ".xml", ".txt"
+    };
 
     private final PathTokenMap pathTokenMap;
     private final OmeXmlScrubber omeXmlScrubber;
@@ -64,9 +68,7 @@ public class PseudonymisationFilter {
         }
         RedactionReport.Builder report = RedactionReport.builder()
                 .command(command)
-                .posture(effective)
-                .bytesBefore(response == null ? 0 : response.toString()
-                        .getBytes(StandardCharsets.UTF_8).length);
+                .posture(effective);
         try {
             beforeFiltering(response, command, effective);
             if (response == null) {
@@ -79,9 +81,7 @@ public class PseudonymisationFilter {
             tokeniseResultsTables(response, command, report);
             tokenisePathTypedFields(response, report);
             freeTextScrub(response, report);
-            RedactionReport built = report
-                    .bytesAfter(response.toString().getBytes(StandardCharsets.UTF_8).length)
-                    .build();
+            RedactionReport built = report.build();
             response.add("_governance", built.governanceBlock());
             return built;
         } catch (Exception e) {
@@ -118,8 +118,6 @@ public class PseudonymisationFilter {
                 .posture(posture)
                 .failed(true)
                 .fieldPseudonymised("redaction_failed")
-                .bytesAfter(response == null ? 0 : response.toString()
-                        .getBytes(StandardCharsets.UTF_8).length)
                 .build();
         if (response != null) {
             response.add("_governance", failed.governanceBlock());
@@ -318,6 +316,14 @@ public class PseudonymisationFilter {
         if (isPathTypedKey(key) && isPathLike(value)) {
             report.fieldPseudonymised("path");
             return pathTokenMap.tokenForPathString(value);
+        }
+        String registered = freeTextScrubString(value);
+        if (!registered.equals(value)) {
+            report.fieldPseudonymised("path");
+            if (!hasPathLikeCueOutsideTokens(registered)) {
+                return registered;
+            }
+            value = registered;
         }
         String replaced = replacePathLikeSubstrings(value, report);
         if (!replaced.equals(value)) {
@@ -543,6 +549,34 @@ public class PseudonymisationFilter {
                 .contains("image-");
     }
 
+    private static boolean hasPathLikeCueOutsideTokens(String value) {
+        if (value == null || value.isEmpty()) {
+            return false;
+        }
+        Matcher matcher = PATH_TOKEN.matcher(value);
+        int start = 0;
+        while (matcher.find()) {
+            if (segmentHasPathCue(value, start, matcher.start())) {
+                return true;
+            }
+            start = matcher.end();
+        }
+        return segmentHasPathCue(value, start, value.length());
+    }
+
+    private static boolean segmentHasPathCue(String value, int start, int end) {
+        if (start >= end) {
+            return false;
+        }
+        String segment = value.substring(start, end).toLowerCase(java.util.Locale.ROOT);
+        for (String extension : PATH_EXTENSIONS) {
+            if (segment.contains(extension)) {
+                return true;
+            }
+        }
+        return segment.indexOf('\\') >= 0 || segment.indexOf('/') >= 0;
+    }
+
     private static int indexOfIgnoreCase(List<String> values, String needle) {
         for (int i = 0; i < values.size(); i++) {
             if (needle.equalsIgnoreCase(values.get(i))) {
@@ -622,4 +656,5 @@ public class PseudonymisationFilter {
             object.remove(key);
         }
     }
+
 }

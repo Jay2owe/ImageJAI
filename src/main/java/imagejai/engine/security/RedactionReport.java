@@ -15,8 +15,6 @@ public final class RedactionReport {
     private final String command;
     private final PrivacyPosture posture;
     private final Set<String> fieldsPseudonymised;
-    private final int bytesBefore;
-    private final int bytesAfter;
     private final boolean failed;
 
     private RedactionReport(Builder builder) {
@@ -24,8 +22,6 @@ public final class RedactionReport {
         this.posture = builder.posture;
         this.fieldsPseudonymised = Collections.unmodifiableSet(
                 new LinkedHashSet<String>(builder.fieldsPseudonymised));
-        this.bytesBefore = builder.bytesBefore;
-        this.bytesAfter = builder.bytesAfter;
         this.failed = builder.failed;
     }
 
@@ -47,14 +43,6 @@ public final class RedactionReport {
 
     public Set<String> fieldsPseudonymised() {
         return fieldsPseudonymised;
-    }
-
-    public int bytesBefore() {
-        return bytesBefore;
-    }
-
-    public int bytesAfter() {
-        return bytesAfter;
     }
 
     public boolean failed() {
@@ -80,8 +68,6 @@ public final class RedactionReport {
         private PrivacyPosture posture = PrivacyPosture.PSEUDONYMISED;
         private final LinkedHashSet<String> fieldsPseudonymised =
                 new LinkedHashSet<String>();
-        private int bytesBefore;
-        private int bytesAfter;
         private boolean failed;
 
         public Builder command(String command) {
@@ -98,16 +84,6 @@ public final class RedactionReport {
             if (field != null && !field.trim().isEmpty()) {
                 fieldsPseudonymised.add(field);
             }
-            return this;
-        }
-
-        public Builder bytesBefore(int bytesBefore) {
-            this.bytesBefore = Math.max(0, bytesBefore);
-            return this;
-        }
-
-        public Builder bytesAfter(int bytesAfter) {
-            this.bytesAfter = Math.max(0, bytesAfter);
             return this;
         }
 
