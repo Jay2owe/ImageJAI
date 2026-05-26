@@ -1,5 +1,6 @@
 package imagejai.terminal;
 
+import com.jediterm.core.util.TermSize;
 import com.jediterm.terminal.TtyConnector;
 import com.jediterm.terminal.TerminalColor;
 import com.jediterm.terminal.TextStyle;
@@ -101,6 +102,14 @@ public final class EmbeddedPty {
 
     public void interrupt() throws IOException {
         connector.write(new byte[] { 0x03 });
+    }
+
+    public String readScrollback(int lineLimit) {
+        return AgentRegistry.readScrollback(widget, lineLimit);
+    }
+
+    public void resize(int columns, int rows) {
+        connector.resize(new TermSize(columns, rows));
     }
 
     public void closeWidget() {
