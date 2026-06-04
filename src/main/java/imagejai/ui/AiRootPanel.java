@@ -8,6 +8,7 @@ import ij.io.FileInfo;
 import imagejai.config.PrivacyPosture;
 import imagejai.config.Settings;
 import imagejai.engine.AgentLauncher;
+import imagejai.engine.AgentRecommender;
 import imagejai.engine.AgentSession;
 import imagejai.engine.EmbeddedAgentSession;
 import imagejai.engine.ExternalAgentSession;
@@ -19,11 +20,9 @@ import imagejai.engine.picker.ModelEntry;
 import imagejai.engine.picker.ModelsCache;
 import imagejai.engine.picker.ModelsLocalLoader;
 import imagejai.engine.picker.ModelsYamlLoader;
-import imagejai.engine.picker.NativeAgentLauncher;
 import imagejai.engine.picker.ProviderDiscovery;
 import imagejai.engine.picker.ProviderEntry;
 import imagejai.engine.picker.ProviderRegistry;
-import imagejai.engine.picker.ProxyAgentLauncher;
 import imagejai.engine.safeMode.SafeModeIndicator;
 import imagejai.engine.security.AuditLog;
 import imagejai.engine.security.OutboundPromptScrubber;
@@ -35,10 +34,14 @@ import imagejai.ui.picker.TierChangeBanner;
 
 import javax.swing.JButton;
 import javax.swing.BoxLayout;
-import javax.swing.JCheckBox;
+import javax.swing.JCheckBoxMenuItem;
 import javax.swing.JComboBox;
 import javax.swing.JComponent;
 import javax.swing.JFrame;
+import javax.swing.JMenu;
+import javax.swing.JMenuItem;
+import javax.swing.JPopupMenu;
+import javax.swing.JRadioButtonMenuItem;
 import javax.swing.JFileChooser;
 import javax.swing.JOptionPane;
 import javax.swing.JPanel;
@@ -80,6 +83,7 @@ import java.util.Set;
 public class AiRootPanel extends JPanel implements ChatSurface {
     private static final String CARD_CHAT = "chat";
     private static final String CARD_TERMINAL = "terminal";
+    private static final String CARD_WELCOME = "welcome";
 
     private static final String PREF_WINDOW_SIZE_PREFIX = "ai.assistant.window.size.";
     private static final Dimension CHAT_SIZE = new Dimension(420, 600);
@@ -99,8 +103,6 @@ public class AiRootPanel extends JPanel implements ChatSurface {
 
     private AgentLauncher agentLauncher;
     private SafeModeIndicator safeModeIndicator;
-    private JCheckBox safeModeBox;
-    private JComboBox<Settings.ModelConfig> profileSwitcher;
     private JComboBox<String> agentSelector;
     private ModelPickerButton modelPicker;
     private ProviderRegistry providerRegistry;
@@ -115,7 +117,10 @@ public class AiRootPanel extends JPanel implements ChatSurface {
     private VisualOverrideNotice visualOverrideNotice;
     private AutoCloseable promptToastSubscription;
     private EgressIndicator egressIndicator;
-    private JButton agentBtn;
+    private WelcomePanel welcomePanel;
+    private AgentRecommender.Recommendation recommendation;
+    private CardLayout headerCardLayout;
+    private JPanel headerCards;
     private JFrame frame;
     private String currentCard = CARD_CHAT;
     private boolean applyingFrameSize;
@@ -141,6 +146,18 @@ public class AiRootPanel extends JPanel implements ChatSurface {
         cards.setOpaque(false);
         cards.add(chatView, CARD_CHAT);
         cards.add(terminalView, CARD_TERMINAL);
+        welcomePanel = new WelcomePanel(new Runnable() {
+            @Override
+            public void run() {
+                launchRecommended();
+            }
+        }, new Runnable() {
+            @Override
+            public void run() {
+                openAgentPicker();
+            }
+        });
+        cards.add(welcomePanel, CARD_WELCOME);
         pseudonymisationToast = new PseudonymisationToast();
         promptToastSubscription = OutboundPromptScrubber.getInstance()
                 .addNotifier(pseudonymisationToast);
@@ -184,7 +201,7 @@ public class AiRootPanel extends JPanel implements ChatSurface {
 
         add(top, BorderLayout.NORTH);
         add(body, BorderLayout.CENTER);
-        showChatCard();
+        showWelcomeCard();
         runFirstRunFlipNoticeIfNeeded();
         runStartupTierChangeCheck();
         installPostureRefreshListener();
@@ -220,9 +237,87 @@ public class AiRootPanel extends JPanel implements ChatSurface {
         if (launcher != null) {
             terminalView.setWorkspace(new File(launcher.getAgentWorkspace()));
         }
+        // Pass null launchers so the orchestrator wires them with the CLI
+        // launcher, giving the proxy/native paths the terminal machinery they
+        // need to spawn the Python provider agent loop.
         launchOrchestrator = new AgentLaunchOrchestrator(
-                launcher, new NativeAgentLauncher(), new ProxyAgentLauncher());
+                launcher, null, null, this::buildLaunchEnv);
         refreshAgentSelectorAsync();
+        injectCliAgentsAsync();
+    }
+
+    /**
+     * Detect installed CLI agents off the EDT and add them to the picker as a
+     * synthetic {@code "cli"} provider group. The cascading dropdown is
+     * default-on, but the curated {@code models.yaml} only carries API
+     * providers; without this, existing users of Claude Code / Aider / etc.
+     * would lose access to their CLI agents, and a legacy
+     * {@code cli:<command>} selection could not resolve to a launchable row.
+     */
+    private void injectCliAgentsAsync() {
+        final AgentLauncher launcher = agentLauncher;
+        if (launcher == null) {
+            return;
+        }
+        new SwingWorker<ProviderEntry, Void>() {
+            @Override
+            protected ProviderEntry doInBackground() {
+                return buildCliProviderEntry(launcher.detectAgents());
+            }
+
+            @Override
+            protected void done() {
+                try {
+                    ProviderEntry cli = get();
+                    if (cli == null || providerRegistry == null) {
+                        return;
+                    }
+                    providerRegistry = providerRegistry.withProvider(cli);
+                    if (modelPicker != null) {
+                        modelPicker.setRegistry(providerRegistry);
+                    }
+                    recomputeRecommendation();
+                } catch (Exception ignore) {
+                    // Detection failure leaves the API-only picker in place.
+                }
+            }
+        }.execute();
+    }
+
+    /**
+     * Build the synthetic {@code "cli"} provider from detected CLI agents. Each
+     * agent becomes a {@link ModelEntry} whose {@code modelId} is the agent's
+     * command, so {@link AgentLaunchOrchestrator} (transport {@code CLI}) can
+     * resolve and launch it, and legacy {@code cli:<command>} selections map
+     * straight onto a row. Returns {@code null} when no agents are detected.
+     */
+    private static ProviderEntry buildCliProviderEntry(List<AgentLauncher.AgentInfo> agents) {
+        if (agents == null || agents.isEmpty()) {
+            return null;
+        }
+        List<ModelEntry> models = new ArrayList<ModelEntry>();
+        for (AgentLauncher.AgentInfo agent : agents) {
+            if (agent == null || agent.command == null || agent.command.trim().isEmpty()) {
+                continue;
+            }
+            models.add(new ModelEntry(
+                    "cli",
+                    agent.command,
+                    agent.name == null ? agent.command : agent.name,
+                    agent.description == null ? "" : agent.description,
+                    ModelEntry.Tier.FREE,
+                    0,
+                    false,
+                    ModelEntry.Reliability.HIGH,
+                    false,
+                    true,
+                    "Installed CLI agent (launched in a terminal)."));
+        }
+        if (models.isEmpty()) {
+            return null;
+        }
+        return new ProviderEntry("cli", "CLI agents",
+                ProviderEntry.Status.READY, "", models);
     }
 
     private void installPostureRefreshListener() {
@@ -233,7 +328,6 @@ public class AiRootPanel extends JPanel implements ChatSurface {
                     @Override
                     public void run() {
                         refreshAgentSelectorAsync();
-                        updateLaunchButtonState();
                     }
                 });
             }
@@ -250,30 +344,15 @@ public class AiRootPanel extends JPanel implements ChatSurface {
      */
     public void setSafeModeIndicator(SafeModeIndicator indicator) {
         this.safeModeIndicator = indicator;
-        if (indicator != null && safeModeBox != null) {
-            indicator.setMasterEnabled(safeModeBox.isSelected());
+        if (indicator != null) {
+            indicator.setMasterEnabled(settings.safeModeEnabled);
         }
     }
 
     public void refreshProfileSwitcher() {
-        if (profileSwitcher == null) {
-            return;
-        }
-
-        ActionListener[] listeners = profileSwitcher.getActionListeners();
-        for (ActionListener listener : listeners) {
-            profileSwitcher.removeActionListener(listener);
-        }
-
-        profileSwitcher.removeAllItems();
-        for (Settings.ModelConfig config : settings.configs) {
-            profileSwitcher.addItem(config);
-        }
-        profileSwitcher.setSelectedItem(settings.getActiveConfig());
-
-        for (ActionListener listener : listeners) {
-            profileSwitcher.addActionListener(listener);
-        }
+        // The profile selector now lives in the working-header overflow menu
+        // (rebuilt from settings each time it opens), so there is no combo box
+        // to re-sync here -- just refresh the chat input state.
         chatView.refreshInputState();
     }
 
@@ -347,24 +426,9 @@ public class AiRootPanel extends JPanel implements ChatSurface {
     }
 
     private JComponent createHeader() {
-        JPanel header = new JPanel(new BorderLayout(4, 0));
-        header.setOpaque(false);
-
-        JPanel leftPanel = new JPanel(new FlowLayout(FlowLayout.LEFT, 4, 0));
-        leftPanel.setOpaque(false);
-
-        javax.swing.JLabel title = new javax.swing.JLabel("AI Assistant");
-        title.setForeground(ACCENT);
-        title.setFont(new Font(Font.SANS_SERIF, Font.BOLD, 14));
-        leftPanel.add(title);
-
-        javax.swing.JLabel agentLabel = new javax.swing.JLabel("Agent:");
-        agentLabel.setForeground(TEXT_MUTED);
-        agentLabel.setFont(new Font(Font.SANS_SERIF, Font.PLAIN, 11));
-        leftPanel.add(agentLabel);
-
+        // The agent/model picker doubles as the working-state switch picker.
         agentSelector = new JComboBox<String>();
-        agentSelector.setPreferredSize(new Dimension(140, 22));
+        agentSelector.setPreferredSize(new Dimension(180, 22));
         agentSelector.setFont(new Font(Font.SANS_SERIF, Font.PLAIN, 11));
         agentSelector.setToolTipText("<html>Agent CLI to launch."
                 + "<br>In On-premises posture, only local-binary agents are selectable.</html>");
@@ -376,7 +440,6 @@ public class AiRootPanel extends JPanel implements ChatSurface {
                 if (selected != null) {
                     settings.setSelectedAgentName(selected);
                     chatView.refreshInputState();
-                    updateLaunchButtonState();
                 }
             }
         });
@@ -396,7 +459,6 @@ public class AiRootPanel extends JPanel implements ChatSurface {
                 settings.selectedAgentName = entry.providerId() + ":" + entry.modelId();
                 settings.save();
                 chatView.refreshInputState();
-                updateLaunchButtonState();
             }
 
             @Override
@@ -416,68 +478,138 @@ public class AiRootPanel extends JPanel implements ChatSurface {
                 openSettingsForProvider(providerId);
             }
         });
+        modelPicker.setPinListener(new ModelPickerButton.PinListener() {
+            @Override
+            public void onPinChanged(ModelEntry entry, boolean nowPinned) {
+                persistPin(entry, nowPinned);
+            }
+        });
         if (settings.useMultiProviderPicker) {
             // Phase G cross-phase carry-over: feed the dropdown's â†» refresh
             // button a real RefreshTask backed by ProviderDiscovery + ModelsCache
             // so the user can refresh model lists at any time. Without this hook
             // the refresh button is permanently disabled (Phase G acceptance).
             modelPicker.setRefreshTask(buildRefreshTask());
+            // Apply persisted pins/hides to the bundled list at startup so a
+            // pinned favourite survives a restart even before any network
+            // refresh (verifier #6); then honour refreshOnStartup by kicking a
+            // background discovery so the dropdown isn't stuck on the bundled
+            // snapshot (verifier #9).
+            applyStartupOverrides();
+            if (settings.refreshOnStartup) {
+                triggerStartupRefresh();
+            }
         }
 
-        if (settings.useMultiProviderPicker) {
-            leftPanel.add(modelPicker);
-        } else {
-            leftPanel.add(agentSelector);
-        }
-
-        javax.swing.JLabel profileLabel = new javax.swing.JLabel("Profile:");
-        profileLabel.setForeground(TEXT_MUTED);
-        profileLabel.setFont(new Font(Font.SANS_SERIF, Font.PLAIN, 11));
-        leftPanel.add(profileLabel);
-
-        profileSwitcher = new JComboBox<Settings.ModelConfig>();
-        profileSwitcher.setPreferredSize(new Dimension(150, 22));
-        profileSwitcher.setFont(new Font(Font.SANS_SERIF, Font.PLAIN, 11));
-        for (Settings.ModelConfig config : settings.configs) {
-            profileSwitcher.addItem(config);
-        }
-        profileSwitcher.setSelectedItem(settings.getActiveConfig());
-        profileSwitcher.addActionListener(new ActionListener() {
+        // --- Minimal header (Welcome / home state): title + settings gear. ---
+        JPanel minHeader = new JPanel(new BorderLayout(4, 0));
+        minHeader.setOpaque(false);
+        javax.swing.JLabel minTitle = new javax.swing.JLabel("AI Assistant");
+        minTitle.setForeground(ACCENT);
+        minTitle.setFont(new Font(Font.SANS_SERIF, Font.BOLD, 14));
+        minHeader.add(minTitle, BorderLayout.WEST);
+        JButton minSettings = createHeaderButton("\u2699", "Settings");
+        minSettings.addActionListener(new ActionListener() {
             @Override
             public void actionPerformed(ActionEvent e) {
-                Settings.ModelConfig selected =
-                        (Settings.ModelConfig) profileSwitcher.getSelectedItem();
-                if (selected != null) {
-                    settings.activeConfigId = selected.id;
-                    settings.save();
-                    chatView.refreshInputState();
-                    chatView.appendMessage("assistant", "Switched to profile: " + selected.name);
-                }
+                openSettings();
             }
         });
-        leftPanel.add(profileSwitcher);
+        JPanel minRight = new JPanel(new FlowLayout(FlowLayout.RIGHT, 2, 0));
+        minRight.setOpaque(false);
+        minRight.add(minSettings);
+        minHeader.add(minRight, BorderLayout.EAST);
 
-        // Safe-mode v2 stage 02: master-switch checkbox.
-        // Per plan: docs/safe_mode_v2/02_master-switch-and-caps.md.
-        // When unchecked, the next launched agent will see
-        // {@code IMAGEJAI_SAFE_MODE=0} and pass {@code safe_mode=false}
-        // in its hello handshake â€” legacy unguarded fast path.
-        // Stage 07: also drives the toolbar / status-bar indicator's master
-        // grey state so the biologist's at-a-glance signal matches the
-        // checkbox without waiting for the next agent launch.
-        safeModeBox = new JCheckBox("Safe Mode", settings.safeModeEnabled);
-        safeModeBox.setOpaque(false);
-        safeModeBox.setForeground(TEXT_MUTED);
-        safeModeBox.setFont(new Font(Font.SANS_SERIF, Font.PLAIN, 11));
-        safeModeBox.setFocusPainted(false);
-        safeModeBox.setToolTipText(
+        // --- Working header (chat / embedded terminal): the switch picker on
+        // the left; read-only status plus an overflow menu on the right. Each
+        // side holds only a couple of items, so the row can never overlap (the
+        // original first-open bug packed ~988px of controls into a ~404px
+        // BorderLayout row). Secondary controls live in the overflow menu. ---
+        JPanel workHeader = new JPanel(new BorderLayout(4, 0));
+        workHeader.setOpaque(false);
+        JPanel workLeft = new JPanel(new FlowLayout(FlowLayout.LEFT, 4, 0));
+        workLeft.setOpaque(false);
+        workLeft.add(settings.useMultiProviderPicker ? modelPicker : agentSelector);
+        workHeader.add(workLeft, BorderLayout.WEST);
+
+        JPanel workRight = new JPanel(new FlowLayout(FlowLayout.RIGHT, 2, 0));
+        workRight.setOpaque(false);
+        workRight.add(new PostureBadge(PostureController.getInstance()));
+        egressIndicator = new EgressIndicator();
+        workRight.add(egressIndicator);
+        JButton overflowBtn = createHeaderButton("\u22EF",
+                "More: Browse Files, View Audit Log, Safe Mode, Profile, Settings");
+        overflowBtn.addActionListener(new ActionListener() {
+            @Override
+            public void actionPerformed(ActionEvent e) {
+                showOverflowMenu((JButton) e.getSource());
+            }
+        });
+        workRight.add(overflowBtn);
+        workHeader.add(workRight, BorderLayout.EAST);
+
+        // Swap minimal/working via a CardLayout so the persistent NORTH header
+        // morphs with the body card (Welcome -> minimal, chat/terminal -> work).
+        headerCardLayout = new CardLayout();
+        headerCards = new JPanel(headerCardLayout);
+        headerCards.setOpaque(false);
+        headerCards.add(minHeader, "min");
+        headerCards.add(workHeader, "work");
+        headerCards.setBorder(new EmptyBorder(0, 0, 2, 0));
+        return headerCards;
+    }
+
+    /** Show the minimal (Welcome) or working header to match the active body card. */
+    private void setHeaderState(boolean welcome) {
+        if (headerCardLayout == null || headerCards == null) {
+            return;
+        }
+        headerCardLayout.show(headerCards, welcome ? "min" : "work");
+    }
+
+    /**
+     * Build and show the working-state overflow menu. Holds the secondary
+     * controls that used to crowd the header row -- Browse Files, View Audit
+     * Log, Safe Mode, Profile, Clear, Settings -- rebuilt each time so the Safe
+     * Mode tick and Profile selection reflect current settings.
+     */
+    private void showOverflowMenu(JButton owner) {
+        JPopupMenu menu = new JPopupMenu();
+
+        JMenuItem browse = new JMenuItem("Browse Files...");
+        browse.setToolTipText("<html>Select files and series locally."
+                + "<br>The agent receives only pseudonym tokens and your tag.</html>");
+        browse.addActionListener(new ActionListener() {
+            @Override
+            public void actionPerformed(ActionEvent e) {
+                openBrowseFilesDialog();
+            }
+        });
+        menu.add(browse);
+
+        JMenuItem audit = new JMenuItem("View Audit Log");
+        audit.setToolTipText("<html>Audit trail of outbound calls to the agent."
+                + "<br>CSV format. Suitable for ethics applications.</html>");
+        audit.addActionListener(new ActionListener() {
+            @Override
+            public void actionPerformed(ActionEvent e) {
+                openAuditLogAsync();
+            }
+        });
+        menu.add(audit);
+
+        menu.addSeparator();
+
+        final JCheckBoxMenuItem safeMode =
+                new JCheckBoxMenuItem("Safe Mode", settings.safeModeEnabled);
+        safeMode.setToolTipText(
                 "<html>Block destructive ops + auto-snapshot before every macro."
               + "<br>Uncheck for a fast, unguarded session."
               + "<br>Applies to the next agent you launch.</html>");
-        safeModeBox.addActionListener(new ActionListener() {
+        safeMode.addActionListener(new ActionListener() {
             @Override
             public void actionPerformed(ActionEvent e) {
-                boolean on = safeModeBox.isSelected();
+                boolean on = safeMode.isSelected();
                 settings.safeModeEnabled = on;
                 settings.save();
                 if (safeModeIndicator != null) {
@@ -485,53 +617,36 @@ public class AiRootPanel extends JPanel implements ChatSurface {
                 }
             }
         });
-        leftPanel.add(safeModeBox);
+        menu.add(safeMode);
 
-        header.add(leftPanel, BorderLayout.WEST);
-
-        JPanel buttons = new JPanel(new FlowLayout(FlowLayout.RIGHT, 2, 0));
-        buttons.setOpaque(false);
-
-        String agentBtnTooltip = "<html>Launch the selected agent."
-                + "<br>The current Privacy Posture governs what data may leave the machine.</html>";
-        agentBtn = createHeaderButton("\u25B6", agentBtnTooltip);
-        agentBtn.addActionListener(new ActionListener() {
-            @Override
-            public void actionPerformed(ActionEvent e) {
-                if (settings.useMultiProviderPicker) {
-                    relaunchLastModel();
-                } else {
-                    launchSelectedAgentAsync();
-                }
+        JMenu profile = new JMenu("Profile");
+        if (settings.configs == null || settings.configs.isEmpty()) {
+            JMenuItem none = new JMenuItem("(no profiles)");
+            none.setEnabled(false);
+            profile.add(none);
+        } else {
+            for (final Settings.ModelConfig config : settings.configs) {
+                boolean active = config.id != null && config.id.equals(settings.activeConfigId);
+                JRadioButtonMenuItem item = new JRadioButtonMenuItem(config.name, active);
+                item.addActionListener(new ActionListener() {
+                    @Override
+                    public void actionPerformed(ActionEvent e) {
+                        settings.activeConfigId = config.id;
+                        settings.save();
+                        chatView.refreshInputState();
+                        chatView.appendMessage("assistant",
+                                "Switched to profile: " + config.name);
+                    }
+                });
+                profile.add(item);
             }
-        });
-        updateLaunchButtonState();
-        buttons.add(agentBtn);
+        }
+        menu.add(profile);
 
-        buttons.add(new PostureBadge(PostureController.getInstance()));
-        egressIndicator = new EgressIndicator();
-        buttons.add(egressIndicator);
-        buttons.add(createGovernanceActionButton("Browse Files...",
-                "<html>Select files and series locally."
-              + "<br>The agent receives only pseudonym tokens and your tag.</html>",
-                new Runnable() {
-                    @Override
-                    public void run() {
-                        openBrowseFilesDialog();
-                    }
-                }));
-        buttons.add(createGovernanceActionButton("View Audit Log",
-                "<html>Audit trail of outbound calls to the agent."
-              + "<br>CSV format. Suitable for ethics applications.</html>",
-                new Runnable() {
-                    @Override
-                    public void run() {
-                        openAuditLogAsync();
-                    }
-                }));
+        menu.addSeparator();
 
-        JButton clearBtn = createHeaderButton("\u2718", "Clear conversation");
-        clearBtn.addActionListener(new ActionListener() {
+        JMenuItem clear = new JMenuItem("Clear conversation");
+        clear.addActionListener(new ActionListener() {
             @Override
             public void actionPerformed(ActionEvent e) {
                 int result = JOptionPane.showConfirmDialog(
@@ -545,20 +660,18 @@ public class AiRootPanel extends JPanel implements ChatSurface {
                 }
             }
         });
-        buttons.add(clearBtn);
+        menu.add(clear);
 
-        JButton settingsBtn = createHeaderButton("\u2699", "Settings");
-        settingsBtn.addActionListener(new ActionListener() {
+        JMenuItem settingsItem = new JMenuItem("Settings...");
+        settingsItem.addActionListener(new ActionListener() {
             @Override
             public void actionPerformed(ActionEvent e) {
                 openSettings();
             }
         });
-        buttons.add(settingsBtn);
+        menu.add(settingsItem);
 
-        header.add(buttons, BorderLayout.EAST);
-        header.setBorder(new EmptyBorder(0, 0, 2, 0));
-        return header;
+        menu.show(owner, 0, owner.getHeight());
     }
 
     private JButton createHeaderButton(String symbol, String tooltip) {
@@ -571,36 +684,6 @@ public class AiRootPanel extends JPanel implements ChatSurface {
         button.setCursor(Cursor.getPredefinedCursor(Cursor.HAND_CURSOR));
         button.setToolTipText(tooltip);
         button.setMargin(new Insets(0, 4, 0, 4));
-        return button;
-    }
-
-    private JButton createGovernancePlaceholderButton(String text, String tooltip) {
-        JButton button = new JButton(text);
-        button.setFont(new Font(Font.SANS_SERIF, Font.PLAIN, 11));
-        button.setForeground(TEXT_MUTED);
-        button.setEnabled(false);
-        button.setFocusPainted(false);
-        button.setMargin(new Insets(1, 6, 1, 6));
-        button.setToolTipText(tooltip);
-        return button;
-    }
-
-    private JButton createGovernanceActionButton(String text, String tooltip,
-                                                 final Runnable action) {
-        JButton button = new JButton(text);
-        button.setFont(new Font(Font.SANS_SERIF, Font.PLAIN, 11));
-        button.setForeground(TEXT_MUTED);
-        button.setFocusPainted(false);
-        button.setMargin(new Insets(1, 6, 1, 6));
-        button.setToolTipText(tooltip);
-        button.addActionListener(new ActionListener() {
-            @Override
-            public void actionPerformed(ActionEvent e) {
-                if (action != null) {
-                    action.run();
-                }
-            }
-        });
         return button;
     }
 
@@ -740,7 +823,7 @@ public class AiRootPanel extends JPanel implements ChatSurface {
     private void refreshAgentSelector(List<AgentLauncher.AgentInfo> agents) {
         detectedAgents = new ArrayList<AgentLauncher.AgentInfo>(agents);
         if (agentSelector == null) {
-            updateLaunchButtonState();
+            recomputeRecommendation();
             return;
         }
 
@@ -768,36 +851,7 @@ public class AiRootPanel extends JPanel implements ChatSurface {
         for (ActionListener listener : listeners) {
             agentSelector.addActionListener(listener);
         }
-        updateLaunchButtonState();
-    }
-
-    private void updateLaunchButtonState() {
-        if (agentBtn == null) {
-            return;
-        }
-        if (settings.useMultiProviderPicker) {
-            ModelEntry entry = providerRegistry == null
-                    ? null
-                    : providerRegistry.lookup(
-                            settings.selectedProvider, settings.selectedModelId);
-            boolean enabled = entry != null;
-            agentBtn.setEnabled(enabled);
-            agentBtn.setToolTipText(enabled
-                    ? "<html>Launch the selected agent."
-                            + "<br>The current Privacy Posture governs what data may leave the machine.</html>"
-                    : "<html>Pick a model from the dropdown first."
-                            + "<br>The Data Governance posture badge shows the active policy.</html>");
-            return;
-        }
-        String selected = settings.getSelectedAgentName();
-        AgentLauncher.AgentInfo agent = findDetectedAgent(selected);
-        boolean externalSelected = agentLauncher != null && agent != null;
-        agentBtn.setEnabled(externalSelected);
-        agentBtn.setToolTipText(externalSelected
-                ? "<html>Launch the selected agent."
-                        + "<br>The current Privacy Posture governs what data may leave the machine.</html>"
-                : "<html>Local Assistant is built in."
-                        + "<br>The Data Governance steward can use the posture badge to verify policy.</html>");
+        recomputeRecommendation();
     }
 
     private AgentLauncher.AgentInfo findDetectedAgent(String name) {
@@ -810,39 +864,6 @@ public class AiRootPanel extends JPanel implements ChatSurface {
             }
         }
         return null;
-    }
-
-    private void launchSelectedAgentAsync() {
-        String selected = settings.getSelectedAgentName();
-        if (AgentLauncher.LOCAL_ASSISTANT_NAME.equals(selected)) {
-            return;
-        }
-        AgentLauncher.AgentInfo agent = findDetectedAgent(selected);
-        if (agent == null) {
-            chatView.appendMessage("assistant",
-                    "Could not launch " + selected + ": agent is not detected on PATH.");
-            updateLaunchButtonState();
-            return;
-        }
-        launchAgentAsync(agent);
-    }
-
-    private void relaunchLastModel() {
-        if (providerRegistry == null || launchOrchestrator == null) {
-            return;
-        }
-        String prov = settings.selectedProvider;
-        String mid  = settings.selectedModelId;
-        if (prov == null || mid == null) {
-            modelPicker.showPopup();
-            return;
-        }
-        ModelEntry entry = providerRegistry.lookup(prov, mid);
-        if (entry == null) {
-            modelPicker.showPopup();
-            return;
-        }
-        launchModelAsync(entry);
     }
 
     private void launchModelAsync(final ModelEntry entry) {
@@ -859,15 +880,6 @@ public class AiRootPanel extends JPanel implements ChatSurface {
             } catch (java.io.IOException ex) {
                 IJ.log("[ImageJAI] Could not persist usage_tracking.json: " + ex.getMessage());
             }
-        }
-        final AgentLaunchOrchestrator.Transport transport =
-                AgentLaunchOrchestrator.transportFor(entry);
-        if (transport != AgentLaunchOrchestrator.Transport.CLI) {
-            chatView.appendMessage("assistant",
-                    "The " + entry.providerId() + " transport will land in a later "
-                    + "phase of the multi-provider rollout â€” for now this picker "
-                    + "row is informational.");
-            return;
         }
         final AgentLauncher.Mode mode = settings.agentEmbeddedTerminal
                 ? AgentLauncher.Mode.EMBEDDED
@@ -969,6 +981,7 @@ public class AiRootPanel extends JPanel implements ChatSurface {
             }
             chatView.appendMessage("assistant", "Launched " + agent.name
                     + " in: " + agentLauncher.getAgentWorkspace());
+            showChatCard();
         }
     }
 
@@ -991,12 +1004,11 @@ public class AiRootPanel extends JPanel implements ChatSurface {
                 "This Fiji is running Java "
                         + System.getProperty("java.specification.version", "unknown")
                         + ".\n\n"
-                        + "ImageJAI is built as Java 8 bytecode so Fiji can load it on "
-                        + "older Zulu 8 installs. The embedded terminal backend "
-                        + "is loaded only on Java 11 or newer.\n\n"
-                        + "On Java 8, the selected agent still launches in a normal "
-                        + "terminal window. Upgrade Fiji's Java runtime to Java 11+ "
-                        + "to use the embedded terminal.",
+                        + "ImageJAI targets Java 11. The embedded terminal backend "
+                        + "(pty4j / JediTerm) is loaded only on Java 11 or newer.\n\n"
+                        + "On older runtimes the selected agent still launches in a "
+                        + "normal terminal window. Upgrade Fiji's Java runtime to "
+                        + "Java 11+ to use the embedded terminal.",
                 "ImageJAI Java compatibility",
                 JOptionPane.INFORMATION_MESSAGE);
     }
@@ -1022,7 +1034,7 @@ public class AiRootPanel extends JPanel implements ChatSurface {
                 terminalView.clearSession(session);
                 IJ.log("[ImageJAI-Term] Embedded agent exited with code "
                         + session.exitValue() + ": " + session.info().name);
-                showChatCard();
+                showWelcomeCard();
             }
         });
         timer.start();
@@ -1067,6 +1079,7 @@ public class AiRootPanel extends JPanel implements ChatSurface {
 
     private void showTerminalCard() {
         currentCard = CARD_TERMINAL;
+        setHeaderState(false);
         cardLayout.show(cards, CARD_TERMINAL);
         applyFrameSize();
         SwingUtilities.invokeLater(new Runnable() {
@@ -1079,6 +1092,7 @@ public class AiRootPanel extends JPanel implements ChatSurface {
 
     private void showChatCard() {
         currentCard = CARD_CHAT;
+        setHeaderState(false);
         cardLayout.show(cards, CARD_CHAT);
         applyFrameSize();
         SwingUtilities.invokeLater(new Runnable() {
@@ -1089,12 +1103,144 @@ public class AiRootPanel extends JPanel implements ChatSurface {
         });
     }
 
+    /**
+     * Show the Welcome "home" card. Shown on first open and whenever no agent
+     * session is live (the rule that governs welcome vs working state).
+     */
+    private void showWelcomeCard() {
+        currentCard = CARD_WELCOME;
+        setHeaderState(true);
+        cardLayout.show(cards, CARD_WELCOME);
+        applyFrameSize();
+        recomputeRecommendation();
+    }
+
+    /**
+     * Launch the recommended agent from the Welcome CTA. The built-in Local
+     * Assistant has no process, so it just reveals the chat surface; a detected
+     * CLI agent goes through the normal embedded/external launch path.
+     */
+    private void launchRecommended() {
+        AgentRecommender.Recommendation rec = recommendation;
+        if (rec == null || rec.isLocalAssistant()) {
+            settings.setSelectedAgentName(AgentLauncher.LOCAL_ASSISTANT_NAME);
+            chatView.refreshInputState();
+            showChatCard();
+            return;
+        }
+        settings.setSelectedAgentName(rec.agent.name);
+        chatView.refreshInputState();
+        launchAgentAsync(rec.agent);
+    }
+
+    /**
+     * Open a picker so the user can launch a specific assistant from the Welcome
+     * card. Built as a self-anchored popup over the on-screen Welcome panel: the
+     * header's model picker sits on a hidden CardLayout card while Welcome is
+     * showing, so popping relative to it would throw IllegalComponentStateException.
+     */
+    private void openAgentPicker() {
+        JPopupMenu menu = new JPopupMenu();
+
+        JMenuItem local = new JMenuItem(AgentLauncher.LOCAL_ASSISTANT_NAME + " - built-in, offline");
+        local.addActionListener(new ActionListener() {
+            @Override
+            public void actionPerformed(ActionEvent e) {
+                settings.setSelectedAgentName(AgentLauncher.LOCAL_ASSISTANT_NAME);
+                chatView.refreshInputState();
+                showChatCard();
+            }
+        });
+        menu.add(local);
+
+        if (detectedAgents != null && !detectedAgents.isEmpty()) {
+            menu.addSeparator();
+            for (final AgentLauncher.AgentInfo agent : detectedAgents) {
+                JMenuItem item = new JMenuItem(agent.name);
+                if (agent.description != null && !agent.description.trim().isEmpty()) {
+                    item.setToolTipText(agent.description);
+                }
+                item.addActionListener(new ActionListener() {
+                    @Override
+                    public void actionPerformed(ActionEvent e) {
+                        settings.setSelectedAgentName(agent.name);
+                        chatView.refreshInputState();
+                        launchAgentAsync(agent);
+                    }
+                });
+                menu.add(item);
+            }
+        }
+
+        if (settings.useMultiProviderPicker) {
+            menu.addSeparator();
+            JMenuItem more = new JMenuItem("More models & providers...");
+            more.addActionListener(new ActionListener() {
+                @Override
+                public void actionPerformed(ActionEvent e) {
+                    openSettings();
+                }
+            });
+            menu.add(more);
+        }
+
+        // Anchor to a component that is actually on-screen, or no-op.
+        java.awt.Component anchor = welcomePanel != null && welcomePanel.isShowing()
+                ? welcomePanel
+                : (isShowing() ? this : null);
+        if (anchor != null) {
+            menu.show(anchor, Math.max(0, anchor.getWidth() / 2 - 70), anchor.getHeight() / 2);
+        }
+    }
+
+    /**
+     * Recompute the recommended agent (posture-aware) and push it, the CTA
+     * caption, and the posture footer into the Welcome card. Cheap; safe to call
+     * after agent detection, on posture change, and on return to the home card.
+     */
+    private void recomputeRecommendation() {
+        if (welcomePanel == null) {
+            return;
+        }
+        boolean onPremises =
+                PostureController.getInstance().current() == PrivacyPosture.ON_PREMISES;
+        AgentRecommender.Recommendation rec = AgentRecommender.recommend(
+                detectedAgents, settings.getSelectedAgentName(), onPremises);
+        recommendation = rec;
+        boolean noAgents = detectedAgents == null || detectedAgents.isEmpty();
+        welcomePanel.setStartCaption(rec.isLocalAssistant() && noAgents
+                ? "▶   Start with the built-in assistant"
+                : "▶   Start analysing");
+        welcomePanel.setRecommendation(rec.displayName, rec.reason);
+        welcomePanel.setPostureText(postureFooterText());
+    }
+
+    private String postureFooterText() {
+        PrivacyPosture posture = PostureController.getInstance().current();
+        if (posture == PrivacyPosture.ON_PREMISES) {
+            return "🔒 On-premises — your data stays on this machine";
+        }
+        if (posture == PrivacyPosture.PSEUDONYMISED) {
+            return "🔒 Pseudonymised — identifiers tokenised before send";
+        }
+        return "Standard — cloud agents allowed";
+    }
+
     private void applyFrameSize() {
         if (frame == null) {
             return;
         }
         applyingFrameSize = true;
-        frame.setSize(savedSizeFor(currentCard));
+        // Never open smaller than the frame's minimum, so a stale persisted size
+        // (or the 240px parse floor) can't re-clip the content on a card switch.
+        Dimension target = savedSizeFor(currentCard);
+        Dimension min = frame.getMinimumSize();
+        if (min != null) {
+            target = new Dimension(
+                    Math.max(target.width, min.width),
+                    Math.max(target.height, min.height));
+        }
+        frame.setSize(target);
         applyingFrameSize = false;
         frame.revalidate();
     }
@@ -1261,6 +1407,13 @@ public class AiRootPanel extends JPanel implements ChatSurface {
         List<ModelEntry> visible = MergeFunction.applyVisibility(merged, overrides, today);
         ProviderRegistry newRegistry = ProviderRegistry.fromMerged(visible, today);
         newRegistry = applyProviderStatuses(newRegistry, live, failed);
+        // Re-inject the CLI agents the merge layer doesn't know about, so a
+        // manual refresh doesn't drop them from the default-on dropdown.
+        ProviderEntry cliProvider = buildCliProviderEntry(
+                agentLauncher != null ? agentLauncher.detectAgents() : null);
+        if (cliProvider != null) {
+            newRegistry = newRegistry.withProvider(cliProvider);
+        }
 
         int newCount = 0;
         int removedCount = 0;
@@ -1374,6 +1527,103 @@ public class AiRootPanel extends JPanel implements ChatSurface {
         } catch (Exception ex) {
             return java.util.Collections.emptyMap();
         }
+    }
+
+    /**
+     * Extra environment merged into every native/proxy provider-agent launch.
+     * Carries the live LiteLLM proxy port so the Python client targets the
+     * actual sidecar port (verifier #2), and the active budget ceiling so the
+     * native paths enforce it in-loop (verifier #1). Evaluated at launch time.
+     */
+    private Map<String, String> buildLaunchEnv() {
+        Map<String, String> env = new LinkedHashMap<String, String>();
+        int port = imagejai.ImageJAIPlugin.liteLlmProxyPort();
+        if (port > 0) {
+            env.put("IMAGEJAI_LITELLM_PORT", Integer.toString(port));
+        }
+        if (settings != null && settings.budgetCeilingEnabled
+                && settings.budgetCeilingUsd > 0.0) {
+            env.put("IMAGEJAI_BUDGET_CEILING_USD",
+                    Double.toString(settings.budgetCeilingUsd));
+        }
+        return env;
+    }
+
+    /** Persist a pin toggle to models_local.yaml and re-apply it immediately. */
+    private void persistPin(ModelEntry entry, boolean nowPinned) {
+        if (entry == null) {
+            return;
+        }
+        try {
+            ModelsLocalLoader loader = new ModelsLocalLoader(
+                    ModelsLocalLoader.resolveDefaultPath());
+            loader.setPinned(entry.providerId(), entry.modelId(), nowPinned);
+        } catch (Exception ex) {
+            IJ.log("[ImageJAI] Could not persist pin for " + entry.providerId()
+                    + "/" + entry.modelId() + ": " + ex.getMessage());
+        }
+        applyStartupOverrides();
+    }
+
+    /**
+     * Re-merge the bundled curated catalogue with persisted user overrides
+     * (pins/hides) and push the result to the picker — no network. Makes pinned
+     * favourites apply on startup and immediately after a pin toggle (#6).
+     */
+    private void applyStartupOverrides() {
+        Map<String, ModelsLocalLoader.Override> overrides = loadUserOverrides();
+        if (overrides == null || overrides.isEmpty()) {
+            return;
+        }
+        List<ModelEntry> curated = loadCuratedEntries();
+        if (curated.isEmpty()) {
+            return;
+        }
+        LocalDate today = LocalDate.now();
+        Map<String, MergeFunction.LiveResult> noLive =
+                java.util.Collections.<String, MergeFunction.LiveResult>emptyMap();
+        List<ModelEntry> merged = MergeFunction.merge(curated, noLive, overrides, today);
+        List<ModelEntry> visible = MergeFunction.applyVisibility(merged, overrides, today);
+        ProviderRegistry reg = ProviderRegistry.fromMerged(visible, today);
+        ProviderEntry cliProvider = buildCliProviderEntry(
+                agentLauncher != null ? agentLauncher.detectAgents() : null);
+        if (cliProvider != null) {
+            reg = reg.withProvider(cliProvider);
+        }
+        providerRegistry = reg;
+        if (modelPicker != null) {
+            modelPicker.setRegistry(reg);
+        }
+    }
+
+    /**
+     * Run a one-off discovery refresh in the background at startup (honours
+     * {@code Settings.refreshOnStartup}, verifier #9), applying the outcome to
+     * the picker on the EDT. Bundled models stay visible until it completes.
+     */
+    private void triggerStartupRefresh() {
+        javax.swing.SwingWorker<ModelPickerButton.RefreshOutcome, Void> worker =
+                new javax.swing.SwingWorker<ModelPickerButton.RefreshOutcome, Void>() {
+                    @Override
+                    protected ModelPickerButton.RefreshOutcome doInBackground() {
+                        return runRefreshOffEdt();
+                    }
+
+                    @Override
+                    protected void done() {
+                        try {
+                            ModelPickerButton.RefreshOutcome outcome = get();
+                            if (outcome != null && outcome.newRegistry != null
+                                    && modelPicker != null) {
+                                modelPicker.setRegistry(outcome.newRegistry);
+                            }
+                        } catch (Exception ex) {
+                            IJ.log("[ImageJAI] Startup model refresh failed: "
+                                    + ex.getMessage());
+                        }
+                    }
+                };
+        worker.execute();
     }
 
     private static Set<String> collectModelKeys(ProviderRegistry registry) {
