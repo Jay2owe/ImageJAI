@@ -26,33 +26,33 @@ public class ProviderDiscoveryTest {
     @Test
     public void anthropicEndpointHasCorrectAuthHeaders() {
         Map<String, String> creds = new LinkedHashMap<String, String>();
-        creds.put("anthropic", "sk-ant-test");
+        creds.put("anthropic", "anthropic-test-key");
         Map<String, ProviderDiscovery.Endpoint> endpoints =
                 ProviderDiscovery.defaultEndpoints(creds);
         ProviderDiscovery.Endpoint anthropic = endpoints.get("anthropic");
         assertNotNull(anthropic);
         assertEquals("https://api.anthropic.com/v1/models", anthropic.url());
-        assertEquals("sk-ant-test", anthropic.headers().get("x-api-key"));
+        assertEquals("anthropic-test-key", anthropic.headers().get("x-api-key"));
         assertEquals("2023-06-01", anthropic.headers().get("anthropic-version"));
     }
 
     @Test
     public void geminiEndpointEmbedsKeyInQueryString() {
         Map<String, String> creds = new LinkedHashMap<String, String>();
-        creds.put("gemini", "AIza-test");
+        creds.put("gemini", "gemini-test-key");
         Map<String, ProviderDiscovery.Endpoint> endpoints =
                 ProviderDiscovery.defaultEndpoints(creds);
-        assertTrue(endpoints.get("gemini").url().endsWith("?key=AIza-test"));
+        assertTrue(endpoints.get("gemini").url().endsWith("?key=gemini-test-key"));
     }
 
     @Test
     public void groqAndCerebrasUseBearerAuth() {
         Map<String, String> creds = new LinkedHashMap<String, String>();
-        creds.put("groq", "gsk_test");
+        creds.put("groq", "groq-test-key");
         creds.put("cerebras", "cer-test");
         Map<String, ProviderDiscovery.Endpoint> endpoints =
                 ProviderDiscovery.defaultEndpoints(creds);
-        assertEquals("Bearer gsk_test",
+        assertEquals("Bearer groq-test-key",
                 endpoints.get("groq").headers().get("Authorization"));
         assertEquals("Bearer cer-test",
                 endpoints.get("cerebras").headers().get("Authorization"));
@@ -75,7 +75,7 @@ public class ProviderDiscoveryTest {
         Map<String, ProviderDiscovery.Endpoint> endpoints = new LinkedHashMap<String, ProviderDiscovery.Endpoint>();
         endpoints.put("openai", new ProviderDiscovery.Endpoint("openai",
                 "https://api.openai.com/v1/models",
-                Collections.singletonMap("Authorization", "Bearer sk-test")));
+                Collections.singletonMap("Authorization", "Bearer openai-test-key")));
         ProviderDiscovery.HttpFetcher fetcher = (endpoint, timeout) ->
                 new ProviderDiscovery.HttpFetcher.HttpResult(200,
                         "{\"data\":[{\"id\":\"gpt-5\"},{\"id\":\"gpt-5-mini\"}]}");
