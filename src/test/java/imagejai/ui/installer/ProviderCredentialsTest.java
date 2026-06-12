@@ -25,11 +25,11 @@ public class ProviderCredentialsTest {
     public void saveApiKeyRoundTripsAndReportsHasCredentials() throws IOException {
         Path tmp = Files.createTempDirectory("creds-test");
         ProviderCredentials store = new ProviderCredentials(tmp);
-        store.saveApiKey("anthropic", "sk-ant-test-12345");
+        store.saveApiKey("anthropic", "anthropic-test-key-12345");
 
         assertTrue(store.hasCredentials("anthropic"));
         Map<String, String> read = store.read("anthropic");
-        assertEquals("sk-ant-test-12345", read.get("ANTHROPIC_API_KEY"));
+        assertEquals("anthropic-test-key-12345", read.get("ANTHROPIC_API_KEY"));
     }
 
     @Test
@@ -59,7 +59,7 @@ public class ProviderCredentialsTest {
     public void clearRemovesEnvFile() throws IOException {
         Path tmp = Files.createTempDirectory("creds-test");
         ProviderCredentials store = new ProviderCredentials(tmp);
-        store.saveApiKey("openai", "sk-test");
+        store.saveApiKey("openai", "openai-test-key");
         assertTrue(store.hasCredentials("openai"));
         store.clear("openai");
         assertFalse(store.hasCredentials("openai"));

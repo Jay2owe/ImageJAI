@@ -41,7 +41,7 @@ public class MultiProviderPanelTest {
     public void savedCredentialFlipsCardToReady() throws IOException {
         Path tmp = Files.createTempDirectory("panel-test");
         ProviderCredentials creds = new ProviderCredentials(tmp);
-        creds.saveApiKey("anthropic", "sk-ant-test");
+        creds.saveApiKey("anthropic", "anthropic-test-key");
         MultiProviderPanel panel = new MultiProviderPanel(ProviderRegistry.empty(), creds,
                 providerKey -> null);
         assertEquals(ProviderCard.Status.READY, panel.statusOf("anthropic"));
@@ -75,7 +75,7 @@ public class MultiProviderPanelTest {
         MultiProviderPanel panel = new MultiProviderPanel(ProviderRegistry.empty(), creds,
                 providerKey -> null);
         assertEquals(ProviderCard.Status.NEEDS_SETUP, panel.statusOf("groq"));
-        creds.saveApiKey("groq", "gsk-test");
+        creds.saveApiKey("groq", "groq-test-key");
         panel.refreshAll();
         assertEquals(ProviderCard.Status.READY, panel.statusOf("groq"));
     }
