@@ -192,6 +192,24 @@ When using Claude Code in this project directory, a context hook (`context_hook.
 
 Requires the TCP command server to be enabled in Fiji (Settings > Advanced > "Enable TCP command server"). Gracefully degrades when Fiji is not running.
 
+## Citing ImageJAI
+
+If you use ImageJAI in published work, please cite it. Citation metadata is in [`CITATION.cff`](CITATION.cff) (use GitHub's "Cite this repository" button). A Zenodo DOI will be added here once the first tagged release is archived.
+
+When you use ImageJAI to invoke specific tools, also cite the underlying methods (StarDist, Cellpose, TrackMate, etc.) as you would when using them directly.
+
 ## License
 
-BSD-2-Clause
+BSD 3-Clause License. See [`LICENSE`](LICENSE) for the full text.
+
+(Earlier ImageJAI versions shipped under BSD-2-Clause. Versions from the next tagged release onwards ship under BSD-3-Clause.)
+
+## Acknowledgements
+
+Developed by Jamie Malcolm in the [Brancaccio Lab](https://www.ukdri.ac.uk/labs/brancaccio-lab) at the [UK Dementia Research Institute](https://ukdri.ac.uk/centres/imperial), Imperial College London.
+
+This work was supported by the UK Dementia Research Institute, which receives its core funding from the UK Medical Research Council, the Alzheimer's Society, and Alzheimer's Research UK.
+
+Built on the [Fiji](https://fiji.sc/) / [ImageJ](https://imagej.net/) ecosystem and on third-party language-model providers (Google Gemini, OpenAI, Ollama). Users running ImageJAI with cloud LLM backends should be aware that image content and prompts are transmitted to the chosen provider; see the provider's privacy policy.
+
+Note: this plugin contains AI components that interact with third-party LLM services. Before institutional or commercial use, confirm your data-handling requirements with your local information-governance contact.

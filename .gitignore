@@ -1,3 +1,64 @@
+# Secrets / credentials
 .env
 .env.*
 !.env.example
+secrets/
+.secrets/
+
+# Build output
+target/
+
+# Python caches / artifacts
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+
+# Editor / OS
+*.swp
+*~
+.DS_Store
+Thumbs.db
+
+# Backups
+*.bak
+*.premerge.bak
+
+# Dropbox sync artifacts
+*conflicted copy*
+*.tmp.[0-9]*
+.conflicted_quarantine/
+
+# Local scratch / generated
+/AGENTS.md
+/CLAUDE.md
+/GEMINI.md
+.claude/
+.codex-m2/
+.codex_pytest_tmp/
+.tmp/
+AI_Exports/
+# graphify knowledge graph artifacts (regenerated on commit/deploy, no LLM needed)
+graphify-out/
+**/graphify-out/
+.graphify_*
+agent/.tmp/
+agent/.claude/
+agent/OpenCL-log.txt
+agent/*.log
+agent/hs_err_*.log
+agent/*.stackdump
+agent/learnings.md
+agent/to-learn.md
+agent_implementation_plan.txt
+agent/gemma4_31b/.plugin_cache/
+agent/providers/proxy.port
+agent/providers/proxy.port.lock
+test-scripts/
+
+# Excluded from public release: unpublished lab research + publication-prep
+agent/scripts/
+agent/work_in_progress/
+docs/ImageJAI-Publication/
+scripts/make_lab_bundle.ps1

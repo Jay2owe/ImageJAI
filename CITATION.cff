@@ -1,0 +1,32 @@
+cff-version: 1.2.0
+message: "If you use ImageJAI in published work, please cite it as below."
+type: software
+title: "ImageJAI: a conversational AI assistant for ImageJ/Fiji"
+abstract: >-
+  Fiji/ImageJ plugin that adds a conversational AI assistant to ImageJ.
+  Supports natural-language control, multi-step pipeline generation,
+  vision reasoning over open images, multi-specialist agents
+  (segmentation, measurement, visualisation, statistics, hypothesis-driven
+  analysis), parameter exploration, teaching mode, and a TCP command
+  server for external agent integration. Compatible with Google Gemini,
+  OpenAI-compatible endpoints, and local Ollama backends.
+authors:
+  - given-names: Jamie
+    family-names: Malcolm
+    orcid: "https://orcid.org/0009-0008-3862-2776"
+    affiliation: "UK Dementia Research Institute at Imperial College London"
+    email: jamiemalcolm12@gmail.com
+repository-code: "https://github.com/Jay2owe/ImageJAI"
+url: "https://github.com/Jay2owe/ImageJAI"
+license: BSD-3-Clause
+version: "0.2.0"
+keywords:
+  - fiji
+  - imagej
+  - microscopy
+  - llm
+  - ai-assistant
+  - natural-language-interface
+  - agentic
+# TODO: add `doi:` once Zenodo concept DOI is minted from the first
+# tagged GitHub Release.
