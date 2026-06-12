@@ -292,6 +292,45 @@ def _simple_yaml_parse(text):
 # ---------------------------------------------------------------------------
 
 RECIPE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "recipes")
+USER_RECIPE_DIR_ENV = "IMAGEJAI_USER_RECIPES_DIR"
+RECIPE_DIRS_ENV = "IMAGEJAI_RECIPE_DIRS"
+
+
+def recipe_directories(recipe_dir=None):
+    """Return recipe directories in discovery order.
+
+    By default ImageJAI searches user-saved recipes first
+    (Fiji.app/ImageJAI/recipes, passed in IMAGEJAI_USER_RECIPES_DIR by
+    the Java launcher), then bundled recipes in agent/recipes. Passing
+    recipe_dir keeps the old override behavior and searches only that
+    directory.
+    """
+    if recipe_dir:
+        if isinstance(recipe_dir, (list, tuple)):
+            raw_dirs = [str(d) for d in recipe_dir if str(d).strip()]
+        else:
+            raw_dirs = [str(recipe_dir)]
+    else:
+        raw_dirs = []
+        env_dirs = os.environ.get(RECIPE_DIRS_ENV, "").strip()
+        if env_dirs:
+            raw_dirs.extend([d for d in env_dirs.split(os.pathsep) if d.strip()])
+        else:
+            user_dir = os.environ.get(USER_RECIPE_DIR_ENV, "").strip()
+            if user_dir:
+                raw_dirs.append(user_dir)
+            raw_dirs.append(RECIPE_DIR)
+
+    dirs = []
+    seen = set()
+    for raw in raw_dirs:
+        path = os.path.abspath(os.path.expanduser(str(raw)))
+        key = os.path.normcase(os.path.normpath(path))
+        if key in seen:
+            continue
+        seen.add(key)
+        dirs.append(path)
+    return dirs
 
 
 def load_recipe(path):
@@ -303,23 +342,24 @@ def load_recipe(path):
 
 
 def load_all_recipes(recipe_dir=None):
-    """Load all .yaml/.yml recipe files from the recipes directory.
+    """Load all .yaml/.yml recipe files from configured recipe directories.
 
     Returns:
         List of recipe dicts.
     """
-    d = recipe_dir or RECIPE_DIR
-    if not os.path.isdir(d):
-        return []
-
     recipes = []
-    for fname in sorted(os.listdir(d)):
-        if fname.endswith((".yaml", ".yml")) and not fname.startswith("."):
-            path = os.path.join(d, fname)
-            recipe = load_recipe(path)
-            if recipe:
-                recipe["_source_file"] = fname
-                recipes.append(recipe)
+    for d in recipe_directories(recipe_dir):
+        if not os.path.isdir(d):
+            continue
+        for fname in sorted(os.listdir(d)):
+            if fname.endswith((".yaml", ".yml")) and not fname.startswith("."):
+                path = os.path.join(d, fname)
+                recipe = load_recipe(path)
+                if recipe:
+                    recipe["_source_file"] = fname
+                    recipe["_source_dir"] = d
+                    recipe["_source_path"] = path
+                    recipes.append(recipe)
     return recipes
 
 
@@ -722,7 +762,7 @@ def main():
     parser.add_argument("--recipe-dir", help="Override recipe directory path")
     args = parser.parse_args()
 
-    recipe_dir = args.recipe_dir or RECIPE_DIR
+    recipe_dir = args.recipe_dir
 
     if args.validate:
         results = validate_all(recipe_dir)
@@ -764,7 +804,7 @@ def main():
     if args.list:
         recipes = load_all_recipes(recipe_dir)
         if not recipes:
-            print("No recipes found in %s" % recipe_dir)
+            print("No recipes found in %s" % ", ".join(recipe_directories(recipe_dir)))
             return
         if args.json:
             summary = [{"id": r.get("id"), "name": r.get("name"), "domain": r.get("domain"),

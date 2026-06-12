@@ -9,35 +9,102 @@ Usage:
     python probe_plugin.py --list                          # list all cached
 """
 
-import socket
 import json
 import os
-import sys
 import re
+import socket
+import sys
 
 HOST = "localhost"
 PORT = 7746
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 CACHE_DIR = os.path.join(SCRIPT_DIR, ".tmp", "plugin_args")
 
+# REGRESSION GUARD: Past probe features mixed terse legacy names, CLI-only behavior, and raw TCP cache logic.
+# The fix: add clear helper names to __all__, keep compatibility aliases, and test cache plus CLI routing.
+__all__ = [
+    "cache_key",
+    "probe_plugin",
+    "lookup_cached_probe",
+    "search_cached_probes",
+    "list_cached_probes",
+    "format_probe_result",
+    "probe_plugins",
+    "probe",
+    "lookup",
+    "search",
+    "list_cached",
+    "format_result",
+    "send",
+]
 
-def send(cmd):
-    """Send a JSON command to ImageJ TCP server."""
+
+def _load_ij_probe_command():
+    """Return ij.probe_command when ij.py is importable in this context."""
+    try:
+        from ij import probe_command
+        return probe_command
+    except ImportError:
+        pass
+
+    try:
+        from .ij import probe_command
+        return probe_command
+    except ImportError:
+        return None
+
+
+def _load_ij_imagej_command():
+    """Return ij.imagej_command when ij.py is importable in this context."""
+    try:
+        from ij import imagej_command
+        return imagej_command
+    except ImportError:
+        pass
+
+    try:
+        from .ij import imagej_command
+        return imagej_command
+    except ImportError:
+        return None
+
+
+def _raw_send(cmd):
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     s.settimeout(15)
-    s.connect((HOST, PORT))
-    s.sendall((json.dumps(cmd) + "\n").encode("utf-8"))
-    data = b""
-    while True:
-        try:
-            chunk = s.recv(65536)
-            if not chunk:
+    try:
+        s.connect((HOST, PORT))
+        s.sendall((json.dumps(cmd) + "\n").encode("utf-8"))
+        data = b""
+        while True:
+            try:
+                chunk = s.recv(65536)
+                if not chunk:
+                    break
+                data += chunk
+            except socket.timeout:
                 break
-            data += chunk
-        except socket.timeout:
-            break
-    s.close()
-    return json.loads(data.decode("utf-8"))
+        return json.loads(data.decode("utf-8"))
+    finally:
+        try:
+            s.close()
+        except Exception:
+            pass
+
+
+def send(cmd):
+    """Legacy low-level helper for sending a JSON command to ImageJAI."""
+    imagej_command = _load_ij_imagej_command()
+    if imagej_command is not None:
+        return imagej_command(cmd, timeout=15)
+    return _raw_send(cmd)
+
+
+def _request_probe_command(plugin_name):
+    probe_command = _load_ij_probe_command()
+    if probe_command is not None:
+        return probe_command(plugin_name)
+    return send({"command": "probe_command", "plugin": plugin_name})
 
 
 def cache_key(plugin_name):
@@ -46,40 +113,40 @@ def cache_key(plugin_name):
     return safe + ".json"
 
 
-def probe(plugin_name, force=False):
+def probe_plugin(plugin_name, force=False):
     """Probe a plugin to discover its parameters. Caches the result."""
     os.makedirs(CACHE_DIR, exist_ok=True)
 
     # Check cache first
     cpath = os.path.join(CACHE_DIR, cache_key(plugin_name))
     if not force and os.path.exists(cpath):
-        with open(cpath) as f:
+        with open(cpath, encoding="utf-8") as f:
             return json.load(f)
 
     # Probe via TCP
-    resp = send({"command": "probe_command", "plugin": plugin_name})
+    resp = _request_probe_command(plugin_name)
     if not resp.get("ok"):
         return {"plugin": plugin_name, "error": resp.get("error", "unknown")}
 
     result = resp["result"]
 
     # Cache it
-    with open(cpath, "w") as f:
+    with open(cpath, "w", encoding="utf-8") as f:
         json.dump(result, f, indent=2)
 
     return result
 
 
-def lookup(plugin_name):
+def lookup_cached_probe(plugin_name):
     """Look up cached plugin info without probing."""
     cpath = os.path.join(CACHE_DIR, cache_key(plugin_name))
     if os.path.exists(cpath):
-        with open(cpath) as f:
+        with open(cpath, encoding="utf-8") as f:
             return json.load(f)
     return None
 
 
-def search(keyword):
+def search_cached_probes(keyword):
     """Search cached plugin args by keyword."""
     if not os.path.exists(CACHE_DIR):
         return []
@@ -89,7 +156,7 @@ def search(keyword):
         if not fname.endswith(".json"):
             continue
         fpath = os.path.join(CACHE_DIR, fname)
-        with open(fpath) as f:
+        with open(fpath, encoding="utf-8") as f:
             data = json.load(f)
         # Search in plugin name, field labels, macro keys, options
         blob = json.dumps(data).lower()
@@ -98,7 +165,7 @@ def search(keyword):
     return results
 
 
-def list_cached():
+def list_cached_probes():
     """List all cached plugin probes."""
     if not os.path.exists(CACHE_DIR):
         return []
@@ -107,13 +174,13 @@ def list_cached():
         if not fname.endswith(".json"):
             continue
         fpath = os.path.join(CACHE_DIR, fname)
-        with open(fpath) as f:
+        with open(fpath, encoding="utf-8") as f:
             data = json.load(f)
         results.append(data.get("plugin", fname))
     return results
 
 
-def format_result(result):
+def format_probe_result(result):
     """Pretty-print a probe result."""
     if not result:
         return "  (no result)"
@@ -184,6 +251,19 @@ def format_result(result):
     return "\n".join(lines)
 
 
+def probe_plugins(plugin_names, force=False):
+    """Probe multiple plugins and return their results in input order."""
+    return [probe_plugin(name, force=force) for name in plugin_names]
+
+
+# Compatibility names kept for existing agent code and scripts.
+probe = probe_plugin
+lookup = lookup_cached_probe
+search = search_cached_probes
+list_cached = list_cached_probes
+format_result = format_probe_result
+
+
 def main():
     if len(sys.argv) < 2:
         print(__doc__)
@@ -193,9 +273,9 @@ def main():
 
     if args[0] == "--lookup":
         for name in args[1:]:
-            result = lookup(name)
+            result = lookup_cached_probe(name)
             if result:
-                print(format_result(result))
+                print(format_probe_result(result))
             else:
                 print("Not cached: {}".format(name))
 
@@ -203,16 +283,16 @@ def main():
         if len(args) < 2:
             print("Usage: python probe_plugin.py --search KEYWORD")
             sys.exit(1)
-        results = search(args[1])
+        results = search_cached_probes(args[1])
         if results:
             print("Found {} cached plugins matching '{}':" .format(len(results), args[1]))
             for r in results:
-                print(format_result(r))
+                print(format_probe_result(r))
         else:
             print("No cached plugins matching '{}'".format(args[1]))
 
     elif args[0] == "--list":
-        cached = list_cached()
+        cached = list_cached_probes()
         if cached:
             print("Cached plugins ({}):" .format(len(cached)))
             for name in cached:
@@ -222,20 +302,20 @@ def main():
 
     elif args[0] == "--batch":
         for name in args[1:]:
-            result = probe(name)
-            print(format_result(result))
+            result = probe_plugin(name)
+            print(format_probe_result(result))
 
     elif args[0] == "--force":
         # Force re-probe (ignore cache)
         for name in args[1:]:
-            result = probe(name, force=True)
-            print(format_result(result))
+            result = probe_plugin(name, force=True)
+            print(format_probe_result(result))
 
     else:
         # Single plugin probe
         name = " ".join(args)
-        result = probe(name)
-        print(format_result(result))
+        result = probe_plugin(name)
+        print(format_probe_result(result))
 
 
 if __name__ == "__main__":

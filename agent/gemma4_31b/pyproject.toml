@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gemma4_31b_agent"
+version = "0.1.0"
+description = "Shared ImageJAI rich terminal agent that drives Fiji through the TCP server."
+requires-python = ">=3.9"
+dependencies = [
+    "ollama>=0.3.0",
+    "numpy>=1.20",
+    "pillow>=9.0",
+    "pyyaml>=6.0",
+]
+
+[project.scripts]
+gemma4_31b_agent = "gemma4_31b.__main__:main"
+imagejai_agent = "gemma4_31b.__main__:main"
+
+[tool.setuptools]
+packages = ["gemma4_31b"]
+
+[tool.setuptools.package-dir]
+gemma4_31b = "."

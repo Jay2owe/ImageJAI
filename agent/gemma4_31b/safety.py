@@ -84,17 +84,18 @@ def check_macro(code: str) -> str | None:
 
     folder = active_image.current_export_folder()
     if folder is None:
-        if active_image.current_active_image() is None:
+        if not active_image.is_any_image_open():
             return (
-                "No image is open (the active-image cache is empty). Open an image "
-                "first, or launch the agent with --export-dir PATH to set a "
-                "fallback folder for macro outputs."
+                "No image is open. Open an image first, or launch the agent "
+                "with --export-dir PATH to set a fallback folder for macro "
+                "outputs."
             )
         return (
-            "The active image is a sample (no file on disk, e.g. 'Blobs'). "
-            "Sample images cannot run macros that write files into AI_Exports/ "
-            "because there is no folder to sit next to. Save the image first, "
-            "or launch the agent with --export-dir PATH. The image IS open."
+            "The active image has no file on disk (a sample like 'Blobs', a "
+            "File > New image, or an unsaved duplicate), so there is no folder "
+            "to sit AI_Exports/ next to. The image IS open — save it to disk "
+            "first, or launch the agent with --export-dir PATH to set a "
+            "fallback output folder."
         )
     folder_abs = os.path.abspath(folder)
 

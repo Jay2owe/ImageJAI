@@ -83,9 +83,11 @@ steps:
     validate: ""
     notes: >
       Median 3D with radius=2 smooths noise and voxel edges while preserving
-      object boundaries. This makes the 3D render much cleaner. Do NOT use
-      Gaussian Blur here — it blurs edges too much. Do NOT skip — raw data
-      looks noisy in volume rendering.
+      object boundaries FOR COMPACT objects. This makes the 3D render much cleaner.
+      For DIFFUSE/WISPY signal (e.g. App NL-G-F amyloid, filamentous structures) use
+      radius=1 — radius=2 (5x5x5) erodes thin wisps and the render loses the fine
+      structure visible in the MIP. Do NOT use Gaussian Blur — it blurs edges too much.
+      Do NOT skip — raw data looks noisy in volume rendering.
 
   - id: 2
     description: "Convert to 8-bit for rendering"
@@ -109,7 +111,10 @@ steps:
       Do NOT Z-interpolate before 3Dscript — interpolated masked data (0→signal→0)
       produces dim slices that fall below 3Dscript's alpha threshold, making the
       object invisible. Feed the raw z-stack instead. Input MUST be 8-bit.
-      Output resolution equals input image XY dimensions.
+      Output resolution equals input image XY dimensions — KEEP IT <= ~2000px square:
+      3Dscript Batch Animation silently produces no output above ~2050px (no error,
+      no window, and a same-named save is skipped leaving a stale render). Verify the
+      saved render's dimensions and frame count after rendering.
     capture_after: true
     validate: "Animation stack should show smooth rotation of the 3D object."
 
@@ -163,6 +168,16 @@ known_issues:
   - condition: "Bitwise AND corrupts 16-bit masked data"
     symptom: "Intensity values wrong after masking — only low byte preserved"
     fix: "Use imageCalculator('Multiply create stack', ...) with a 0/1 mask, never AND."
+  - condition: "3Dscript Batch Animation produces nothing for large volumes"
+    symptom: "Macro returns success but no rendered stack window appears; render TIF is stale"
+    fix: "Output ceiling ~2050px square. Scale so output is <=2000px. Verify saved render dims."
+  - condition: "Diffuse/wispy structure missing from 3Dscript render but present in MIP"
+    symptom: "Render looks sparse/blobby vs the MIP — thin filaments gone"
+    fix: "Use Median 3D radius=1 (not 2); set display-range min to match the MIP (don't over-clip).
+          A volume render makes dim voxels transparent, so gentle prep is the fix, not the renderer."
+  - condition: "Bio-Formats macro importer opens all channels despite c_begin/c_end"
+    symptom: "Single-channel crop has nC×nZ slices instead of nZ"
+    fix: "Extract with run('Duplicate...','duplicate channels=N'); check nSlices. series_ option is 1-based."
 
 related_recipes:
   - name: "3D Ring Render (Ch4 around DAPI)"

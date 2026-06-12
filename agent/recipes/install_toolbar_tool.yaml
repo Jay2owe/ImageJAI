@@ -1,0 +1,183 @@
+name: Install Fiji Toolbar Button
+id: install_toolbar_tool
+description: >
+  Create and install a custom toolbar button (a "tool macro") in Fiji. The
+  button appears on the ImageJ toolbar and runs the supplied macro body on
+  click. Optionally persists across restarts by appending to StartupMacros.
+  See references/fiji-toolbar-tools-reference.md for tool syntax, the icon
+  mini-language, and worked examples.
+domain: agent_ergonomics
+difficulty: beginner
+
+preconditions:
+  image_type: [any]
+  min_channels: 0
+  needs_stack: false
+  needs_calibration: false
+  notes: >
+    No image needed to install the button itself. The button's macro body
+    may have its own preconditions — those fire only when the user clicks.
+
+parameters:
+  - name: tool_label
+    label: "Button label (appears on hover)"
+    type: string
+    default: "My Action"
+    description: >
+      Short label. Must be unique across installed tools to avoid silent
+      overwrite. The word 'Tool' and the icon separator are added
+      automatically — do NOT include them here.
+
+  - name: icon
+    label: "Icon string (16x16 bitmap)"
+    type: string
+    default: "C037T4e14M"
+    description: >
+      Icon mini-language. C<rgb> sets colour, T<xy><size><char> draws one
+      character. Example: 'C037T4e14B' = blue 'B' at (4,14). See §2 of the
+      reference for F/R/O/L/P primitives.
+
+  - name: macro_body
+    label: "Macro code that runs on click"
+    type: string
+    default: 'run("Gaussian Blur...", "sigma=2");'
+    description: >
+      Raw ImageJ macro code — one or many statements. Keep short; for heavy
+      logic, save a separate .ijm file and call runMacro(path) here.
+
+  - name: toolset_name
+    label: "Toolset filename (without extension)"
+    type: string
+    default: "agent_tools"
+    description: >
+      Creates/appends to <Fiji>/macros/toolsets/<name>.ijm. Group related
+      buttons under the same toolset; they install together.
+
+  - name: persistent
+    label: "Survive Fiji restart?"
+    type: boolean
+    default: false
+    description: >
+      If true, also appends the tool macro to StartupMacros.fiji.ijm so Fiji
+      reinstalls it on every startup. Safe — appends, does not overwrite.
+
+steps:
+  - id: 1
+    description: "Write and install the tool macro (this session)"
+    macro: |
+      // This recipe runs through run_script (Groovy), not macro.
+      // Use the Groovy block below via: python ij.py script --file <path>.groovy
+    decision_point: false
+    decision_logic: ""
+    capture_after: false
+    validate: "After install, the toolbar should show the new icon."
+    groovy: |
+      import ij.IJ
+      import ij.plugin.MacroInstaller
+
+      def label   = "${tool_label}"
+      def icon    = "${icon}"
+      def body    = '''${macro_body}'''
+      def toolset = "${toolset_name}"
+
+      def header  = 'macro "' + label + ' Tool - ' + icon + '" {\n'
+      def footer  = '\n}\n'
+      def toolMacro = header + body + footer
+
+      def fiji = IJ.getDirectory("imagej")
+      def tsDir = new File(fiji, "macros/toolsets")
+      tsDir.mkdirs()
+      def tsFile = new File(tsDir, toolset + ".ijm")
+
+      // Append if the toolset exists, else create. Strip any prior macro with
+      // the exact same label to avoid silent overwrite surprises.
+      def existing = tsFile.exists() ? tsFile.text : ""
+      def stripped = existing.replaceAll(
+          /(?ms)^macro\s+"\Q${label}\E\s+Tool\s+-\s+[^"]*"\s*\{.*?^\}\s*/,
+          ""
+      )
+      tsFile.text = stripped + "\n" + toolMacro
+
+      new MacroInstaller().installFile(tsFile.absolutePath)
+      IJ.showStatus("Installed toolbar button: " + label)
+
+  - id: 2
+    description: "Persist across restarts (optional)"
+    macro: |
+      // Only runs if persistent=true. Appends the same tool macro to
+      // StartupMacros.fiji.ijm so Fiji reinstalls it on startup.
+    decision_point: true
+    decision_logic: >
+      If persistent=false, skip this step. If true, run the Groovy block to
+      append. Always append — never overwrite StartupMacros.
+    capture_after: false
+    validate: "After restart (not tested here), the button should reappear."
+    when: "persistent == true"
+    groovy: |
+      import ij.IJ
+
+      def label = "${tool_label}"
+      def icon  = "${icon}"
+      def body  = '''${macro_body}'''
+      def toolMacro = 'macro "' + label + ' Tool - ' + icon + '" {\n' + body + '\n}\n'
+
+      def startup = new File(IJ.getDirectory("imagej"),
+                             "macros/StartupMacros.fiji.ijm")
+      if (!startup.exists()) {
+          startup = new File(IJ.getDirectory("imagej"),
+                             "macros/StartupMacros.ijm")
+      }
+      // Append with a separator so we don't fuse into the last macro.
+      startup << "\n\n// --- agent-installed tool ---\n" + toolMacro
+
+  - id: 3
+    description: "Verify the button exists"
+    macro: |
+      // The toolbar does not expose its contents through the macro language.
+      // Verification is by capture_image + visual check, or by clicking the
+      // button and observing the expected action.
+    decision_point: false
+    decision_logic: ""
+    capture_after: true
+    validate: >
+      Toolbar screenshot should show the new icon at the right end of the
+      toolbar (or in the >> toolset menu if grouped). Hover text = label.
+
+outputs:
+  - type: side_effect
+    description: "New button on the Fiji toolbar. Runs macro_body on click."
+  - type: file
+    description: "<Fiji>/macros/toolsets/<toolset_name>.ijm written/updated."
+  - type: file
+    description: >
+      If persistent=true: <Fiji>/macros/StartupMacros.fiji.ijm appended.
+
+known_issues:
+  - condition: "Button does nothing when clicked"
+    symptom: "Click does not run the expected macro; no error"
+    fix: >
+      The tool header was malformed. Check the ' Tool ' spacing and the
+      ' - ' separator before the icon. See §6 of
+      references/fiji-toolbar-tools-reference.md.
+  - condition: "Icon is invisible (white on white)"
+    symptom: "New toolbar slot exists but is blank"
+    fix: "Prepend C000 (black) or another C<rgb> at the start of icon."
+  - condition: "Name collision with an existing button"
+    symptom: "Another button disappeared after install"
+    fix: >
+      Tool labels must be unique. Prefix agent-installed tools with
+      'agent_' or the recipe id to avoid clashing with user tools.
+  - condition: "Path contains spaces and install silently fails"
+    symptom: "No error, but the toolbar does not change"
+    fix: >
+      Always build paths from IJ.getDirectory('imagej') + subpath so the
+      absolute path is clean. The recipe already does this in Groovy.
+  - condition: "Button runs fine but output lands in wrong folder"
+    symptom: "Measurement files saved next to the .ijm file, not AI_Exports/"
+    fix: >
+      Macro bodies are not exempt from the AI_Exports/ rule. Have the macro
+      resolve output paths from the active image's directory.
+
+tags:
+  [toolbar, tool, button, macro, toolset, StartupMacros, install, shortcut,
+   automation, agent_ergonomics]

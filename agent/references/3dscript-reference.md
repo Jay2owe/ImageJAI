@@ -118,7 +118,7 @@ echo 'From frame 0 to frame 100 rotate by 360 degrees horizontally' > .tmp/rotat
 python ij.py macro 'selectWindow("img"); run("Batch Animation", "animation=[/path/.tmp/rotate.animation.txt]");'
 ```
 
-- **Batch Animation**: headless → AVI stack (101 frames, output size = input size)
+- **Batch Animation**: headless → stack (highest frame + 1 frames, output size = input size; keep ≤~2000px, see §9)
 - **Interactive Animation**: GUI + 3D canvas (linked pair — closing one breaks the other)
 - Menu command: `run("Interactive Animation")` (NOT "Interactive Raycaster")
 - Batch creates its own renderer — use animation text for ALL settings
@@ -295,10 +295,20 @@ change channel 1 color to (255, 0, 0)                    # (R, G, B)
 
 ## §9 Tips
 
-- Batch Animation outputs 101 frames — frame numbers are proportional
+- Batch Animation outputs (highest frame number + 1) frames — e.g. `... to frame 180` → 181 frames
 - Scale XY before rendering (output size = input size)
+- **OUTPUT-SIZE CEILING ~2050px square:** above it, Batch Animation SILENTLY produces no output
+  window — the macro returns success, no error, no dialog, but no rendered stack. A same-named
+  `saveAs` is then skipped, leaving a STALE older render. Keep scaled volumes ≤ ~2000px in XY,
+  and always verify the saved render's dimensions + frame count after a batch. (Tested: 1600/1800/
+  2000 work; 2100/2236 produce nothing.) Window detection via list-diff works fine ≤2000px (render
+  is synchronous there).
 - Avoid Z-interpolation (masked data falls below alpha threshold)
 - 8-bit required
+- **Diffuse/wispy signal:** a volume render makes low-intensity voxels transparent (alpha ∝
+  intensity), so it always looks sparser than the MIP. Keep wisps bright in prep (gentle display
+  range, Median 3D radius=1 not 2) rather than hand-tuning alpha. The `change channel N alpha to
+  (...)` / `alpha gamma` keywords can abort the whole Batch Animation (0 frames) — avoid them.
 - Front clipping to large value (1000) fully hides a channel
 - Bounding box tightening works as spatial crop
 - Example scripts: `Macros and Scripts/3D Scripts/`

@@ -1,0 +1,181 @@
+name: Even-Brightness Time-Lapse Video
+id: normalise_timeseries_video
+description: >
+  Make a time-series play as an evenly-lit video where the start looks like the
+  end, even when the raw signal bleaches, drifts, or oscillates. Each frame's
+  DISPLAY contrast is auto-stretched independently (per-frame saturation), then
+  baked into an RGB movie saved as AVI. Pixel values in the source are never
+  modified — this is a display-only normalisation for presentation, NOT for
+  quantification. Works on a single open image or batches every .tif in a folder.
+domain: visualization
+difficulty: intermediate
+
+preconditions:
+  image_type: [8-bit, 16-bit]
+  min_channels: 1
+  needs_stack: true
+  needs_calibration: false
+  notes: >
+    Designed for single-channel grayscale/pseudocolour time stacks (the common
+    Incucyte/widefield case). The current display LUT is preserved into the RGB
+    movie, so the video matches what is on screen. Multi-channel composites are
+    out of scope — flatten/merge to a single display first.
+
+decision_points:
+  - question: "Is the brightness change real biology or an artefact?"
+    logic: >
+      CHECK FIRST with per-frame mean intensity (pixels.py stack_stats, or a
+      Groovy loop of ImageProcessor.getStatistics). A monotonic fade is usually
+      photobleaching/illumination drift — safe to flatten. A dip-and-recover or
+      periodic swing may be a real reporter rhythm (e.g. pCry1-Cry1-GFP circadian
+      signal sampled over days). Flattening HIDES that rhythm. Confirm with the
+      user that they want a presentation-only flat video before proceeding, and
+      keep the raw stack for any measurement.
+  - question: "PNG or JPEG compression?"
+    logic: >
+      PNG is lossless but huge (~275 MB for 143x1536x1152 RGB) and can stutter
+      on playback. JPEG is ~15-25 MB, plays everywhere, and lossy artefacts are
+      irrelevant for a flat presentation movie. Prefer JPEG for batches; PNG only
+      if pixel-perfect frames are needed.
+
+parameters:
+  - name: saturation
+    label: "Per-frame saturation (%)"
+    type: numeric
+    default: 0.35
+    range: [0.0, 5.0]
+    description: >
+      Fraction of pixels clipped at each end when auto-stretching each frame's
+      display range (ImageJ ContrastEnhancer, normalize=OFF). 0.35 matches the
+      default Enhance Contrast. Higher = punchier but clips more highlights.
+  - name: fps
+    label: "Playback frame rate"
+    type: numeric
+    default: 25
+    range: [1, 60]
+    description: "AVI frame rate. 10 fps is gentle; 25 fps is smooth/cine."
+  - name: compression
+    label: "AVI compression"
+    type: choice
+    default: "JPEG"
+    options: ["JPEG", "PNG", "None"]
+    description: "JPEG small+shareable; PNG lossless+large; None uncompressed."
+  - name: output_dir
+    label: "Output subfolder"
+    type: string
+    default: "AI_Exports"
+    description: "Created next to the source image(s). Never write elsewhere."
+
+steps:
+  - id: 1
+    description: "Inspect the per-frame brightness trend before deciding to flatten"
+    macro: |
+      // Groovy (run via: python ij.py script --file trend.groovy):
+      //   imp = ij.IJ.getImage(); st = imp.getStack();
+      //   for (i in [1, (int)(st.size()/2), st.size()])
+      //     { imp.setSlice(i); s = imp.getProcessor().getStatistics();
+      //       println("$i mean=${s.mean} min=${s.min} max=${s.max}") }
+      // println output lands in `python ij.py console`, NOT the Log window.
+    decision_point: true
+    decision_logic: "See decision_points: monotonic fade = artefact; dip/recover or periodic = possible real rhythm."
+    capture_after: false
+    validate: "You can state whether brightness fades, rises, or oscillates."
+
+  - id: 2
+    description: "Build per-frame display-normalised RGB movie(s) and save as AVI"
+    language: groovy
+    script: |
+      import ij.*
+      import ij.process.*
+      import ij.plugin.ContrastEnhancer
+      import java.io.File
+
+      // ---- config ----
+      double saturation = 0.35
+      int fps = 25
+      String compression = "JPEG"          // JPEG | PNG | None
+      String outName = "AI_Exports"
+      boolean BATCH = true                  // false = just the active image
+      String dir = "/full/path/to/folder"   // batch source folder (use forward slashes)
+      int MAXPERRUN = 5                     // keep each call < ij.py's 180 s socket timeout
+
+      ContrastEnhancer ce = new ContrastEnhancer()
+      ce.setNormalize(false)                // DISPLAY-ONLY: never rewrites pixels
+      ce.setUseStackHistogram(false)        // per-frame, not global
+
+      def makeMovie = { ImagePlus imp, String outDir ->
+          def stack = imp.getStack()
+          int n = stack.getSize()
+          int w = imp.getWidth(); int h = imp.getHeight()
+          def lut = imp.getProcessor().getLut()          // preserve on-screen LUT
+          def out = new ImageStack(w, h)
+          for (i in 1..n) {
+              def ip = stack.getProcessor(i).duplicate()  // copy -> source safe
+              ip.setColorModel(lut)
+              ce.stretchHistogram(ip, saturation)         // sets display range only
+              out.addSlice(ip.convertToRGB())             // bake LUT + range into RGB
+          }
+          def res = new ImagePlus("tmp_rgb", out)
+          def cal = res.getCalibration(); cal.fps = fps; res.setCalibration(cal)
+          new File(outDir).mkdirs()
+          String op = outDir + "/" + imp.getTitle().replaceAll(/(?i)\.tif+$/, "") + "_normalised.avi"
+          new File(op).delete()
+          IJ.run(res, "AVI... ", "compression=" + compression + " frame=" + fps + " save=[" + op + "]")
+          res.close()
+          return op
+      }
+
+      if (!BATCH) {
+          def imp = IJ.getImage()
+          String outDir = new File(imp.getOriginalFileInfo().directory, outName).getPath()
+          println("saved " + makeMovie(imp, outDir))
+      } else {
+          String outDir = dir + "/" + outName
+          // idempotent + chunked: skip wells whose AVI already exists; >100 MB output = stale, redo.
+          def todo = new File(dir).listFiles()
+              .findAll { it.isFile() && it.getName().toLowerCase().endsWith(".tif") }
+              .findAll { !it.getName().toUpperCase().contains("(DEAD)") }   // skip flagged dead wells
+              .sort { it.getName() }
+              .findAll { f ->
+                  def of = new File(outDir + "/" + f.getName().replaceAll(/(?i)\.tif$/, "") + "_normalised.avi")
+                  return !of.exists() || of.length() > 100L*1024*1024
+              }
+          int done = 0
+          for (f in todo.take(MAXPERRUN)) {
+              try {
+                  def imp = IJ.openImage(f.getAbsolutePath())     // headless, not shown
+                  if (imp == null || imp.getStackSize() < 2) { if (imp!=null) imp.close(); continue }
+                  println("OK " + makeMovie(imp, outDir)); imp.close(); done++
+              } catch (Throwable t) { println("ERROR " + f.getName() + ": " + t) }
+          }
+          println("processed=" + done + " remaining=" + (todo.size() - done))
+      }
+    decision_point: false
+    decision_logic: ""
+    capture_after: true
+    validate: >
+      Montage first/middle/last frames of an output movie (Make Substack +
+      Make Montage) and confirm all read at the same brightness. AVI file size
+      should be >0; JPEG ~15-25 MB, PNG ~275 MB at 143x1536x1152.
+
+known_issues:
+  - issue: "ij.py 'script' has a hard 180 s client socket timeout (no --timeout flag)."
+    fix: >
+      Batch many files in idempotent chunks (MAXPERRUN ~5): skip wells whose AVI
+      already exists, then re-invoke the same script until remaining=0. Each call
+      stays well under 180 s and the run is resumable.
+  - issue: "Filename drift between a one-off save and the batch."
+    fix: >
+      The batch names outputs '<tif-basename>_normalised.avi'. A hand-written
+      one-off path may differ (e.g. dropping '_timestack'), leaving a duplicate.
+      Use the same naming or delete the stray file afterwards.
+  - issue: "Flattened movie destroys the intensity narrative."
+    fix: >
+      Per-frame stretch removes bleaching AND real rhythms. NEVER quantify from
+      the RGB movie — measure on the raw stack. State this to the user.
+  - issue: "Groovy println does not appear in the Log window."
+    fix: "Read it via `python ij.py console` (System.out), not `ij.py log`."
+  - issue: "convertToRGB renders grey when the source LUT is a grayscale ramp."
+    fix: >
+      That is faithful (isColorLut=false). If a colour movie is wanted, apply a
+      colour LUT to the source display first; getProcessor().getLut() is preserved.

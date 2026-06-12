@@ -1,0 +1,305 @@
+name: 3D Segmentation (StarDist via TrackMate)
+id: 3d_segmentation_stardist_trackmate
+description: >
+  Segment 3D objects using StarDist 2D applied slice-by-slice through TrackMate,
+  then measure per-object 3D statistics via mcib3d. Uses a Z-to-T dimension swap
+  trick so TrackMate's StarDist detector processes each z-slice as a 2D frame,
+  then exports a label image with globally unique IDs across all slices. Superior
+  to threshold-based 3D segmentation for dense or touching nuclei/cells.
+domain: 3d
+difficulty: advanced
+
+preconditions:
+  image_type: [8-bit, 16-bit]
+  min_channels: 1
+  needs_stack: true
+  needs_calibration: true
+  notes: >
+    Requires a z-stack (single-channel or multi-channel). Calibration is needed
+    for volume/surface measurements in real units. Requires the StarDist, CSBDeep,
+    and TrackMate update sites. The mcib3d / 3D ImageJ Suite is needed for
+    per-object measurements. The image must be shown (not hidden) for TrackMate
+    to process it.
+
+parameters:
+  - name: target_channel
+    label: "Channel to segment (1-based)"
+    type: numeric
+    default: 1
+    range: [1, 10]
+    description: "Which channel contains the objects to segment. Only relevant for multi-channel images."
+
+  - name: prob_thresh
+    label: "Probability threshold"
+    type: numeric
+    default: 0.5
+    range: [0.0, 1.0]
+    description: "StarDist detection confidence. Lower (0.3) = more detections (may include noise). Higher (0.7) = fewer, more confident detections."
+
+  - name: nms_thresh
+    label: "NMS overlap threshold"
+    type: numeric
+    default: 0.4
+    range: [0.0, 1.0]
+    description: "Non-maximum suppression threshold. Controls how much overlap is allowed between neighbouring detections. Lower = less overlap."
+
+steps:
+  - id: 1
+    description: "Check image dimensions and calibration"
+    macro: |
+      // Agent should run:
+      //   python ij.py state
+      //   python ij.py metadata
+      // Verify image is a z-stack (NSlices > 1), check calibration,
+      // note number of channels.
+    decision_point: true
+    decision_logic: >
+      If the image has no calibration, set it before proceeding — volume and
+      surface measurements will be meaningless without voxel dimensions.
+      If the image is a time series (not z-stack), verify the user wants
+      slice-by-slice segmentation rather than tracking.
+    capture_after: true
+    validate: "Confirm a z-stack is open with correct dimensions (C, Z, T) and calibration."
+
+  - id: 2
+    description: "Extract the target channel (if multi-channel)"
+    macro: |
+      // For multi-channel images, extract the channel to segment:
+      run("Duplicate...", "title=StarDist_input duplicate channels=${target_channel}");
+    decision_point: false
+    decision_logic: ""
+    capture_after: true
+    validate: "A single-channel z-stack should be open, titled StarDist_input."
+
+  - id: 3
+    description: "Swap Z and T dimensions for TrackMate"
+    macro: |
+      // TrackMate's StarDist detector runs 2D StarDist per timepoint.
+      // By swapping Z->T, each z-slice becomes a "frame" for 2D detection.
+      getDimensions(w, h, c, z, t);
+      Stack.setDimensions(c, 1, z * t);
+      // IMPORTANT: the image must remain visible (shown) for TrackMate.
+    decision_point: false
+    decision_logic: ""
+    capture_after: false
+    validate: "Image should now show NSlices=1, NFrames=original_z. Check with Properties."
+
+  - id: 4
+    description: "Run TrackMate with StarDist detector"
+    macro: |
+      // This step must be done via Groovy/script because TrackMate's
+      // programmatic API is needed (not a simple macro command).
+      // Use: python ij.py script --file scripts/stardist_trackmate.groovy
+      // Or inline Groovy via: python ij.py script '...'
+      //
+      // The Groovy script should:
+      //   1. Get the active image
+      //   2. Create TrackMate Model + Settings
+      //   3. Set StarDistDetectorFactory with prob/nms thresholds
+      //   4. Set a dummy tracker (SparseLAPTrackerFactory)
+      //   5. Run trackmate.process()
+      //   6. Export label image via LabelImgExporter.createLabelImagePlus()
+      //      with LABEL_IS_INDEX_MOVIE_UNIQUE painting
+      //   7. Restore Z/T dimensions on the label image
+    decision_point: true
+    decision_logic: >
+      If TrackMate fails with "StarDist not found", the user needs to install
+      the CSBDeep and StarDist update sites. If it fails with memory errors,
+      the image may be too large — consider cropping or downsampling. If
+      detection count is too low/high, adjust prob_thresh.
+    capture_after: true
+    validate: "A label image should be produced with unique integer IDs. Apply glasbey_on_dark LUT to visualize."
+
+  - id: 5
+    description: "Restore Z dimensions on label image"
+    macro: |
+      // The label image comes out with dimensions (1, 1, z*t).
+      // Restore to (1, z, 1) so it's a proper z-stack again.
+      selectImage("Label Image");
+      getDimensions(w, h, c, slices, frames);
+      Stack.setDimensions(1, frames, 1);
+      // Copy calibration from original image
+    decision_point: false
+    decision_logic: ""
+    capture_after: true
+    validate: "Label image should be a z-stack with correct Z dimension. Apply glasbey_on_dark LUT."
+
+  - id: 6
+    description: "Visualize label image with glasbey LUT"
+    macro: |
+      run("glasbey_on_dark");
+    decision_point: false
+    decision_logic: ""
+    capture_after: true
+    validate: "Each object should appear as a distinct color. Scroll through z-slices to verify 3D coverage."
+
+  - id: 7
+    description: "Count detected objects"
+    macro: |
+      // Count labels by finding the max pixel value in the label image
+      Stack.getStatistics(voxelCount, mean, min, max, std);
+      nObjects = max;
+      print("StarDist detected " + nObjects + " objects across " + nSlices + " slices");
+    decision_point: true
+    decision_logic: >
+      If the count seems too high, raise prob_thresh (e.g. 0.6-0.7) or raise
+      nms_thresh to merge more overlapping detections. If too low, lower
+      prob_thresh (e.g. 0.3). If objects span multiple slices and should be
+      merged, the MOVIE_UNIQUE label painting already handles this — each
+      object tracked across frames gets one ID.
+    capture_after: false
+    validate: "Object count should be reasonable for the image content."
+
+  - id: 8
+    description: "Run mcib3d per-object measurements"
+    macro: |
+      // mcib3d measures 3D properties from the label image, redirecting
+      // intensity measurements to the original (raw) channel image.
+      //
+      // Via macro, use 3D Objects Counter in "label mode" or use Groovy:
+      //   python ij.py script '
+      //     import mcib3d.geom.Objects3DPopulation
+      //     import mcib3d.image3d.ImageHandler
+      //     label = ImageHandler.wrap(ij.IJ.getImage())
+      //     pop = new Objects3DPopulation(label)
+      //     // measure against raw channel image
+      //   '
+      //
+      // Or use the simpler approach:
+      // 1. Set the label image as a mask
+      // 2. Run "3D Objects Counter" with redirect to the raw channel
+      run("3D Objects Counter", "threshold=1 min.=10 max.=9999999 objects surfaces statistics redirect=[StarDist_input]");
+    decision_point: true
+    decision_logic: >
+      The redirect image must be the raw (unprocessed) channel — this ensures
+      intensity measurements reflect true signal, not processed values. If
+      mcib3d is not available, fall back to 3D Objects Counter. If neither is
+      available, use 2D measurements per slice as a last resort.
+    capture_after: false
+    validate: "Statistics table should have one row per 3D object with Volume, Surface, Mean, IntDen, Centroid."
+
+  - id: 9
+    description: "Review and export results"
+    macro: |
+      // Agent should run: python ij.py results
+      // Check for reasonable values:
+      //   - Volume range matches expected cell/nucleus size
+      //   - No extreme outliers suggesting merged objects
+      //   - Centroid coordinates within image bounds
+      // Then run: python auditor.py
+    decision_point: false
+    decision_logic: ""
+    capture_after: false
+    validate: "Results should have per-object rows. Run auditor.py to check measurement sanity."
+
+groovy_reference: |
+  // Full Groovy script for steps 3-5 (run via: python ij.py script --file)
+  // This is the recommended approach — avoids macro limitations.
+  import ij.IJ
+  import ij.ImagePlus
+  import fiji.plugin.trackmate.Model
+  import fiji.plugin.trackmate.Settings
+  import fiji.plugin.trackmate.TrackMate
+  import fiji.plugin.trackmate.Logger
+  import fiji.plugin.trackmate.action.LabelImgExporter
+  import fiji.plugin.trackmate.detection.DetectorKeys
+  import fiji.plugin.trackmate.stardist.StarDistDetectorFactory
+  import fiji.plugin.trackmate.tracking.jaqaman.SparseLAPTrackerFactory
+
+  imp = IJ.getImage()
+  cal = imp.getCalibration()?.copy()
+
+  // Remember original dims
+  int c = imp.getNChannels()
+  int z = imp.getNSlices()
+  int t = imp.getNFrames()
+
+  // Swap Z -> T
+  imp.setDimensions(c, 1, z * t)
+
+  // Configure TrackMate
+  Model model = new Model()
+  model.setLogger(Logger.VOID_LOGGER)
+  Settings settings = new Settings(imp)
+  settings.addAllAnalyzers()
+
+  settings.detectorFactory = new StarDistDetectorFactory()
+  settings.detectorSettings = settings.detectorFactory.getDefaultSettings()
+  settings.detectorSettings.put(DetectorKeys.KEY_TARGET_CHANNEL, 1)
+  // Optional: set prob/nms thresholds if the factory supports it
+
+  settings.trackerFactory = new SparseLAPTrackerFactory()
+  settings.trackerSettings = settings.trackerFactory.getDefaultSettings()
+
+  TrackMate trackmate = new TrackMate(model, settings)
+  if (!trackmate.checkInput() || !trackmate.process()) {
+      IJ.log("TrackMate failed: " + trackmate.getErrorMessage())
+      imp.setDimensions(c, z, t)  // restore
+      return
+  }
+
+  // Export label image
+  ImagePlus labelImp = LabelImgExporter.createLabelImagePlus(
+      trackmate, false, false,
+      LabelImgExporter.LabelIdPainting.LABEL_IS_INDEX_MOVIE_UNIQUE)
+
+  // Restore original image dims
+  imp.setDimensions(c, z, t)
+
+  // Fix label image dims
+  labelImp.setDimensions(1, z * t, 1)
+  labelImp.setTitle("Label Image")
+  if (cal != null) labelImp.setCalibration(cal)
+  labelImp.show()
+  IJ.run(labelImp, "glasbey_on_dark", "")
+
+  // Count
+  double maxVal = 0
+  for (int s = 1; s <= labelImp.getStackSize(); s++) {
+      double m = labelImp.getStack().getProcessor(s).getStats().max
+      if (m > maxVal) maxVal = m
+  }
+  IJ.log("StarDist detected " + (int)maxVal + " objects in " + z + " slices")
+
+outputs:
+  - type: image
+    description: "Label image: each voxel contains the integer ID of its parent object (0 = background). Apply glasbey_on_dark LUT to visualize."
+  - type: image
+    description: "Objects map from 3D Objects Counter (if mcib3d used)."
+  - type: results_table
+    description: "Per-object 3D statistics: Volume, Surface area, Mean intensity, IntDen, Centroid (x,y,z)."
+
+known_issues:
+  - condition: "StarDist/CSBDeep not installed"
+    symptom: "ClassNotFoundException for StarDistDetectorFactory"
+    fix: "Help > Update > Manage Update Sites > enable CSBDeep and StarDist > Apply > Restart Fiji."
+
+  - condition: "TrackMate-StarDist version mismatch"
+    symptom: "NoSuchMethodException or LinkageError during TrackMate setup"
+    fix: "TrackMate-StarDist 1.2.x works with TrackMate 7.x. TrackMate-StarDist 2.x needs TrackMate 8.x. Update both together."
+
+  - condition: "Image not shown (hidden)"
+    symptom: "TrackMate fails or processes zero frames"
+    fix: "The image must be visible (imp.show()) for TrackMate to process it. Do not hide it."
+
+  - condition: "Z and T swapped incorrectly"
+    symptom: "Only one slice processed, or label image has wrong dimensions"
+    fix: "Ensure original image has Z > 1. After swap: NSlices=1, NFrames=original_Z. After label export, restore: NSlices=original_Z, NFrames=1."
+
+  - condition: "Objects not linked across z-slices"
+    symptom: "Same cell gets different IDs in adjacent slices"
+    fix: "Use LABEL_IS_INDEX_MOVIE_UNIQUE painting mode. TrackMate's tracker links detections across 'frames' (which are actually z-slices), giving each 3D object one ID."
+
+  - condition: "Large images cause memory errors"
+    symptom: "OutOfMemoryError during StarDist inference"
+    fix: "Crop to a region of interest, or increase Fiji memory via Edit > Options > Memory & Threads."
+
+  - condition: "16-bit label image overflows at 65535 objects"
+    symptom: "Label values wrap around for images with >65535 objects"
+    fix: "Extremely rare in practice. If needed, process sub-regions separately."
+
+  - condition: "mcib3d not available for measurements"
+    symptom: "3D ImageJ Suite commands not found"
+    fix: "Enable the 3D ImageJ Suite update site, or fall back to 3D Objects Counter with threshold=1 on the label image."
+
+tags: [3d, stardist, trackmate, segmentation, deep_learning, nuclei, cells, z_stack, label_image, mcib3d]

@@ -1,0 +1,56 @@
+name: TrackMate Cell Intensity Traces
+description: >
+  Extract per-cell mean intensity over time from a TrackMate label image,
+  using the label image as a mask on the corresponding intensity image.
+  Exports a CSV (Frame, CellID, MeanIntensity, Area) and generates two
+  plots: individual cell traces and population mean +/- SEM.
+domain: tracking, measurement, time-series
+tags: [trackmate, label-image, intensity, traces, time-series, plotting]
+
+preconditions:
+  - TrackMate label image (32-bit, exported with Track ID labels)
+  - Matching intensity image (same dimensions and number of frames)
+  - Both images must be open in ImageJ
+
+parameters:
+  min_frames:
+    description: Minimum number of frames a cell must be tracked to appear in plots
+    default: 50
+    notes: >
+      Set relative to total frames. For 111 frames, 50 is reasonable.
+      For 20 frames, use 10.
+
+steps:
+  - description: Export label image from TrackMate
+    notes: >
+      In TrackMate: run tracking, then use Action > Export label image.
+      Set "Label ID is: Track ID". This gives each tracked cell a consistent
+      integer label across frames. Untracked spots get unique IDs above max track ID.
+
+  - description: Extract per-cell intensity using label mask
+    notes: >
+      For each frame, iterate all pixels. Where label > 0, accumulate
+      intensity from the matching intensity image pixel. Compute mean
+      per label per frame. Export as CSV.
+    code: >
+      // See Groovy script: TrackMate_Cell_Traces.groovy
+      // Installed to Fiji scripts/Plugins/
+
+  - description: Plot individual traces and population mean
+    notes: >
+      Filter to cells tracked >= min_frames. Plot each cell as a coloured
+      line (turbo colourmap). Separately plot population mean +/- SEM.
+
+validation:
+  - CSV should have one row per cell per frame it appears in
+  - Cell IDs should be consistent across frames (same cell = same ID)
+  - Check for outlier cells with abnormally high/low intensity (possible segmentation errors)
+  - Population mean should be relatively stable if no biological trend expected
+
+known_issues:
+  - TrackMate label export uses Track ID + 1 internally; untracked spots
+    get IDs above the max track ID, appearing as single-frame entries
+  - Large stacks (>500 frames) may need the Groovy script split into batches
+    to avoid memory issues
+  - The intensity image must have the same number of frames as the label image;
+    if TrackMate was run on a subset, duplicate that subset first

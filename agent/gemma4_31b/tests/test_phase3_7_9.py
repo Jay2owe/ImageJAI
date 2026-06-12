@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -11,6 +12,7 @@ if str(PACKAGE_ROOT) not in sys.path:
 
 from gemma4_31b import harvest_recipe, tools_fiji, tools_jobs  # noqa: E402
 import recipe_search  # noqa: E402
+import run_recipe  # noqa: E402
 
 
 def test_run_macro_does_not_hidden_probe(monkeypatch):
@@ -216,3 +218,57 @@ def test_harvest_recipe_filters_to_current_session_and_success(monkeypatch, tmp_
     assert recipe["parameters"][0]["range"] == [0, 6]
     assert recipe["parameters"][0]["image_specific"] is True
     assert recipe["known_issues"]
+
+
+def test_recipe_search_loads_user_recipes_before_bundled(tmp_path, monkeypatch):
+    user = tmp_path / "Fiji.app" / "ImageJAI" / "recipes"
+    bundled = tmp_path / "agent" / "recipes"
+    user.mkdir(parents=True)
+    bundled.mkdir(parents=True)
+    (user / "saved_recipe.yaml").write_text(
+        "name: Saved Recipe\nid: saved_recipe\ndescription: user\ndomain: general\nsteps: []\n",
+        encoding="utf-8",
+    )
+    (bundled / "bundled_recipe.yaml").write_text(
+        "name: Bundled Recipe\nid: bundled_recipe\ndescription: bundled\ndomain: general\nsteps: []\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv(
+        "IMAGEJAI_RECIPE_DIRS",
+        os.pathsep.join([str(user), str(bundled)]),
+    )
+
+    recipes = recipe_search.load_all_recipes()
+
+    assert [r["id"] for r in recipes] == ["saved_recipe", "bundled_recipe"]
+    assert Path(recipes[0]["_source_dir"]) == user
+
+
+def test_run_recipe_resolves_names_from_user_recipe_dir(tmp_path, monkeypatch):
+    user = tmp_path / "Fiji.app" / "ImageJAI" / "recipes"
+    user.mkdir(parents=True)
+    recipe = user / "saved_recipe.yaml"
+    recipe.write_text(
+        "name: Saved Recipe\nid: saved_recipe\ndescription: user\ndomain: general\nsteps: []\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("IMAGEJAI_RECIPE_DIRS", str(user))
+
+    assert Path(run_recipe.recipe_path("saved_recipe")) == recipe
+    assert Path(run_recipe.recipe_path(str(recipe))) == recipe
+
+
+def test_harvest_recipe_saves_to_user_recipe_dir(tmp_path, monkeypatch):
+    user = tmp_path / "Fiji.app" / "ImageJAI" / "recipes"
+    monkeypatch.setenv("IMAGEJAI_USER_RECIPES_DIR", str(user))
+
+    path = Path(harvest_recipe.save_recipe_file({
+        "name": "Saved From Session",
+        "id": "saved_from_session",
+        "description": "desc",
+        "domain": "general",
+        "steps": [],
+    }))
+
+    assert path.parent == user
+    assert path.name == "saved_from_session.yaml"

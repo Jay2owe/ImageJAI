@@ -20,8 +20,11 @@ preconditions:
 # Use these by default unless the user requests otherwise.
 
 quality_settings:
-  median_radius: 2           # Median 3D radius — smooths edges while preserving ring shape
-  scale_factor: 15           # XY upscale — 50px crop becomes 750px render output
+  median_radius: 2           # Median 3D radius for COMPACT rings/blobs. Use radius=1 for
+                             # DIFFUSE/WISPY signal (e.g. App NL-G-F plaques) — radius=2 erodes
+                             # thin wisps and the render ends up looking nothing like the MIP.
+  scale_factor: 15           # XY upscale. BUT keep final output <= ~2000px square: 3Dscript
+                             # Batch Animation SILENTLY produces no output above ~2050px.
   interpolation: Bicubic     # Best quality scaling
   rendering: "combined transparency"  # Channels affect each other's opacity — proper depth
   lighting: on               # Enables shading for 3D depth perception
@@ -259,15 +262,19 @@ steps:
       with no neighbouring blue nuclei cluttering the view.
 
   - id: 6
-    description: "Median 3D filter (radius=2 for smooth edges)"
+    description: "Median 3D filter (radius=2 for compact rings, radius=1 for diffuse/wispy)"
     code: |
       selectWindow("C4-ring_crop");
-      run("Median 3D...", "x=2 y=2 z=2");
+      run("Median 3D...", "x=2 y=2 z=2");   // radius=1 for diffuse/wispy plaques
       selectWindow("C1-ring_crop");
       run("Median 3D...", "x=2 y=2 z=2");
     notes: >
       Median filter preserves ring edges while removing noise.
-      Radius=2 gives noticeably smoother edges than radius=1.
+      Radius=2 gives smoother edges than radius=1 FOR COMPACT RING/BLOB structures.
+      BUT for DIFFUSE/WISPY signal (App NL-G-F amyloid, filamentous deposits) use
+      radius=1 — a radius=2 (5x5x5) median erodes any wisp thinner than ~2px, and the
+      render loses the fine structure you see in the MIP. Compare the render's face-on
+      frame to the data MIP; if wisps are missing, drop to radius=1.
       Do NOT use Gaussian Blur — it blurs the ring edges too much.
       Do NOT skip filtering — raw data looks noisy in 3D.
 
@@ -297,7 +304,7 @@ steps:
       MUST reapply LUTs after 8-bit conversion — they always reset.
 
   - id: 9
-    description: "Scale up 15× XY with Bicubic interpolation"
+    description: "Scale up XY with Bicubic interpolation (keep output <= ~2000px)"
     code: |
       selectWindow("ring_merged");
       run("Scale...", "x=15 y=15 z=1.0 interpolation=Bicubic process create title=ring_render");
@@ -307,6 +314,11 @@ steps:
       Field of view remains ~34 um; effective pixel size = 0.019 um/px (19 nm/px).
       Bicubic gives the smoothest result. Do NOT Z-interpolate — interpolated
       masked data falls below 3Dscript's alpha threshold.
+      CEILING: keep the scaled output <= ~2000px square. 3Dscript Batch Animation
+      silently produces NO output window above ~2050px (macro returns success, no error,
+      no dialog, but no rendered stack — and a same-named saveAs is then skipped, leaving
+      a STALE older render in place). For a "greater upscale" request, ~1980px is the max.
+      Always verify the saved render's dimensions and frame count after the batch.
 
   - id: 10
     description: "Save pre-render TIF"
@@ -394,6 +406,14 @@ known_issues:
   - "Do NOT Z-interpolate for 3Dscript — interpolated data falls below alpha threshold"
   - "Do NOT create custom multi-axis animations without testing — they can produce bizarre results"
   - "Stick to rotation (simple 360° vertical) and spin (proven multi-axis wobble) animations"
+  - "DIFFUSE/WISPY signal: median radius=2 erodes thin wisps — use radius=1 (see step 6)"
+  - "Display-range min too high clips faint wisps to black BEFORE rendering — match the min used
+     in the candidate MIPs you judged from (a volume render also makes dim voxels transparent, so
+     a render always looks sparser than the MIP; the fix is gentle prep, not the renderer)"
+  - "3Dscript Batch Animation produces NO output above ~2050px square (silent) — keep output <=2000px"
+  - "Failed Batch Animation leaves a STALE older render under the same filename — verify dims after batch"
+  - "Bio-Formats macro importer IGNORES c_begin/c_end channel range — extract a channel with
+     run('Duplicate...','duplicate channels=N'); always check nSlices. Series option is 1-based."
 
 # ============================================================
 # VALIDATION
@@ -408,3 +428,13 @@ validation:
   - "ROI overlay shows yellow rectangle at correct position on green+blue composite"
   - "Pre-render TIFs open correctly with Green+Blue LUTs"
   - "Spin animation covers multiple viewing angles (wobble + continuous rotation)"
+  - "Render face-on frame MATCHES the data MIP — fine wisps/structure preserved, not eroded"
+  - "Saved render has expected dims (<=2000px) and frame count (not a stale older file)"
+
+# ============================================================
+# OPTIONAL DELIVERABLE — source-context overlay
+# ============================================================
+# Useful to show WHERE each render came from in the section. Per source series, make a
+# full-field MIP: ch4 (plaque) Green + ch1 (DAPI) Blue, flatten to RGB, draw a yellow
+# rectangle (Line Width ~5) at the crop region used for that render, label it, and save
+# as <series_name>.png. Lets the user locate each rendered plaque within the SCN.

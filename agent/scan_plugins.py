@@ -17,9 +17,19 @@ HOST = "localhost"
 PORT = 7746
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 TMP_DIR = os.path.join(SCRIPT_DIR, ".tmp")
-FIJI_HOME = "C:/Users/jamie/OneDrive - Imperial College London/ImageJ/Fiji.app"
-FIJI_PLUGINS = FIJI_HOME + "/plugins"
-DB_XML_GZ = FIJI_HOME + "/db.xml.gz"
+
+
+def _configured_fiji_home():
+    for name in ("FIJI_HOME", "IMAGEJ_HOME", "FIJI_APP_HOME"):
+        value = os.environ.get(name)
+        if value:
+            return os.path.abspath(os.path.expanduser(value))
+    return ""
+
+
+FIJI_HOME = _configured_fiji_home()
+FIJI_PLUGINS = os.path.join(FIJI_HOME, "plugins") if FIJI_HOME else ""
+DB_XML_GZ = os.path.join(FIJI_HOME, "db.xml.gz") if FIJI_HOME else ""
 
 
 def send(cmd):

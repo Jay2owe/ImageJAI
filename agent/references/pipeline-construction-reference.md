@@ -14,7 +14,7 @@ Sources: `imagej.net/tutorials/batch-processing-with-ij-macro`,
 `imagej.net/scripting/parameters`, `clij.github.io`, Bio-Formats macro
 extensions Javadoc, scikit-image regionprops, PyImageJ docs, ImageJ Auto
 Threshold plugin. ImageJAI-specific sections cross-reference
-`src/main/java/uk/ac/ucl/imagej/ai/engine/PipelineBuilder.java`.
+`src/main/java/imagejai/engine/PipelineBuilder.java`.
 
 Invoke from the agent:
 `python ij.py macro '<code>'` — run ImageJ macro (.ijm) code.
@@ -734,7 +734,7 @@ function logParameters(outputDir) {
 
 ## §18 ImageJAI PipelineBuilder API
 
-**Source**: `src/main/java/uk/ac/ucl/imagej/ai/engine/PipelineBuilder.java`
+**Source**: `src/main/java/imagejai/engine/PipelineBuilder.java`
 
 ### PipelineStep Fields
 

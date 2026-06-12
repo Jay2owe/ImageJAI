@@ -1,0 +1,94 @@
+name: Remove Drift Correction Borders
+id: remove_drift_borders
+description: >
+  After running "Correct 3D Drift", the registered output is padded with black
+  borders that shift position each frame (each frame was translated differently).
+  This recipe detects the content region per frame, translates all channels so
+  content aligns to (0,0), then crops to the smallest common size — eliminating
+  all black borders without a uniform crop that wastes data.
+domain: preprocessing
+difficulty: beginner
+
+preconditions:
+  image_type: [8-bit, 16-bit]
+  min_channels: 1
+  needs_stack: true
+  needs_calibration: false
+  notes: >
+    Must be a hyperstack with multiple frames (time dimension). Run this
+    AFTER Correct 3D Drift. The image should have at least one non-black
+    channel to detect borders against.
+
+parameters:
+  - name: detect_channel
+    label: "Detection channel"
+    type: numeric
+    default: 2
+    range: [1, 10]
+    description: "Channel to use for border detection. Pick the brightest channel (e.g. GFP = 2)."
+
+  - name: scan_step
+    label: "Scan step (pixels)"
+    type: numeric
+    default: 10
+    range: [1, 50]
+    description: "Pixel step for scanning edges. Higher = faster but less precise. 10 is fine for most images."
+
+  - name: safety_margin
+    label: "Safety margin (pixels)"
+    type: numeric
+    default: 2
+    range: [0, 20]
+    description: "Extra pixels trimmed from each edge to catch sub-pixel border residue."
+
+steps:
+  - description: "Run the Groovy border removal script"
+    type: script
+    language: groovy
+    file: "scripts/remove_drift_borders.groovy"
+    notes: >
+      The script scans every frame to find the bounding box of non-black pixels
+      (on the detection channel), translates all channels per frame so content
+      starts at the origin, then crops to the minimum common content size.
+      Progress is logged to the ImageJ Log window.
+
+  - description: "Verify — scrub through the stack"
+    type: manual
+    notes: >
+      Scrub through the time series to confirm no black borders remain on any
+      frame. If small borders persist, increase safety_margin and re-run on
+      the original (not the already-cropped image).
+
+agent_instructions: >
+  Run via: python ij.py script --file scripts/remove_drift_borders.groovy
+
+  To change parameters, edit the top of the Groovy script (detectChannel,
+  scanStep, safetyMargin).
+
+  After running, capture a few frames (first, middle, last) and visually
+  confirm no black borders remain.
+
+  This does NOT fix rotation — only translation-based border shifting.
+  If the tissue rotates over time, rigid body registration (e.g. StackReg
+  "Rigid Body" on the brightfield channel) is needed separately.
+
+validation:
+  - check: "No black (value=0) rows or columns on any frame edge"
+  - check: "All channels aligned — content matches across channels per frame"
+  - check: "Calibration preserved after crop"
+
+known_issues:
+  - issue: "Large drift = large crop = significant data loss"
+    solution: >
+      This is inherent — the common overlap shrinks as drift increases.
+      Consider re-running Correct 3D Drift with different settings (e.g.
+      different channel, smaller crop region) to reduce the drift magnitude
+      before applying this recipe.
+  - issue: "Does not correct rotation"
+    solution: >
+      Use StackReg (Rigid Body) on the brightfield channel, or Linear Stack
+      Alignment with SIFT on a non-fluorescent channel, to correct rotation
+      before or after this step.
+  - issue: "Very dark tissue near edges may be mistaken for black border"
+    solution: >
+      Increase scan_step or switch detect_channel to a brighter channel.

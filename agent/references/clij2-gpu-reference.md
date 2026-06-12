@@ -15,7 +15,7 @@ forum.image.sc CLIJ2 threads (Apple Silicon, OOM, multi-GPU, statistics
 table). Project-side: `agent/references/3d-spatial-reference.md §12`,
 `agent/references/large-dataset-optimization-reference.md §7`,
 `agent/references/deconvolution-reference.md §6`,
-`src/main/java/uk/ac/ucl/imagej/ai/engine/TCPCommandServer.java` (handlers
+`src/main/java/imagejai/engine/TCPCommandServer.java` (handlers
 `handleExecuteMacro` and `handleRunScript`).
 
 Invoke from the agent:
@@ -1283,7 +1283,7 @@ are the load-bearing ones for CLIJ2.
 
 #### §14.1.1 `execute_macro` — primary CLIJ2 entry point
 
-Source: `src/main/java/uk/ac/ucl/imagej/ai/engine/TCPCommandServer.java`,
+Source: `src/main/java/imagejai/engine/TCPCommandServer.java`,
 handler `handleExecuteMacro`.
 
 ```python

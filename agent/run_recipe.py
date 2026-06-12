@@ -14,7 +14,7 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 RECIPE_DIR = os.path.join(SCRIPT_DIR, "recipes")
 
 sys.path.insert(0, SCRIPT_DIR)
-from recipe_search import load_recipe  # noqa: E402
+from recipe_search import load_recipe, recipe_directories  # noqa: E402
 
 
 HOST = os.environ.get("IMAGEJAI_TCP_HOST", "localhost")
@@ -258,15 +258,20 @@ def step_name(step, index):
 
 
 def recipe_path(name):
+    raw = os.path.expanduser(str(name or ""))
+    if os.path.isfile(raw):
+        return os.path.abspath(raw)
+
     safe = os.path.basename(name)
     if safe.endswith((".yaml", ".yml")):
         candidates = [safe]
     else:
         candidates = [safe + ".yaml", safe + ".yml"]
-    for candidate in candidates:
-        path = os.path.join(RECIPE_DIR, candidate)
-        if os.path.isfile(path):
-            return path
+    for recipe_dir in recipe_directories():
+        for candidate in candidates:
+            path = os.path.join(recipe_dir, candidate)
+            if os.path.isfile(path):
+                return path
     raise RuntimeError("recipe not found: %s" % name)
 
 

@@ -26,29 +26,75 @@ import sys
 import os
 import math
 
-HOST = "localhost"
-PORT = 7746
+HOST = os.environ.get("IMAGEJAI_TCP_HOST", "localhost")
+try:
+    PORT = int(os.environ.get("IMAGEJAI_TCP_PORT", "7746"))
+except ValueError:
+    PORT = 7746
+TIMEOUT = 60
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 TMP_DIR = os.path.join(SCRIPT_DIR, ".tmp")
 
+try:
+    from ij import imagej_command as _ij_imagej_command
+except Exception:
+    try:
+        from .ij import imagej_command as _ij_imagej_command
+    except Exception:
+        _ij_imagej_command = None
+
+# REGRESSION GUARD: Past pixel workflows existed only as CLI branches, so importing agents could not reuse them.
+# The fix: add every stable workflow to __all__, route main() through it, and cover it in test_pixels_api.py.
+__all__ = [
+    "imagej_command",
+    "send",
+    "get_pixels",
+    "compute_stats",
+    "line_profile",
+    "find_bright_objects",
+    "get_current_stats",
+    "get_slice_stats",
+    "get_region_stats",
+    "get_line_profile",
+    "find_cells",
+    "get_stack_stats",
+]
+
+
+def _socket_command(cmd, host=HOST, port=PORT, timeout=TIMEOUT):
+    """Fallback JSON-over-TCP client used when ij.py cannot be imported."""
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.settimeout(timeout)
+    try:
+        s.connect((host, port))
+        s.sendall((json.dumps(cmd) + "\n").encode("utf-8"))
+        data = b""
+        while True:
+            try:
+                chunk = s.recv(65536)
+                if not chunk:
+                    break
+                data += chunk
+            except socket.timeout:
+                break
+        return json.loads(data.decode("utf-8"))
+    finally:
+        try:
+            s.close()
+        except Exception:
+            pass
+
+
+def imagej_command(cmd, host=HOST, port=PORT, timeout=TIMEOUT):
+    """Send a JSON command to ImageJAI, preferring ij.py's shared client."""
+    if _ij_imagej_command is not None:
+        return _ij_imagej_command(cmd, host=host, port=port, timeout=timeout)
+    return _socket_command(cmd, host=host, port=port, timeout=timeout)
+
 
 def send(cmd):
-    """Send JSON command to ImageJ TCP server."""
-    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    s.settimeout(60)
-    s.connect((HOST, PORT))
-    s.sendall((json.dumps(cmd) + "\n").encode("utf-8"))
-    data = b""
-    while True:
-        try:
-            chunk = s.recv(65536)
-            if not chunk:
-                break
-            data += chunk
-        except socket.timeout:
-            break
-    s.close()
-    return json.loads(data.decode("utf-8"))
+    """Compatibility alias for older pixels.py callers."""
+    return imagej_command(cmd)
 
 
 def get_pixels(x=None, y=None, width=None, height=None, slice_num=None, all_slices=False):
@@ -230,13 +276,70 @@ def find_bright_objects(pixels_2d, meta=None, threshold_factor=2.0, min_size=10)
     return objects
 
 
+def get_current_stats():
+    """Return stats and metadata for the current slice."""
+    pixels, meta = get_pixels()
+    return {"stats": compute_stats(pixels), "meta": meta}
+
+
+def get_slice_stats(slice_num):
+    """Return stats and metadata for one 1-based stack slice."""
+    pixels, meta = get_pixels(slice_num=slice_num)
+    return {"slice": slice_num, "stats": compute_stats(pixels), "meta": meta}
+
+
+def get_region_stats(x, y, width, height):
+    """Return stats and metadata for a rectangular region."""
+    pixels, meta = get_pixels(x=x, y=y, width=width, height=height)
+    return {
+        "x": x,
+        "y": y,
+        "width": width,
+        "height": height,
+        "stats": compute_stats(pixels),
+        "meta": meta,
+    }
+
+
+def get_line_profile(x1, y1, x2, y2):
+    """Return the current image intensity profile between two points."""
+    pixels, meta = get_pixels()
+    return line_profile(pixels, x1, y1, x2, y2, meta)
+
+
+def find_cells(threshold_factor=2.0, min_size=10):
+    """Find bright objects in the current image."""
+    pixels, meta = get_pixels()
+    return find_bright_objects(
+        pixels,
+        meta,
+        threshold_factor=threshold_factor,
+        min_size=min_size,
+    )
+
+
+def get_stack_stats():
+    """Return per-slice stats for the active stack."""
+    info_resp = send({"command": "get_image_info"})
+    if not info_resp.get("ok"):
+        raise RuntimeError(info_resp.get("error"))
+    n_slices = info_resp["result"]["slices"]
+
+    rows = []
+    for s in range(1, n_slices + 1):
+        pixels, meta = get_pixels(slice_num=s)
+        rows.append({"slice": s, "stats": compute_stats(pixels), "meta": meta})
+    return rows
+
+
 def main():
     os.makedirs(TMP_DIR, exist_ok=True)
 
     if len(sys.argv) < 2:
         # Default: stats for current slice
-        pixels, meta = get_pixels()
-        stats = compute_stats(pixels)
+        current = get_current_stats()
+        meta = current["meta"]
+        stats = current["stats"]
         print("Image: {}x{}, {}, slice {}-{}".format(
             meta["width"], meta["height"], meta["type"],
             meta["sliceStart"], meta["sliceEnd"]))
@@ -248,8 +351,8 @@ def main():
     try:
         if cmd == "slice":
             s = int(sys.argv[2]) if len(sys.argv) > 2 else 1
-            pixels, meta = get_pixels(slice_num=s)
-            stats = compute_stats(pixels)
+            result = get_slice_stats(s)
+            stats = result["stats"]
             print("Slice {}: {}".format(s, json.dumps(stats)))
 
         elif cmd == "region":
@@ -257,8 +360,8 @@ def main():
                 print("Usage: python pixels.py region X Y WIDTH HEIGHT")
                 sys.exit(1)
             x, y, w, h = int(sys.argv[2]), int(sys.argv[3]), int(sys.argv[4]), int(sys.argv[5])
-            pixels, meta = get_pixels(x=x, y=y, width=w, height=h)
-            stats = compute_stats(pixels)
+            result = get_region_stats(x, y, w, h)
+            stats = result["stats"]
             print("Region ({},{} {}x{}): {}".format(x, y, w, h, json.dumps(stats)))
 
         elif cmd == "profile":
@@ -266,31 +369,24 @@ def main():
                 print("Usage: python pixels.py profile X1 Y1 X2 Y2")
                 sys.exit(1)
             x1, y1, x2, y2 = int(sys.argv[2]), int(sys.argv[3]), int(sys.argv[4]), int(sys.argv[5])
-            pixels, meta = get_pixels()
-            prof = line_profile(pixels, x1, y1, x2, y2, meta)
+            prof = get_line_profile(x1, y1, x2, y2)
             for p in prof:
                 print("{}\t{:.1f}".format(p["pos"], p["value"]))
 
         elif cmd == "find_cells":
             factor = float(sys.argv[2]) if len(sys.argv) > 2 else 2.0
-            pixels, meta = get_pixels()
-            objects = find_bright_objects(pixels, meta, threshold_factor=factor)
+            objects = find_cells(threshold_factor=factor)
             print("Found {} objects (threshold = mean + {}*std):".format(len(objects), factor))
             for obj in objects[:20]:
                 print("  label={}: pos=({},{}) area={} mean={:.0f}".format(
                     obj["label"], obj["x"], obj["y"], obj["area"], obj["mean_intensity"]))
 
         elif cmd == "stack_stats":
-            # Get info first to know slice count
-            info_resp = send({"command": "get_image_info"})
-            if not info_resp.get("ok"):
-                print("ERROR:", info_resp.get("error"))
-                sys.exit(1)
-            n_slices = info_resp["result"]["slices"]
+            stack = get_stack_stats()
             print("Slice  Mean      Std       Min    Max")
-            for s in range(1, n_slices + 1):
-                pixels, meta = get_pixels(slice_num=s)
-                st = compute_stats(pixels)
+            for row in stack:
+                s = row["slice"]
+                st = row["stats"]
                 print("{:5d}  {:8.1f}  {:8.1f}  {:5.0f}  {:5.0f}".format(
                     s, st["mean"], st["std"], st["min"], st["max"]))
 

@@ -20,6 +20,21 @@ import os
 import sys
 
 
+# REGRESSION GUARD: Past audit workflows were CLI-only, so agents could not import current-results or CSV audits.
+# The fix: expose stable audit helpers in __all__, route main() through them, and keep report formatting public.
+__all__ = [
+    "audit_results",
+    "audit_current_results",
+    "audit_csv_file",
+    "format_report",
+    "main",
+]
+
+
+class _NoResultsTable(RuntimeError):
+    """Raised when ImageJ is reachable but has no results table to audit."""
+
+
 # ---------------------------------------------------------------------------
 # Parsing helpers (reuse logic from results_parser but keep auditor standalone)
 # ---------------------------------------------------------------------------
@@ -674,7 +689,71 @@ def audit_results(csv_string, pixel_size=None, unit=None, bit_depth=None, check=
     }
 
 
-def _format_report(result):
+def _load_ij_helpers():
+    """Import ij.py helper functions from this directory on demand."""
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    if script_dir not in sys.path:
+        sys.path.insert(0, script_dir)
+    from ij import get_image_info, get_metadata, get_results_table
+    return get_results_table, get_image_info, get_metadata
+
+
+def audit_current_results(check=None, unit=None, pixel_size=None, bit_depth=None):
+    """Audit the current ImageJ results table via ij.py helper functions."""
+    get_results_table, get_image_info, get_metadata = _load_ij_helpers()
+
+    resp = get_results_table()
+    if resp.get("ok") and resp.get("result"):
+        csv_string = resp["result"]
+    else:
+        raise _NoResultsTable("No results table available in ImageJ.")
+
+    # Preserve the original CLI behaviour: infer image metadata only when the
+    # bit depth or pixel size was not supplied explicitly.
+    if bit_depth is None or pixel_size is None:
+        info_resp = get_image_info()
+        if info_resp.get("ok") and info_resp.get("result"):
+            info = info_resp["result"]
+            if bit_depth is None:
+                type_str = info.get("type", "")
+                if "8" in type_str:
+                    bit_depth = 8
+                elif "16" in type_str:
+                    bit_depth = 16
+                elif "32" in type_str:
+                    bit_depth = 32
+
+        meta_resp = get_metadata()
+        if meta_resp.get("ok") and meta_resp.get("result"):
+            cal = meta_resp["result"].get("calibration", {})
+            if pixel_size is None and cal.get("pixelWidth"):
+                pixel_size = cal["pixelWidth"]
+            if unit is None and cal.get("unit"):
+                unit = cal["unit"]
+
+    return audit_results(
+        csv_string,
+        pixel_size=pixel_size,
+        unit=unit,
+        bit_depth=bit_depth,
+        check=check,
+    )
+
+
+def audit_csv_file(path, check=None, unit=None, pixel_size=None, bit_depth=None):
+    """Read a CSV file and audit its ImageJ results table contents."""
+    with open(path, "r") as f:
+        csv_string = f.read()
+    return audit_results(
+        csv_string,
+        pixel_size=pixel_size,
+        unit=unit,
+        bit_depth=bit_depth,
+        check=check,
+    )
+
+
+def format_report(result):
     """Format audit result as readable text."""
     lines = []
     lines.append("")
@@ -703,6 +782,9 @@ def _format_report(result):
     return "\n".join(lines)
 
 
+_format_report = format_report
+
+
 # ---------------------------------------------------------------------------
 # CLI entry point
 # ---------------------------------------------------------------------------
@@ -719,63 +801,34 @@ def main():
     parser.add_argument("--json", action="store_true", help="Output as JSON instead of formatted text")
     args = parser.parse_args()
 
-    csv_string = None
-
     if args.csv:
-        with open(args.csv, "r") as f:
-            csv_string = f.read()
+        result = audit_csv_file(
+            args.csv,
+            pixel_size=args.pixel_size,
+            unit=args.unit,
+            bit_depth=args.bit_depth,
+            check=args.check,
+        )
     else:
-        # Fetch from ImageJ via ij.py
         try:
-            script_dir = os.path.dirname(os.path.abspath(__file__))
-            sys.path.insert(0, script_dir)
-            from ij import imagej_command
-            resp = imagej_command({"command": "get_results_table"})
-            if resp.get("ok") and resp.get("result"):
-                csv_string = resp["result"]
-            else:
-                print("No results table available in ImageJ.")
-                sys.exit(1)
-
-            # Also try to get image info for bit depth and calibration
-            if args.bit_depth is None or args.pixel_size is None:
-                info_resp = imagej_command({"command": "get_image_info"})
-                if info_resp.get("ok") and info_resp.get("result"):
-                    info = info_resp["result"]
-                    if args.bit_depth is None:
-                        type_str = info.get("type", "")
-                        if "8" in type_str:
-                            args.bit_depth = 8
-                        elif "16" in type_str:
-                            args.bit_depth = 16
-                        elif "32" in type_str:
-                            args.bit_depth = 32
-
-                meta_resp = imagej_command({"command": "get_metadata"})
-                if meta_resp.get("ok") and meta_resp.get("result"):
-                    cal = meta_resp["result"].get("calibration", {})
-                    if args.pixel_size is None and cal.get("pixelWidth"):
-                        args.pixel_size = cal["pixelWidth"]
-                    if args.unit is None and cal.get("unit"):
-                        args.unit = cal["unit"]
-
+            result = audit_current_results(
+                pixel_size=args.pixel_size,
+                unit=args.unit,
+                bit_depth=args.bit_depth,
+                check=args.check,
+            )
+        except _NoResultsTable as e:
+            print(str(e))
+            sys.exit(1)
         except Exception as e:
             print("Could not connect to ImageJ: %s" % e)
             print("Use --csv to audit a CSV file directly.")
             sys.exit(1)
 
-    result = audit_results(
-        csv_string,
-        pixel_size=args.pixel_size,
-        unit=args.unit,
-        bit_depth=args.bit_depth,
-        check=args.check,
-    )
-
     if args.json:
         print(json.dumps(result, indent=2))
     else:
-        print(_format_report(result))
+        print(format_report(result))
 
 
 if __name__ == "__main__":

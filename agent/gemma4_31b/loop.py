@@ -1,20 +1,10 @@
-"""Chat loop for the Gemma 4 31B agent.
+"""Rich ImageJAI terminal loop for Ollama and provider-backed models.
 
-Copied in spirit from agent/ollama_agent/ollama_chat.py, then
-trimmed down for the standalone Gemma 4 31B agent. What stays:
-
-- a single ollama.chat() call with stream=False, temperature=0.2
-  and num_ctx=131072 (the model is gemma4:31b-cloud, which the
-  Ollama cloud proxy does not expose num_ctx for via ollama.show,
-  so we hard-code it — see agent/ollama_agent/CLAUDE.md);
-- a stdin read loop that appends to message history, sends, prints
-  the reply;
-- tool dispatch using TOOL_MAP built from the REGISTRY populated
-  by every tools_*.py module's @tool decorators;
-- a Ctrl-C handler that prints "bye" and returns;
-- a worker-thread wrapper around ollama.chat() so Ctrl-C remains
-  responsive on Windows — signal delivery during the blocking
-  socket read inside the ollama client is unreliable there.
+The original entry point was tuned for ``gemma4:31b-cloud`` via the Ollama
+Python client. The terminal UX, Fiji tool registry, slash commands, event
+subscription, and status animation are provider-agnostic, so the same loop can
+also be driven by a multi-provider ``ProviderClient``. Ollama keeps the native
+``ollama.chat`` path; cloud/API providers swap only the model-call adapter.
 """
 
 from __future__ import annotations
@@ -30,6 +20,7 @@ import time
 from collections import deque
 from io import BytesIO
 from pathlib import Path
+from typing import Any
 
 import ollama
 from PIL import Image
@@ -69,8 +60,53 @@ from . import triage_image  # noqa: F401
 from .console_text import normalize_inline_latex_symbols
 from .registry import REGISTRY, _rebuild_tool_map
 
-DEFAULT_MODEL = "gemma4:31b-cloud"
+# No model name is hardcoded here. This wrapper drives *any* Ollama model
+# (and, via a ProviderClient, any provider model); the model is always supplied
+# by --model / loop.run(model=...). _resolve_default_model() is only consulted
+# for a bare manual launch with no --model and no env hint.
+_FALLBACK_OLLAMA_MODEL_ENVS = ("IMAGEJAI_MODEL", "OLLAMA_MODEL")
+DEFAULT_PROVIDER = "ollama-cloud"
 NUM_CTX = 131072
+
+
+def _resolve_default_model() -> str:
+    """Resolve a model when none was passed on a bare manual launch.
+
+    Order: IMAGEJAI_MODEL / OLLAMA_MODEL env vars, then the first model the
+    local Ollama daemon reports. Raises RuntimeError if nothing is found so the
+    caller can print a clear "pass --model" message instead of silently
+    defaulting to one baked-in tag.
+    """
+    for env_name in _FALLBACK_OLLAMA_MODEL_ENVS:
+        value = os.environ.get(env_name, "").strip()
+        if value:
+            return value
+    try:
+        listing = ollama.list()
+        # Tolerate both the typed ListResponse (.models) and the legacy dict
+        # shape ({"models": [...]}) returned by older ollama clients.
+        models = getattr(listing, "models", None)
+        if models is None and isinstance(listing, dict):
+            models = listing.get("models")
+        for entry in models or []:
+            # Newer clients expose .model; older ones used .name / "name".
+            name = (
+                getattr(entry, "model", None)
+                or getattr(entry, "name", None)
+                or (
+                    (entry.get("model") or entry.get("name"))
+                    if isinstance(entry, dict)
+                    else None
+                )
+            )
+            if name:
+                return str(name)
+    except Exception:
+        pass
+    raise RuntimeError(
+        "no model specified: pass --model, set IMAGEJAI_MODEL/OLLAMA_MODEL, "
+        "or pull at least one Ollama model (ollama pull <model>)"
+    )
 TEMPERATURE = 0.2
 SAMPLING_PROFILES: dict[str, dict] = {
     "tool": {"temperature": 0.25, "top_p": 0.90, "top_k": 30, "thinking": False},
@@ -255,6 +291,7 @@ _SLASH_COMMANDS: tuple[tuple[str, str], ...] = (
     ("/clear", "Reset the conversation history."),
     ("/queue <text>", "Queue a prompt to run after the current turn."),
     ("/interrupt [text]", "Abort the current turn and optionally queue replacement text."),
+    ("/resume", "Raise the provider budget ceiling after a budget pause."),
     ("/think [on|off|auto]", "Force thinking mode on/off, or return to auto. No arg = show state."),
     ("/mode [<name>|auto]", "Lock sampling mode (tool/plan/recover/explain/recipe) or return to auto."),
     ("/ccommands [name]", "List or load custom command prompts."),
@@ -820,6 +857,174 @@ def _chat_interruptible(abort_event: threading.Event | None = None, **kwargs):
     return _run_interruptible(ollama.chat, abort_event=abort_event, **kwargs)
 
 
+def _provider_chat_interruptible(
+    client: Any,
+    messages: list,
+    tools: list,
+    model: str,
+    provider: str,
+    turn_config: dict,
+    provider_opts: dict | None = None,
+    abort_event: threading.Event | None = None,
+):
+    """Run a ProviderClient chat call through the same interruptible wrapper."""
+
+    opts = _provider_chat_options(provider, turn_config, provider_opts)
+    return _run_interruptible(
+        client.chat,
+        abort_event=abort_event,
+        messages=messages,
+        tools=tools,
+        model=model,
+        **opts,
+    )
+
+
+def _provider_chat_options(
+    provider: str,
+    turn_config: dict,
+    provider_opts: dict | None = None,
+) -> dict:
+    """Translate the local sampling mode into provider-safe chat kwargs."""
+
+    sampling = dict(turn_config.get("sampling") or {})
+    opts: dict[str, Any] = {}
+    for key in ("temperature", "top_p"):
+        if key in sampling:
+            opts[key] = sampling[key]
+    provider_key = str(provider or "").strip().lower()
+    if provider_key == "gemini" and "top_k" in sampling:
+        opts["top_k"] = sampling["top_k"]
+
+    extra = dict(provider_opts or {})
+    server_tools = extra.pop("server_tools", None)
+    if provider_key == "anthropic" and server_tools:
+        opts["enable_server_tools"] = server_tools
+    elif provider_key == "gemini" and server_tools:
+        opts["server_tools"] = server_tools
+    for key, value in extra.items():
+        if key.startswith("enable_") or key in {"thinking_budget", "max_tokens", "max_output_tokens"}:
+            opts[key] = value
+    return opts
+
+
+def _tool_call_name(call: Any) -> str:
+    if hasattr(call, "function"):
+        return str(getattr(call.function, "name", "") or "")
+    return str(getattr(call, "name", "") or "")
+
+
+def _tool_call_args(call: Any) -> dict:
+    if hasattr(call, "function"):
+        args = getattr(call.function, "arguments", None) or {}
+    else:
+        args = getattr(call, "args", None) or {}
+    return args if isinstance(args, dict) else {}
+
+
+def _tool_call_error(call: Any) -> str | None:
+    error = getattr(call, "error", None)
+    return str(error) if error else None
+
+
+def _append_tool_result(
+    messages: list,
+    call: Any,
+    name: str,
+    result_text: str,
+    provider_client: Any | None = None,
+) -> None:
+    """Append a tool result using the active backend's message contract."""
+
+    if provider_client is not None:
+        provider_client.append_tool_result(messages, call, result_text)
+        return
+    msg = {"role": "tool", "content": result_text, "tool_name": name}
+    if name == "capture_image":
+        encoded = _encode_capture_for_vision(result_text)
+        if encoded:
+            msg["images"] = [encoded]
+            _prune_older_capture_images(messages)
+    messages.append(msg)
+
+
+def _append_assistant_turn(
+    messages: list,
+    response: Any,
+    provider_client: Any | None = None,
+) -> tuple[str, list, int]:
+    """Append assistant history and return text, normalised tool calls, tokens."""
+
+    if provider_client is None:
+        msg = response.message
+        messages.append(msg)
+        content = (getattr(msg, "content", "") or "").strip()
+        tool_calls = getattr(msg, "tool_calls", None) or []
+        eval_tokens = getattr(response, "eval_count", 0) or 0
+        return content, tool_calls, int(eval_tokens)
+    provider_client.append_assistant(messages, response)
+    return (
+        provider_client.extract_text(response),
+        provider_client.extract_tool_calls(response),
+        0,
+    )
+
+
+def _budget_pause_message(guard: Any) -> str:
+    ceiling = float(getattr(guard, "ceiling_usd", 0.0) or 0.0)
+    spent = float(getattr(guard, "total_usd", 0.0) or 0.0)
+    return (
+        "[budget] ceiling ${:.2f} reached (spent ~${:.4f}). "
+        "Paused before the next model call; type /resume to raise the ceiling "
+        "or exit to stop."
+    ).format(ceiling, spent)
+
+
+def _infer_provider_for_model(model: str) -> str:
+    tag = str(model or "").strip()
+    return "ollama-cloud" if tag.endswith("-cloud") or tag.endswith(":cloud") else "ollama"
+
+
+def _normalise_provider(provider: str | None, model: str) -> str:
+    value = str(provider or "").strip().lower()
+    return value or _infer_provider_for_model(model)
+
+
+def _context_limit_for(provider: str, model: str) -> int:
+    try:
+        from agent.contexts import loader as _ctx_loader
+        import yaml
+
+        cfg = yaml.safe_load(_ctx_loader.REGISTRY.read_text(encoding="utf-8"))
+        for entry in cfg.get("models", []):
+            if entry.get("provider") == provider and entry.get("model_id") == model:
+                return int(entry.get("context_window") or NUM_CTX)
+    except Exception:
+        pass
+    return NUM_CTX
+
+
+def _fallback_system_prompt() -> str:
+    return (
+        "You are an AI agent controlling Fiji/ImageJ for a biologist doing image "
+        "analysis. Check state before acting, probe unfamiliar plugins before "
+        "using them, write outputs to AI_Exports/ next to the opened image, and "
+        "never use Enhance Contrast normalize=true on data you will measure. "
+        "If something fails, read the log/console and fix the underlying macro "
+        "or script error."
+    )
+
+
+def _assistant_label(provider: str) -> str:
+    if provider.startswith("ollama"):
+        return "ollama"
+    if provider == "anthropic":
+        return "claude"
+    if provider == "gemini":
+        return "gemini"
+    return "agent"
+
+
 def _format_assistant_reply(text: str) -> str:
     """Normalize assistant text before writing it to the console."""
     return normalize_inline_latex_symbols(text or "")
@@ -1282,8 +1487,13 @@ def _one_turn(
     turn_config: dict,
     think_capability_state: dict | None = None,
     abort_event: threading.Event | None = None,
+    provider: str = DEFAULT_PROVIDER,
+    provider_client: Any | None = None,
+    provider_opts: dict | None = None,
+    budget_guard: Any | None = None,
+    ctx_limit: int = NUM_CTX,
 ) -> tuple[str, bool]:
-    """Run one user turn through ollama.chat(), dispatching tools as needed."""
+    """Run one user turn through the active backend, dispatching tools."""
     ticker = _ActivityTicker()
     turn_start = time.time()
     round_n = 0
@@ -1299,6 +1509,8 @@ def _one_turn(
     ticker.start(_THINKING_STATUS)
     try:
         while True:
+            if budget_guard is not None and budget_guard.exceeded():
+                return _budget_pause_message(budget_guard), False
             round_n += 1
             model_initial, model_transitions = _status_plan_for_model_round(
                 round_n,
@@ -1308,44 +1520,56 @@ def _one_turn(
             ticker.set_phase(model_initial, model_transitions)
             options = {
                 **turn_config["sampling"],
-                "num_ctx": NUM_CTX,
+                "num_ctx": ctx_limit,
             }
-            if turn_config["thinking"] and think_capability_state.get("supported", True):
+            if provider_client is None and turn_config["thinking"] and think_capability_state.get("supported", True):
                 options["think"] = True
             try:
-                try:
-                    resp = _chat_interruptible(
-                        abort_event=abort_event,
-                        model=model,
-                        messages=messages,
-                        tools=tools,
-                        stream=False,
-                        options=options,
-                    )
-                except Exception as exc:
-                    if not (
-                        options.get("think") is True
-                        and _looks_like_think_option_rejection(exc)
-                    ):
-                        raise
-                    think_capability_state["supported"] = False
-                    if not think_capability_state.get("logged", False):
-                        safety.friction_log(
-                            {
-                                "event": "ollama_think_unsupported",
-                                "error": "{}: {}".format(type(exc).__name__, exc),
-                            }
+                if provider_client is None:
+                    try:
+                        resp = _chat_interruptible(
+                            abort_event=abort_event,
+                            model=model,
+                            messages=messages,
+                            tools=tools,
+                            stream=False,
+                            options=options,
                         )
-                        think_capability_state["logged"] = True
-                    fallback_options = dict(options)
-                    fallback_options.pop("think", None)
-                    resp = _chat_interruptible(
+                    except Exception as exc:
+                        if not (
+                            options.get("think") is True
+                            and _looks_like_think_option_rejection(exc)
+                        ):
+                            raise
+                        think_capability_state["supported"] = False
+                        if not think_capability_state.get("logged", False):
+                            safety.friction_log(
+                                {
+                                    "event": "ollama_think_unsupported",
+                                    "error": "{}: {}".format(type(exc).__name__, exc),
+                                }
+                            )
+                            think_capability_state["logged"] = True
+                        fallback_options = dict(options)
+                        fallback_options.pop("think", None)
+                        resp = _chat_interruptible(
+                            abort_event=abort_event,
+                            model=model,
+                            messages=messages,
+                            tools=tools,
+                            stream=False,
+                            options=fallback_options,
+                        )
+                else:
+                    resp = _provider_chat_interruptible(
+                        provider_client,
+                        messages,
+                        tools,
+                        model,
+                        provider,
+                        turn_config,
+                        provider_opts=provider_opts,
                         abort_event=abort_event,
-                        model=model,
-                        messages=messages,
-                        tools=tools,
-                        stream=False,
-                        options=fallback_options,
                     )
             finally:
                 _invalidate_prompt()
@@ -1353,11 +1577,11 @@ def _one_turn(
             if abort_event is not None and abort_event.is_set():
                 raise _TurnAborted()
 
-            msg = resp.message
-            messages.append(msg)
-            eval_tokens = getattr(resp, "eval_count", 0) or 0
-
-            tool_calls = getattr(msg, "tool_calls", None) or []
+            content, tool_calls, eval_tokens = _append_assistant_turn(
+                messages,
+                resp,
+                provider_client,
+            )
             if not tool_calls:
                 elapsed = time.time() - turn_start
                 tok_s = eval_tokens / elapsed if elapsed > 0 and eval_tokens else 0
@@ -1365,19 +1589,25 @@ def _one_turn(
                 if eval_tokens:
                     stats += " ({} tok, {:.1f} tok/s)".format(eval_tokens, tok_s)
                 stats += "\033[0m"
-                content = (getattr(msg, "content", "") or "").strip()
                 return "{}\n  {}".format(
                     _format_assistant_reply(content),
                     stats,
                 ), _turn_had_failure(turn_config)
 
             for call in tool_calls:
-                name = call.function.name
-                args = call.function.arguments or {}
+                name = _tool_call_name(call)
+                args = _tool_call_args(call)
+                call_error = _tool_call_error(call)
                 if name not in tool_map:
                     result_text = "ERROR: unknown tool '{}'".format(name)
                     _console_emit("  \033[31m✗ {}\033[0m".format(result_text), reserve_status_line=True)
-                    messages.append({"role": "tool", "content": result_text})
+                    _append_tool_result(messages, call, name, result_text, provider_client)
+                    _flip_turn_config_to_recover(turn_config)
+                    continue
+                if call_error:
+                    result_text = "ERROR: malformed tool arguments: {}".format(call_error)
+                    _console_emit("  \033[31m✗ {}\033[0m".format(result_text), reserve_status_line=True)
+                    _append_tool_result(messages, call, name, result_text, provider_client)
                     _flip_turn_config_to_recover(turn_config)
                     continue
                 _console_emit(
@@ -1396,11 +1626,13 @@ def _one_turn(
                         ),
                         reserve_status_line=True,
                     )
-                    messages.append({
-                        "role": "tool",
-                        "content": "ABORTED: {}".format(pre_dispatch_note),
-                        "tool_name": name,
-                    })
+                    _append_tool_result(
+                        messages,
+                        call,
+                        name,
+                        "ABORTED: {}".format(pre_dispatch_note),
+                        provider_client,
+                    )
                     messages.append({"role": "system", "content": pre_dispatch_note})
                     _flip_turn_config_to_recover(turn_config)
                     continue
@@ -1430,13 +1662,7 @@ def _one_turn(
                     hidden = len(display_text) - 20480
                     display_text = display_text[:20480] + "\n… [truncated, {} chars hidden]".format(hidden)
                 _console_emit("  \033[90m→ {}\033[0m".format(display_text), reserve_status_line=True)
-                msg = {'role': 'tool', 'content': result_text, 'tool_name': name}
-                if name == 'capture_image':
-                    _b64 = _encode_capture_for_vision(result_text)
-                    if _b64:
-                        msg['images'] = [_b64]
-                        _prune_older_capture_images(messages)
-                messages.append(msg)
+                _append_tool_result(messages, call, name, result_text, provider_client)
                 for post_note in _post_tool_system_notes(name, args, result_text, turn_state):
                     messages.append({"role": "system", "content": post_note})
                     preview_len = 140
@@ -1876,6 +2102,11 @@ def _turn_worker(
     think_capability_state: dict,
     abort_event: threading.Event,
     result_queue: "queue.Queue[dict]",
+    provider: str = DEFAULT_PROVIDER,
+    provider_client: Any | None = None,
+    provider_opts: dict | None = None,
+    budget_guard: Any | None = None,
+    ctx_limit: int = NUM_CTX,
 ) -> None:
     """Run one turn in a worker thread and push the result back to the main loop."""
     try:
@@ -1887,6 +2118,11 @@ def _turn_worker(
             turn_config,
             think_capability_state=think_capability_state,
             abort_event=abort_event,
+            provider=provider,
+            provider_client=provider_client,
+            provider_opts=provider_opts,
+            budget_guard=budget_guard,
+            ctx_limit=ctx_limit,
         )
     except Exception as exc:
         result_queue.put(
@@ -1920,16 +2156,22 @@ def _input_worker(
 
 
 def run(
-    model: str = DEFAULT_MODEL,
+    model: str | None = None,
     no_friction_log: bool = False,
     prompt_filename: str = "GEMMA.md",
     initial_mode_lock: str | None = None,
     initial_think_lock: bool | None = None,
+    provider: str | None = None,
+    provider_client: Any | None = None,
+    provider_opts: dict | None = None,
+    budget_guard: Any | None = None,
 ) -> int:
     """Start the interactive chat loop. Returns a shell-style exit code.
 
     Args:
-        model: Ollama model name. Defaults to gemma4:31b-cloud.
+        model: Ollama model name (or provider model id when provider_client
+            is supplied). When empty, resolved from IMAGEJAI_MODEL/OLLAMA_MODEL
+            or the first local Ollama model. No model tag is hardcoded.
         no_friction_log: Reserved for Phase 1c / friction.py. This loop
             does not yet write a friction log, so the flag is accepted
             and ignored. Keeps the CLI surface stable across phases.
@@ -1938,33 +2180,66 @@ def run(
             the Claude-style variant for A/B comparison.
         initial_mode_lock: Optional starting lock for the sampling mode.
         initial_think_lock: Optional starting lock for native thinking mode.
+        provider: Canonical provider id for context loading and display.
+        provider_client: Optional multi-provider client. When absent, the
+            loop uses the native Ollama Python client.
+        provider_opts: Provider chat kwargs supplied by the Java/native launcher.
+        budget_guard: Optional spend guard with enabled/exceeded/raise_ceiling.
     """
     del no_friction_log  # no-op until friction.py lands in a later phase
 
+    # Native Ollama path needs a concrete model; the provider-client path always
+    # arrives with one. Resolve from env / local daemon rather than a baked-in tag.
+    model = (model or "").strip()
+    if not model and provider_client is None:
+        model = _resolve_default_model()
+
+    provider_key = _normalise_provider(provider, model)
+    ctx_limit = _context_limit_for(provider_key, model)
+    assistant_label = _assistant_label(provider_key)
     tools = list(REGISTRY)
     tool_map = _rebuild_tool_map()
     slash_completer = _build_slash_completer()
-    ctx_state = {"used": 0, "limit": NUM_CTX}
+    ctx_state = {"used": 0, "limit": ctx_limit}
     mode_state = {"lock": initial_mode_lock if initial_mode_lock in SAMPLING_PROFILES else None}
     think_state = {"lock": initial_think_lock if isinstance(initial_think_lock, bool) else None}
     think_capability_state = {"supported": True, "logged": False}
 
-    _console_emit("gemma4_31b_agent — model={} — {} tools — prompt={}".format(
-        model, len(tools), prompt_filename
+    _console_emit("imagejai_agent — {}/{} — {} tools — prompt={}".format(
+        provider_key, model, len(tools), prompt_filename or "registry"
     ))
-    _console_emit("Context window: {:,} tokens".format(NUM_CTX))
+    _console_emit("Context window: {:,} tokens".format(ctx_limit))
     _console_emit("Type a message and press Enter. /help for slash commands.")
-    _console_emit("While Gemma is working, plain text queues and /interrupt aborts the current turn.")
+    _console_emit("While the model is working, plain text queues and /interrupt aborts the current turn.")
+    if budget_guard is not None and budget_guard.enabled():
+        _console_emit(
+            "Budget ceiling ${:.2f}. Type /resume to raise it after a pause.".format(
+                float(getattr(budget_guard, "ceiling_usd", 0.0) or 0.0)
+            )
+        )
 
     messages: list = []
-    _gemma_md_path = os.path.join(os.path.dirname(__file__), prompt_filename)
-    try:
-        with open(_gemma_md_path, "r", encoding="utf-8") as _f:
-            _gemma_md_text = _f.read().strip()
-        if _gemma_md_text:
-            messages.append({"role": "system", "content": _gemma_md_text})
-    except OSError:
-        pass
+    _system_text: str = ""
+    if prompt_filename in (None, "", "GEMMA.md"):
+        # Phase F: default system prompt is composed by the overlay loader.
+        try:
+            from agent.contexts import loader as _ctx_loader
+            _system_text = _ctx_loader.load_context(
+                "{}/{}".format(provider_key, model)
+            ).strip()
+        except Exception:
+            _system_text = ""
+    if not _system_text and prompt_filename:
+        _gemma_md_path = os.path.join(os.path.dirname(__file__), prompt_filename)
+        try:
+            with open(_gemma_md_path, "r", encoding="utf-8") as _f:
+                _system_text = _f.read().strip()
+        except OSError:
+            pass
+    if not _system_text:
+        _system_text = _fallback_system_prompt()
+    if _system_text:
+        messages.append({"role": "system", "content": _system_text})
     pending_prompts: deque[str] = deque()
     pending_system_notes: deque[str] = deque()
     event_queue: "queue.Queue[dict]" = queue.Queue()
@@ -2038,6 +2313,11 @@ def run(
                         think_capability_state,
                         abort_event,
                         result_queue,
+                        provider_key,
+                        provider_client,
+                        provider_opts,
+                        budget_guard,
+                        ctx_limit,
                     ),
                     daemon=True,
                 )
@@ -2055,7 +2335,7 @@ def run(
             if active_turn is not None and not active_turn["thread"].is_alive():
                 result = active_turn["result_queue"].get_nowait()
                 if result["status"] == "ok":
-                    _console_emit("\033[34mgemma>\033[0m {}\n".format(result["reply"]), reserve_status_line=True)
+                    _console_emit("\033[34m{}>\033[0m {}\n".format(assistant_label, result["reply"]), reserve_status_line=True)
                 else:
                     _console_emit("{}\n".format(result["error"]), reserve_status_line=True)
                 last_turn_had_failure = bool(result.get("had_failure", False))
@@ -2107,6 +2387,18 @@ def run(
                 previous_auto_mode = None
                 previous_banner_text = ""
                 _console_emit("(conversation cleared)", reserve_status_line=True)
+                continue
+            if command == "/resume":
+                if budget_guard is not None and budget_guard.enabled():
+                    budget_guard.raise_ceiling()
+                    _console_emit(
+                        "(budget ceiling raised to ${:.2f})".format(
+                            float(getattr(budget_guard, "ceiling_usd", 0.0) or 0.0)
+                        ),
+                        reserve_status_line=True,
+                    )
+                else:
+                    _console_emit("(no budget ceiling is set for this session)", reserve_status_line=True)
                 continue
             if command == "/think":
                 _console_emit(

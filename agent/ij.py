@@ -9,6 +9,9 @@ Usage:
     python ij.py results
     python ij.py capture [name]
     python ij.py macro "run('Blobs (25K)');"
+    python ij.py script 'println("hello")'
+    python ij.py script --lang jython 'print("hello")'
+    python ij.py script --file path/to/script.groovy
     # The `run` subcommand takes a single string argument containing a
     # |||-delimited chain. You MUST quote the whole chain so your shell doesn't
     # word-split on spaces or mangle the embedded quotes:
@@ -26,6 +29,7 @@ Usage:
     python ij.py console               # recent Fiji stdout/stderr (Groovy traces)
     python ij.py console --tail 5000   # longer console window
     python ij.py probe "Gaussian Blur..."
+    python ij.py ui list               # dialog components
     python ij.py friction              # recent failures
     python ij.py friction patterns     # recurring failure patterns
     python ij.py friction clear        # clear the log
@@ -57,7 +61,14 @@ Usage:
     python ij.py capabilities           # send hello, show server-enabled features
     python ij.py raw '{"command": "ping"}'
 
-Can also be imported:
+Importable helper examples:
+    from ij import get_state, execute_macro, run_script, get_console
+    state = get_state()
+    result = execute_macro("run('Blobs (25K)');")
+    script_result = run_script('println("hello")')
+    console = get_console(tail=5000)
+
+Raw TCP escape hatch:
     from ij import imagej_command
     result = imagej_command({"command": "ping"})
     for event in imagej_events(["dialog.*", "macro.completed"]): ...
@@ -77,6 +88,66 @@ except ValueError:
 TIMEOUT = 60
 SESSION_ID = os.environ.get("IMAGEJAI_SESSION_ID", "").strip()
 MODEL_ENDPOINT = os.environ.get("IMAGEJAI_MODEL_ENDPOINT", "").strip()
+
+# REGRESSION GUARD: Past extensions added CLI/raw TCP commands without importable helpers, tests, or docs.
+# The fix: every stable agent-facing command must have a helper in __all__, CLI routing through it, and API tests.
+__all__ = [
+    "imagej_command",
+    "hello",
+    "normalize_error",
+    "extract_error",
+    "ping",
+    "get_state",
+    "get_image_info",
+    "get_results_table",
+    "get_state_context",
+    "get_progress",
+    "get_roi_state",
+    "get_display_state",
+    "get_console",
+    "execute_macro",
+    "run_script",
+    "run_groovy",
+    "run_jython",
+    "capture_image",
+    "run_pipeline",
+    "explore_thresholds",
+    "get_log",
+    "get_histogram",
+    "get_open_windows",
+    "get_metadata",
+    "get_pixels",
+    "viewer3d",
+    "get_dialogs",
+    "close_dialogs",
+    "probe_command",
+    "interact_dialog",
+    "run_chain",
+    "intent",
+    "intent_teach",
+    "intent_list",
+    "intent_forget",
+    "get_friction_log",
+    "get_friction_patterns",
+    "clear_friction_log",
+    "list_reactive_rules",
+    "reactive_enable",
+    "reactive_disable",
+    "reactive_reload",
+    "reactive_stats",
+    "submit_async",
+    "job_status",
+    "job_cancel",
+    "job_list",
+    "wait_for_job",
+    "gui_toast",
+    "gui_inline",
+    "gui_focus",
+    "gui_markdown",
+    "gui_highlight_roi",
+    "gui_confirm",
+    "imagej_events",
+]
 
 # Step 01 (docs/tcp_upgrade): capabilities Claude's ij.py declares on first
 # contact. Claude Code hooks already inject per-turn session state, so pulse
@@ -252,6 +323,22 @@ import atexit as _atexit
 _atexit.register(_flush_cache)
 
 
+def _read_server_token():
+    """Read the per-install shared token written by the Java server at
+    ~/.imagejai/server-token. Returns None if the file isn't present —
+    that's fine while token enforcement is opt-in (the server still
+    accepts unauthenticated hello). When IMAGEJAI_TCP_REQUIRE_TOKEN=1 is
+    set on the server side, this function MUST return a valid token or
+    every command will be rejected."""
+    try:
+        p = os.path.join(os.path.expanduser("~"), ".imagejai", "server-token")
+        with open(p, "r", encoding="utf-8") as f:
+            tok = f.read().strip()
+        return tok if tok else None
+    except (IOError, OSError):
+        return None
+
+
 def hello(host=HOST, port=PORT, timeout=10):
     """Send the step 01 handshake. Records caps on the server side and
     returns {server_version, session_id, enabled[], server_time_ms}.
@@ -264,6 +351,9 @@ def hello(host=HOST, port=PORT, timeout=10):
         req["session_id"] = SESSION_ID
     if MODEL_ENDPOINT:
         req["model_endpoint"] = MODEL_ENDPOINT
+    tok = _read_server_token()
+    if tok:
+        req["token"] = tok
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         s.settimeout(timeout)
@@ -412,8 +502,40 @@ def get_state_context():
     return imagej_command({"command": "get_state_context"})
 
 
+def get_progress():
+    return imagej_command({"command": "get_progress"})
+
+
+def get_roi_state():
+    return imagej_command({"command": "get_roi_state"})
+
+
+def get_display_state():
+    return imagej_command({"command": "get_display_state"})
+
+
+def get_console(tail=2000):
+    return imagej_command({"command": "get_console", "tail": tail})
+
+
 def execute_macro(code):
     return imagej_command({"command": "execute_macro", "code": code})
+
+
+def run_script(code, language="groovy", timeout=180):
+    return imagej_command({
+        "command": "run_script",
+        "language": language,
+        "code": code,
+    }, timeout=timeout)
+
+
+def run_groovy(code, timeout=180):
+    return run_script(code, language="groovy", timeout=timeout)
+
+
+def run_jython(code, timeout=180):
+    return run_script(code, language="jython", timeout=timeout)
 
 
 def capture_image(max_size=1024):
@@ -467,6 +589,17 @@ def get_dialogs():
 
 def close_dialogs(pattern=None):
     return imagej_command({"command": "close_dialogs", "pattern": pattern})
+
+
+def probe_command(plugin):
+    return imagej_command({"command": "probe_command", "plugin": plugin})
+
+
+def interact_dialog(action, **kwargs):
+    cmd = dict(kwargs)
+    cmd["command"] = "interact_dialog"
+    cmd["action"] = action
+    return imagej_command(cmd)
 
 
 def run_chain(chain, halt_on_error=True):
@@ -526,6 +659,26 @@ def get_friction_patterns():
 
 def clear_friction_log():
     return imagej_command({"command": "clear_friction_log"})
+
+
+def list_reactive_rules():
+    return imagej_command({"command": "list_reactive_rules"})
+
+
+def reactive_enable(name):
+    return imagej_command({"command": "reactive_enable", "name": name})
+
+
+def reactive_disable(name):
+    return imagej_command({"command": "reactive_disable", "name": name})
+
+
+def reactive_reload():
+    return imagej_command({"command": "reactive_reload"})
+
+
+def reactive_stats():
+    return imagej_command({"command": "reactive_stats"})
 
 
 # ---------------------------------------------------------------------------
@@ -971,7 +1124,7 @@ def main():
                 print(json.dumps(resp, indent=2))
 
         elif cmd == "progress":
-            print(json.dumps(imagej_command({"command": "get_progress"}), indent=2))
+            print(json.dumps(get_progress(), indent=2))
 
         elif cmd == "histogram":
             print(json.dumps(get_histogram(), indent=2))
@@ -984,13 +1137,11 @@ def main():
 
         elif cmd == "rois":
             # Step 08: thin wrapper over the step 07 get_roi_state command.
-            print(json.dumps(imagej_command({"command": "get_roi_state"}),
-                             indent=2))
+            print(json.dumps(get_roi_state(), indent=2))
 
         elif cmd == "display":
             # Step 08: active C/Z/T, composite mode, display range, LUT.
-            print(json.dumps(imagej_command({"command": "get_display_state"}),
-                             indent=2))
+            print(json.dumps(get_display_state(), indent=2))
 
         elif cmd == "console":
             # Step 08: tail of Fiji's buffered stdout/stderr. Groovy /
@@ -1013,9 +1164,7 @@ def main():
                     i += 1
                 else:
                     i += 1
-            print(json.dumps(
-                imagej_command({"command": "get_console", "tail": tail}),
-                indent=2))
+            print(json.dumps(get_console(tail=tail), indent=2))
 
         elif cmd == "3d":
             # Sub-commands: status, add, list, snapshot, close
@@ -1042,8 +1191,7 @@ def main():
                 print("Usage: python ij.py probe \"Plugin Name...\"")
                 sys.exit(1)
             plugin_name = " ".join(sys.argv[2:])
-            print(json.dumps(imagej_command(
-                {"command": "probe_command", "plugin": plugin_name}), indent=2))
+            print(json.dumps(probe_command(plugin_name), indent=2))
 
         elif cmd == "script":
             # Run a Groovy (or other language) script inside Fiji's JVM
@@ -1069,9 +1217,7 @@ def main():
             if not code:
                 print("No code provided")
                 sys.exit(1)
-            resp = imagej_command(
-                {"command": "run_script", "language": language, "code": code},
-                timeout=180)
+            resp = run_script(code, language=language)
             print(json.dumps(resp, indent=2))
             # Show dialogs if any
             dlgs = []
@@ -1105,13 +1251,13 @@ def main():
                 sys.exit(1)
 
             sub = sys.argv[2]
-            req = {"command": "interact_dialog"}
+            req = {}
 
             if sub == "list":
                 req["action"] = "list_components"
                 if len(sys.argv) > 3:
                     req["dialog"] = sys.argv[3]
-                resp = imagej_command(req)
+                resp = interact_dialog(**req)
                 # Pretty-print the component list
                 if resp.get("ok") and resp.get("result", {}).get("dialogs"):
                     for dlg in resp["result"]["dialogs"]:
@@ -1143,7 +1289,7 @@ def main():
                 req["target"] = sys.argv[3] if len(sys.argv) > 3 else None
                 if len(sys.argv) > 4 and sys.argv[4].isdigit():
                     req["index"] = int(sys.argv[4])
-                print(json.dumps(imagej_command(req), indent=2))
+                print(json.dumps(interact_dialog(**req), indent=2))
 
             elif sub == "check":
                 req["action"] = "set_checkbox"
@@ -1152,32 +1298,32 @@ def main():
                     req["value"] = sys.argv[4].lower() in ("true", "1", "on", "yes")
                 else:
                     req["value"] = True
-                print(json.dumps(imagej_command(req), indent=2))
+                print(json.dumps(interact_dialog(**req), indent=2))
 
             elif sub == "toggle":
                 req["action"] = "toggle_checkbox"
                 req["target"] = sys.argv[3] if len(sys.argv) > 3 else None
                 if len(sys.argv) > 4 and sys.argv[4].isdigit():
                     req["index"] = int(sys.argv[4])
-                print(json.dumps(imagej_command(req), indent=2))
+                print(json.dumps(interact_dialog(**req), indent=2))
 
             elif sub == "text":
                 req["action"] = "set_text"
                 req["target"] = sys.argv[3] if len(sys.argv) > 3 else None
                 req["value"] = sys.argv[4] if len(sys.argv) > 4 else ""
-                print(json.dumps(imagej_command(req), indent=2))
+                print(json.dumps(interact_dialog(**req), indent=2))
 
             elif sub == "texti":
                 req["action"] = "set_text"
                 req["index"] = int(sys.argv[3]) if len(sys.argv) > 3 else 0
                 req["value"] = sys.argv[4] if len(sys.argv) > 4 else ""
-                print(json.dumps(imagej_command(req), indent=2))
+                print(json.dumps(interact_dialog(**req), indent=2))
 
             elif sub == "dropdown":
                 req["action"] = "set_dropdown"
                 req["target"] = sys.argv[3] if len(sys.argv) > 3 else None
                 req["value"] = sys.argv[4] if len(sys.argv) > 4 else ""
-                print(json.dumps(imagej_command(req), indent=2))
+                print(json.dumps(interact_dialog(**req), indent=2))
 
             elif sub == "slider":
                 req["action"] = "set_slider"
@@ -1186,7 +1332,7 @@ def main():
                 else:
                     req["target"] = sys.argv[3] if len(sys.argv) > 3 else None
                 req["value"] = int(sys.argv[4]) if len(sys.argv) > 4 else 0
-                print(json.dumps(imagej_command(req), indent=2))
+                print(json.dumps(interact_dialog(**req), indent=2))
 
             elif sub == "spinner":
                 req["action"] = "set_spinner"
@@ -1195,7 +1341,7 @@ def main():
                 else:
                     req["target"] = sys.argv[3] if len(sys.argv) > 3 else None
                 req["value"] = sys.argv[4] if len(sys.argv) > 4 else "0"
-                print(json.dumps(imagej_command(req), indent=2))
+                print(json.dumps(interact_dialog(**req), indent=2))
 
             elif sub == "scroll":
                 req["action"] = "set_scrollbar"
@@ -1204,7 +1350,7 @@ def main():
                 else:
                     req["target"] = sys.argv[3] if len(sys.argv) > 3 else None
                 req["value"] = int(sys.argv[4]) if len(sys.argv) > 4 else 0
-                print(json.dumps(imagej_command(req), indent=2))
+                print(json.dumps(interact_dialog(**req), indent=2))
 
             elif sub == "tab":
                 req["action"] = "focus_tab"
@@ -1212,7 +1358,7 @@ def main():
                     req["index"] = int(sys.argv[3])
                 else:
                     req["target"] = sys.argv[3] if len(sys.argv) > 3 else None
-                print(json.dumps(imagej_command(req), indent=2))
+                print(json.dumps(interact_dialog(**req), indent=2))
 
             else:
                 print("Unknown ui subcommand: " + sub)
@@ -1623,7 +1769,7 @@ def main():
             # Phase 8: inspect / toggle / reload the reactive rules engine.
             sub = sys.argv[2] if len(sys.argv) > 2 else "list"
             if sub == "list":
-                resp = imagej_command({"command": "list_reactive_rules"})
+                resp = list_reactive_rules()
                 if not resp.get("ok"):
                     print(json.dumps(resp, indent=2))
                     sys.exit(1)
@@ -1658,22 +1804,19 @@ def main():
                 if len(sys.argv) < 4:
                     print("Usage: python ij.py reactive enable <name>")
                     sys.exit(1)
-                print(json.dumps(imagej_command(
-                    {"command": "reactive_enable", "name": sys.argv[3]}), indent=2))
+                print(json.dumps(reactive_enable(sys.argv[3]), indent=2))
 
             elif sub == "disable":
                 if len(sys.argv) < 4:
                     print("Usage: python ij.py reactive disable <name>")
                     sys.exit(1)
-                print(json.dumps(imagej_command(
-                    {"command": "reactive_disable", "name": sys.argv[3]}), indent=2))
+                print(json.dumps(reactive_disable(sys.argv[3]), indent=2))
 
             elif sub == "reload":
-                print(json.dumps(imagej_command(
-                    {"command": "reactive_reload"}), indent=2))
+                print(json.dumps(reactive_reload(), indent=2))
 
             elif sub == "stats":
-                resp = imagej_command({"command": "reactive_stats"})
+                resp = reactive_stats()
                 if resp.get("ok"):
                     res = resp.get("result", {})
                     hits = res.get("hits", {})
