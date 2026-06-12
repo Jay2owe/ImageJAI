@@ -269,7 +269,7 @@ def test_anthropic_native_loop():
 
 def test_gemini_native_loop():
     reset_log()
-    os.environ.setdefault("GOOGLE_API_KEY", "AIza-test-not-real")
+    os.environ.setdefault("GOOGLE_API_KEY", "test-not-real")
     client = get_client("gemini")
 
     responses = iter([

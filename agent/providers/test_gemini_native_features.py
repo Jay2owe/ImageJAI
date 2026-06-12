@@ -17,8 +17,8 @@ from agent.providers.test_base import multiply
 
 
 def _build_client(monkeypatch: pytest.MonkeyPatch) -> tuple[GeminiNativeClient, dict]:
-    monkeypatch.setenv("GOOGLE_API_KEY", "AIza-test-not-real")
-    client = GeminiNativeClient(api_key="AIza-test-not-real")
+    monkeypatch.setenv("GOOGLE_API_KEY", "test-not-real")
+    client = GeminiNativeClient(api_key="test-not-real")
     captured: dict = {}
 
     def fake_generate_content(**kwargs):
@@ -174,7 +174,7 @@ def test_features_default_off_preserves_phase_b_behaviour(monkeypatch) -> None:
 
 def test_router_server_tools_off_by_default(monkeypatch) -> None:
     """Phase C acceptance: server tools must be off when router opt-in absent."""
-    monkeypatch.setenv("GOOGLE_API_KEY", "AIza-test-not-real")
+    monkeypatch.setenv("GOOGLE_API_KEY", "test-not-real")
     client = router.get_client("gemini", "gemini-2.5-pro")
     assert isinstance(client, GeminiNativeClient)
     assert client._default_server_tools == set()
@@ -200,7 +200,7 @@ def test_router_server_tools_code_execution_threads_through(monkeypatch) -> None
     """Phase C acceptance: ``router.get_client('gemini', model, server_tools=['code_execution'])``
     enables sandbox code execution on every chat() call without per-call kwargs.
     """
-    monkeypatch.setenv("GOOGLE_API_KEY", "AIza-test-not-real")
+    monkeypatch.setenv("GOOGLE_API_KEY", "test-not-real")
     client = router.get_client(
         "gemini", "gemini-2.5-pro", server_tools=["code_execution"]
     )
@@ -222,7 +222,7 @@ def test_router_server_tools_code_execution_threads_through(monkeypatch) -> None
 
 def test_router_server_tools_google_search_threads_through(monkeypatch) -> None:
     """Phase C acceptance: same pattern enables Google Search grounding."""
-    monkeypatch.setenv("GOOGLE_API_KEY", "AIza-test-not-real")
+    monkeypatch.setenv("GOOGLE_API_KEY", "test-not-real")
     client = router.get_client(
         "gemini", "gemini-2.5-pro", server_tools=["google_search"]
     )
@@ -241,7 +241,7 @@ def test_router_server_tools_google_search_threads_through(monkeypatch) -> None:
 
 
 def test_router_server_tools_unknown_name_raises(monkeypatch) -> None:
-    monkeypatch.setenv("GOOGLE_API_KEY", "AIza-test-not-real")
+    monkeypatch.setenv("GOOGLE_API_KEY", "test-not-real")
     with pytest.raises(ValueError, match="unknown Gemini server tool"):
         router.get_client("gemini", "gemini-2.5-pro", server_tools=["bogus"])
 

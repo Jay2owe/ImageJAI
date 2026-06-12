@@ -11,7 +11,7 @@ from agent.providers.test_base import CALL_LOG, multiply, run_loop
 
 
 def test_gemini_native_loop(monkeypatch) -> None:
-    monkeypatch.setenv("GOOGLE_API_KEY", "AIza-test-not-real")
+    monkeypatch.setenv("GOOGLE_API_KEY", "test-not-real")
     client = router.get_client("gemini")
     calls_seen: list[dict] = []
 
@@ -38,8 +38,8 @@ def test_gemini_native_loop(monkeypatch) -> None:
 
 
 def test_gemini_disables_automatic_function_calling(monkeypatch) -> None:
-    monkeypatch.setenv("GOOGLE_API_KEY", "AIza-test-not-real")
-    client = GeminiNativeClient(api_key="AIza-test-not-real")
+    monkeypatch.setenv("GOOGLE_API_KEY", "test-not-real")
+    client = GeminiNativeClient(api_key="test-not-real")
     captured = {}
 
     def fake_generate_content(**kwargs):

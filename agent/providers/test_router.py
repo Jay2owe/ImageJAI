@@ -15,7 +15,7 @@ from agent.providers.router import _PROXY_PROVIDERS
 
 def test_router_native_and_proxy_mapping(monkeypatch) -> None:
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-not-real")
-    monkeypatch.setenv("GOOGLE_API_KEY", "AIza-test-not-real")
+    monkeypatch.setenv("GOOGLE_API_KEY", "test-not-real")
     assert isinstance(router.get_client("anthropic", "claude-sonnet-4-6"), AnthropicNativeClient)
     assert isinstance(router.get_client("gemini", "gemini-2.5-flash"), GeminiNativeClient)
     assert isinstance(router.get_client("groq", "llama-3.3-70b-versatile"), LiteLLMProxyClient)
