@@ -658,7 +658,7 @@ roiManager("Save", dir + "AI_output/rois.zip");
 print(File.length(dir + "AI_output/processed.tif"));
 
 // Bio-Formats paths with spaces need square brackets
-run("Bio-Formats Importer", "open=[C:/Users/Owner/UK Dementia Research Institute Dropbox/file.lif]");
+run("Bio-Formats Importer", "open=[C:/Users/example/data/file.lif]");
 ```
 
 | Source | Format | Import Pattern |

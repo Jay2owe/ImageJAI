@@ -167,8 +167,8 @@ def _rule_windows_backslashes_in_path(code, state):
             return (
                 "String literal \"{}\" contains '\\\\' — ImageJ macros "
                 "misread Windows-style paths. Use forward slashes instead, "
-                "e.g. \"C:/Users/jamie/data.tif\" not "
-                "\"C:\\\\Users\\\\jamie\\\\data.tif\"."
+                "e.g. \"C:/Users/example/data.tif\" not "
+                "\"C:\\\\Users\\\\example\\\\data.tif\"."
             ).format(literal)
     return None
 
