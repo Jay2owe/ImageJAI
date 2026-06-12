@@ -1,0 +1,406 @@
+package imagejai.ui.installer;
+
+import imagejai.config.Settings;
+import imagejai.engine.picker.ModelEntry;
+import imagejai.engine.picker.ProviderEntry;
+import imagejai.engine.picker.ProviderRegistry;
+import imagejai.ui.installer.wizard.BrowserAuthWizard;
+import imagejai.ui.installer.wizard.CredentialVerifier;
+import imagejai.ui.installer.wizard.InstallerWizard;
+import imagejai.ui.installer.wizard.LocalModelDownloadWizard;
+import imagejai.ui.installer.wizard.LocalRuntimeWizard;
+import imagejai.ui.installer.wizard.PaidWithCardWizard;
+import imagejai.ui.installer.wizard.ProviderDiscoveryCredentialVerifier;
+import imagejai.ui.installer.wizard.PureApiKeyWizard;
+
+import javax.swing.BoxLayout;
+import javax.swing.JPanel;
+import javax.swing.JScrollPane;
+import javax.swing.JViewport;
+import javax.swing.border.EmptyBorder;
+import java.awt.BorderLayout;
+import java.awt.Component;
+import java.awt.Dimension;
+import java.awt.Rectangle;
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+
+/**
+ * Settings tab that exposes one card per provider. Cards show the current
+ * configuration status (✓/⚠/✗) and a button that opens the matching install
+ * wizard. The dropdown's ⚠ status icon click deep-links here through
+ * {@link #scrollTo(String)}.
+ *
+ * <p>Implements docs/multi_provider/05_ui_design.md §9 (settings touchpoints)
+ * and §7 (status-icon click flow).
+ */
+public class MultiProviderPanel extends JPanel {
+
+    private static final Dimension COMPACT_VIEWPORT_SIZE = new Dimension(620, 360);
+
+    /** Curated descriptions per provider — fallback to the first model's description otherwise. */
+    private static final Map<String, ProviderMeta> META;
+    static {
+        Map<String, ProviderMeta> m = new LinkedHashMap<String, ProviderMeta>();
+        m.put("anthropic", new ProviderMeta(
+                "Anthropic", "Claude (Opus, Sonnet, Haiku) — strongest agent for long Fiji sessions.",
+                ProviderCard.CostTier.PAID, "paid",
+                "https://console.anthropic.com/settings/keys"));
+        m.put("openai", new ProviderMeta(
+                "OpenAI", "GPT-5 / GPT-4 family — gold-standard tool reliability.",
+                ProviderCard.CostTier.PAID, "paid",
+                "https://platform.openai.com/api-keys"));
+        m.put("gemini", new ProviderMeta(
+                "Google Gemini", "Vision-capable, frontier-class free tier.",
+                ProviderCard.CostTier.FREE_WITH_LIMITS, "browser",
+                "https://aistudio.google.com/app/apikey"));
+        m.put("groq", new ProviderMeta(
+                "Groq", "Open-weight models on LPU silicon — 4-10× faster than GPU providers.",
+                ProviderCard.CostTier.FREE_WITH_LIMITS, "key",
+                "https://console.groq.com/keys"));
+        m.put("cerebras", new ProviderMeta(
+                "Cerebras", "Wafer-scale chips — highest tok/s anywhere. 1M tokens/day free.",
+                ProviderCard.CostTier.FREE_WITH_LIMITS, "key",
+                "https://cloud.cerebras.ai/platform/keys"));
+        m.put("openrouter", new ProviderMeta(
+                "OpenRouter", "Single key for 300+ models behind one OpenAI-shaped API.",
+                ProviderCard.CostTier.FREE_WITH_LIMITS, "key",
+                "https://openrouter.ai/keys"));
+        m.put("github-models", new ProviderMeta(
+                "GitHub Models", "Free taste of GPT-5/Claude/Llama-4 with a GitHub PAT.",
+                ProviderCard.CostTier.FREE_WITH_LIMITS, "browser",
+                "https://github.com/settings/tokens"));
+        m.put("mistral", new ProviderMeta(
+                "Mistral", "EU-hosted GDPR-friendly Mistral Large/Medium/Small line.",
+                ProviderCard.CostTier.PAID, "key",
+                "https://console.mistral.ai/api-keys"));
+        m.put("together", new ProviderMeta(
+                "Together AI", "Cheapest serverless host for Llama, Qwen, DeepSeek, GLM.",
+                ProviderCard.CostTier.PAID, "key",
+                "https://api.together.ai/settings/api-keys"));
+        m.put("huggingface", new ProviderMeta(
+                "HuggingFace", "Inference Providers gateway — one key, multiple backends.",
+                ProviderCard.CostTier.PAID, "key",
+                "https://huggingface.co/settings/tokens"));
+        m.put("deepseek", new ProviderMeta(
+                "DeepSeek", "Open-weight V4/R1 — reasoning + tools, off-peak discounts.",
+                ProviderCard.CostTier.PAID, "key",
+                "https://platform.deepseek.com/api_keys"));
+        m.put("xai", new ProviderMeta(
+                "xAI Grok", "Long-context Grok 4 family — Grok 4.1 Fast competes on price.",
+                ProviderCard.CostTier.PAID, "key",
+                "https://console.x.ai/keys"));
+        m.put("perplexity", new ProviderMeta(
+                "Perplexity", "Search-augmented LLMs — grounded in live web results.",
+                ProviderCard.CostTier.PAID, "key",
+                "https://www.perplexity.ai/settings/api"));
+        m.put("ollama-cloud", new ProviderMeta(
+                "Ollama Cloud", "Free-with-limits frontier-scale open models behind browser sign-in.",
+                ProviderCard.CostTier.FREE_WITH_LIMITS, "runtime",
+                "https://ollama.com/cloud"));
+        m.put("ollama", new ProviderMeta(
+                "Ollama (local)", "Runs on your computer — no API key, no quota.",
+                ProviderCard.CostTier.FREE, "runtime-models",
+                "https://ollama.com/download"));
+        // Keyless local OpenAI-compatible servers — no API key, runs on the
+        // user's machine. Models are whatever the user has loaded.
+        m.put("lmstudio", new ProviderMeta(
+                "LM Studio (local)", "Runs models on your computer via LM Studio — no API key.",
+                ProviderCard.CostTier.FREE, "runtime",
+                "https://lmstudio.ai"));
+        m.put("jan", new ProviderMeta(
+                "Jan (local)", "Open-source local model app — runs on your computer, no API key.",
+                ProviderCard.CostTier.FREE, "runtime",
+                "https://jan.ai"));
+        m.put("llamacpp", new ProviderMeta(
+                "llama.cpp (local)", "Runs GGUF models via llama-server on your computer — no API key.",
+                ProviderCard.CostTier.FREE, "runtime",
+                "https://github.com/ggml-org/llama.cpp"));
+        m.put("vllm", new ProviderMeta(
+                "vLLM (local)", "High-throughput local inference server — runs on your machine, no API key.",
+                ProviderCard.CostTier.FREE, "runtime",
+                "https://docs.vllm.ai"));
+        META = Collections.unmodifiableMap(m);
+    }
+
+    /** Order in which cards render — mirrors the dropdown order. */
+    static final List<String> CARD_ORDER = Collections.unmodifiableList(Arrays.asList(
+            "ollama", "ollama-cloud", "lmstudio", "jan", "llamacpp", "vllm",
+            "anthropic", "openai", "gemini",
+            "groq", "cerebras", "openrouter", "github-models", "mistral",
+            "together", "huggingface", "deepseek", "xai", "perplexity"));
+
+    private final ProviderRegistry registry;
+    private final ProviderCredentials credentials;
+    private final WizardFactory wizardFactory;
+    private final Settings settings;
+    private final Map<String, ProviderCard> cards = new LinkedHashMap<String, ProviderCard>();
+    private final JPanel cardStack;
+    private final JScrollPane scroll;
+    private TierSafetyPanel tierSafetyPanel;
+
+    /** Test seam — lets fixtures replace the wizard implementations. */
+    public interface WizardFactory {
+        InstallerWizard wizardFor(String providerKey);
+    }
+
+    public MultiProviderPanel(ProviderRegistry registry, ProviderCredentials credentials) {
+        this(registry, credentials, defaultFactory(registry, credentials), null);
+    }
+
+    public MultiProviderPanel(ProviderRegistry registry,
+                              ProviderCredentials credentials,
+                              Settings settings) {
+        this(registry, credentials, defaultFactory(registry, credentials), settings);
+    }
+
+    public MultiProviderPanel(ProviderRegistry registry,
+                              ProviderCredentials credentials,
+                              WizardFactory wizardFactory) {
+        this(registry, credentials, wizardFactory, null);
+    }
+
+    public MultiProviderPanel(ProviderRegistry registry,
+                              ProviderCredentials credentials,
+                              WizardFactory wizardFactory,
+                              Settings settings) {
+        super(new BorderLayout());
+        this.registry = registry == null ? ProviderRegistry.empty() : registry;
+        this.credentials = credentials;
+        this.wizardFactory = wizardFactory;
+        this.settings = settings;
+        setBorder(new EmptyBorder(10, 10, 10, 10));
+
+        cardStack = new JPanel();
+        cardStack.setLayout(new BoxLayout(cardStack, BoxLayout.Y_AXIS));
+        if (settings != null) {
+            tierSafetyPanel = new TierSafetyPanel(settings);
+            cardStack.add(tierSafetyPanel);
+            cardStack.add(javax.swing.Box.createVerticalStrut(10));
+        }
+        for (String key : CARD_ORDER) {
+            ProviderCard card = buildCard(key);
+            cards.put(key, card);
+            cardStack.add(card);
+            cardStack.add(javax.swing.Box.createVerticalStrut(6));
+        }
+        scroll = new JScrollPane(cardStack);
+        scroll.setBorder(null);
+        scroll.setPreferredSize(COMPACT_VIEWPORT_SIZE);
+        scroll.getVerticalScrollBar().setUnitIncrement(16);
+        add(scroll, BorderLayout.CENTER);
+    }
+
+    /** Tier-safety section — null when constructed without a Settings instance (test seam). */
+    public TierSafetyPanel tierSafetyPanel() {
+        return tierSafetyPanel;
+    }
+
+    /** Names of every provider currently shown as a card. */
+    public java.util.Set<String> providerKeys() {
+        return Collections.unmodifiableSet(cards.keySet());
+    }
+
+    /** Refresh every card's status from disk. */
+    public void refreshAll() {
+        for (Map.Entry<String, ProviderCard> entry : cards.entrySet()) {
+            entry.getValue().updateStatus(deriveStatus(entry.getKey()));
+        }
+    }
+
+    /** Status of a card at this moment — visible for tests. */
+    public ProviderCard.Status statusOf(String providerKey) {
+        ProviderCard card = cards.get(providerKey);
+        if (card == null) {
+            return ProviderCard.Status.NEEDS_SETUP;
+        }
+        return deriveStatus(providerKey);
+    }
+
+    /** Look up the card for one provider — visible for tests. */
+    public ProviderCard cardFor(String providerKey) {
+        return cards.get(providerKey);
+    }
+
+    /** Scroll the named provider's card into view (deep-link from dropdown). */
+    public void scrollTo(String providerKey) {
+        ProviderCard card = cards.get(providerKey);
+        if (card == null) {
+            return;
+        }
+        Rectangle bounds = card.getBounds();
+        cardStack.scrollRectToVisible(bounds);
+        JViewport viewport = scroll.getViewport();
+        viewport.setViewPosition(new java.awt.Point(0, Math.max(0, bounds.y - 8)));
+        card.requestFocusInWindow();
+    }
+
+    /** Trigger the wizard programmatically — used by the dropdown deep-link. */
+    public void launchWizard(String providerKey) {
+        ProviderCard card = cards.get(providerKey);
+        if (card != null) {
+            card.actionButton().doClick();
+        }
+    }
+
+    private ProviderCard buildCard(final String key) {
+        ProviderMeta meta = META.get(key);
+        String displayName = meta != null ? meta.displayName : key;
+        String description = meta != null ? meta.description : "";
+        ProviderCard.CostTier tier = meta != null ? meta.tier : ProviderCard.CostTier.PAID;
+
+        ProviderCard card = new ProviderCard(key, displayName, description,
+                deriveStatus(key), tier);
+        card.setActionListener(e -> handleWizardClick(card, key));
+        card.setStatusClickListener((clicked, status) -> handleStatusIconClick(clicked, status));
+        return card;
+    }
+
+    private void handleStatusIconClick(ProviderCard card, ProviderCard.Status status) {
+        if (card == null || status == null) {
+            return;
+        }
+        if (status == ProviderCard.Status.NEEDS_SETUP) {
+            launchWizard(card.providerKey());
+            return;
+        }
+        if (status == ProviderCard.Status.UNAVAILABLE) {
+            showCachedError(card.providerKey());
+        }
+    }
+
+    private void showCachedError(final String providerKey) {
+        ProviderEntry entry = registry.provider(providerKey);
+        ProviderMeta meta = META.get(providerKey);
+        String display = meta != null ? meta.displayName
+                : entry != null ? entry.displayName() : providerKey;
+        String error = settings == null ? null : settings.lastErrorFor(providerKey);
+        if ((error == null || error.trim().isEmpty()) && entry != null) {
+            error = entry.lastError();
+        }
+        new CachedErrorDialog(display, error, null,
+                new CachedErrorDialog.ReconfigureAction() {
+                    @Override
+                    public void reconfigure() {
+                        launchWizard(providerKey);
+                    }
+                }).show(this);
+    }
+
+    private void handleWizardClick(final ProviderCard card, final String providerKey) {
+        InstallerWizard wizard = wizardFactory == null ? null : wizardFactory.wizardFor(providerKey);
+        if (wizard == null) {
+            return;
+        }
+        boolean saved = wizard.showAndSave(card);
+        if (saved) {
+            card.updateStatus(deriveStatus(providerKey));
+        }
+    }
+
+    private ProviderCard.Status deriveStatus(String providerKey) {
+        ProviderEntry provider = registry.provider(providerKey);
+        if (provider != null && provider.status() == ProviderEntry.Status.UNAVAILABLE) {
+            return ProviderCard.Status.UNAVAILABLE;
+        }
+        if (ProviderCredentials.isLocalDaemonProvider(providerKey)) {
+            // Ollama (local AND cloud) runs keyless through the signed-in local
+            // daemon — localhost:11434 forwards :cloud tags to ollama.com. The
+            // daemon being reachable is enough, so surface as ready and don't
+            // nag for an OLLAMA_API_KEY the launch never needs.
+            return ProviderCard.Status.READY;
+        }
+        if (credentials != null && credentials.hasCredentials(providerKey)) {
+            return ProviderCard.Status.READY;
+        }
+        return ProviderCard.Status.NEEDS_SETUP;
+    }
+
+    /** Map a provider key to the wizard shape it uses. Visible for tests. */
+    public static String installShapeFor(String providerKey) {
+        ProviderMeta meta = META.get(providerKey);
+        return meta == null ? "key" : meta.shape;
+    }
+
+    private static WizardFactory defaultFactory(final ProviderRegistry registry,
+                                                final ProviderCredentials credentials) {
+        // Phase G cross-phase carry-over from Phase E: wire the production
+        // CredentialVerifier so "Save & test" actually fires a /models probe
+        // through ProviderDiscovery. Without this the wizards default to noop
+        // and the user's key is saved but never validated.
+        final CredentialVerifier verifier = credentials == null
+                ? CredentialVerifier.noop()
+                : new ProviderDiscoveryCredentialVerifier(credentials);
+        return providerKey -> {
+            ProviderMeta meta = META.get(providerKey);
+            if (meta == null) {
+                return null;
+            }
+            switch (meta.shape) {
+                case "paid":
+                    return new PaidWithCardWizard(providerKey, meta.displayName,
+                            meta.signupUrl, credentials, verifier);
+                case "browser":
+                    return new BrowserAuthWizard(providerKey, meta.displayName,
+                            meta.signupUrl, cliHintFor(providerKey), credentials, verifier);
+                case "runtime":
+                    return new LocalRuntimeWizard(providerKey, credentials);
+                case "runtime-models":
+                    return new LocalModelDownloadWizard(registry, credentials);
+                case "key":
+                default:
+                    return new PureApiKeyWizard(providerKey, meta.displayName,
+                            meta.signupUrl, credentials, verifier);
+            }
+        };
+    }
+
+    private static String cliHintFor(String providerKey) {
+        switch (providerKey) {
+            case "github-models": return "gh auth login --scopes models:read";
+            case "gemini": return "gcloud auth application-default login (Vertex path)";
+            default: return "";
+        }
+    }
+
+    /** Resolve description fallback from registry when curated meta lacks one. */
+    static String descriptionForRegistry(ProviderRegistry registry, String providerKey) {
+        if (registry == null) {
+            return "";
+        }
+        ProviderEntry entry = registry.provider(providerKey);
+        if (entry == null) {
+            return "";
+        }
+        for (ModelEntry model : entry.models()) {
+            String desc = model.description();
+            if (desc != null && !desc.isEmpty()) {
+                return desc;
+            }
+        }
+        return "";
+    }
+
+    private static final class ProviderMeta {
+        final String displayName;
+        final String description;
+        final ProviderCard.CostTier tier;
+        final String shape;
+        final String signupUrl;
+
+        ProviderMeta(String displayName,
+                     String description,
+                     ProviderCard.CostTier tier,
+                     String shape,
+                     String signupUrl) {
+            this.displayName = displayName;
+            this.description = description;
+            this.tier = tier;
+            this.shape = shape;
+            this.signupUrl = signupUrl;
+        }
+    }
+}

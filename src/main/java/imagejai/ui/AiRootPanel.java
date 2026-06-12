@@ -600,6 +600,23 @@ public class AiRootPanel extends JPanel implements ChatSurface {
 
         menu.addSeparator();
 
+        final AgentLauncher.AgentInfo resumeAgent = selectedCliAgent();
+        final boolean resumeSupported = agentLauncher != null
+                && agentLauncher.supportsResumeLatest(resumeAgent);
+        if (resumeSupported) {
+            JMenuItem resume = new JMenuItem("Resume selected CLI session");
+            resume.setToolTipText("Resume the latest saved " + resumeAgent.name
+                    + " session for this agent workspace.");
+            resume.addActionListener(new ActionListener() {
+                @Override
+                public void actionPerformed(ActionEvent e) {
+                    launchAgentAsync(resumeAgent, AgentLauncher.SessionAction.RESUME_LATEST);
+                }
+            });
+            menu.add(resume);
+            menu.addSeparator();
+        }
+
         final JCheckBoxMenuItem safeMode =
                 new JCheckBoxMenuItem("Safe Mode", settings.safeModeEnabled);
         safeMode.setToolTipText(
@@ -866,6 +883,53 @@ public class AiRootPanel extends JPanel implements ChatSurface {
         return null;
     }
 
+    private AgentLauncher.AgentInfo findDetectedAgentByCommand(String command) {
+        if (command == null) {
+            return null;
+        }
+        for (AgentLauncher.AgentInfo agent : detectedAgents) {
+            if (agent != null && command.equals(agent.command)) {
+                return agent;
+            }
+        }
+        return null;
+    }
+
+    private AgentLauncher.AgentInfo selectedCliAgent() {
+        if (settings.useMultiProviderPicker) {
+            String provider = settings.selectedProvider == null
+                    ? ""
+                    : settings.selectedProvider.trim();
+            if (!"cli".equals(provider)) {
+                return null;
+            }
+            return findDetectedAgentByCommand(settings.selectedModelId);
+        }
+
+        String selected = agentSelector == null
+                ? settings.getSelectedAgentName()
+                : (String) agentSelector.getSelectedItem();
+        return findDetectedAgent(selected);
+    }
+
+    private void rememberCliAgentSelection(AgentLauncher.AgentInfo agent) {
+        if (agent == null) {
+            return;
+        }
+        settings.selectedAgentName = agent.name == null || agent.name.trim().isEmpty()
+                ? agent.command
+                : agent.name;
+        if (settings.useMultiProviderPicker) {
+            settings.selectedProvider = "cli";
+            settings.selectedModelId = agent.command;
+        }
+        settings.save();
+        if (modelPicker != null) {
+            modelPicker.refreshCaption();
+        }
+        chatView.refreshInputState();
+    }
+
     private void launchModelAsync(final ModelEntry entry) {
         if (entry == null || launchOrchestrator == null) {
             return;
@@ -910,30 +974,55 @@ public class AiRootPanel extends JPanel implements ChatSurface {
     }
 
     private void launchAgentAsync(final AgentLauncher.AgentInfo agent) {
+        launchAgentAsync(agent, AgentLauncher.SessionAction.NEW_SESSION);
+    }
+
+    private void launchAgentAsync(final AgentLauncher.AgentInfo agent,
+                                  final AgentLauncher.SessionAction sessionAction) {
+        if (agent == null || agentLauncher == null) {
+            return;
+        }
+        final AgentLauncher.SessionAction action = sessionAction == null
+                ? AgentLauncher.SessionAction.NEW_SESSION
+                : sessionAction;
+        if (action == AgentLauncher.SessionAction.RESUME_LATEST
+                && !agentLauncher.supportsResumeLatest(agent)) {
+            chatView.appendMessage("assistant",
+                    "Resume is not available for " + agent.name + ".");
+            return;
+        }
         final AgentLauncher.Mode mode = settings.agentEmbeddedTerminal
                 ? AgentLauncher.Mode.EMBEDDED
                 : AgentLauncher.Mode.EXTERNAL;
 
-        chatView.appendMessage("assistant", "Launching " + agent.name + "...");
+        rememberCliAgentSelection(agent);
+        final boolean resume = action == AgentLauncher.SessionAction.RESUME_LATEST;
+        chatView.appendMessage("assistant",
+                (resume ? "Resuming latest " : "Launching ") + agent.name + "...");
         new SwingWorker<AgentSession, Void>() {
             @Override
             protected AgentSession doInBackground() {
-                return agentLauncher.launch(agent, mode);
+                return agentLauncher.launch(agent, mode, action);
             }
 
             @Override
             protected void done() {
                 try {
                     AgentSession session = get();
-                    handleLaunchedSession(agent, mode, session);
+                    handleLaunchedSession(agent, mode, session,
+                            resume ? "Resumed" : "Launched");
                 } catch (Exception ex) {
-                    reportLaunchFailure(agent.name, ex);
+                    reportLaunchFailure(agent.name, ex, resume ? "resume" : "launch");
                 }
             }
         }.execute();
     }
 
     private void reportLaunchFailure(String displayName, Exception ex) {
+        reportLaunchFailure(displayName, ex, "launch");
+    }
+
+    private void reportLaunchFailure(String displayName, Exception ex, String verb) {
         Throwable cause = ex == null ? null : ex.getCause();
         if (cause == null) {
             cause = ex;
@@ -942,7 +1031,7 @@ public class AiRootPanel extends JPanel implements ChatSurface {
                 ? String.valueOf(cause)
                 : cause.getMessage();
         chatView.appendMessage("assistant",
-                "Failed to launch " + displayName + ": " + message);
+                "Failed to " + verb + " " + displayName + ": " + message);
         if (cause instanceof PostureViolation) {
             JOptionPane.showMessageDialog(
                     AiRootPanel.this,
@@ -955,8 +1044,21 @@ public class AiRootPanel extends JPanel implements ChatSurface {
     private void handleLaunchedSession(AgentLauncher.AgentInfo agent,
                                        AgentLauncher.Mode mode,
                                        AgentSession session) {
+        handleLaunchedSession(agent, mode, session, "Launched");
+    }
+
+    private void handleLaunchedSession(AgentLauncher.AgentInfo agent,
+                                       AgentLauncher.Mode mode,
+                                       AgentSession session,
+                                       String verb) {
+        String pastTense = verb == null || verb.trim().isEmpty()
+                ? "Launched"
+                : verb.trim();
+        String failureVerb = "Resumed".equalsIgnoreCase(pastTense)
+                ? "resume"
+                : "launch";
         if (session == null) {
-            chatView.appendMessage("assistant", "Failed to launch " + agent.name
+            chatView.appendMessage("assistant", "Failed to " + failureVerb + " " + agent.name
                     + ". Check the ImageJ log for details.");
             return;
         }
@@ -970,7 +1072,7 @@ public class AiRootPanel extends JPanel implements ChatSurface {
             terminalView.attachSession(embedded);
             showTerminalCard();
             watchSessionExit(embedded);
-            chatView.appendMessage("assistant", "Launched " + agent.name
+            chatView.appendMessage("assistant", pastTense + " " + agent.name
                     + " inside the plugin window.");
         } else {
             if (mode == AgentLauncher.Mode.EMBEDDED && session instanceof ExternalAgentSession) {
@@ -979,7 +1081,7 @@ public class AiRootPanel extends JPanel implements ChatSurface {
                     showTerminalFallbackNotice(external.notice());
                 }
             }
-            chatView.appendMessage("assistant", "Launched " + agent.name
+            chatView.appendMessage("assistant", pastTense + " " + agent.name
                     + " in: " + agentLauncher.getAgentWorkspace());
             showChatCard();
         }
@@ -1169,6 +1271,18 @@ public class AiRootPanel extends JPanel implements ChatSurface {
                     }
                 });
                 menu.add(item);
+
+                if (agentLauncher != null && agentLauncher.supportsResumeLatest(agent)) {
+                    JMenuItem resume = new JMenuItem("Resume latest " + agent.name + " session");
+                    resume.setToolTipText("Resume the latest saved session for this agent workspace.");
+                    resume.addActionListener(new ActionListener() {
+                        @Override
+                        public void actionPerformed(ActionEvent e) {
+                            launchAgentAsync(agent, AgentLauncher.SessionAction.RESUME_LATEST);
+                        }
+                    });
+                    menu.add(resume);
+                }
             }
         }
 

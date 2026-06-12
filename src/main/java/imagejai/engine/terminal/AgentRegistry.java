@@ -1,0 +1,277 @@
+package imagejai.engine.terminal;
+
+import com.google.gson.JsonArray;
+import com.google.gson.JsonElement;
+import com.google.gson.JsonObject;
+import com.google.gson.JsonParser;
+import ij.IJ;
+import imagejai.engine.AgentLauncher;
+
+import java.io.File;
+import java.io.InputStream;
+import java.io.InputStreamReader;
+import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.Comparator;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.util.regex.Pattern;
+import java.util.regex.PatternSyntaxException;
+
+/**
+ * Loader for bundled per-agent command, clear, and user-command registries.
+ */
+public final class AgentRegistry {
+    private static final long USER_COMMAND_CACHE_MS = 5000L;
+    private static final String DEFAULT_ID = "default";
+    private static final Map<String, CachedCommands> USER_COMMAND_CACHE =
+            new HashMap<String, CachedCommands>();
+
+    private AgentRegistry() {
+    }
+
+    public static String agentId(AgentLauncher.AgentInfo info) {
+        if (info == null || info.command == null || info.command.trim().isEmpty()) {
+            return DEFAULT_ID;
+        }
+        String rawCommand = info.command.trim().toLowerCase(Locale.ROOT);
+        String flags = info.contextFlags == null ? "" : info.contextFlags.toLowerCase(Locale.ROOT);
+        if (isGemmaWrapper(rawCommand) && flags.contains("--style claude")) {
+            return "gemma4_31b_claude";
+        }
+        if (isGemmaWrapper(rawCommand)) {
+            return "gemma4_31b";
+        }
+        String provider = providerFromAgentCli(rawCommand);
+        if (!provider.isEmpty()) {
+            return "provider_" + slug(provider);
+        }
+        String command = rawCommand.split("\\s+")[0];
+        if (command.endsWith("_agent")) {
+            command = command.substring(0, command.length() - "_agent".length());
+        }
+        String slug = slug(command);
+        return slug.isEmpty() ? DEFAULT_ID : slug;
+    }
+
+    private static boolean isGemmaWrapper(String command) {
+        return "gemma4_31b_agent".equals(command)
+                || "imagejai_agent".equals(command)
+                || command.contains(" -m gemma4_31b")
+                || command.contains(" -m agent.gemma4_31b");
+    }
+
+    private static String providerFromAgentCli(String command) {
+        if (!command.contains("agent.providers.agent_cli")) {
+            return "";
+        }
+        List<String> tokens = shellLikeTokens(command);
+        for (int i = 0; i < tokens.size(); i++) {
+            String token = tokens.get(i);
+            if ("--provider".equals(token)) {
+                return i + 1 < tokens.size() ? tokens.get(i + 1) : "";
+            }
+            if (token.startsWith("--provider=")) {
+                return token.substring("--provider=".length());
+            }
+        }
+        return "";
+    }
+
+    private static List<String> shellLikeTokens(String text) {
+        List<String> tokens = new ArrayList<String>();
+        if (text == null) {
+            return tokens;
+        }
+        StringBuilder current = new StringBuilder();
+        boolean quoted = false;
+        char quote = 0;
+        for (int i = 0; i < text.length(); i++) {
+            char c = text.charAt(i);
+            if (quoted) {
+                if (c == quote) {
+                    quoted = false;
+                } else {
+                    current.append(c);
+                }
+                continue;
+            }
+            if (c == '\'' || c == '"') {
+                quoted = true;
+                quote = c;
+                continue;
+            }
+            if (Character.isWhitespace(c)) {
+                if (current.length() > 0) {
+                    tokens.add(current.toString());
+                    current.setLength(0);
+                }
+            } else {
+                current.append(c);
+            }
+        }
+        if (current.length() > 0) {
+            tokens.add(current.toString());
+        }
+        return tokens;
+    }
+
+    private static String slug(String value) {
+        return value == null ? "" : value.replaceAll("[^a-z0-9]+", "_")
+                .replaceAll("^_+", "")
+                .replaceAll("_+$", "");
+    }
+
+    public static List<CommandEntry> builtInCommands(AgentLauncher.AgentInfo info) {
+        String id = agentId(info);
+        String resource = "/agents/" + id + "/commands.json";
+        InputStream in = AgentRegistry.class.getResourceAsStream(resource);
+        if (in == null) {
+            return Collections.emptyList();
+        }
+        try (InputStreamReader reader = new InputStreamReader(in, StandardCharsets.UTF_8)) {
+            JsonArray array = JsonParser.parseReader(reader).getAsJsonArray();
+            List<CommandEntry> commands = new ArrayList<CommandEntry>();
+            for (JsonElement element : array) {
+                if (!element.isJsonObject()) {
+                    continue;
+                }
+                JsonObject obj = element.getAsJsonObject();
+                String command = stringValue(obj, "command");
+                if (command.isEmpty()) {
+                    continue;
+                }
+                commands.add(new CommandEntry(command, stringValue(obj, "description")));
+            }
+            return commands;
+        } catch (Exception e) {
+            IJ.log("[ImageJAI-Term] Failed to load command registry " + resource
+                    + ": " + e.getMessage());
+            return Collections.emptyList();
+        }
+    }
+
+    public static Pattern clearPattern(AgentLauncher.AgentInfo info) {
+        String id = agentId(info);
+        String resource = "/agents/" + id + "/clear.json";
+        InputStream in = AgentRegistry.class.getResourceAsStream(resource);
+        if (in == null) {
+            return null;
+        }
+        try (InputStreamReader reader = new InputStreamReader(in, StandardCharsets.UTF_8)) {
+            JsonObject root = JsonParser.parseReader(reader).getAsJsonObject();
+            String regex = stringValue(root, "match");
+            return regex.isEmpty() ? null : Pattern.compile(regex);
+        } catch (PatternSyntaxException e) {
+            IJ.log("[ImageJAI-Term] Invalid clear matcher in " + resource + ": " + e.getMessage());
+            return null;
+        } catch (Exception e) {
+            IJ.log("[ImageJAI-Term] Failed to load clear registry " + resource
+                    + ": " + e.getMessage());
+            return null;
+        }
+    }
+
+    public static List<CommandEntry> userCommands(AgentLauncher.AgentInfo info, File workspace) {
+        String id = agentId(info);
+        String cacheKey = id + "|" + (workspace == null ? "" : workspace.getAbsolutePath());
+        long now = System.currentTimeMillis();
+        synchronized (USER_COMMAND_CACHE) {
+            CachedCommands cached = USER_COMMAND_CACHE.get(cacheKey);
+            if (cached != null && now - cached.loadedAtMs < USER_COMMAND_CACHE_MS) {
+                return cached.commands;
+            }
+        }
+
+        List<CommandEntry> commands = scanUserCommands(id, workspace);
+        List<CommandEntry> immutable = Collections.unmodifiableList(commands);
+        synchronized (USER_COMMAND_CACHE) {
+            USER_COMMAND_CACHE.put(cacheKey, new CachedCommands(now, immutable));
+        }
+        return immutable;
+    }
+
+    private static List<CommandEntry> scanUserCommands(String id, File workspace) {
+        List<CommandEntry> commands = new ArrayList<CommandEntry>();
+        if ("claude".equals(id) && workspace != null) {
+            File dir = new File(workspace, ".claude" + File.separator + "commands");
+            scanFiles(dir, ".md", "/", commands);
+        } else if ("gemma4_31b".equals(id) || "gemma4_31b_claude".equals(id)) {
+            File dir = new File(System.getProperty("user.home", ""),
+                    ".config" + File.separator + "imagej-ai" + File.separator
+                            + "gemma4_31b" + File.separator + ".ccommands");
+            scanFiles(dir, null, "/ccommands ", commands);
+        }
+        return commands;
+    }
+
+    private static void scanFiles(File dir, String requiredSuffix,
+                                  String commandPrefix, List<CommandEntry> out) {
+        if (dir == null || !dir.isDirectory()) {
+            return;
+        }
+        File[] files = dir.listFiles();
+        if (files == null) {
+            return;
+        }
+        List<File> sorted = new ArrayList<File>();
+        for (File file : files) {
+            if (!file.isFile()) {
+                continue;
+            }
+            String name = file.getName().toLowerCase(Locale.ROOT);
+            if (requiredSuffix != null && !name.endsWith(requiredSuffix)) {
+                continue;
+            }
+            if (requiredSuffix == null && !(name.endsWith(".md") || name.endsWith(".txt"))) {
+                continue;
+            }
+            sorted.add(file);
+        }
+        Collections.sort(sorted, new Comparator<File>() {
+            @Override
+            public int compare(File a, File b) {
+                return a.getName().compareToIgnoreCase(b.getName());
+            }
+        });
+        for (File file : sorted) {
+            String stem = stripExtension(file.getName());
+            out.add(new CommandEntry(commandPrefix + stem, file.getAbsolutePath()));
+        }
+    }
+
+    private static String stripExtension(String name) {
+        int dot = name.lastIndexOf('.');
+        return dot > 0 ? name.substring(0, dot) : name;
+    }
+
+    private static String stringValue(JsonObject obj, String key) {
+        if (obj == null || !obj.has(key) || !obj.get(key).isJsonPrimitive()) {
+            return "";
+        }
+        return obj.get(key).getAsString();
+    }
+
+    public static final class CommandEntry {
+        public final String command;
+        public final String description;
+
+        public CommandEntry(String command, String description) {
+            this.command = command == null ? "" : command;
+            this.description = description == null ? "" : description;
+        }
+    }
+
+    private static final class CachedCommands {
+        final long loadedAtMs;
+        final List<CommandEntry> commands;
+
+        CachedCommands(long loadedAtMs, List<CommandEntry> commands) {
+            this.loadedAtMs = loadedAtMs;
+            this.commands = commands;
+        }
+    }
+}

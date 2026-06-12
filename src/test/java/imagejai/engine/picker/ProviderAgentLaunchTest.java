@@ -1,0 +1,85 @@
+package imagejai.engine.picker;
+
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertNull;
+import static org.junit.Assert.assertTrue;
+
+import java.io.File;
+import java.util.Collections;
+
+import org.junit.Test;
+
+/**
+ * Unit tests for the provider-agent launch plan — the command + environment the
+ * proxy/native launchers hand to {@code AgentLauncher}. Side-effect-free, so no
+ * terminal is spawned.
+ */
+public class ProviderAgentLaunchTest {
+
+    private static ModelEntry entry(String provider, String modelId) {
+        return new ModelEntry(provider, modelId, provider + " " + modelId, "",
+                ModelEntry.Tier.FREE, 0, false, ModelEntry.Reliability.HIGH,
+                false, true, "");
+    }
+
+    @Test
+    public void planBuildsPythonModuleCommand() {
+        ProviderAgentLaunch.Plan plan = ProviderAgentLaunch.plan(
+                "/home/me/agent", entry("groq", "llama-3.3-70b-versatile"), null);
+        assertNotNull(plan);
+        assertTrue(plan.info.command.contains("-m agent.providers.agent_cli"));
+        assertTrue(plan.info.command.contains("--provider groq"));
+        assertTrue(plan.info.command.contains("--model llama-3.3-70b-versatile"));
+    }
+
+    @Test
+    public void planSetsProviderModelAndPythonpath() {
+        ProviderAgentLaunch.Plan plan = ProviderAgentLaunch.plan(
+                "/home/me/agent", entry("anthropic", "claude-sonnet-4-6"), null);
+        assertNotNull(plan);
+        assertEquals("anthropic", plan.env.get("IMAGEJAI_PROVIDER"));
+        assertEquals("claude-sonnet-4-6", plan.env.get("IMAGEJAI_MODEL"));
+        String pp = plan.env.get("PYTHONPATH");
+        assertNotNull(pp);
+        // Parent of the agent/ workspace must be on PYTHONPATH so
+        // `python -m agent.providers.agent_cli` resolves.
+        assertTrue(pp.contains("home" + File.separator + "me")
+                || pp.contains("/home/me") || pp.contains("home"));
+    }
+
+    @Test
+    public void planMergesNativeFeatureEnv() {
+        ProviderAgentLaunch.Plan plan = ProviderAgentLaunch.plan(
+                "/ws/agent", entry("gemini", "gemini-2.5-pro"),
+                Collections.singletonMap("IMAGEJAI_NATIVE_GOOGLE_SEARCH", "true"));
+        assertNotNull(plan);
+        assertEquals("true", plan.env.get("IMAGEJAI_NATIVE_GOOGLE_SEARCH"));
+    }
+
+    @Test
+    public void planCarriesOllamaModelTagForPostureRefusal() {
+        ProviderAgentLaunch.Plan plan = ProviderAgentLaunch.plan(
+                "/ws/agent", entry("ollama-cloud", "gemma4:31b-cloud"), null);
+        assertNotNull(plan);
+        // isOllama() must be true and the tag must surface so AgentLauncher's
+        // on-premises cloud-tag refusal can still fire.
+        assertTrue(plan.info.isOllama());
+        assertEquals("gemma4:31b-cloud", plan.info.defaultOllamaModel());
+    }
+
+    @Test
+    public void planRejectsBlankWorkspaceOrEntry() {
+        assertNull(ProviderAgentLaunch.plan("", entry("groq", "x"), null));
+        assertNull(ProviderAgentLaunch.plan("/ws/agent", null, null));
+    }
+
+    @Test
+    public void launchReturnsNullWithoutCliLauncher() {
+        // Both transports degrade gracefully (no NPE) when unwired.
+        assertNull(new ProxyAgentLauncher().launch(
+                entry("groq", "x"), imagejai.engine.AgentLauncher.Mode.EXTERNAL));
+        assertNull(new NativeAgentLauncher().launch(
+                entry("anthropic", "y"), imagejai.engine.AgentLauncher.Mode.EXTERNAL));
+    }
+}

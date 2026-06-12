@@ -390,13 +390,11 @@ public class TCPCommandServer {
         // dismissedDialogs) into a single "stateDelta" sub-object. Clients
         // that set state_delta=false in hello keep the legacy flat shape.
         boolean stateDelta = true;
-        // safe_mode defaults ON. Clients can still opt out with
-        // capabilities.safe_mode=false in their hello, but the default
-        // protects clients that never said hello (the bare `{"command":
-        // "..."}` path) and clients that forgot to claim it. The
-        // safe_mode_v2 package is partial — see docs/safe_mode_v2/ — so
-        // this is a defence-in-depth default, not a sandbox.
-        boolean safeMode = true;
+        // Safe-mode master switch. The field default stays false so
+        // DEFAULT_CAPS, used for sockets that never call hello, preserves the
+        // legacy unguarded path. Clients that do say hello negotiate
+        // safe_mode=true by default in handleHello.
+        boolean safeMode = false;
         SafeModeOptions safeModeOptions = new SafeModeOptions();
         // Step 02: opt-in to typed error objects
         // (docs/tcp_upgrade/02_structured_errors.md). Off-by-default so clients
@@ -1236,6 +1234,16 @@ public class TCPCommandServer {
         if (capsWitnessForTest != null) {
             capsWitnessForTest.add(caps);
         }
+
+        // Inbound reverse-resolution: outbound responses tokenise window-title
+        // paths (image-XXXX.lif - SCN), so a macro the agent builds from that
+        // title must have the token turned back into the real title before it
+        // reaches Fiji — otherwise selectWindow() never matches an open window.
+        // Scoped to code/title-bearing execution commands and gated on posture
+        // inside the filter; a no-op in Standard mode. The reversed value stays
+        // in the JVM and is re-tokenised on the way out by the filter.
+        pseudonymisationFilter.deTokeniseRequest(request, command,
+                PostureController.getInstance().current());
 
         JsonObject response = dispatchCore(command, request, caps, sock);
 
@@ -2299,7 +2307,8 @@ public class TCPCommandServer {
         // already injects the state a pulse string would carry.
         c.pulse        = optBool(caps, "pulse", true);
         c.stateDelta   = optBool(caps, "state_delta", true);
-        // Default ON. See AgentCaps default (line 221) for rationale.
+        // Handshake default ON. AgentCaps itself stays false so DEFAULT_CAPS
+        // preserves the no-handshake legacy path.
         c.safeMode     = optBool(caps, "safe_mode", true);
         JsonObject smOpts = (caps.has("safe_mode_options")
                 && caps.get("safe_mode_options").isJsonObject())
@@ -2429,6 +2438,12 @@ public class TCPCommandServer {
         if (caps != null && caps.pulse) {
             arr.add(new JsonPrimitive("pulse"));
         }
+        if (caps != null && caps.safeMode) {
+            arr.add(new JsonPrimitive("safe_mode"));
+            for (String name : enabledSafeModeOptions(caps)) {
+                arr.add(new JsonPrimitive(name));
+            }
+        }
         // Step 06: advertise warnings so clients can detect the new
         // top-level warnings[] array on success/failure replies.
         if (caps != null && caps.warnings) {
@@ -2501,6 +2516,22 @@ public class TCPCommandServer {
         arr.add(new JsonPrimitive("branch_switch"));
         arr.add(new JsonPrimitive("branch_delete"));
         return arr;
+    }
+
+    static List<String> enabledSafeModeOptions(AgentCaps caps) {
+        List<String> out = new ArrayList<String>();
+        if (caps == null || !caps.safeMode || caps.safeModeOptions == null) {
+            return out;
+        }
+        SafeModeOptions opt = caps.safeModeOptions;
+        if (opt.blockBitDepthNarrowing)  out.add("safe_mode_option:block_bit_depth_narrowing");
+        if (opt.blockNormalizeContrast)  out.add("safe_mode_option:block_normalize_contrast");
+        if (opt.autoBackupRoiOnReset)    out.add("safe_mode_option:auto_backup_roi_on_reset");
+        if (opt.autoSnapshotRescue)      out.add("safe_mode_option:auto_snapshot_rescue");
+        if (opt.queueStormGuard)         out.add("safe_mode_option:queue_storm_guard");
+        if (opt.autoSourceImageColumn)   out.add("safe_mode_option:auto_source_image_column");
+        if (opt.scientificIntegrityScan) out.add("safe_mode_option:scientific_integrity_scan");
+        return out;
     }
 
     // ---- Small JSON option helpers used by the hello handler. ----

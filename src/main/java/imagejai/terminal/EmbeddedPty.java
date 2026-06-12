@@ -117,12 +117,16 @@ public final class EmbeddedPty {
     }
 
     private static void configurePtyNativeFolder() {
-        if (System.getProperty("pty4j.tmpdir") != null
-                && System.getProperty("pty4j.preferred.native.folder") != null) {
+        File folder = new File(System.getProperty("java.io.tmpdir"), "imagejai-pty4j-native");
+        String preferred = System.getProperty("pty4j.preferred.native.folder");
+        if (folder.getAbsolutePath().equals(preferred)) {
+            System.clearProperty("pty4j.preferred.native.folder");
+        }
+
+        if (System.getProperty("pty4j.tmpdir") != null) {
             return;
         }
 
-        File folder = new File(System.getProperty("java.io.tmpdir"), "imagejai-pty4j-native");
         if (!folder.isDirectory() && !folder.mkdirs()) {
             IJ.log("[ImageJAI-Term] Could not create pty4j native temp folder: "
                     + folder.getAbsolutePath());
@@ -130,8 +134,8 @@ public final class EmbeddedPty {
         }
 
         System.setProperty("pty4j.tmpdir", folder.getAbsolutePath());
-        System.setProperty("pty4j.preferred.native.folder", folder.getAbsolutePath());
-        IJ.log("[ImageJAI-Term] pty4j native extraction folder: " + folder.getAbsolutePath());
+        IJ.log("[ImageJAI-Term] pty4j native extraction temp folder: "
+                + folder.getAbsolutePath());
     }
 
     private void installKeyBindings(JediTermWidget terminalWidget) {
@@ -293,13 +297,13 @@ public final class EmbeddedPty {
     }
 
     private static final class ImageJAITermSettingsProvider extends DefaultSettingsProvider {
-        private static final int BG_MAIN = 0x1e1e23;
-        private static final int BG_MESSAGES = 0x19191e;
-        private static final int BG_INPUT = 0x282830;
+        private static final int BG_MAIN = 0x1a1a20;
+        private static final int BG_MESSAGES = 0x16161b;
+        private static final int BG_INPUT = 0x25252c;
         private static final int BORDER = 0x3c3c46;
         private static final int ACCENT = 0x00c8ff;
         private static final int TEXT = 0xe6e6e6;
-        private static final int TEXT_MUTED = 0x787882;
+        private static final int TEXT_MUTED = 0x9696a2;
         private static final ColorPalette CHAT_PALETTE = new ChatAlignedColorPalette();
         private float fontSize = clamp((int) Math.round(Prefs.get(PREF_FONT_SIZE, DEFAULT_FONT_SIZE)));
 
@@ -382,7 +386,7 @@ public final class EmbeddedPty {
                     0x9a70c9,     // magenta
                     ACCENT,       // cyan / accent
                     TEXT,         // white / foreground
-                    BG_INPUT,     // bright black -> input surface
+                    TEXT_MUTED,   // bright black -> event/status text
                     0xd14f4f,
                     0xa8d8a8,
                     0xd6a933,

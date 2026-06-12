@@ -6,6 +6,7 @@ import imagejai.config.Settings;
 
 import java.io.File;
 import java.io.IOException;
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -25,6 +26,8 @@ import java.util.UUID;
 public class AgentLauncher {
 
     public static final String LOCAL_ASSISTANT_NAME = "Local Assistant";
+    public static final String GEMMA_WRAPPER_COMMAND = "gemma4_31b_agent";
+    private static final String GEMMA_BUNDLED_MODULE = "gemma4_31b";
 
     /** How an agent should be launched. */
     public enum Mode {
@@ -32,6 +35,14 @@ public class AgentLauncher {
         EXTERNAL,
         /** Embedded PTY inside the plugin frame — landed in stage 05. */
         EMBEDDED
+    }
+
+    /** Which CLI conversation lifecycle action to request. */
+    public enum SessionAction {
+        /** Start a fresh CLI conversation. */
+        NEW_SESSION,
+        /** Ask the CLI to resume its latest conversation for this workspace. */
+        RESUME_LATEST
     }
 
     /**
@@ -94,9 +105,9 @@ public class AgentLauncher {
         {"Gemini CLI", "gemini", "Google's Gemini CLI agent", "--yolo", "false", ""},
         {"Open Interpreter", "interpreter", "Open-source code interpreter", "--system_message \"$(cat CLAUDE.md)\"", "false", ""},
         {"Cline", "cline", "Autonomous coding agent", "", "false", ""},
-        {"Codex CLI", "codex", "OpenAI Codex CLI", "--full-auto", "false", ""},
-        {"Gemma 4 31B", "gemma4_31b_agent", "Ollama-backed Gemma agent", "", "true", "gemma4:31b-cloud"},
-        {"Gemma 4 31B (Claude-style)", "gemma4_31b_agent", "Gemma with Claude-style narrative prompt (A/B test)", "--style claude", "true", "gemma4:31b-cloud"},
+        {"Codex CLI", "codex", "OpenAI Codex CLI", "--dangerously-bypass-approvals-and-sandbox", "false", ""},
+        {"Gemma 4 31B", GEMMA_WRAPPER_COMMAND, "Ollama-backed Gemma agent", "", "true", "gemma4:31b-cloud"},
+        {"Gemma 4 31B (Claude-style)", GEMMA_WRAPPER_COMMAND, "Gemma with Claude-style narrative prompt (A/B test)", "--style claude", "true", "gemma4:31b-cloud"},
     };
 
     static final String CLOUD_OLLAMA_REFUSAL =
@@ -177,23 +188,61 @@ public class AgentLauncher {
      * lands (stage 05); until then it throws {@link UnsupportedOperationException}.
      */
     public AgentSession launch(AgentInfo agent, Mode mode) {
+        return launch(agent, mode, SessionAction.NEW_SESSION);
+    }
+
+    /**
+     * Launch an agent while choosing whether the CLI starts fresh or resumes
+     * its latest saved conversation.
+     */
+    public AgentSession launch(AgentInfo agent, Mode mode, SessionAction sessionAction) {
+        return launch(agent, mode, null, sessionAction);
+    }
+
+    /**
+     * Launch with extra environment variables merged into the spec. Used by the
+     * multi-provider proxy/native launchers to pass {@code PYTHONPATH} (so the
+     * {@code agent} package resolves for {@code python -m agent.providers.agent_cli})
+     * and {@code IMAGEJAI_NATIVE_*} feature flags into the agent process.
+     */
+    public AgentSession launch(AgentInfo agent, Mode mode, Map<String, String> extraEnv) {
+        return launch(agent, mode, extraEnv, SessionAction.NEW_SESSION);
+    }
+
+    /**
+     * Launch with extra environment variables and an explicit CLI session
+     * action. Existing provider/native wrappers call the three-argument
+     * overload, so only direct CLI launches can opt into resume.
+     */
+    public AgentSession launch(AgentInfo agent, Mode mode, Map<String, String> extraEnv,
+                               SessionAction sessionAction) {
+        SessionAction action = sessionAction == null
+                ? SessionAction.NEW_SESSION
+                : sessionAction;
         try {
             refuseCloudTagIfOnPremises(agent, null);
             syncContextFiles();
 
             if (mode == Mode.EMBEDDED) {
-                AgentLaunchSpec spec = buildEmbeddedLaunchSpec(agent);
-                return new EmbeddedAgentSession(agent, spec);
+                AgentLaunchSpec spec = buildEmbeddedLaunchSpec(agent, action);
+                if (extraEnv != null) {
+                    spec.env.putAll(extraEnv);
+                }
+                try {
+                    return createEmbeddedSession(agent, spec);
+                } catch (IOException e) {
+                    return fallbackToExternalAfterEmbeddedFailure(agent, extraEnv, action, e);
+                } catch (RuntimeException e) {
+                    if (e instanceof PostureViolation) {
+                        throw e;
+                    }
+                    return fallbackToExternalAfterEmbeddedFailure(agent, extraEnv, action, e);
+                } catch (LinkageError e) {
+                    return fallbackToExternalAfterEmbeddedFailure(agent, extraEnv, action, e);
+                }
             }
 
-            AgentLaunchSpec spec = buildExternalLaunchSpec(agent);
-            ProcessBuilder pb = new ProcessBuilder(spec.agentCommand);
-            pb.directory(spec.workingDir);
-            pb.environment().putAll(spec.env);
-            pb.start();
-
-            IJ.log("[AgentLauncher] Launched: " + agent.name + " (" + agent.command + ")");
-            return new ExternalAgentSession(agent, true);
+            return launchExternalSession(agent, extraEnv, "", action);
         } catch (IOException e) {
             IJ.log("[AgentLauncher] Failed to launch " + agent.name + ": " + e.getMessage());
             return null;
@@ -203,6 +252,48 @@ public class AgentLauncher {
         }
     }
 
+    AgentSession createEmbeddedSession(AgentInfo agent, AgentLaunchSpec spec) throws IOException {
+        return new EmbeddedAgentSession(agent, spec);
+    }
+
+    AgentSession launchExternalSession(AgentInfo agent,
+                                       Map<String, String> extraEnv,
+                                       String notice) throws IOException {
+        return launchExternalSession(agent, extraEnv, notice, SessionAction.NEW_SESSION);
+    }
+
+    AgentSession launchExternalSession(AgentInfo agent,
+                                       Map<String, String> extraEnv,
+                                       String notice,
+                                       SessionAction sessionAction) throws IOException {
+        AgentLaunchSpec spec = buildExternalLaunchSpec(agent, sessionAction);
+        if (extraEnv != null) {
+            spec.env.putAll(extraEnv);
+        }
+        ProcessBuilder pb = new ProcessBuilder(spec.agentCommand);
+        pb.directory(spec.workingDir);
+        pb.environment().putAll(spec.env);
+        pb.start();
+
+        IJ.log("[AgentLauncher] Launched: " + agent.name + " (" + agent.command + ")");
+        return new ExternalAgentSession(agent, true, notice);
+    }
+
+    private AgentSession fallbackToExternalAfterEmbeddedFailure(AgentInfo agent,
+                                                               Map<String, String> extraEnv,
+                                                               SessionAction sessionAction,
+                                                               Throwable failure)
+            throws IOException {
+        String reason = "Embedded terminal failed for " + agent.name + ": "
+                + describeThrowable(failure);
+        IJ.log("[AgentLauncher] " + reason + ". Falling back to external terminal.");
+        String notice = reason + ". Launching agent in an external window.";
+        if (sessionAction == SessionAction.NEW_SESSION) {
+            return launchExternalSession(agent, extraEnv, notice);
+        }
+        return launchExternalSession(agent, extraEnv, notice, sessionAction);
+    }
+
     /**
      * Build the OS-specific command list that opens a new detached terminal
      * and runs the agent inside it. Kept distinct from embedded-launch spec
@@ -210,8 +301,12 @@ public class AgentLauncher {
      * shape without cross-contaminating shell quoting.
      */
     AgentLaunchSpec buildExternalLaunchSpec(AgentInfo agent) {
+        return buildExternalLaunchSpec(agent, SessionAction.NEW_SESSION);
+    }
+
+    AgentLaunchSpec buildExternalLaunchSpec(AgentInfo agent, SessionAction sessionAction) {
         refuseCloudTagIfOnPremises(agent, null);
-        String fullCommand = buildAgentCommandString(agent);
+        String fullCommand = buildAgentCommandString(agent, sessionAction);
 
         String os = System.getProperty("os.name", "").toLowerCase();
         List<String> cmd = new ArrayList<String>();
@@ -243,6 +338,8 @@ public class AgentLauncher {
 
         Map<String, String> env = new LinkedHashMap<>();
         env.put("IMAGEJAI_TCP_PORT", String.valueOf(tcpPort));
+        env.put("IMAGEJAI_SAFE_MODE", settings.safeModeEnabled ? "1" : "0");
+        addRecipeEnvironment(env);
         addAuditEnvironment(env, agent);
 
         return new AgentLaunchSpec(agent, cmd, new File(agentWorkspace), env);
@@ -254,8 +351,12 @@ public class AgentLauncher {
      * existing external-terminal path.
      */
     AgentLaunchSpec buildEmbeddedLaunchSpec(AgentInfo agent) {
+        return buildEmbeddedLaunchSpec(agent, SessionAction.NEW_SESSION);
+    }
+
+    AgentLaunchSpec buildEmbeddedLaunchSpec(AgentInfo agent, SessionAction sessionAction) {
         refuseCloudTagIfOnPremises(agent, null);
-        String fullCommand = buildAgentCommandString(agent);
+        String fullCommand = buildAgentCommandString(agent, sessionAction);
 
         String os = System.getProperty("os.name", "").toLowerCase();
         List<String> cmd = new ArrayList<String>();
@@ -271,9 +372,11 @@ public class AgentLauncher {
 
         Map<String, String> env = new LinkedHashMap<>(System.getenv());
         env.put("IMAGEJAI_TCP_PORT", String.valueOf(tcpPort));
+        env.put("IMAGEJAI_SAFE_MODE", settings.safeModeEnabled ? "1" : "0");
         env.put("TERM", "xterm-256color");
         env.put("COLORTERM", "truecolor");
         env.put("TERMINAL_EMULATOR", "JetBrains-JediTerm");
+        addRecipeEnvironment(env);
         addAuditEnvironment(env, agent);
 
         return new AgentLaunchSpec(agent, cmd, new File(agentWorkspace), env);
@@ -304,25 +407,119 @@ public class AgentLauncher {
         return lastSessionId == null ? "" : lastSessionId;
     }
 
+    /**
+     * Whether this installed CLI has a known non-interactive "resume latest"
+     * launch form. The plugin deliberately delegates transcript ownership to
+     * the vendor CLI instead of trying to parse their session stores.
+     */
+    public boolean supportsResumeLatest(AgentInfo agent) {
+        return !isBlank(resumeLaunchCommand(agent));
+    }
+
     // --- Private helpers ---
 
     String buildAgentCommandString(AgentInfo agent) {
+        return buildAgentCommandString(agent, SessionAction.NEW_SESSION);
+    }
+
+    String buildAgentCommandString(AgentInfo agent, SessionAction sessionAction) {
+        SessionAction action = sessionAction == null
+                ? SessionAction.NEW_SESSION
+                : sessionAction;
         List<String> parts = new ArrayList<String>();
-        parts.add(agent.command);
-        if (agent.contextFlags != null && !agent.contextFlags.trim().isEmpty()) {
-            parts.add(agent.contextFlags.trim());
+        if (action == SessionAction.RESUME_LATEST) {
+            String resumeCommand = resumeLaunchCommand(agent);
+            if (isBlank(resumeCommand)) {
+                throw new UnsupportedOperationException(
+                        "Resume latest is not available for " + displayName(agent) + ".");
+            }
+            parts.add(resumeCommand);
+        } else {
+            parts.add(resolveLaunchCommand(agent));
         }
-        if ("Claude Code".equals(agent.name)
+        String flags = agent == null ? "" : agent.contextFlags;
+        if (flags != null && !flags.trim().isEmpty()) {
+            parts.add(flags.trim());
+        }
+        if (isClaudeAgent(agent)
                 && settings.claudeUseGsdFlag
                 && AgentPlannerDetector.isInstalled(settings)) {
             parts.add("--dangerously-skip-permissions");
         }
         StringBuilder sb = new StringBuilder();
         for (String part : parts) {
+            if (isBlank(part)) {
+                continue;
+            }
             if (sb.length() > 0) sb.append(' ');
             sb.append(part);
         }
         return sb.toString();
+    }
+
+    String resumeLaunchCommand(AgentInfo agent) {
+        String command = resolveLaunchCommand(agent);
+        if (isBlank(command)) {
+            return "";
+        }
+        if (isClaudeAgent(agent)) {
+            return command + " --continue";
+        }
+        if (isGeminiAgent(agent)) {
+            return command + " --resume latest";
+        }
+        if (isCodexAgent(agent)) {
+            return command + " resume --last";
+        }
+        return "";
+    }
+
+    private String resolveLaunchCommand(AgentInfo agent) {
+        if (agent == null || agent.command == null) {
+            return "";
+        }
+        if (GEMMA_WRAPPER_COMMAND.equals(agent.command) && bundledGemmaModuleAvailable()) {
+            return pythonCommand() + " -m " + GEMMA_BUNDLED_MODULE;
+        }
+        return agent.command;
+    }
+
+    private static boolean isClaudeAgent(AgentInfo agent) {
+        return agentMatches(agent, "claude");
+    }
+
+    private static boolean isGeminiAgent(AgentInfo agent) {
+        return agentMatches(agent, "gemini");
+    }
+
+    private static boolean isCodexAgent(AgentInfo agent) {
+        return agentMatches(agent, "codex");
+    }
+
+    private static boolean agentMatches(AgentInfo agent, String commandBase) {
+        if (agent == null) {
+            return false;
+        }
+        String command = firstCommandToken(agent.command).toLowerCase(Locale.ROOT);
+        return commandBase.equals(command);
+    }
+
+    private static String firstCommandToken(String command) {
+        if (command == null) {
+            return "";
+        }
+        String trimmed = command.trim();
+        if (trimmed.isEmpty()) {
+            return "";
+        }
+        return trimmed.split("\\s+")[0];
+    }
+
+    private static String displayName(AgentInfo agent) {
+        if (agent == null || isBlank(agent.name)) {
+            return "this agent";
+        }
+        return agent.name;
     }
 
     /**
@@ -331,6 +528,13 @@ public class AgentLauncher {
     String findExecutable(String command) {
         // Handle compound commands like "gh copilot"
         String baseCommand = command.split(" ")[0];
+
+        // The bundled Gemma wrapper is the canonical path for ImageJAI. Treat
+        // it as available even when the optional pip console script is absent.
+        if (GEMMA_WRAPPER_COMMAND.equals(baseCommand) && bundledGemmaModuleAvailable()) {
+            File main = bundledGemmaMain();
+            return main == null ? null : main.getAbsolutePath();
+        }
 
         // Check PATH using 'where' (Windows) or 'which' (Unix)
         try {
@@ -385,6 +589,28 @@ public class AgentLauncher {
         return null;
     }
 
+    private boolean bundledGemmaModuleAvailable() {
+        File main = bundledGemmaMain();
+        return main != null && main.isFile();
+    }
+
+    private File bundledGemmaMain() {
+        if (agentWorkspace == null || agentWorkspace.trim().isEmpty()) {
+            return null;
+        }
+        return new File(new File(agentWorkspace, GEMMA_BUNDLED_MODULE), "__main__.py");
+    }
+
+    private static String pythonCommand() {
+        String configured = System.getenv("IMAGEJAI_PYTHON");
+        if (configured != null && !configured.trim().isEmpty()) {
+            return configured.trim();
+        }
+        return System.getProperty("os.name", "").toLowerCase().contains("win")
+                ? "python"
+                : "python3";
+    }
+
     private List<AgentInfo> filterAgentsForPosture(List<AgentInfo> agents) {
         List<AgentInfo> filtered = new ArrayList<AgentInfo>();
         PrivacyPosture posture = currentPosture();
@@ -433,8 +659,11 @@ public class AgentLauncher {
     }
 
     static boolean isCloudOllamaTag(String tag) {
-        return !isBlank(tag)
-                && cleanModelTag(tag).toLowerCase(Locale.ROOT).endsWith("-cloud");
+        if (isBlank(tag)) {
+            return false;
+        }
+        String cleaned = cleanModelTag(tag).toLowerCase(Locale.ROOT);
+        return cleaned.endsWith("-cloud") || cleaned.endsWith(":cloud");
     }
 
     private void addAuditEnvironment(Map<String, String> env, AgentInfo agent) {
@@ -448,6 +677,22 @@ public class AgentLauncher {
         if (!endpoint.isEmpty()) {
             env.put("IMAGEJAI_MODEL_ENDPOINT", endpoint);
         }
+    }
+
+    private void addRecipeEnvironment(Map<String, String> env) {
+        if (env == null) {
+            return;
+        }
+        Path userRecipes = RecipePaths.userRecipesDir();
+        env.put(RecipePaths.USER_RECIPES_ENV,
+                userRecipes.toAbsolutePath().normalize().toString());
+
+        List<Path> dirs = new ArrayList<Path>();
+        dirs.add(userRecipes);
+        if (agentWorkspace != null && !agentWorkspace.trim().isEmpty()) {
+            dirs.add(new File(agentWorkspace).toPath().resolve("recipes"));
+        }
+        env.put(RecipePaths.RECIPE_DIRS_ENV, RecipePaths.pathList(dirs));
     }
 
     private static String newAuditSessionId() {
@@ -543,6 +788,27 @@ public class AgentLauncher {
             cleaned = cleaned.substring(1, cleaned.length() - 1).trim();
         }
         return cleaned;
+    }
+
+    private static String describeThrowable(Throwable failure) {
+        if (failure == null) {
+            return "unknown error";
+        }
+        StringBuilder sb = new StringBuilder(failure.getClass().getSimpleName());
+        String message = failure.getMessage();
+        if (message != null && !message.trim().isEmpty()) {
+            sb.append(": ").append(message.trim());
+        }
+        Throwable cause = failure.getCause();
+        if (cause != null && cause != failure) {
+            sb.append("; cause ");
+            sb.append(cause.getClass().getSimpleName());
+            String causeMessage = cause.getMessage();
+            if (causeMessage != null && !causeMessage.trim().isEmpty()) {
+                sb.append(": ").append(causeMessage.trim());
+            }
+        }
+        return sb.toString();
     }
 
     private static boolean isBlank(String value) {

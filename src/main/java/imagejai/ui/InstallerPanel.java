@@ -22,6 +22,7 @@ import java.util.Map;
 public class InstallerPanel extends JPanel {
 
     private static final long VERSION_TIMEOUT_MS = 2500L;
+    private static final Dimension AGENT_LIST_VIEWPORT_SIZE = new Dimension(620, 145);
 
     private final Settings settings;
     private final ProcessRunner processRunner;
@@ -79,7 +80,10 @@ public class InstallerPanel extends JPanel {
                 settings.geminiInstallCommand, "npm", "https://nodejs.org/en/download",
                 "Install via npm");
 
-        add(new JScrollPane(rows), BorderLayout.CENTER);
+        JScrollPane rowsScroll = new JScrollPane(rows);
+        rowsScroll.setPreferredSize(AGENT_LIST_VIEWPORT_SIZE);
+        rowsScroll.getVerticalScrollBar().setUnitIncrement(16);
+        add(rowsScroll, BorderLayout.CENTER);
         add(buildEditableSettings(), BorderLayout.SOUTH);
     }
 

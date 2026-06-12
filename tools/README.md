@@ -1,39 +1,74 @@
 # Local Assistant Phrasebook Tool
 
-`phrasebook_build.py` is a dev-time compiler for the baked Local Assistant phrasebook. The shipped plugin does not call an LLM at runtime.
+`phrasebook_build.py` is a dev-time compiler for the baked Local Assistant
+phrasebook. The shipped plugin does not call an LLM at runtime — only the
+developer runs this tool, periodically, to regenerate the phrasebook.
 
-Offline dry run:
+Providers shell out to a CLI the developer is already authenticated with
+via subscription, so no API keys or per-call billing are involved.
+
+## Default: Gemini CLI
+
+```bash
+python tools/phrasebook_build.py --provider gemini --model gemini-3.1-pro-preview
+```
+
+Prerequisites: `gemini --version` should print a version (the Gemini CLI is
+on `PATH`).
+
+## Other CLIs
+
+Available for parity; require the corresponding CLI on `PATH`:
+
+```bash
+python tools/phrasebook_build.py --provider claude
+python tools/phrasebook_build.py --provider codex
+```
+
+## Offline dry run (no CLI required)
 
 ```bash
 python tools/phrasebook_build.py --dry-run --provider mock --intent image.pixel_size
 ```
 
-With `--intent`, dry-run prints the normalised phrasings one per line. Without `--intent`, dry-run prints the generated phrasebook JSON.
+With `--intent`, dry-run prints the normalised phrasings one per line.
+Without `--intent`, dry-run prints the generated phrasebook JSON.
 
-Real providers require an API key and fail before any network call if it is missing:
+## One-intent regeneration
 
 ```bash
-set ANTHROPIC_API_KEY=...
-python tools/phrasebook_build.py --provider claude --model claude-haiku-4-5
-
-set OPENAI_API_KEY=...
-python tools/phrasebook_build.py --provider openai --model gpt-5-mini
+python tools/phrasebook_build.py --provider gemini --intent image.pixel_size
 ```
 
-Use `--output <path>` for temporary verification. Do not write mock output over `src/main/resources/phrasebook.json`; stage 04 keeps the stage-03 starter phrasebook intact.
+Merges the regenerated intent into the existing `src/main/resources/phrasebook.json`,
+preserving every other intent. Useful for fixing a single bad intent without
+re-billing the entire compile.
 
-Schema check against the Java loader:
+## Schema check against the Java loader
 
 ```bash
 python tools/phrasebook_build.py --provider mock --output %TEMP%\phrasebook.json --java-load-check
 ```
 
-Menu-command expansion dry run:
+## Menu-command expansion
+
+`tools/menu-commands.txt` is the canonical build-time input for menu phrase
+generation. Keep it updated by dumping `ij.Menus.getCommands()` keys from a
+fresh Fiji install:
 
 ```bash
-python tools/phrasebook_build.py --menu-dump tools/menu-commands.txt --provider mock --dry-run | python -c "import json,sys; data=json.load(sys.stdin); wanted=sum(1 for line in open('tools/menu-commands.txt', encoding='utf-8') if line.strip()); got=sum(1 for row in data['intents'] if row['id'].startswith('menu.')); assert got == wanted, (got, wanted); print(f'menu intents: {got}')"
+# from inside Fiji's macro recorder, with the plugin loaded:
+print(Menus.getCommands().keySet().toArray().join("\n"))
 ```
 
-`tools/menu-commands.txt` is the canonical build-time input for menu
-phrase generation. `agent/scan_plugins.py` is a legacy agent-side scanner,
-not the Java Local Assistant source.
+Then regenerate menu phrasings:
+
+```bash
+python tools/phrasebook_build.py --provider gemini --menu-dump tools/menu-commands.txt --keep
+```
+
+`--keep` preserves all hand-curated intents; only `menu.*` IDs that are not
+already in the phrasebook get LLM-distilled phrasings.
+
+`agent/scan_plugins.py` is a legacy agent-side scanner, not the Java Local
+Assistant source.

@@ -6,6 +6,7 @@ import org.scijava.plugin.Plugin;
 import imagejai.config.Constants;
 import imagejai.config.Settings;
 import imagejai.engine.AgentLauncher;
+import imagejai.engine.BillingFailureListener;
 import imagejai.engine.CommandEngine;
 import imagejai.engine.DialogWatcher;
 import imagejai.engine.EventBus;
@@ -24,6 +25,7 @@ import imagejai.ui.ChatPanelController;
 import imagejai.ui.ChatSurface;
 import imagejai.ui.PostureBanner;
 import imagejai.ui.SettingsDialog;
+import imagejai.ui.picker.BillingFailureDialog;
 import imagejai.ui.picker.BudgetCeilingDialog;
 
 import javax.swing.*;
@@ -32,6 +34,7 @@ import java.awt.event.WindowAdapter;
 import java.awt.event.WindowEvent;
 import java.io.IOException;
 import java.io.InputStream;
+import java.net.URI;
 
 /**
  * Main entry point for the ImageJ AI Assistant plugin.
@@ -50,8 +53,10 @@ public class ImageJAIPlugin implements Command {
     private static LiteLlmProxyService liteLlmProxyService;
     private static BudgetCeilingTracker budgetCeilingTracker;
     private static boolean budgetTrackerRegistered;
+    private static boolean billingListenerRegistered;
     private static volatile Settings budgetSettings;
     private static volatile boolean budgetDialogOpen;
+    private static volatile boolean billingDialogOpen;
     private static boolean terminalFontsRegistered;
     private static boolean shutdownHookRegistered;
 
@@ -60,6 +65,14 @@ public class ImageJAIPlugin implements Command {
                 @Override
                 public void onCeilingBreached(double totalUsd, double ceilingUsd) {
                     showBudgetCeilingDialog(totalUsd, ceilingUsd);
+                }
+            };
+
+    private static final BillingFailureListener BILLING_FAILURE_LISTENER =
+            new BillingFailureListener() {
+                @Override
+                public void onBillingFailure(String provider, int status, String message) {
+                    showBillingFailureDialog(provider, status, message);
                 }
             };
 
@@ -119,8 +132,13 @@ public class ImageJAIPlugin implements Command {
 
         // Set up agent launcher â€” find the agent workspace directory
         String agentWorkspace = findAgentWorkspace();
+        // Phase A: the LiteLLM proxy autostarts on Fiji boot. It can run from
+        // bundled jar resources (LiteLlmProxyService extracts proxy.py + config
+        // when agentWorkspace is null), so start it independently of external
+        // CLI-agent workspace discovery — otherwise a jar-only Fiji deploy never
+        // gets a proxy. The CLI AgentLauncher still needs a real workspace.
+        startLiteLlmProxy(agentWorkspace, settings);
         if (agentWorkspace != null) {
-            startLiteLlmProxy(agentWorkspace, settings);
             rootPanel.setAgentLauncher(new AgentLauncher(agentWorkspace, settings.tcpPort, settings));
         }
 
@@ -278,7 +296,25 @@ public class ImageJAIPlugin implements Command {
             liteLlmProxyService.addCostHeaderListener(budgetCeilingTracker);
             budgetTrackerRegistered = true;
         }
+        if (!billingListenerRegistered) {
+            liteLlmProxyService.addBillingFailureListener(BILLING_FAILURE_LISTENER);
+            billingListenerRegistered = true;
+        }
         liteLlmProxyService.startAsync();
+    }
+
+    /**
+     * Live LiteLLM proxy port (4000-4010) for the agent launcher to export to
+     * the Python provider client as {@code IMAGEJAI_LITELLM_PORT}; 0 when the
+     * sidecar is not running. Closes the gap where the client hard-coded 4000.
+     */
+    public static int liteLlmProxyPort() {
+        LiteLlmProxyService svc = liteLlmProxyService;
+        // Only export the port once readiness has confirmed it; before that the
+        // field may still hold the stale default 4000 while the sidecar is
+        // actually binding 4001-4010. Returning 0 makes the Python client scan
+        // for the live port instead of trusting a stale value.
+        return svc != null && svc.isReady() ? svc.getPort() : 0;
     }
 
     private static synchronized boolean markBudgetDialogOpen() {
@@ -357,6 +393,132 @@ public class ImageJAIPlugin implements Command {
         IJ.log("[ImageJAI-Budget] " + message);
         if (panel != null) {
             panel.appendMessage("assistant", message);
+        }
+    }
+
+    private static synchronized boolean markBillingDialogOpen() {
+        if (billingDialogOpen) {
+            return false;
+        }
+        billingDialogOpen = true;
+        return true;
+    }
+
+    private static synchronized void markBillingDialogClosed() {
+        billingDialogOpen = false;
+    }
+
+    /**
+     * Surface an upstream billing/auth failure (401/402/429) from the proxy as
+     * the Phase H {@link BillingFailureDialog}. Coalesces repeats so a burst of
+     * rejected calls in one session does not stack dialogs.
+     */
+    private static void showBillingFailureDialog(final String provider,
+                                                 final int status,
+                                                 final String message) {
+        if (!markBillingDialogOpen()) {
+            IJ.log("[ImageJAI-Billing] failure dialog already open; suppressing duplicate");
+            return;
+        }
+        final String display = billingProviderDisplay(provider);
+        final String body = (message != null && !message.isEmpty())
+                ? message
+                : ("HTTP " + status);
+        final URI consoleUri = billingConsoleUri(provider);
+        Runnable show = new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    Frame owner = chatFrame != null ? chatFrame : IJ.getInstance();
+                    BillingFailureDialog dialog =
+                            new BillingFailureDialog(owner, display, body, consoleUri);
+                    BillingFailureDialog.Result result = dialog.showAndAwait();
+                    handleBillingDialogResult(result, display);
+                } catch (Throwable t) {
+                    IJ.log("[ImageJAI-Billing] could not show billing dialog: " + t.getMessage());
+                } finally {
+                    markBillingDialogClosed();
+                }
+            }
+        };
+        if (SwingUtilities.isEventDispatchThread()) {
+            show.run();
+        } else {
+            SwingUtilities.invokeLater(show);
+        }
+    }
+
+    private static void handleBillingDialogResult(BillingFailureDialog.Result result,
+                                                  String display) {
+        AiRootPanel panel = rootPanel;
+        String message;
+        if (result == BillingFailureDialog.Result.SWITCH_MODEL) {
+            message = display + " refused the request. Pick a free model "
+                    + "(Gemini Flash, Groq, or Ollama) from the model picker to continue.";
+        } else if (result == BillingFailureDialog.Result.OPEN_CONSOLE) {
+            message = "Opened the " + display + " billing console. Add credit or a payment "
+                    + "method, then re-run.";
+        } else {
+            message = display + " billing failure dismissed. The paid session is paused.";
+        }
+        IJ.log("[ImageJAI-Billing] " + message);
+        if (panel != null) {
+            panel.appendMessage("assistant", message);
+        }
+    }
+
+    private static String billingProviderDisplay(String provider) {
+        if (provider == null || provider.isEmpty()) {
+            return "The provider";
+        }
+        switch (provider) {
+            case "anthropic": return "Anthropic";
+            case "openai": return "OpenAI";
+            case "gemini": case "google": case "vertex_ai": return "Google Gemini";
+            case "groq": return "Groq";
+            case "cerebras": return "Cerebras";
+            case "mistral": return "Mistral";
+            case "deepseek": return "DeepSeek";
+            case "xai": return "xAI";
+            case "perplexity": return "Perplexity";
+            case "openrouter": return "OpenRouter";
+            case "together": case "together_ai": return "Together AI";
+            case "huggingface": return "Hugging Face";
+            case "github-models": case "github": return "GitHub Models";
+            default: return provider;
+        }
+    }
+
+    private static URI billingConsoleUri(String provider) {
+        String url = null;
+        if (provider != null) {
+            switch (provider) {
+                case "anthropic": url = "https://console.anthropic.com/settings/billing"; break;
+                case "openai": url = "https://platform.openai.com/account/billing"; break;
+                case "gemini": case "google": case "vertex_ai":
+                    url = "https://aistudio.google.com/app/apikey"; break;
+                case "groq": url = "https://console.groq.com/settings/billing"; break;
+                case "cerebras": url = "https://cloud.cerebras.ai/"; break;
+                case "mistral": url = "https://console.mistral.ai/billing/"; break;
+                case "deepseek": url = "https://platform.deepseek.com/usage"; break;
+                case "xai": url = "https://console.x.ai/"; break;
+                case "perplexity": url = "https://www.perplexity.ai/settings/api"; break;
+                case "openrouter": url = "https://openrouter.ai/credits"; break;
+                case "together": case "together_ai":
+                    url = "https://api.together.ai/settings/billing"; break;
+                case "huggingface": url = "https://huggingface.co/settings/billing"; break;
+                case "github-models": case "github":
+                    url = "https://github.com/settings/billing"; break;
+                default: url = null;
+            }
+        }
+        if (url == null) {
+            return null;
+        }
+        try {
+            return new URI(url);
+        } catch (Exception e) {
+            return null;
         }
     }
 

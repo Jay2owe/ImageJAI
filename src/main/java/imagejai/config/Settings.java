@@ -18,7 +18,28 @@ import java.util.UUID;
  */
 public class Settings {
 
-    private static final Gson GSON = new GsonBuilder().setPrettyPrinting().create();
+    private static final Gson GSON = new GsonBuilder()
+            .setPrettyPrinting()
+            // Never serialize ModelConfig.apiKey — secrets live in
+            // <imagej-ai>/secrets/<provider>.env, never in config.json
+            // (verifier #3). Deserialization stays intact so a legacy key in an
+            // old config.json can be migrated to the secrets store on load.
+            .addSerializationExclusionStrategy(new com.google.gson.ExclusionStrategy() {
+                @Override
+                public boolean shouldSkipField(com.google.gson.FieldAttributes f) {
+                    return f.getDeclaringClass() == ModelConfig.class
+                            && "apiKey".equals(f.getName());
+                }
+
+                @Override
+                public boolean shouldSkipClass(Class<?> clazz) {
+                    return false;
+                }
+            })
+            .create();
+
+    /** Env-var name under which a legacy "custom" provider key is stored in custom.env. */
+    public static final String CUSTOM_API_KEY_ENV = "CUSTOM_API_KEY";
 
     /**
      * Configuration for a specific LLM model/provider.
@@ -94,11 +115,11 @@ public class Settings {
      * agent's terminal UI inside the plugin frame (requires stage 05+). When
      * false, today's detached cmd.exe /c start behaviour is preserved.
      *
-     * <p>Default is false for migrated installs so existing users don't see a
-     * silent UX change. The checkbox to flip it lives in SettingsDialog (added
-     * in stage 06 together with the terminal card that uses it).
+     * <p>Default is true so agent launches use the controllable in-window
+     * terminal. The Settings dialog exposes this so users can still opt back
+     * into a detached terminal.
      */
-    public boolean agentEmbeddedTerminal = false;
+    public boolean agentEmbeddedTerminal = true;
 
     /**
      * Optional terminal-output audit log. Default stays false because terminal
@@ -150,6 +171,11 @@ public class Settings {
     public java.util.Set<String> dismissedTierChangeBanners = new java.util.LinkedHashSet<>();
     /** Set after the first run where useMultiProviderPicker default flipped to true. */
     public boolean multiProviderFlipNoticeShown = false;
+    /**
+     * One-time migration for the hidden embedded-terminal flag. Before this
+     * setting had UI, saved configs usually carried the old default false.
+     */
+    public boolean embeddedTerminalDefaultFlipApplied = false;
 
     /**
      * Per-provider cached error from the most recent {@code /models} probe â€”
@@ -291,7 +317,60 @@ public class Settings {
         if (privacyPosture == null) {
             privacyPosture = PrivacyPosture.PSEUDONYMISED;
         }
+        if (!embeddedTerminalDefaultFlipApplied) {
+            agentEmbeddedTerminal = true;
+            embeddedTerminalDefaultFlipApplied = true;
+        }
         seedMultiProviderFromLegacyAgentName();
+        migrateLegacyApiKeysToSecrets();
+    }
+
+    /**
+     * Relocate any legacy {@link ModelConfig#apiKey} carried by an old
+     * config.json into the per-provider {@code .env} secrets store, so the
+     * proxy path keeps working after apiKey stops being serialized (verifier
+     * #3). The in-memory value is left intact for this session so the legacy
+     * direct path is unaffected; it simply never reaches disk again. Providers
+     * with no known env-var mapping (e.g. "custom"/"ollama") are skipped — their
+     * key is also no longer persisted, but cannot be relocated automatically.
+     * Never overwrites a key already present in the secrets store.
+     */
+    // Package-private so SettingsApiKeyResolutionTest can drive it directly.
+    void migrateLegacyApiKeysToSecrets() {
+        if (configs == null) {
+            return;
+        }
+        for (ModelConfig c : configs) {
+            if (c == null || c.apiKey == null || c.apiKey.trim().isEmpty()) {
+                continue;
+            }
+            String prov = c.provider;
+            if (prov == null || "ollama".equals(prov)) {
+                continue;
+            }
+            try {
+                if ("custom".equals(prov)) {
+                    // Check the specific key, not hasCredentials("custom") — an
+                    // unmapped provider reports "has credentials" for any
+                    // non-empty custom.env, which would wrongly block migration.
+                    String existing = providerCredentials().read("custom").get(CUSTOM_API_KEY_ENV);
+                    if (existing == null || existing.isEmpty()) {
+                        java.util.Map<String, String> entries =
+                                new java.util.LinkedHashMap<String, String>();
+                        entries.put(CUSTOM_API_KEY_ENV, c.apiKey.trim());
+                        providerCredentials().saveEntries("custom", entries);
+                    }
+                } else if (imagejai.ui.installer.ProviderCredentials
+                        .ENV_VAR_FOR_PROVIDER.containsKey(prov)) {
+                    if (!providerCredentials().hasCredentials(prov)) {
+                        providerCredentials().saveApiKey(prov, c.apiKey.trim());
+                    }
+                }
+            } catch (Exception e) {
+                System.err.println("[ImageJAI] Could not migrate " + prov
+                        + " key to secrets store: " + e.getMessage());
+            }
+        }
     }
 
     private void addDefaultConfig() {
@@ -401,6 +480,40 @@ public class Settings {
     }
 
     /**
+     * The effective API key for a config: the in-memory {@link ModelConfig#apiKey}
+     * if present, otherwise the value relocated to the {@code <provider>.env}
+     * secrets store. Lets the legacy direct backends keep working after apiKey
+     * stopped being serialized to config.json (verifier #3 / #3-2).
+     */
+    public String resolveApiKey(ModelConfig config) {
+        if (config == null) {
+            return "";
+        }
+        if (config.apiKey != null && !config.apiKey.trim().isEmpty()) {
+            return config.apiKey.trim();
+        }
+        String prov = config.provider;
+        if (prov == null) {
+            return "";
+        }
+        try {
+            if ("custom".equals(prov)) {
+                String v = providerCredentials().read("custom").get(CUSTOM_API_KEY_ENV);
+                return v == null ? "" : v;
+            }
+            String envName = imagejai.ui.installer.ProviderCredentials
+                    .ENV_VAR_FOR_PROVIDER.get(prov);
+            if (envName != null) {
+                String v = providerCredentials().read(prov).get(envName);
+                return v == null ? "" : v;
+            }
+        } catch (Exception ignored) {
+            // fall through to empty
+        }
+        return "";
+    }
+
+    /**
      * Returns true if this appears to be a first-run (no API key configured).
      */
     public boolean isFirstRun() {
@@ -408,7 +521,8 @@ public class Settings {
         ModelConfig active = getActiveConfig();
         if (active == null) return true;
         if ("ollama".equals(active.provider)) return false;
-        return active.apiKey == null || active.apiKey.trim().isEmpty();
+        String key = resolveApiKey(active);
+        return key == null || key.trim().isEmpty();
     }
 
     /**
@@ -417,9 +531,10 @@ public class Settings {
     public boolean hasApiKey() {
         ModelConfig active = getActiveConfig();
         if (active == null) return false;
-        
+
         if ("gemini".equals(active.provider) || "openai".equals(active.provider) || "custom".equals(active.provider)) {
-            return active.apiKey != null && !active.apiKey.trim().isEmpty();
+            String key = resolveApiKey(active);
+            return key != null && !key.trim().isEmpty();
         }
         if ("ollama".equals(active.provider)) {
             return true; // No key needed
@@ -459,11 +574,11 @@ public class Settings {
         if (providerKey == null) {
             return false;
         }
-        if ("ollama".equals(providerKey)) {
-            // Local Ollama runs without a key â€” assume reachable unless the
-            // user configured an explicit override. Returning true keeps the
-            // dropdown's status icon green for biologists who haven't touched
-            // settings yet.
+        if (imagejai.ui.installer.ProviderCredentials.isLocalDaemonProvider(providerKey)) {
+            // Ollama (local AND cloud) runs keyless through the signed-in local
+            // daemon — the launch never checks OLLAMA_API_KEY. Returning true
+            // keeps the dropdown's status icon green for biologists who haven't
+            // touched settings yet. A key is an optional override, not required.
             return true;
         }
         return providerCredentials().hasCredentials(providerKey);

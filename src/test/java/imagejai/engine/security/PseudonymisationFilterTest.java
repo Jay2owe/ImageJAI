@@ -82,6 +82,49 @@ public class PseudonymisationFilterTest {
     }
 
     @Test
+    public void resultsArrayLabelsAndPlainTextSlicesAreTokenised() {
+        PathTokenMap map = new PathTokenMap(bytes(14));
+        PseudonymisationFilter filter = filter(map);
+        JsonObject response = new JsonObject();
+        response.addProperty("ok", true);
+        JsonArray rows = new JsonArray();
+        JsonObject row = new JsonObject();
+        row.addProperty("Label", "MOAB2_subject_017_cell_3");
+        row.addProperty("Slice", "subject_017_zplane");
+        row.addProperty("Area", "44");
+        rows.add(row);
+        response.add("results", rows);
+
+        filter.apply(response, "get_state", PrivacyPosture.PSEUDONYMISED, "s");
+
+        String out = response.toString();
+        assertFalse(out.contains("MOAB2_subject_017"));
+        assertFalse(out.contains("subject_017_zplane"));
+        assertTrue(out.contains("\"Area\":\"44\""));
+        assertTrue(governanceFields(response).contains("results_table"));
+    }
+
+    @Test
+    public void getPixelsBinaryDataContractIsPreserved() {
+        PathTokenMap map = new PathTokenMap(bytes(15));
+        PseudonymisationFilter filter = filter(map);
+        JsonObject response = new JsonObject();
+        response.addProperty("ok", true);
+        JsonObject result = new JsonObject();
+        result.addProperty("encoding", "base64_float32_le");
+        result.addProperty("data", "QUJDREVGRw==");
+        result.addProperty("width", 2);
+        result.addProperty("height", 2);
+        response.add("result", result);
+
+        filter.apply(response, "get_pixels", PrivacyPosture.PSEUDONYMISED, "s");
+
+        assertEquals("QUJDREVGRw==",
+                response.getAsJsonObject("result").get("data").getAsString());
+        assertTrue(response.has("_governance"));
+    }
+
+    @Test
     public void freeTextScrubReplacesRegisteredPathsInErrors() {
         PathTokenMap map = new PathTokenMap(bytes(5));
         String token = map.tokenForPathString("C:\\study\\subject_017.lif");
@@ -100,6 +143,18 @@ public class PseudonymisationFilterTest {
     public void freeTextScrubUsesLongestFirst() {
         PathTokenMap map = new PathTokenMap(bytes(6));
         String longToken = map.tokenForSensitiveText("alpha beta", "label");
+        String shortToken = map.tokenForSensitiveText("alpha", "label");
+        PseudonymisationFilter filter = filter(map);
+
+        String scrubbed = filter.freeTextScrubString("alpha beta alpha");
+
+        assertEquals(longToken + " " + shortToken, scrubbed);
+    }
+
+    @Test
+    public void freeTextScrubDoesNotRescanInsertedTokens() {
+        PathTokenMap map = new PathTokenMap(bytes(16));
+        String longToken = map.tokenForSensitiveText("alpha beta", "alpha");
         String shortToken = map.tokenForSensitiveText("alpha", "label");
         PseudonymisationFilter filter = filter(map);
 
@@ -145,6 +200,29 @@ public class PseudonymisationFilterTest {
     }
 
     @Test
+    public void failClosedAlsoAppliesInOnPremisesMode() {
+        PseudonymisationFilter filter = new PseudonymisationFilter(
+                new PathTokenMap(bytes(17)), new OmeXmlScrubber(),
+                new CaptureHandler(new BurnInDetector(), new VisualOverrideRegistry())) {
+            @Override
+            protected void beforeFiltering(JsonObject response, String command,
+                                           PrivacyPosture posture) {
+                throw new IllegalStateException("boom");
+            }
+        };
+        JsonObject response = okObject();
+        response.getAsJsonObject("result").addProperty("path", "C:\\secret\\subject_017.lif");
+
+        filter.apply(response, "get_state", PrivacyPosture.ON_PREMISES, "s");
+
+        assertFalse(response.get("ok").getAsBoolean());
+        assertEquals("redaction_failed", response.get("error").getAsString());
+        assertFalse(response.toString().contains("subject_017"));
+        assertEquals("On-premises",
+                response.getAsJsonObject("_governance").get("posture").getAsString());
+    }
+
+    @Test
     public void reverseResolutionReturnsRealPathAndSeries() {
         PathTokenMap map = new PathTokenMap(bytes(9));
         String token = map.tokenForSeries(Paths.get("study", "subject_017.lif"), 3);
@@ -153,6 +231,189 @@ public class PseudonymisationFilterTest {
 
         assertEquals(Paths.get("study", "subject_017.lif"), target.realPath());
         assertEquals(3, target.series());
+    }
+
+    @Test
+    public void windowTitleWithPathAndSeriesYieldsOneStableTokenAcrossFields() {
+        PathTokenMap map = new PathTokenMap(bytes(30));
+        PseudonymisationFilter filter = filter(map);
+        String realPath = "C:\\study\\H31L21.MOAB2.4Weeks.SBB.lif";
+        // The file's own path token (what open_image returns).
+        String pathToken = map.tokenForPathString(realPath);
+
+        String titleLH = realPath + " - NLGF11_LH_SCN";
+        String titleRH = realPath + " - NGF11_RH_SCN";
+
+        // get_open_windows: array under non-path key.
+        JsonObject windows = new JsonObject();
+        windows.addProperty("ok", true);
+        JsonObject windowsResult = new JsonObject();
+        JsonArray images = new JsonArray();
+        images.add(titleLH);
+        images.add(titleRH);
+        windowsResult.add("images", images);
+        windows.add("result", windowsResult);
+        filter.apply(windows, "get_open_windows", PrivacyPosture.PSEUDONYMISED, "s");
+
+        // get_active_layer / get_state: scalar under the path-typed "title" key
+        // (the field that used to swallow the " - series" suffix into the token).
+        JsonObject state = new JsonObject();
+        state.addProperty("ok", true);
+        JsonObject stateResult = new JsonObject();
+        stateResult.addProperty("title", titleRH);
+        state.add("result", stateResult);
+        filter.apply(state, "get_state", PrivacyPosture.PSEUDONYMISED, "s");
+
+        String lh = windows.getAsJsonObject("result").getAsJsonArray("images")
+                .get(0).getAsString();
+        String rh = windows.getAsJsonObject("result").getAsJsonArray("images")
+                .get(1).getAsString();
+        String titleFieldRh = state.getAsJsonObject("result").get("title").getAsString();
+
+        // One stable base token for the file, everywhere; series kept in plain
+        // text as a suffix (never folded into the token).
+        assertEquals(pathToken + " - NLGF11_LH_SCN", lh);
+        assertEquals(pathToken + " - NGF11_RH_SCN", rh);
+        assertEquals(pathToken + " - NGF11_RH_SCN", titleFieldRh);
+        // The series name must not have leaked into the token itself.
+        assertFalse(pathToken.contains("SCN"));
+        // No real identifiers survive.
+        assertFalse(windows.toString().contains("H31L21"));
+        assertFalse(state.toString().contains("H31L21"));
+    }
+
+    @Test
+    public void cleanPathTitleFieldsStillTokeniseWholeValue() {
+        PathTokenMap map = new PathTokenMap(bytes(31));
+        PseudonymisationFilter filter = filter(map);
+        JsonObject response = okObject();
+        JsonObject result = response.getAsJsonObject("result");
+        // A full-path title (this project's window-title format) tokenises to
+        // the same token as the path field — one stable token per file.
+        result.addProperty("path", "C:\\study\\MOAB2_subject_017.lif");
+        result.addProperty("title", "C:\\study\\MOAB2_subject_017.lif");
+
+        filter.apply(response, "get_state", PrivacyPosture.PSEUDONYMISED, "s");
+
+        String expected = map.tokenForPathString("C:\\study\\MOAB2_subject_017.lif");
+        assertEquals(expected, result.get("path").getAsString());
+        assertEquals(expected, result.get("title").getAsString());
+        // The fix kept whole-value tokenisation for clean paths intact.
+        assertTrue(expected.startsWith("image-"));
+        assertFalse(expected.contains("MOAB2"));
+    }
+
+    @Test
+    public void directoryTitleFieldIsStillTokenisedWholeWithNoLeak() {
+        PathTokenMap map = new PathTokenMap(bytes(32));
+        PseudonymisationFilter filter = filter(map);
+        JsonObject response = okObject();
+        response.getAsJsonObject("result").addProperty("directory", "C:\\study\\Patient_Jane");
+
+        filter.apply(response, "get_state", PrivacyPosture.PSEUDONYMISED, "s");
+
+        // A bare directory (no extension) must not leak even though it never
+        // matches the substring tokeniser.
+        assertFalse(response.toString().contains("Patient_Jane"));
+        assertTrue(governanceFields(response).contains("path"));
+    }
+
+    @Test
+    public void reverseResolveTextRestoresWindowTitleTokenInMacro() {
+        PathTokenMap map = new PathTokenMap(bytes(20));
+        PseudonymisationFilter filter = filter(map);
+        // Outbound the filter tokenises the path portion of the window title;
+        // the agent then builds a macro from the pseudonymised title.
+        String token = map.tokenForPathString("H31L21.MOAB2.4Weeks.SBB.lif");
+        String agentMacro = "selectWindow(\"" + token + " - NGF11_RH_SCN\");";
+
+        String reversed = filter.reverseResolveText(agentMacro);
+
+        assertEquals("selectWindow(\"H31L21.MOAB2.4Weeks.SBB.lif - NGF11_RH_SCN\");",
+                reversed);
+    }
+
+    @Test
+    public void reverseResolveTextLeavesUnknownTokensUntouched() {
+        PathTokenMap map = new PathTokenMap(bytes(21));
+        PseudonymisationFilter filter = filter(map);
+        String macro = "selectWindow(\"image-dead.lif - SCN\");";
+
+        assertEquals(macro, filter.reverseResolveText(macro));
+    }
+
+    @Test
+    public void deTokeniseRequestReversesMacroCodeButNotPersistenceCommands() {
+        PathTokenMap map = new PathTokenMap(bytes(22));
+        PseudonymisationFilter filter = filter(map);
+        String token = map.tokenForPathString("subject_017.lif");
+
+        JsonObject exec = new JsonObject();
+        exec.addProperty("code", "selectWindow(\"" + token + " - SCN\");");
+        filter.deTokeniseRequest(exec, "execute_macro", PrivacyPosture.PSEUDONYMISED);
+        assertTrue(exec.get("code").getAsString().contains("subject_017.lif"));
+        assertFalse(exec.get("code").getAsString().contains(token));
+
+        // intent_teach persists its macro to disk — the token must survive so
+        // no real path is ever written out of the JVM.
+        JsonObject teach = new JsonObject();
+        teach.addProperty("macro", "selectWindow(\"" + token + " - SCN\");");
+        filter.deTokeniseRequest(teach, "intent_teach", PrivacyPosture.PSEUDONYMISED);
+        assertTrue(teach.get("macro").getAsString().contains(token));
+        assertFalse(teach.get("macro").getAsString().contains("subject_017.lif"));
+    }
+
+    @Test
+    public void deTokeniseRequestReversesPipelineStepCode() {
+        PathTokenMap map = new PathTokenMap(bytes(23));
+        PseudonymisationFilter filter = filter(map);
+        String token = map.tokenForPathString("subject_017.lif");
+        JsonObject request = new JsonObject();
+        JsonArray steps = new JsonArray();
+        JsonObject step = new JsonObject();
+        step.addProperty("code", "selectWindow(\"" + token + " - SCN\");");
+        steps.add(step);
+        request.add("steps", steps);
+
+        filter.deTokeniseRequest(request, "run_pipeline", PrivacyPosture.PSEUDONYMISED);
+
+        assertTrue(request.getAsJsonArray("steps").get(0).getAsJsonObject()
+                .get("code").getAsString().contains("subject_017.lif"));
+    }
+
+    @Test
+    public void deTokeniseRequestIsNoOpInStandardMode() {
+        PathTokenMap map = new PathTokenMap(bytes(24));
+        PseudonymisationFilter filter = filter(map);
+        String token = map.tokenForPathString("subject_017.lif");
+        JsonObject request = new JsonObject();
+        request.addProperty("code", "selectWindow(\"" + token + "\");");
+
+        filter.deTokeniseRequest(request, "execute_macro", PrivacyPosture.STANDARD);
+
+        assertEquals("selectWindow(\"" + token + "\");",
+                request.get("code").getAsString());
+    }
+
+    @Test
+    public void roundTripTokeniseThenReverseYieldsOriginalTitle() {
+        PathTokenMap map = new PathTokenMap(bytes(25));
+        PseudonymisationFilter filter = filter(map);
+        // Outbound: a get_open_windows-style response carries the real title.
+        JsonObject response = new JsonObject();
+        response.addProperty("ok", true);
+        JsonArray images = new JsonArray();
+        images.add("subject_017.lif - NGF11_RH_SCN");
+        response.add("images", images);
+        filter.apply(response, "get_open_windows", PrivacyPosture.PSEUDONYMISED, "s");
+        String pseudonymisedTitle = response.getAsJsonArray("images").get(0).getAsString();
+        assertFalse(pseudonymisedTitle.contains("subject_017"));
+
+        // Inbound: the agent echoes that title into a macro.
+        String reversed = filter.reverseResolveText(
+                "selectWindow(\"" + pseudonymisedTitle + "\");");
+
+        assertEquals("selectWindow(\"subject_017.lif - NGF11_RH_SCN\");", reversed);
     }
 
     @Test

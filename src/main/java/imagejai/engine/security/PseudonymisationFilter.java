@@ -106,6 +106,98 @@ public class PseudonymisationFilter {
         response.add("_governance", report.governanceBlock());
     }
 
+    /**
+     * Inbound counterpart to {@link #apply}: turn a pseudonymised string the
+     * agent is sending back to Fiji into the real string Fiji actually knows.
+     *
+     * <p>Outbound, {@link #apply} replaces the path portion of a window title
+     * ({@code H31L21.lif - SCN}) with a token ({@code image-30e3.lif - SCN}).
+     * Without the reverse step a macro the agent builds from that title —
+     * {@code selectWindow("image-30e3.lif - SCN")} — can never match the real
+     * window, so every subsequent interaction with the image fails. Here we
+     * replace each resolvable path token ({@code image-XXXX[.ext][:N]}) with
+     * its real path; unknown tokens are left untouched.
+     *
+     * <p>The reversed value never leaves the JVM: it flows straight into
+     * Fiji's macro interpreter, and any echo of it in the reply
+     * ({@code ranCode}, error text, provenance macros) is re-tokenised by
+     * {@link #apply} before the response is written. The privacy guarantee is
+     * therefore preserved end-to-end.
+     */
+    public String reverseResolveText(String text) {
+        if (text == null || text.isEmpty()) {
+            return text;
+        }
+        Matcher matcher = PATH_TOKEN.matcher(text);
+        StringBuffer out = new StringBuffer();
+        boolean changed = false;
+        while (matcher.find()) {
+            String token = matcher.group();
+            PathTokenMap.ResolvedTarget resolved =
+                    pathTokenMap.resolve(token).orElse(null);
+            if (resolved != null && resolved.realPath() != null) {
+                matcher.appendReplacement(out,
+                        Matcher.quoteReplacement(resolved.realPath().toString()));
+                changed = true;
+            } else {
+                matcher.appendReplacement(out, Matcher.quoteReplacement(token));
+            }
+        }
+        matcher.appendTail(out);
+        return changed ? out.toString() : text;
+    }
+
+    /**
+     * Reverse pseudonym tokens in the inbound request's executable fields so
+     * macros and rewind targets reach Fiji with the titles it actually knows.
+     *
+     * <p>Deliberately scoped to commands that run code against live windows.
+     * Persistence commands (e.g. {@code intent_teach}, which writes its macro
+     * to disk) are excluded so a real path can never be reversed back and then
+     * written out of the JVM.
+     */
+    public void deTokeniseRequest(JsonObject request, String command,
+                                  PrivacyPosture posture) {
+        if (request == null || command == null || posture == null
+                || posture == PrivacyPosture.STANDARD) {
+            return;
+        }
+        switch (command) {
+            case "execute_macro":
+            case "execute_macro_async":
+            case "run_script":
+                reverseStringField(request, "code");
+                break;
+            case "run_pipeline":
+                JsonElement steps = request.get("steps");
+                if (steps != null && steps.isJsonArray()) {
+                    for (JsonElement step : steps.getAsJsonArray()) {
+                        if (step != null && step.isJsonObject()) {
+                            reverseStringField(step.getAsJsonObject(), "code");
+                        }
+                    }
+                }
+                break;
+            case "rewind":
+                reverseStringField(request, "image_title");
+                break;
+            default:
+                break;
+        }
+    }
+
+    private void reverseStringField(JsonObject object, String key) {
+        JsonElement element = object.get(key);
+        if (element != null && element.isJsonPrimitive()
+                && element.getAsJsonPrimitive().isString()) {
+            String value = element.getAsString();
+            String reversed = reverseResolveText(value);
+            if (!reversed.equals(value)) {
+                object.addProperty(key, reversed);
+            }
+        }
+    }
+
     private RedactionReport failClosed(JsonObject response, String command,
                                        PrivacyPosture posture,
                                        RedactionReport.Builder report) {
@@ -313,7 +405,7 @@ public class PseudonymisationFilter {
         if (value == null || value.isEmpty()) {
             return value;
         }
-        if (isPathTypedKey(key) && isPathLike(value)) {
+        if (isPathTypedKey(key) && isPathLike(value) && isCleanPathValue(value)) {
             report.fieldPseudonymised("path");
             return pathTokenMap.tokenForPathString(value);
         }
@@ -494,6 +586,31 @@ public class PseudonymisationFilter {
         String trimmed = value.trim();
         return trimmed.contains("/") || trimmed.contains("\\")
                 || IMAGE_EXTENSION.matcher(trimmed).matches();
+    }
+
+    /**
+     * A path-typed field holds a "clean" path when the whole value is a single
+     * file or directory — not a window title such as
+     * {@code "C:\study\file.lif - NGF11_RH_SCN"}.
+     *
+     * <p>Folding a title's trailing suffix into
+     * {@link PathTokenMap#tokenForPathString} would bury the series name inside
+     * the token's extension and key the token per-series, so the same file
+     * surfaces a different token in every title field — and a token that
+     * diverges from the file's own path token. Title-like values instead fall
+     * through to {@link #replacePathLikeSubstrings}, which tokenises only the
+     * embedded file path and leaves the suffix untouched, giving one stable
+     * token per file.
+     */
+    private static boolean isCleanPathValue(String value) {
+        String trimmed = value.trim();
+        if (IMAGE_EXTENSION.matcher(trimmed).matches()) {
+            return true; // whole value ends at a recognised file extension
+        }
+        // No embedded extension-terminated file path → treat as a bare
+        // directory and fold it wholesale; substring tokenisation would miss it
+        // (it only matches values ending in an extension), risking a leak.
+        return !PATH_SUBSTRING.matcher(trimmed).find();
     }
 
     private static boolean shouldTokeniseSlice(String value) {

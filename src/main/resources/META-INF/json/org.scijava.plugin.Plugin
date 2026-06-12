@@ -1,1 +1,1 @@
-{"class":"uk.ac.ucl.imagej.ai.ImageJAIPlugin","values":{"type":"org.scijava.command.Command","menuPath":"Plugins>AI Assistant"}}
+{"class":"imagejai.ImageJAIPlugin","values":{"type":"org.scijava.command.Command","menuPath":"Plugins>AI Assistant"}}

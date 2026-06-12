@@ -4,6 +4,8 @@ import imagejai.config.PrivacyPosture;
 import imagejai.config.Settings;
 import org.junit.Test;
 
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -92,6 +94,33 @@ public class AgentLauncherPostureTest {
     }
 
     @Test
+    public void bundledGemmaWrapperRunsPythonModuleInsteadOfPathScript() throws Exception {
+        Path workspace = Files.createTempDirectory("imagejai-agent");
+        Path module = workspace.resolve("gemma4_31b");
+        Files.createDirectories(module);
+        Files.write(module.resolve("__main__.py"), new byte[0]);
+
+        Settings settings = new Settings();
+        settings.setPrivacyPosture(PrivacyPosture.PSEUDONYMISED);
+        PostureController controller = new PostureController(settings, null, null);
+        AgentLauncher launcher = new AgentLauncher(
+                workspace.toString(), 7746, settings, controller);
+        AgentLauncher.AgentInfo gemma = new AgentLauncher.AgentInfo(
+                "Gemma 4 31B",
+                "gemma4_31b_agent",
+                "Ollama-backed Gemma agent",
+                null,
+                "",
+                true,
+                "gemma4:31b-cloud");
+
+        String command = launcher.buildAgentCommandString(gemma);
+
+        assertTrue(command, command.contains("-m gemma4_31b"));
+        assertFalse(command, command.contains("gemma4_31b_agent"));
+    }
+
+    @Test
     public void onPremisesRefusesCloudOllamaEnvModel() {
         Settings settings = new Settings();
         settings.setPrivacyPosture(PrivacyPosture.ON_PREMISES);
@@ -109,6 +138,28 @@ public class AgentLauncherPostureTest {
 
         try {
             launcher.refuseCloudTagIfOnPremises(gemma, env);
+            fail("Expected PostureViolation");
+        } catch (PostureViolation violation) {
+            assertEquals(AgentLauncher.CLOUD_OLLAMA_REFUSAL, violation.getMessage());
+        }
+    }
+
+    @Test
+    public void onPremisesRefusesColonCloudOllamaTag() {
+        Settings settings = new Settings();
+        settings.setPrivacyPosture(PrivacyPosture.ON_PREMISES);
+        AgentLauncher launcher = launcherWithAllExecutables(settings);
+        AgentLauncher.AgentInfo deepseek = new AgentLauncher.AgentInfo(
+                "DeepSeek V3.2",
+                "gemma4_31b_agent",
+                "Ollama-backed cloud agent",
+                "gemma4_31b_agent",
+                "--provider ollama-cloud --model deepseek-v3.2:cloud",
+                true,
+                "deepseek-v3.2:cloud");
+
+        try {
+            launcher.buildEmbeddedLaunchSpec(deepseek);
             fail("Expected PostureViolation");
         } catch (PostureViolation violation) {
             assertEquals(AgentLauncher.CLOUD_OLLAMA_REFUSAL, violation.getMessage());
