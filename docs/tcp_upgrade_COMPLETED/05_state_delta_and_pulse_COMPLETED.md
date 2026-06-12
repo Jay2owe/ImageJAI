@@ -59,12 +59,12 @@ Out:
 
 ## Read first
 
-- `src/main/java/uk/ac/ucl/imagej/ai/engine/TCPCommandServer.java`
+- `src/main/java/imagejai/engine/TCPCommandServer.java`
   — `handleExecuteMacro`, `handleRunPipeline`,
   `handleInteractDialog`, `handleRunScript`. Identify every
   `newImages`, `resultsTable`, `logDelta`, `dismissedDialogs`
   emitter.
-- `src/main/java/uk/ac/ucl/imagej/ai/engine/StateInspector.java`
+- `src/main/java/imagejai/engine/StateInspector.java`
   — for pulse's data sources.
 - `docs/tcp_upgrade/01_hello_handshake.md` — caps.
 

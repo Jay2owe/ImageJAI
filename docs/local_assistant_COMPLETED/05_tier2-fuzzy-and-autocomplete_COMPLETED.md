@@ -20,11 +20,11 @@ primary reason a deterministic two-tier matcher is enough.
 - `docs/local_assistant/00_overview.md`
 - `docs/local_assistant/PLAN.md` §4.3 ("Autocomplete chips"), §6.2
   ("Two-tier matcher")
-- `src/main/java/uk/ac/ucl/imagej/ai/engine/FuzzyMatcher.java` —
+- `src/main/java/imagejai/engine/FuzzyMatcher.java` —
   the existing `jaroWinkler(...)` implementation. Verify its
   signature and threshold semantics. **Do not add Apache Commons
   Text as a dependency**; use the in-repo matcher.
-- `src/main/java/uk/ac/ucl/imagej/ai/ui/ChatView.java` — find the
+- `src/main/java/imagejai/ui/ChatView.java` — find the
   input textbox, its `KeyListener` registration site, and the area
   immediately below it where a chip row can fit
 
@@ -63,11 +63,11 @@ primary reason a deterministic two-tier matcher is enough.
 
 | Path | Action | Reason |
 |---|---|---|
-| `src/main/java/uk/ac/ucl/imagej/ai/local/IntentMatcher.java` | MODIFY | Tier 2 fallback + `topK(...)` |
-| `src/main/java/uk/ac/ucl/imagej/ai/local/RankedPhrase.java` | NEW | `(phrase, intentId, score)` record |
-| `src/main/java/uk/ac/ucl/imagej/ai/local/AutocompleteChipRow.java` | NEW | Swing chip panel |
-| `src/main/java/uk/ac/ucl/imagej/ai/ui/ChatView.java` | MODIFY | Debounced listener + chip row in layout |
-| `src/main/java/uk/ac/ucl/imagej/ai/config/Settings.java` | MODIFY | Add `localAssistantFuzzyThreshold` (default 0.90) |
+| `src/main/java/imagejai/local/IntentMatcher.java` | MODIFY | Tier 2 fallback + `topK(...)` |
+| `src/main/java/imagejai/local/RankedPhrase.java` | NEW | `(phrase, intentId, score)` record |
+| `src/main/java/imagejai/local/AutocompleteChipRow.java` | NEW | Swing chip panel |
+| `src/main/java/imagejai/ui/ChatView.java` | MODIFY | Debounced listener + chip row in layout |
+| `src/main/java/imagejai/config/Settings.java` | MODIFY | Add `localAssistantFuzzyThreshold` (default 0.90) |
 
 ## Implementation sketch
 

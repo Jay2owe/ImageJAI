@@ -53,10 +53,10 @@ Out:
 
 ## Read first
 
-- `src/main/java/uk/ac/ucl/imagej/ai/engine/TCPCommandServer.java`
+- `src/main/java/imagejai/engine/TCPCommandServer.java`
   — `handleGetDialogs`, `handleCloseDialogs`, the existing
   dialog inspection logic.
-- `src/main/java/uk/ac/ucl/imagej/ai/engine/DialogWatcher.java`
+- `src/main/java/imagejai/engine/DialogWatcher.java`
   — existing dialog observation code; reuse its component
   walkers.
 - `docs/ollama_COMPLETED/improvement-loop/conversations/ghost-dialog-queued-macros.md`

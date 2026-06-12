@@ -26,7 +26,7 @@ analysis intents in stage 07.
 - ImageJ APIs: `ij.WindowManager`, `ij.ImagePlus`, `ij.IJ`,
   `ij.measure.Calibration`, `ij.measure.ResultsTable`,
   `ij.plugin.frame.RoiManager`, `ij.io.FileSaver`
-- `src/main/java/uk/ac/ucl/imagej/ai/engine/CommandEngine.java` —
+- `src/main/java/imagejai/engine/CommandEngine.java` —
   `executeMacro(String)` for intents that just run a macro string
 
 ## Scope
@@ -89,9 +89,9 @@ display-only contrast via `setMinAndMax`.
 
 | Path | Action | Reason |
 |---|---|---|
-| `src/main/java/uk/ac/ucl/imagej/ai/local/intents/control/*.java` | NEW (~30 files) | One handler per intent |
-| `src/main/java/uk/ac/ucl/imagej/ai/local/FijiBridge.java` | MODIFY | Add `requireOpenImage`, `resolveAiExportsDir`, `runMacro`, `currentResults`, `currentRoiManager` helpers |
-| `src/main/java/uk/ac/ucl/imagej/ai/local/IntentLibrary.java` | MODIFY | Register all new handlers in the load step |
+| `src/main/java/imagejai/local/intents/control/*.java` | NEW (~30 files) | One handler per intent |
+| `src/main/java/imagejai/local/FijiBridge.java` | MODIFY | Add `requireOpenImage`, `resolveAiExportsDir`, `runMacro`, `currentResults`, `currentRoiManager` helpers |
+| `src/main/java/imagejai/local/IntentLibrary.java` | MODIFY | Register all new handlers in the load step |
 | `tests/benchmark/biologist_phrasings.jsonl` | MODIFY | Add ~30 phrasings covering this stage's intents |
 
 ## Implementation sketch

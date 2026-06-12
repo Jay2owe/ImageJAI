@@ -54,9 +54,9 @@ Out:
 
 ## Read first
 
-- `src/main/java/uk/ac/ucl/imagej/ai/engine/FrictionLog.java`
+- `src/main/java/imagejai/engine/FrictionLog.java`
   — all write methods.
-- `src/main/java/uk/ac/ucl/imagej/ai/engine/TCPCommandServer.java`
+- `src/main/java/imagejai/engine/TCPCommandServer.java`
   — every call to `FrictionLog.log*`.
 - `docs/tcp_upgrade/01_hello_handshake.md` — `AgentCaps.agentId`.
 - `docs/tcp_upgrade/06_nresults_trap.md` — the `MacroAnalyser`

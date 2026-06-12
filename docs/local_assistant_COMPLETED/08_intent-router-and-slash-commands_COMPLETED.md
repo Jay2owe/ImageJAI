@@ -21,11 +21,11 @@ chat: `/help`, `/clear`, `/macros`, `/info`, `/close`, `/teach`,
 - `docs/local_assistant/00_overview.md`
 - `docs/local_assistant/PLAN.md` §6.2 (matcher cascade), §11
   (extensibility), §13 (slash commands)
-- `src/main/java/uk/ac/ucl/imagej/ai/engine/IntentRouter.java` —
+- `src/main/java/imagejai/engine/IntentRouter.java` —
   verify the public API: `resolve(String)`, `teach(...)`,
   `forget(...)`, `list()`. **Do not assume `add`/`remove`** — the
   methods are `teach`/`forget`.
-- `src/main/java/uk/ac/ucl/imagej/ai/engine/TCPCommandServer.java`
+- `src/main/java/imagejai/engine/TCPCommandServer.java`
   handlers for `intent`, `intent_teach`, `intent_list`,
   `intent_forget` — they show how the router is invoked today.
 - `agent/gemma4_31b/loop.py` lines around 2090–2170 — the existing
@@ -93,13 +93,13 @@ replies "usage: /teach <phrase> => <macro>".
 
 | Path | Action | Reason |
 |---|---|---|
-| `src/main/java/uk/ac/ucl/imagej/ai/local/LocalAssistant.java` | MODIFY | Add IntentRouter fallback stage |
-| `src/main/java/uk/ac/ucl/imagej/ai/local/IntentMatcher.java` | MODIFY | Detect `/`-prefixed input and route to slash registry first |
-| `src/main/java/uk/ac/ucl/imagej/ai/local/SlashCommandRegistry.java` | NEW | Map `/name -> SlashCommand` |
-| `src/main/java/uk/ac/ucl/imagej/ai/local/SlashCommand.java` | NEW | Interface |
-| `src/main/java/uk/ac/ucl/imagej/ai/local/slash/*.java` | NEW (~8 files) | One class per command |
-| `src/main/java/uk/ac/ucl/imagej/ai/ui/ChatView.java` | MODIFY | Hook for `/clear` to actually wipe rendered history |
-| `src/main/java/uk/ac/ucl/imagej/ai/local/IntentLibrary.java` | MODIFY | Register slash commands' plain-English aliases (e.g. "show open images" → /info) |
+| `src/main/java/imagejai/local/LocalAssistant.java` | MODIFY | Add IntentRouter fallback stage |
+| `src/main/java/imagejai/local/IntentMatcher.java` | MODIFY | Detect `/`-prefixed input and route to slash registry first |
+| `src/main/java/imagejai/local/SlashCommandRegistry.java` | NEW | Map `/name -> SlashCommand` |
+| `src/main/java/imagejai/local/SlashCommand.java` | NEW | Interface |
+| `src/main/java/imagejai/local/slash/*.java` | NEW (~8 files) | One class per command |
+| `src/main/java/imagejai/ui/ChatView.java` | MODIFY | Hook for `/clear` to actually wipe rendered history |
+| `src/main/java/imagejai/local/IntentLibrary.java` | MODIFY | Register slash commands' plain-English aliases (e.g. "show open images" → /info) |
 
 ## Implementation sketch
 

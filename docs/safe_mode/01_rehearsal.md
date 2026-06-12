@@ -86,7 +86,7 @@ run. Log the skip to `FrictionLog` for later review.
 
 ## Files
 
-- Server: `src/main/java/uk/ac/ucl/imagej/ai/engine/TCPCommandServer.java`
+- Server: `src/main/java/imagejai/engine/TCPCommandServer.java`
   — new method `rehearse(String code, ImagePlus imp)`, call site
   inside `handleExecuteMacro`
 - Tests: exercise rehearsal against each known failure category

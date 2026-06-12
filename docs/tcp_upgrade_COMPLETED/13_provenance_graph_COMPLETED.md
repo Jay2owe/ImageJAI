@@ -76,9 +76,9 @@ Out:
 
 ## Read first
 
-- `src/main/java/uk/ac/ucl/imagej/ai/engine/ImageMonitor.java`
+- `src/main/java/imagejai/engine/ImageMonitor.java`
   — how image creation is already tracked.
-- `src/main/java/uk/ac/ucl/imagej/ai/engine/EventBus.java`
+- `src/main/java/imagejai/engine/EventBus.java`
   — `image.opened`, `image.updated`, `image.closed` topics.
 - `docs/tcp_upgrade/05_state_delta_and_pulse.md` —
   `stateDelta.windows.added` is the same info at lower detail.

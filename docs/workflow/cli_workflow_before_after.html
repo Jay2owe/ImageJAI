@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>ImageJAI CLI workflow diagram — before vs after</title>
+<style>
+  :root { color-scheme: light; }
+  body { margin: 0; padding: 24px 32px 64px; background: #f4f6fa; color: #172033;
+         font-family: -apple-system, "Segoe UI", Arial, sans-serif; }
+  h1 { margin: 0 0 4px; font-size: 22px; }
+  .sub { color: #526070; font-size: 13px; margin-bottom: 24px; }
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; align-items: start; }
+  .col { background: #ffffff; border: 1px solid #c8d2df; border-radius: 12px; padding: 16px;
+         box-shadow: 0 1px 2px rgba(0,0,0,0.04); }
+  .col h2 { margin: 0 0 4px; font-size: 16px; }
+  .col .meta { color: #526070; font-size: 12px; margin-bottom: 12px; }
+  .col .verdict { margin-top: 12px; padding: 10px 12px; border-radius: 8px;
+                  font-size: 12px; line-height: 1.5; }
+  .verdict.bad { background: #fff2f3; border: 1px solid #d65b6a; color: #8a2730; }
+  .verdict.good { background: #eefbf8; border: 1px solid #169b88; color: #0e5e54; }
+  .col img { width: 100%; height: auto; display: block; border: 1px solid #e3e8ee;
+             border-radius: 8px; background: #fbfcfe; }
+  .pill { display: inline-block; padding: 1px 8px; margin-right: 4px; border-radius: 10px;
+          font-size: 11px; font-weight: 600; }
+  .pill.before { background: #fff2f3; color: #8a2730; border: 1px solid #d65b6a; }
+  .pill.after  { background: #eefbf8; color: #0e5e54; border: 1px solid #169b88; }
+  .pill.example { background: #fffae0; color: #6a5310; border: 1px solid #d4b850; }
+  .full { margin-top: 24px; }
+  .full .col { max-width: none; }
+  ul { margin: 8px 0 0 18px; padding: 0; font-size: 12px; line-height: 1.6; }
+  li { margin: 2px 0; }
+</style>
+</head>
+<body>
+<h1>ImageJAI CLI workflow diagram — before vs after</h1>
+<p class="sub">Same idea, redrawn so a new biologist gets it in 10 seconds. Open this file in a browser.</p>
+
+<div class="grid">
+  <div class="col">
+    <h2><span class="pill before">BEFORE</span> cli_agent_workflow.svg</h2>
+    <div class="meta">1200 &times; 1600 portrait &middot; 14 stacked text-boxes &middot; no real strings</div>
+    <img src="cli_agent_workflow.svg" alt="current diagram">
+    <div class="verdict bad">
+      <strong>Problems</strong>
+      <ul>
+        <li>Two parallel lanes suggest two paths &mdash; really it&rsquo;s one socket, two message kinds.</li>
+        <li>Zero real command names, event names, agent names, JSON, or <code>:7746</code>.</li>
+        <li>Portrait shape wastes README space; reader scrolls a long way for little payoff.</li>
+        <li>Every box requires reading 3 lines of prose. Nothing is glanceable.</li>
+      </ul>
+    </div>
+  </div>
+
+  <div class="col">
+    <h2><span class="pill after">AFTER</span> cli_agent_workflow.v2.svg</h2>
+    <div class="meta">1400 &times; 1500 landscape &middot; internals exposed on every side &middot; 16-step sequence &middot; gate stages marked</div>
+    <img src="cli_agent_workflow.v2.svg" alt="redesigned diagram">
+    <div class="verdict good">
+      <strong>What changed</strong>
+      <ul>
+        <li><strong>Three exploded internal panels</strong> instead of three labels:
+          <ul>
+            <li><em>Agent workspace</em> &mdash; CLAUDE.md, ij.py, pixels.py, probe_plugin.py, recipe_search.py, auditor.py, recipes/, references/ (60 docs).</li>
+            <li><em>ImageJAI</em> &mdash; TCP listener, JSON parser, dispatcher, EDT marshaller, event bus, subscriber queues, &#9733;&nbsp;safety gate, audit log, privacy posture.</li>
+            <li><em>Fiji</em> &mdash; macro engine, plugin set (Bio-Formats, MorphoLibJ, StarDist, TrackMate, CLIJ2, Weka), image stacks, Results table, ROI manager, dialogs, log, AI_Exports/.</li>
+          </ul>
+        </li>
+        <li><strong>16-step worked example</strong> with numbered stops, EDT badge, and two &#9733;&nbsp;SAFETY GATE callouts at the exact moments it fires (after Fiji returns raw values, before the reply hits the wire).</li>
+        <li><strong>Safety gate breakdown row</strong>: all 6 things the gate does &mdash; path tokenisation, OME-XML scrub, results-table tokenisation, free-text envelopes, vision-frame downsampling, audit row.</li>
+        <li><strong>Pill row</strong> of the 9 supported agents stays at the top.</li>
+        <li><strong>Subway-map cheat-sheet</strong> of real commands + events at the bottom.</li>
+        <li><strong>&quot;How to read this&quot; legend</strong> at the very bottom for first-time viewers.</li>
+      </ul>
+    </div>
+  </div>
+</div>
+
+<div class="full">
+  <div class="col">
+    <h2><span class="pill example">WORKED EXAMPLE</span> example_3d_rings.svg</h2>
+    <div class="meta">A real CLI agent flow when the user types &quot;make a 3D render of the rings in channel 2&quot; &mdash; 30 numbered steps, 7 phases, 3 safety-gate firings.</div>
+    <img src="example_3d_rings.svg" alt="3D rings example workflow">
+    <div class="verdict good">
+      <strong>What this shows</strong>
+      <ul>
+        <li><strong>Pre-flight panel</strong> (top): the user&#39;s vague prompt, the workspace files the agent loads (CLAUDE.md, ij.py, 3d-visualisation reference, 3d-spatial reference, recipes), and the 5-step plan it builds before any TCP traffic.</li>
+        <li><strong>7 phases</strong> labelled in the left margin: ORIENT &middot; LOOK &middot; PROBE &middot; ISOLATE+ENHANCE &middot; VERIFY &middot; 3D RENDER &middot; SAVE.</li>
+        <li><strong>The agent investigates first</strong>: get_state &rarr; get_image_info &rarr; capture_image of ch2 &rarr; thinks (yellow) &rarr; only THEN starts changing the image. This is what stops the agent from being a parrot.</li>
+        <li><strong>Real Fiji macros</strong> with real plugin names: Subtract Background, Tubeness (for ring/tubular enhancement), Otsu threshold, 3D Viewer, ImageJ3DViewer.setView, exportContent &quot;WaveFront&quot;.</li>
+        <li><strong>Three safety-gate stages</strong> marked &#9733; &mdash; every <code>capture_image</code> reply gets vision frames downsampled before it leaves Fiji.</li>
+        <li><strong>Events stream throughout</strong> (dashed blue): macro.started, macro.completed, image.opened, dialog.opened, dialog.closed.</li>
+        <li><strong>Outputs panel</strong> at the bottom: the 3D render preview (mock), the .obj mesh, the .png screenshot, the audit row in <code>imagejai_audit.csv</code>, and what stays in agent memory.</li>
+      </ul>
+    </div>
+  </div>
+</div>
+</body>
+</html>

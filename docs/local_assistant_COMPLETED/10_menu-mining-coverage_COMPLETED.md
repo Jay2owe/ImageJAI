@@ -22,7 +22,7 @@ names so they are findable in plain English.
 - `docs/local_assistant/PLAN.md` §6.4 (TCP command landscape — to
   understand the relationship between menu commands and TCP
   commands), §9 Phase C
-- `src/main/java/uk/ac/ucl/imagej/ai/engine/MenuCommandRegistry.java`
+- `src/main/java/imagejai/engine/MenuCommandRegistry.java`
   — the existing in-JVM snapshot of `ij.Menus.getCommands()`.
   Verify its API; reuse rather than reimplement.
 - `agent/scan_plugins.py` — the older Python-side scraper. **Do
@@ -97,10 +97,10 @@ Two paths:
 
 | Path | Action | Reason |
 |---|---|---|
-| `src/main/java/uk/ac/ucl/imagej/ai/local/MenuIntentImporter.java` | NEW | Iterates registry, creates synthetic intents |
-| `src/main/java/uk/ac/ucl/imagej/ai/engine/MenuCommandRegistry.java` | MODIFY (or NEW if absent) | Expose the menu-command map for Local Assistant |
-| `src/main/java/uk/ac/ucl/imagej/ai/local/IntentLibrary.java` | MODIFY | Call `MenuIntentImporter.importInto(this)` after loading the JSON phrasebook |
-| `src/main/java/uk/ac/ucl/imagej/ai/config/Settings.java` | MODIFY | Add `expandMenuPhrasebook` flag (default false) |
+| `src/main/java/imagejai/local/MenuIntentImporter.java` | NEW | Iterates registry, creates synthetic intents |
+| `src/main/java/imagejai/engine/MenuCommandRegistry.java` | MODIFY (or NEW if absent) | Expose the menu-command map for Local Assistant |
+| `src/main/java/imagejai/local/IntentLibrary.java` | MODIFY | Call `MenuIntentImporter.importInto(this)` after loading the JSON phrasebook |
+| `src/main/java/imagejai/config/Settings.java` | MODIFY | Add `expandMenuPhrasebook` flag (default false) |
 | `tools/phrasebook_build.py` | MODIFY | `--menu-dump` flag |
 | `tools/menu-commands.txt` | NEW (committed) | Snapshot of canonical Fiji install for the dev's machine |
 | `src/main/resources/phrasebook.json` | MODIFY | Add namespaced `menu.*` intents and phrasings |

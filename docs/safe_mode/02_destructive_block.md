@@ -150,7 +150,7 @@ Creates an audit trail and surfaces patterns per-agent (e.g.
 
 ## Files
 
-- Server: `src/main/java/uk/ac/ucl/imagej/ai/engine/safeMode/DestructiveScanner.java`
+- Server: `src/main/java/imagejai/engine/safeMode/DestructiveScanner.java`
   (new), `TCPCommandServer.handleExecuteMacro` (integration), new
   error code `DESTRUCTIVE_OP_BLOCKED` in the structured-error table
 - Python wrappers: `ij.py` learns a `--destructive` flag that

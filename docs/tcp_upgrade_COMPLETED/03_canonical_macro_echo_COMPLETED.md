@@ -53,7 +53,7 @@ Out:
 
 ## Read first
 
-- `src/main/java/uk/ac/ucl/imagej/ai/engine/TCPCommandServer.java`
+- `src/main/java/imagejai/engine/TCPCommandServer.java`
   — `handleExecuteMacro` and `handleInteractDialog`.
 - ImageJ Recorder API:
   https://imagej.net/ij/developer/api/ij/ij/plugin/frame/Recorder.html

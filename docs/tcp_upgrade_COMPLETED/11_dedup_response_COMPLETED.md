@@ -55,7 +55,7 @@ Out:
 
 ## Read first
 
-- `src/main/java/uk/ac/ucl/imagej/ai/engine/TCPCommandServer.java`
+- `src/main/java/imagejai/engine/TCPCommandServer.java`
   — every read-only handler and its dispatch.
 - `docs/tcp_upgrade/01_hello_handshake.md` — where `caps.dedup`
   lives.

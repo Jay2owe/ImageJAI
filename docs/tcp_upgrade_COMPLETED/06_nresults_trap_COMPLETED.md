@@ -55,7 +55,7 @@ Out:
 
 ## Read first
 
-- `src/main/java/uk/ac/ucl/imagej/ai/engine/TCPCommandServer.java`
+- `src/main/java/imagejai/engine/TCPCommandServer.java`
   — `handleExecuteMacro`.
 - `docs/tcp_upgrade/02_structured_errors.md` — this adds a
   `warnings[]` array to the success-reply shape; check that

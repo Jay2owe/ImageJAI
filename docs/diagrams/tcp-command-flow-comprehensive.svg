@@ -1,0 +1,343 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1800" height="1120" viewBox="0 0 1800 1120" role="img" aria-labelledby="title desc">
+  <title id="title">ImageJAI agent command flow across CLI, TCP server, and Fiji</title>
+  <desc id="desc">Three-column architecture diagram showing the order of components when an agent command is sent through ij.py to ImageJAI and Fiji, plus the separate event subscription channel.</desc>
+  <defs>
+    <marker id="arrow-gray" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto" markerUnits="strokeWidth">
+      <path d="M2,2 L10,6 L2,10 Z" fill="#59616b"/>
+    </marker>
+    <marker id="arrow-purple" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto" markerUnits="strokeWidth">
+      <path d="M2,2 L10,6 L2,10 Z" fill="#7b55e7"/>
+    </marker>
+    <marker id="arrow-orange" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto" markerUnits="strokeWidth">
+      <path d="M2,2 L10,6 L2,10 Z" fill="#c97422"/>
+    </marker>
+    <marker id="arrow-blue" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto" markerUnits="strokeWidth">
+      <path d="M2,2 L10,6 L2,10 Z" fill="#2b83c6"/>
+    </marker>
+    <filter id="soft-shadow" x="-10%" y="-10%" width="120%" height="125%">
+      <feDropShadow dx="0" dy="1.5" stdDeviation="1.2" flood-color="#000000" flood-opacity="0.16"/>
+    </filter>
+    <style>
+      text { font-family: "Segoe UI", Arial, sans-serif; fill: #1d2733; }
+      .page-title { font-size: 24px; font-weight: 800; }
+      .subtitle { font-size: 13px; fill: #566170; }
+      .column-title { font-size: 19px; font-weight: 800; }
+      .column-note { font-size: 12px; font-weight: 600; fill: #697381; }
+      .box-title { font-size: 13px; font-weight: 800; }
+      .box-text { font-size: 11.2px; fill: #2d3745; }
+      .micro { font-size: 10px; fill: #4e5967; }
+      .mono { font-family: Consolas, "Cascadia Mono", monospace; font-size: 10.4px; fill: #26313f; }
+      .badge-text { font-size: 10px; font-weight: 800; fill: #ffffff; text-anchor: middle; dominant-baseline: central; }
+      .flow-label { font-size: 10.5px; font-weight: 700; fill: #3f4752; }
+      .muted { fill: #657182; }
+      .col-left { fill: #f4f0ff; stroke: #8d68ff; stroke-width: 2.2; }
+      .col-mid { fill: #fff1df; stroke: #df8b3f; stroke-width: 2.2; }
+      .col-right { fill: #eaf5ff; stroke: #4da0dc; stroke-width: 2.2; }
+      .box { fill: #ffffff; stroke: #c8d0da; stroke-width: 1.25; filter: url(#soft-shadow); }
+      .left-accent { fill: #8d68ff; }
+      .mid-accent { fill: #df8b3f; }
+      .right-accent { fill: #4da0dc; }
+      .left-stroke { stroke: #7b55e7; }
+      .mid-stroke { stroke: #c97422; }
+      .right-stroke { stroke: #2b83c6; }
+      .arrow { fill: none; stroke: #59616b; stroke-width: 2.2; marker-end: url(#arrow-gray); }
+      .arrow-purple { fill: none; stroke: #7b55e7; stroke-width: 2.4; marker-end: url(#arrow-purple); }
+      .arrow-orange { fill: none; stroke: #c97422; stroke-width: 2.4; marker-end: url(#arrow-orange); }
+      .arrow-blue { fill: none; stroke: #2b83c6; stroke-width: 2.4; marker-end: url(#arrow-blue); }
+      .dash-purple { fill: none; stroke: #7b55e7; stroke-width: 2.2; stroke-dasharray: 6 5; marker-end: url(#arrow-purple); }
+      .dash-blue { fill: none; stroke: #2b83c6; stroke-width: 2.2; stroke-dasharray: 6 5; marker-end: url(#arrow-blue); }
+      .tiny-line { stroke: #cbd3dd; stroke-width: 1; }
+    </style>
+  </defs>
+
+  <rect x="0" y="0" width="1800" height="1120" fill="#d3d3d3"/>
+  <text x="24" y="34" class="page-title">ImageJAI command flow: agent to Fiji and back</text>
+  <text x="24" y="56" class="subtitle">Solid arrows are request/response. Dotted arrows are event subscription frames or local helper-only work. The middle column is the part most agents do not see directly.</text>
+
+  <!-- Column backgrounds -->
+  <rect x="25" y="78" width="470" height="984" class="col-left"/>
+  <rect x="525" y="78" width="730" height="984" class="col-mid"/>
+  <rect x="1285" y="78" width="490" height="984" class="col-right"/>
+
+  <!-- Column headers -->
+  <g transform="translate(48 101)">
+    <rect x="0" y="0" width="40" height="40" rx="5" fill="#19202b"/>
+    <text x="9" y="26" font-family="Consolas, monospace" font-size="19" fill="#6ee7a8">&gt;_</text>
+    <text x="54" y="15" class="column-title">CLI agent + workspace</text>
+    <text x="54" y="34" class="column-note">terminal, helper scripts, local docs, caches</text>
+  </g>
+  <g transform="translate(550 101)">
+    <path d="M9 6 h17 v9 h9 v13 h-9 v9 h-17 v-31 z" fill="#df8b3f"/>
+    <text x="54" y="15" class="column-title">ImageJAI JVM socket server</text>
+    <text x="54" y="34" class="column-note">TCPCommandServer on loopback localhost:7746</text>
+  </g>
+  <g transform="translate(1308 101)">
+    <rect x="2" y="2" width="30" height="34" rx="4" fill="#4da0dc" opacity="0.22"/>
+    <path d="M8 8 h8 v22 h-8 z M20 8 h8 v6 h-8 z M20 17 h8 v13 h-8 z" fill="#4da0dc"/>
+    <text x="54" y="15" class="column-title">Fiji / ImageJ runtime</text>
+    <text x="54" y="34" class="column-note">actual image analysis state and plugin work</text>
+  </g>
+
+  <!-- Left column boxes -->
+  <g id="left-context">
+    <rect x="50" y="150" width="420" height="72" rx="5" class="box"/>
+    <rect x="50" y="150" width="420" height="7" class="left-accent"/>
+    <text x="66" y="176" class="box-title">Agent context files</text>
+    <text x="66" y="196" class="box-text">agent/CLAUDE.md, agent/AGENTS.md, agent/GEMINI.md</text>
+    <text x="66" y="213" class="box-text">House rules: check state, probe plugins, save to AI_Exports.</text>
+  </g>
+
+  <g id="left-commands">
+    <rect x="50" y="238" width="420" height="150" rx="5" class="box"/>
+    <rect x="50" y="238" width="420" height="7" class="left-accent"/>
+    <text x="66" y="264" class="box-title">Agent-facing commands and helpers</text>
+    <text x="66" y="286" class="mono">python agent/ij.py macro|script|groovy|jython|subscribe</text>
+    <text x="66" y="304" class="mono">from ij import get_state, run_script, get_pixels, ...</text>
+    <text x="66" y="327" class="box-text">CLI words are local aliases. ij.py converts them into JSON TCP</text>
+    <text x="66" y="344" class="box-text">commands such as execute_macro, run_script, or subscribe.</text>
+    <text x="66" y="367" class="box-text">Some typed commands are Python-only workflows after data is fetched.</text>
+  </g>
+
+  <g id="left-transport">
+    <rect x="50" y="404" width="420" height="190" rx="5" class="box"/>
+    <rect x="50" y="404" width="420" height="7" class="left-accent"/>
+    <text x="66" y="430" class="box-title">ij.py transport layer</text>
+    <text x="66" y="452" class="mono">imagej_command(cmd) -&gt; socket.connect(host, port)</text>
+    <text x="66" y="470" class="mono">json.dumps(cmd) + "\\n" -&gt; sendall() -&gt; read JSON reply</text>
+    <text x="66" y="495" class="box-text">Hello/caps: session_id, model_endpoint, output format,</text>
+    <text x="66" y="512" class="box-text">vision, state_delta, accepted event topics, optional token.</text>
+    <text x="66" y="537" class="box-text">Readonly dedup cache: if_none_match for state, image info,</text>
+    <text x="66" y="554" class="box-text">results, histogram, windows, metadata, dialogs, jobs.</text>
+    <text x="66" y="579" class="mono">agent/.tmp/ij_client_cache.json</text>
+  </g>
+
+  <g id="left-local">
+    <rect x="50" y="610" width="420" height="185" rx="5" class="box"/>
+    <rect x="50" y="610" width="420" height="7" class="left-accent"/>
+    <text x="66" y="636" class="box-title">Other Python helpers agents use</text>
+    <text x="66" y="658" class="box-text">pixels.py: calls get_pixels, then decodes float32 pixels and</text>
+    <text x="66" y="675" class="box-text">computes stats, profiles, stack summaries, bright objects locally.</text>
+    <text x="66" y="701" class="box-text">probe_plugin.py: calls probe_command and caches discovered dialog</text>
+    <text x="66" y="718" class="box-text">parameters so agents do not repeatedly open the same plugin.</text>
+    <text x="66" y="744" class="box-text">auditor.py: reads results/image metadata through ij.py and audits</text>
+    <text x="66" y="761" class="box-text">tables locally for unit, calibration, bit-depth, and table issues.</text>
+    <text x="66" y="780" class="mono">All stable workflows are importable via __all__ and tested.</text>
+  </g>
+
+  <g id="left-planning">
+    <rect x="50" y="811" width="420" height="112" rx="5" class="box"/>
+    <rect x="50" y="811" width="420" height="7" class="left-accent"/>
+    <text x="66" y="837" class="box-title">Local planning data</text>
+    <text x="66" y="859" class="box-text">recipes/*.yaml: reusable workflow recipes.</text>
+    <text x="66" y="876" class="box-text">references/*.md: microscopy and ImageJ knowledge base.</text>
+    <text x="66" y="893" class="box-text">agent/.tmp/plugin_args: plugin probe cache.</text>
+    <text x="66" y="910" class="box-text">These guide command choice but do not control Fiji by themselves.</text>
+  </g>
+
+  <g id="left-response">
+    <rect x="50" y="939" width="420" height="86" rx="5" class="box"/>
+    <rect x="50" y="939" width="420" height="7" class="left-accent"/>
+    <text x="66" y="965" class="box-title">Agent receives structured feedback</text>
+    <text x="66" y="987" class="box-text">One-shot calls return one JSON object: ok/result/error plus deltas.</text>
+    <text x="66" y="1004" class="box-text">Subscriptions stream newline-delimited frames until disconnected.</text>
+  </g>
+
+  <!-- Middle column boxes -->
+  <g id="mid-listener">
+    <rect x="550" y="150" width="680" height="74" rx="5" class="box"/>
+    <rect x="550" y="150" width="680" height="7" class="mid-accent"/>
+    <text x="566" y="176" class="box-title">1. TCP listener accepts a loopback socket</text>
+    <text x="566" y="197" class="box-text">ServerSocket bound to localhost. Each normal connection sends one UTF-8 newline-terminated JSON request.</text>
+    <text x="566" y="214" class="box-text">Oversized request lines are rejected before parsing.</text>
+  </g>
+
+  <g id="mid-split">
+    <rect x="550" y="240" width="680" height="58" rx="5" class="box"/>
+    <rect x="550" y="240" width="680" height="7" class="mid-accent"/>
+    <text x="566" y="266" class="box-title">2. Fast split: is this command subscribe?</text>
+    <text x="566" y="286" class="box-text">subscribe is intercepted before the normal dispatcher because it upgrades the socket into a long-lived stream.</text>
+  </g>
+
+  <g id="mid-subscribe">
+    <rect x="550" y="318" width="330" height="174" rx="5" class="box"/>
+    <rect x="550" y="318" width="330" height="7" class="mid-accent"/>
+    <text x="566" y="344" class="box-title">3A. handleSubscribeStream</text>
+    <text x="566" y="366" class="box-text">Parse topics; default topic is "*".</text>
+    <text x="566" y="383" class="box-text">Register EventBus listener for exact, *, or suffix wildcard.</text>
+    <text x="566" y="400" class="box-text">Max subscribers: 8. Per-socket queue: 256 frames.</text>
+    <text x="566" y="417" class="box-text">Overflow drops oldest and emits event_dropped.</text>
+    <text x="566" y="434" class="box-text">Heartbeat frame every 30s of idle time.</text>
+    <text x="566" y="459" class="mono">{"event","data","ts","seq"} + "\\n"</text>
+  </g>
+
+  <g id="mid-parse">
+    <rect x="900" y="318" width="330" height="174" rx="5" class="box"/>
+    <rect x="900" y="318" width="330" height="7" class="mid-accent"/>
+    <text x="916" y="344" class="box-title">3B. JSON parse, caps, auth</text>
+    <text x="916" y="366" class="box-text">JsonParser builds a JsonObject request.</text>
+    <text x="916" y="383" class="box-text">hello negotiates AgentCaps and optional token auth.</text>
+    <text x="916" y="400" class="box-text">dispatchInternal records command history for friction and hints.</text>
+    <text x="916" y="417" class="box-text">Token gate can reject non-hello/non-ping commands.</text>
+    <text x="916" y="442" class="box-text">Socket caps decide response shape: stateDelta, pulse,</text>
+    <text x="916" y="459" class="box-text">histogramDelta, graphDelta, governance, dedup.</text>
+  </g>
+
+  <g id="mid-dispatch">
+    <rect x="550" y="512" width="680" height="185" rx="5" class="box"/>
+    <rect x="550" y="512" width="680" height="7" class="mid-accent"/>
+    <text x="566" y="538" class="box-title">4. dispatchCore routes command name to handlers</text>
+    <text x="566" y="562" class="box-text">Connection/read: hello, ping, list_commands, get_state, get_image_info, get_results_table, get_log, get_console.</text>
+    <text x="566" y="579" class="box-text">Image data: get_histogram, get_open_windows, get_metadata, get_pixels, get_roi_state, get_display_state, get_image_graph.</text>
+    <text x="566" y="596" class="box-text">Execution: execute_macro, run_script, run_pipeline, explore_thresholds, batch, run, 3d_viewer, open_image, capture_image.</text>
+    <text x="566" y="613" class="box-text">UI/plugin: get_dialogs, close_dialogs, close_windows, probe_command, interact_dialog, gui_action, request_visual.</text>
+    <text x="566" y="630" class="box-text">Async/reactive: execute_macro_async, job_status, job_cancel, job_list, list_reactive_rules, reactive_enable/disable/reload/stats.</text>
+    <text x="566" y="647" class="box-text">Governance/state history: intent*, friction*, ledger_lookup/confirm, rewind, branch, branch_list/switch/delete.</text>
+    <text x="566" y="672" class="box-text">Several CLI commands collapse to one handler; batch/run recursively dispatch generated command objects.</text>
+  </g>
+
+  <g id="mid-exec">
+    <rect x="550" y="717" width="330" height="151" rx="5" class="box"/>
+    <rect x="550" y="717" width="330" height="7" class="mid-accent"/>
+    <text x="566" y="743" class="box-title">5. Execution bridge and guardrails</text>
+    <text x="566" y="765" class="box-text">execute_macro uses CommandEngine / IJ.runMacro.</text>
+    <text x="566" y="782" class="box-text">run_script uses ScriptEngineManager: groovy, jython, javascript.</text>
+    <text x="566" y="799" class="box-text">MACRO_MUTEX and macroInFlight serialize ImageJ-global state.</text>
+    <text x="566" y="816" class="box-text">Dialog polling catches blocking GenericDialogs and may auto-dismiss.</text>
+    <text x="566" y="833" class="box-text">Snapshots collect results, images, histograms, graph, undo boundary.</text>
+    <text x="566" y="850" class="box-text">SessionCodeJournal records macro/script source and outcome.</text>
+  </g>
+
+  <g id="mid-post">
+    <rect x="900" y="717" width="330" height="151" rx="5" class="box"/>
+    <rect x="900" y="717" width="330" height="7" class="mid-accent"/>
+    <text x="916" y="743" class="box-title">6. Response decoration and writeback</text>
+    <text x="916" y="765" class="box-text">Handler returns JsonObject with success, result, output, or error.</text>
+    <text x="916" y="782" class="box-text">Post-processing adds redaction/governance, audit receipt, dedup hash,</text>
+    <text x="916" y="799" class="box-text">friction log entries, pattern hints, stateDelta, histogramDelta,</text>
+    <text x="916" y="816" class="box-text">graphDelta, pulse, or phantomDialog if enabled.</text>
+    <text x="916" y="841" class="mono">writeOutbound(command, JSON + "\\n")</text>
+  </g>
+
+  <g id="mid-bus">
+    <rect x="550" y="888" width="680" height="137" rx="5" class="box"/>
+    <rect x="550" y="888" width="680" height="7" class="mid-accent"/>
+    <text x="566" y="914" class="box-title">7. EventBus side channel inside the same JVM</text>
+    <text x="566" y="936" class="box-text">Singleton pub/sub bus. Publishers call publish(topic, data); subscribers match exact, *, image.*, etc.</text>
+    <text x="566" y="953" class="box-text">Frames include monotonic seq and timestamp. Same-topic events are coalesced for 200 ms.</text>
+    <text x="566" y="970" class="box-text">macro.*, image.*, dialog.*, results.changed, job.*, safe_mode.*, data_governance.*, gui_action.*, memory.pressure.</text>
+    <text x="566" y="987" class="box-text">Suppression scopes can temporarily hide image.* events during sensitive macro execution.</text>
+    <text x="566" y="1004" class="box-text">This does not execute commands by itself; it tells agents what changed so they can decide the next TCP request.</text>
+  </g>
+
+  <!-- Right column boxes -->
+  <g id="right-engines">
+    <rect x="1310" y="150" width="440" height="126" rx="5" class="box"/>
+    <rect x="1310" y="150" width="440" height="7" class="right-accent"/>
+    <text x="1326" y="176" class="box-title">Fiji execution engines</text>
+    <text x="1326" y="198" class="box-text">ImageJ macro interpreter: IJ.runMacro and IJ.run commands.</text>
+    <text x="1326" y="215" class="box-text">JSR-223 script engines: Groovy, Jython, JavaScript when present.</text>
+    <text x="1326" y="232" class="box-text">Command registry/menu commands are what probe_command inspects.</text>
+    <text x="1326" y="249" class="box-text">EDT/Swing constraints still apply to UI-facing work.</text>
+  </g>
+
+  <g id="right-state">
+    <rect x="1310" y="296" width="440" height="170" rx="5" class="box"/>
+    <rect x="1310" y="296" width="440" height="7" class="right-accent"/>
+    <text x="1326" y="322" class="box-title">Image and measurement state</text>
+    <text x="1326" y="344" class="box-text">WindowManager, ImagePlus, stacks, channels, slices, calibration.</text>
+    <text x="1326" y="361" class="box-text">Pixel data for get_pixels is serialized as base64 float32.</text>
+    <text x="1326" y="378" class="box-text">ResultsTable, ROI Manager, overlays, histograms, metadata.</text>
+    <text x="1326" y="395" class="box-text">ImageGraph tracks derived images created by macro/script runs.</text>
+    <text x="1326" y="420" class="box-text">Read handlers inspect this state; mutating handlers change it.</text>
+    <text x="1326" y="437" class="box-text">Deltas summarize what changed since the command started.</text>
+  </g>
+
+  <g id="right-ui">
+    <rect x="1310" y="486" width="440" height="210" rx="5" class="box"/>
+    <rect x="1310" y="486" width="440" height="7" class="right-accent"/>
+    <text x="1326" y="512" class="box-title">Dialogs, windows, plugins</text>
+    <text x="1326" y="534" class="box-text">GenericDialog and Swing windows can be listed, filled, clicked,</text>
+    <text x="1326" y="551" class="box-text">focused, or closed through interact_dialog and gui_action.</text>
+    <text x="1326" y="577" class="box-text">Plugin examples: Bio-Formats, MorphoLibJ, StarDist, TrackMate,</text>
+    <text x="1326" y="594" class="box-text">CLIJ2/GPU, Trainable Weka, 3D Viewer, and local lab plugins.</text>
+    <text x="1326" y="620" class="box-text">Log window, stdout/stderr buffers, progress bar, and open windows</text>
+    <text x="1326" y="637" class="box-text">are read back by get_log, get_console, get_progress, state calls.</text>
+    <text x="1326" y="663" class="box-text">Plugins do not know the agent exists; they just see normal Fiji use.</text>
+  </g>
+
+  <g id="right-events">
+    <rect x="1310" y="716" width="440" height="145" rx="5" class="box"/>
+    <rect x="1310" y="716" width="440" height="7" class="right-accent"/>
+    <text x="1326" y="742" class="box-title">Event publishers</text>
+    <text x="1326" y="764" class="box-text">CommandEngine: macro.started, macro.completed, results.changed.</text>
+    <text x="1326" y="781" class="box-text">ImageMonitor: image.opened, image.closed, image.updated, memory.pressure.</text>
+    <text x="1326" y="798" class="box-text">DialogWatcher: dialog.appeared, dialog.closed.</text>
+    <text x="1326" y="815" class="box-text">JobRegistry: job.started/progress/completed/failed.</text>
+    <text x="1326" y="832" class="box-text">PostureController and ReactiveEngine publish governance/rule events.</text>
+  </g>
+
+  <g id="right-files">
+    <rect x="1310" y="881" width="440" height="144" rx="5" class="box"/>
+    <rect x="1310" y="881" width="440" height="7" class="right-accent"/>
+    <text x="1326" y="907" class="box-title">Files and visible artifacts</text>
+    <text x="1326" y="929" class="box-text">AI_Exports/ next to the opened image: captures, reports, exports.</text>
+    <text x="1326" y="946" class="box-text">imagejai_audit.csv records command receipts when auditing is active.</text>
+    <text x="1326" y="963" class="box-text">Session journal stores macro and script code run over TCP.</text>
+    <text x="1326" y="980" class="box-text">Visual request/capture commands create inspectable image artifacts.</text>
+    <text x="1326" y="1005" class="box-text">These outputs are how agents leave durable analysis evidence.</text>
+  </g>
+
+  <!-- Main flow arrows -->
+  <path d="M470 500 C500 500 510 187 550 187" class="arrow-purple"/>
+  <text x="479" y="455" class="flow-label">JSON request</text>
+
+  <path d="M890 224 L890 240" class="arrow-orange"/>
+  <path d="M890 298 C820 306 740 310 715 318" class="arrow-orange"/>
+  <text x="685" y="307" class="flow-label">subscribe path</text>
+  <path d="M890 298 C955 306 1035 310 1065 318" class="arrow-orange"/>
+  <text x="1036" y="307" class="flow-label">normal path</text>
+  <path d="M1065 492 L1065 512" class="arrow-orange"/>
+  <path d="M715 492 C715 540 715 837 715 888" class="dash-purple"/>
+
+  <path d="M1230 574 C1264 574 1272 211 1310 211" class="arrow-blue"/>
+  <text x="1244" y="252" class="flow-label">macro/script</text>
+  <path d="M1230 595 C1264 595 1272 382 1310 382" class="arrow-blue"/>
+  <text x="1243" y="404" class="flow-label">state reads</text>
+  <path d="M1230 617 C1264 617 1272 592 1310 592" class="arrow-blue"/>
+  <text x="1239" y="628" class="flow-label">UI/plugin</text>
+
+  <path d="M1310 382 C1270 382 1270 792 1230 792" class="arrow-orange"/>
+  <text x="1246" y="746" class="flow-label">result/state/error</text>
+  <path d="M900 793 C770 793 650 984 470 984" class="arrow-purple"/>
+  <text x="604" y="958" class="flow-label">JSON response</text>
+
+  <!-- Event stream arrows -->
+  <path d="M1310 788 C1265 788 1268 956 1230 956" class="dash-blue"/>
+  <text x="1232" y="878" class="flow-label">publish()</text>
+  <path d="M550 956 C500 956 510 1000 470 1000" class="dash-purple"/>
+  <text x="486" y="1034" class="flow-label">event frames to imagej_events / subscribe</text>
+
+  <!-- Local helper-only dotted arrow -->
+  <path d="M260 939 C260 890 260 843 260 795" class="dash-purple"/>
+  <text x="275" y="872" class="flow-label">local analysis after TCP data</text>
+
+  <!-- Internal middle connectors -->
+  <path d="M715 697 L715 717" class="arrow-orange"/>
+  <path d="M1065 697 L1065 717" class="arrow-orange"/>
+  <path d="M880 793 L900 793" class="arrow-orange"/>
+
+  <!-- Legend/footer -->
+  <g id="legend">
+    <rect x="25" y="1076" width="1750" height="32" rx="4" fill="#f7f8fa" stroke="#bec6d0"/>
+    <line x1="48" y1="1092" x2="98" y2="1092" class="arrow"/>
+    <text x="108" y="1096" class="micro">normal request/response control path</text>
+    <line x1="345" y1="1092" x2="395" y2="1092" class="dash-purple"/>
+    <text x="405" y="1096" class="micro">streaming event or local helper path</text>
+    <rect x="648" y="1085" width="12" height="12" class="left-accent"/>
+    <text x="668" y="1096" class="micro">agent-side Python and docs</text>
+    <rect x="878" y="1085" width="12" height="12" class="mid-accent"/>
+    <text x="898" y="1096" class="micro">ImageJAI JVM broker, dispatcher, event bus, response shaping</text>
+    <rect x="1286" y="1085" width="12" height="12" class="right-accent"/>
+    <text x="1306" y="1096" class="micro">Fiji/ImageJ runtime, plugins, windows, images, files</text>
+  </g>
+</svg>

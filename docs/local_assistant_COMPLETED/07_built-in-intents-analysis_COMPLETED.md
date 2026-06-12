@@ -25,10 +25,10 @@ library is feature-complete for v1.
   `denoise_gaussian.yaml`, `cell_counting.yaml`,
   `particle_analysis.yaml`, `ctcf.yaml`, `line_profile.yaml`,
   `colocalization.yaml` — concrete macro patterns to copy
-- `src/main/java/uk/ac/ucl/imagej/ai/engine/TCPCommandServer.java`
+- `src/main/java/imagejai/engine/TCPCommandServer.java`
   `dispatchCore()` — the `explore_thresholds` handler, since
   "compare thresholds" routes through it locally
-- `src/main/java/uk/ac/ucl/imagej/ai/engine/CommandEngine.java`
+- `src/main/java/imagejai/engine/CommandEngine.java`
 
 ## Scope
 
@@ -83,9 +83,9 @@ public ThresholdComparison runExploreThresholds(
 
 | Path | Action | Reason |
 |---|---|---|
-| `src/main/java/uk/ac/ucl/imagej/ai/local/intents/analysis/*.java` | NEW (~25 files) | One handler per intent |
-| `src/main/java/uk/ac/ucl/imagej/ai/local/FijiBridge.java` | MODIFY | Add `runAnalyzeParticles`, `measureCurrentRoiSet`, `computeCtcf`, `runExploreThresholds` |
-| `src/main/java/uk/ac/ucl/imagej/ai/local/IntentLibrary.java` | MODIFY | Register all new handlers |
+| `src/main/java/imagejai/local/intents/analysis/*.java` | NEW (~25 files) | One handler per intent |
+| `src/main/java/imagejai/local/FijiBridge.java` | MODIFY | Add `runAnalyzeParticles`, `measureCurrentRoiSet`, `computeCtcf`, `runExploreThresholds` |
+| `src/main/java/imagejai/local/IntentLibrary.java` | MODIFY | Register all new handlers |
 | `tests/benchmark/biologist_phrasings.jsonl` | MODIFY | Add ~25 phrasings covering this stage's intents |
 
 ## Implementation sketch

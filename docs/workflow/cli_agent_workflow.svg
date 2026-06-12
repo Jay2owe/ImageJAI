@@ -1,0 +1,175 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 1600" font-family="Segoe UI, Arial, sans-serif">
+  <defs>
+    <style>
+      .bg { fill: #fbfcfe; }
+      .title { font-size: 28px; font-weight: 700; fill: #172033; }
+      .subtitle { font-size: 14px; fill: #526070; }
+      .box { fill: #ffffff; stroke: #c8d2df; stroke-width: 1.5; rx: 8; }
+      .start { fill: #eef5ff; stroke: #4d8fe8; }
+      .agent { fill: #f6f2ff; stroke: #8a6be8; }
+      .server { fill: #f7fafc; stroke: #708096; }
+      .safety { fill: #fff2f3; stroke: #d65b6a; }
+      .event { fill: #f1f8ff; stroke: #3984d8; }
+      .output { fill: #eefbf8; stroke: #169b88; }
+      .label { font-size: 14px; font-weight: 700; fill: #172033; }
+      .small { font-size: 11px; fill: #465466; }
+      .tiny { font-size: 10px; fill: #637184; }
+      .lane { font-size: 16px; font-weight: 700; fill: #172033; }
+      .arrow { stroke: #667387; stroke-width: 2; fill: none; marker-end: url(#arrow); }
+      .cmd { stroke: #667387; stroke-width: 2.1; fill: none; marker-end: url(#arrow); }
+      .reply { stroke: #8a6be8; stroke-width: 2.2; fill: none; marker-end: url(#arrow-purple); }
+      .stream { stroke: #3984d8; stroke-width: 2.2; fill: none; marker-end: url(#arrow-blue); }
+    </style>
+    <marker id="arrow" markerWidth="10" markerHeight="8" refX="9" refY="4" orient="auto">
+      <path d="M0,0 L10,4 L0,8 Z" fill="#667387"/>
+    </marker>
+    <marker id="arrow-purple" markerWidth="10" markerHeight="8" refX="9" refY="4" orient="auto">
+      <path d="M0,0 L10,4 L0,8 Z" fill="#8a6be8"/>
+    </marker>
+    <marker id="arrow-blue" markerWidth="10" markerHeight="8" refX="9" refY="4" orient="auto">
+      <path d="M0,0 L10,4 L0,8 Z" fill="#3984d8"/>
+    </marker>
+  </defs>
+
+  <rect class="bg" x="0" y="0" width="1200" height="1600"/>
+
+  <text class="title" x="600" y="42" text-anchor="middle">ImageJAI CLI Agent Flow</text>
+  <text class="subtitle" x="600" y="66" text-anchor="middle">A terminal agent sends short commands and also keeps a separate live event feed open.</text>
+
+  <rect class="box start" x="420" y="95" width="360" height="64"/>
+  <text class="label" x="600" y="121" text-anchor="middle">User prompt</text>
+  <text class="small" x="600" y="141" text-anchor="middle">plain-English request in a terminal agent</text>
+
+  <path class="arrow" d="M600 159 L600 190"/>
+
+  <rect class="box start" x="330" y="190" width="540" height="76"/>
+  <text class="label" x="600" y="216" text-anchor="middle">ImageJAI launches the agent</text>
+  <text class="small" x="600" y="236" text-anchor="middle">user chooses Claude, Codex, Gemini CLI, Aider, or Gemma</text>
+  <text class="tiny" x="600" y="253" text-anchor="middle">ImageJAI gives the agent the local server port and the agent workspace</text>
+
+  <path class="arrow" d="M600 266 L600 300"/>
+
+  <rect class="box agent" x="260" y="300" width="680" height="92"/>
+  <text class="label" x="600" y="328" text-anchor="middle">Terminal agent session</text>
+  <text class="small" x="600" y="348" text-anchor="middle">runs inside ImageJAI or in an external terminal window</text>
+  <text class="small" x="600" y="366" text-anchor="middle">uses the agent/ workspace for instructions, recipes, references, and helper tools</text>
+
+  <path class="arrow" d="M600 392 L600 425"/>
+
+  <rect class="box agent" x="260" y="425" width="680" height="92"/>
+  <text class="label" x="600" y="453" text-anchor="middle">Agent prepares two kinds of connection</text>
+  <text class="small" x="600" y="473" text-anchor="middle">one short connection for each command and reply</text>
+  <text class="small" x="600" y="491" text-anchor="middle">one kept-open connection for live ImageJAI events</text>
+
+  <path class="arrow" d="M600 517 L600 555"/>
+  <path class="cmd" d="M600 555 L320 555 L320 610"/>
+  <path class="stream" d="M600 555 L880 555 L880 610"/>
+
+  <text class="lane" x="320" y="585" text-anchor="middle">Command + Reply</text>
+  <text class="lane" x="880" y="585" text-anchor="middle">Live Event Feed</text>
+
+  <!-- Command / reply lane -->
+  <rect class="box agent" x="70" y="610" width="500" height="88"/>
+  <text class="label" x="320" y="636" text-anchor="middle">Agent opens a short command connection</text>
+  <text class="small" x="320" y="656" text-anchor="middle">sends one request such as read state, run macro, inspect pixels, or control a dialog</text>
+  <text class="tiny" x="320" y="674" text-anchor="middle">this connection expects one reply, then closes</text>
+
+  <path class="cmd" d="M320 698 L320 728"/>
+
+  <rect class="box server" x="70" y="728" width="500" height="88"/>
+  <text class="label" x="320" y="754" text-anchor="middle">ImageJAI local TCP server receives the command</text>
+  <text class="small" x="320" y="774" text-anchor="middle">checks the request and routes it to the matching Fiji action</text>
+  <text class="tiny" x="320" y="792" text-anchor="middle">the same server will also send the reply back</text>
+
+  <path class="cmd" d="M320 816 L320 846"/>
+
+  <rect class="box server" x="70" y="846" width="500" height="100"/>
+  <text class="label" x="320" y="874" text-anchor="middle">Fiji / ImageJ does the requested work</text>
+  <text class="small" x="320" y="894" text-anchor="middle">read image state, results, ROIs, windows, logs, metadata, or pixels</text>
+  <text class="small" x="320" y="912" text-anchor="middle">run macro/script steps, probe plugin dialogs, manage jobs, or show GUI feedback</text>
+  <text class="tiny" x="320" y="930" text-anchor="middle">dialogs and long jobs can also create live events on the right-hand path</text>
+
+  <path class="cmd" d="M320 946 L320 976"/>
+
+  <rect class="box server" x="70" y="976" width="500" height="82"/>
+  <text class="label" x="320" y="1003" text-anchor="middle">Raw result is assembled</text>
+  <text class="small" x="320" y="1023" text-anchor="middle">success, structured error, measurements, image info, job id, or file path</text>
+  <text class="tiny" x="320" y="1041" text-anchor="middle">not returned to the agent yet</text>
+
+  <path class="cmd" d="M320 1058 L320 1088"/>
+
+  <rect class="box safety" x="70" y="1088" width="500" height="122"/>
+  <text class="label" x="320" y="1116" text-anchor="middle">Safety + governance gate</text>
+  <text class="small" x="320" y="1136" text-anchor="middle">applies the selected privacy posture before the reply leaves ImageJAI</text>
+  <text class="small" x="320" y="1154" text-anchor="middle">pseudonymises paths or names when required</text>
+  <text class="small" x="320" y="1172" text-anchor="middle">records an audit row for the command and response</text>
+  <text class="tiny" x="320" y="1192" text-anchor="middle">safe-mode blocks or warnings are included in the result when relevant</text>
+
+  <path class="reply" d="M320 1210 L320 1240"/>
+
+  <rect class="box server" x="70" y="1240" width="500" height="88"/>
+  <text class="label" x="320" y="1266" text-anchor="middle">TCP server sends the reply back</text>
+  <text class="small" x="320" y="1286" text-anchor="middle">same short command connection, one final structured reply</text>
+  <text class="tiny" x="320" y="1304" text-anchor="middle">the helper reads the reply, parses it, and closes the connection</text>
+
+  <path class="reply" d="M320 1328 L320 1358 L520 1358 L520 1398"/>
+
+  <!-- Live event lane -->
+  <rect class="box event" x="630" y="610" width="500" height="88"/>
+  <text class="label" x="880" y="636" text-anchor="middle">Agent opens a live listening connection</text>
+  <text class="small" x="880" y="656" text-anchor="middle">sends one subscribe request to the ImageJAI TCP server</text>
+  <text class="tiny" x="880" y="674" text-anchor="middle">can listen to all events or only image, dialog, macro, job, or safe-mode events</text>
+
+  <path class="stream" d="M880 698 L880 728"/>
+
+  <rect class="box event" x="630" y="728" width="500" height="104"/>
+  <text class="label" x="880" y="754" text-anchor="middle">Subscription happens at the TCP server</text>
+  <text class="small" x="880" y="774" text-anchor="middle">the server keeps this listening connection open</text>
+  <text class="small" x="880" y="792" text-anchor="middle">it attaches the agent to ImageJAI's internal event feed</text>
+  <text class="tiny" x="880" y="812" text-anchor="middle">this is separate from normal command/reply traffic</text>
+
+  <path class="stream" d="M880 832 L880 862"/>
+
+  <rect class="box event" x="630" y="862" width="500" height="160"/>
+  <text class="label" x="880" y="890" text-anchor="middle">ImageJAI internal event feed</text>
+  <text class="small" x="880" y="912" text-anchor="middle">image opened, updated, closed, or active image changed</text>
+  <text class="small" x="880" y="932" text-anchor="middle">dialog opened, changed, confirmed, cancelled, or closed</text>
+  <text class="small" x="880" y="952" text-anchor="middle">macro/script started, paused, completed, failed, or timed out</text>
+  <text class="small" x="880" y="972" text-anchor="middle">job progress, job finished, reactive rule fired, or GUI action result</text>
+  <text class="small" x="880" y="992" text-anchor="middle">safe-mode warning, blocked action, backup, or queue protection event</text>
+
+  <path class="stream" d="M880 1022 L880 1052"/>
+
+  <rect class="box event" x="630" y="1052" width="500" height="92"/>
+  <text class="label" x="880" y="1080" text-anchor="middle">Events are queued for each subscribed agent</text>
+  <text class="small" x="880" y="1100" text-anchor="middle">every listening agent gets its own event queue</text>
+  <text class="tiny" x="880" y="1118" text-anchor="middle">if an agent falls behind, the oldest queued events can be dropped first</text>
+
+  <path class="stream" d="M880 1144 L880 1174"/>
+
+  <rect class="box event" x="630" y="1174" width="500" height="92"/>
+  <text class="label" x="880" y="1202" text-anchor="middle">TCP server streams event messages</text>
+  <text class="small" x="880" y="1222" text-anchor="middle">sends event messages as they happen, plus heartbeat messages while idle</text>
+  <text class="tiny" x="880" y="1240" text-anchor="middle">the listening connection stays open until the agent or server closes it</text>
+
+  <path class="stream" d="M880 1266 L880 1288"/>
+
+  <rect class="box event" x="630" y="1288" width="500" height="92"/>
+  <text class="label" x="880" y="1316" text-anchor="middle">Agent receives live updates</text>
+  <text class="small" x="880" y="1336" text-anchor="middle">sees progress, dialogs, new images, job completion, and safety messages</text>
+  <text class="tiny" x="880" y="1354" text-anchor="middle">it can keep listening while sending new commands on short connections</text>
+
+  <path class="stream" d="M880 1380 L880 1398 L680 1398"/>
+
+  <!-- Shared output -->
+  <rect class="box agent" x="360" y="1398" width="480" height="82"/>
+  <text class="label" x="600" y="1426" text-anchor="middle">CLI agent combines replies and live updates</text>
+  <text class="small" x="600" y="1446" text-anchor="middle">command replies tell it what a request returned</text>
+  <text class="small" x="600" y="1464" text-anchor="middle">event updates tell it what changed while work was running</text>
+
+  <path class="arrow" d="M600 1480 L600 1510"/>
+
+  <rect class="box output" x="330" y="1510" width="540" height="62"/>
+  <text class="label" x="600" y="1536" text-anchor="middle">Next step or final output</text>
+  <text class="small" x="600" y="1556" text-anchor="middle">send another command, wait for more events, ask the user, or give the final answer</text>
+</svg>

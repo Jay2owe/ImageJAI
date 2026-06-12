@@ -1,0 +1,335 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1400 1500" font-family="Segoe UI, Arial, sans-serif">
+  <defs>
+    <style>
+      .bg { fill: #fbfcfe; }
+      .title { font-size: 24px; font-weight: 700; fill: #172033; }
+      .subtitle { font-size: 13px; fill: #526070; }
+      .section { font-size: 15px; font-weight: 700; fill: #172033; }
+      .section-sub { font-size: 11.5px; fill: #526070; }
+      .box { fill: #ffffff; stroke: #c8d2df; stroke-width: 1.5; rx: 10; }
+      .panel { fill: #ffffff; stroke: #c8d2df; stroke-width: 1; rx: 8; }
+      .agent { fill: #f6f2ff; stroke: #8a6be8; }
+      .agent-inner { fill: #ffffff; stroke: #c9b8f4; stroke-width: 1; rx: 6; }
+      .server { fill: #fff6ec; stroke: #d28a3a; }
+      .fiji { fill: #eefbf8; stroke: #169b88; }
+      .fiji-inner { fill: #ffffff; stroke: #a9e0d4; stroke-width: 1; rx: 6; }
+      .safety { fill: #fff2f3; stroke: #d65b6a; }
+      .think { fill: #fffae0; stroke: #d4b850; }
+      .label-big { font-size: 17px; font-weight: 700; fill: #172033; }
+      .label { font-size: 13px; font-weight: 600; fill: #172033; }
+      .small { font-size: 11px; fill: #465466; }
+      .tiny { font-size: 10px; fill: #637184; }
+      .mono { font-family: Consolas, "Liberation Mono", monospace; font-size: 11px; fill: #1b2330; }
+      .mono-strong { font-family: Consolas, "Liberation Mono", monospace; font-size: 12px; font-weight: 700; fill: #1b2330; }
+      .mono-evt { font-family: Consolas, "Liberation Mono", monospace; font-size: 11px; fill: #2c6fc4; }
+      .mono-think { font-family: Consolas, "Liberation Mono", monospace; font-size: 11px; fill: #6a5310; font-style: italic; }
+      .phase-tag { fill: #1b2330; rx: 4; }
+      .phase-text { font-size: 10px; font-weight: 700; fill: #ffffff; letter-spacing: 0.5px; }
+      .lifeline { stroke: #c8d2df; stroke-width: 1; stroke-dasharray: 4 4; }
+      .arrow-cmd { stroke: #667387; stroke-width: 2; fill: none; marker-end: url(#arr); }
+      .arrow-reply { stroke: #8a6be8; stroke-width: 2; fill: none; marker-end: url(#arr-purple); }
+      .arrow-event { stroke: #3984d8; stroke-width: 2; stroke-dasharray: 6 4; fill: none; marker-end: url(#arr-blue); }
+      .arrow-think { stroke: #d4b850; stroke-width: 1.5; stroke-dasharray: 2 3; fill: none; marker-end: url(#arr-yellow); }
+      .step-circle { fill: #4a5566; }
+      .step-circle-gate { fill: #d65b6a; }
+      .step-circle-think { fill: #c9a830; }
+      .step-num { font-size: 10px; font-weight: 700; fill: #ffffff; }
+      .gate-callout { fill: #fff2f3; stroke: #d65b6a; stroke-width: 1.5; rx: 6; }
+      .gate-callout-text { font-size: 10.5px; font-weight: 700; fill: #8a2730; }
+    </style>
+    <marker id="arr" markerWidth="10" markerHeight="8" refX="9" refY="4" orient="auto">
+      <path d="M0,0 L10,4 L0,8 Z" fill="#667387"/>
+    </marker>
+    <marker id="arr-purple" markerWidth="10" markerHeight="8" refX="9" refY="4" orient="auto">
+      <path d="M0,0 L10,4 L0,8 Z" fill="#8a6be8"/>
+    </marker>
+    <marker id="arr-blue" markerWidth="10" markerHeight="8" refX="9" refY="4" orient="auto">
+      <path d="M0,0 L10,4 L0,8 Z" fill="#3984d8"/>
+    </marker>
+    <marker id="arr-yellow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+      <path d="M0,0 L8,3 L0,6 Z" fill="#d4b850"/>
+    </marker>
+  </defs>
+
+  <rect class="bg" x="0" y="0" width="1400" height="1500"/>
+
+  <!-- ============== HEADER ============== -->
+  <text class="title" x="700" y="36" text-anchor="middle">Example workflow — &quot;make a 3D render of the rings in channel 2&quot;</text>
+  <text class="subtitle" x="700" y="58" text-anchor="middle">what the CLI agent actually does between the user&#39;s sentence and the rendered image</text>
+
+  <!-- ============== PHASE 0: SETUP CONTEXT ============== -->
+  <text class="section" x="40" y="92">Before any TCP traffic — what the agent has on hand</text>
+
+  <!-- User prompt -->
+  <rect class="box agent" x="40" y="104" width="400" height="120"/>
+  <text class="label" x="60" y="124">User types in the terminal:</text>
+  <rect x="56" y="134" width="368" height="36" rx="4" fill="#ffffff" stroke="#c9b8f4"/>
+  <text class="mono-strong" x="64" y="156">&quot;make a 3D render of the rings in</text>
+  <text class="mono-strong" x="64" y="170">channel 2&quot;</text>
+  <text class="tiny"  x="60" y="190" font-style="italic">Vague phrasing — the agent has to clarify visually, not by asking.</text>
+  <text class="tiny"  x="60" y="206" font-style="italic">No image path given — agent assumes the active image in Fiji.</text>
+
+  <!-- Agent context -->
+  <rect class="box think" x="460" y="104" width="460" height="120"/>
+  <text class="label" x="480" y="124" fill="#6a5310">Agent loads its workspace</text>
+  <text class="mono"  x="480" y="142">agent/CLAUDE.md</text>
+  <text class="tiny"  x="600" y="142" fill="#6a5310">→ house rules · check state · probe unfamiliar plugins · save to AI_Exports/</text>
+  <text class="mono"  x="480" y="160">agent/ij.py</text>
+  <text class="tiny"  x="600" y="160" fill="#6a5310">→ the TCP helper functions it will call</text>
+  <text class="mono"  x="480" y="178">agent/references/3d-visualisation.md</text>
+  <text class="tiny"  x="700" y="178" fill="#6a5310">→ how 3D Viewer / 3Dscript work</text>
+  <text class="mono"  x="480" y="196">agent/references/3d-spatial.md</text>
+  <text class="tiny"  x="680" y="196" fill="#6a5310">→ what ring-like structures look like in stacks</text>
+  <text class="mono"  x="480" y="214">agent/recipes/*.yaml</text>
+  <text class="tiny"  x="620" y="214" fill="#6a5310">→ scans for a matching vetted workflow (none exact for &quot;rings&quot; → improvises)</text>
+
+  <!-- Plan it builds -->
+  <rect class="box agent" x="940" y="104" width="420" height="120"/>
+  <text class="label" x="960" y="124">The plan it builds before talking to Fiji</text>
+  <text class="small" x="960" y="142">1. orient — see what&#39;s open and what ch2 looks like</text>
+  <text class="small" x="960" y="158">2. isolate ch2, denoise lightly</text>
+  <text class="small" x="960" y="174">3. enhance ring-like structures (Tubeness filter)</text>
+  <text class="small" x="960" y="190">4. threshold to a clean mask</text>
+  <text class="small" x="960" y="206">5. open 3D Viewer · render · capture · save to AI_Exports/</text>
+
+  <!-- ============== SEQUENCE ============== -->
+  <text class="section" x="40" y="262">The actual exchange   ★ marks where the safety gate fires</text>
+
+  <!-- Lifelines -->
+  <line class="lifeline" x1="250"  y1="280" x2="250"  y2="1290"/>
+  <line class="lifeline" x1="700"  y1="280" x2="700"  y2="1290"/>
+  <line class="lifeline" x1="1150" y1="280" x2="1150" y2="1290"/>
+
+  <!-- Lifeline headers -->
+  <rect class="box agent"  x="200" y="280" width="100" height="22"/>
+  <text class="label" x="250" y="296" text-anchor="middle">CLI agent</text>
+  <rect class="box server" x="650" y="280" width="100" height="22"/>
+  <text class="label" x="700" y="296" text-anchor="middle">:7746</text>
+  <rect class="box fiji"   x="1100" y="280" width="100" height="22"/>
+  <text class="label" x="1150" y="296" text-anchor="middle">Fiji</text>
+
+  <!-- ===== PHASE A: ORIENT ===== -->
+  <rect class="phase-tag" x="14" y="330" width="20" height="100"/>
+  <text class="phase-text" x="24" y="385" text-anchor="middle" transform="rotate(-90 24 385)">ORIENT</text>
+
+  <circle class="step-circle" cx="250" cy="334" r="9"/>
+  <text class="step-num" x="250" y="338" text-anchor="middle">1</text>
+  <path class="arrow-cmd" d="M260 334 L700 334"/>
+  <text class="mono" x="480" y="328" text-anchor="middle">ij.get_state()    →    {&quot;command&quot;:&quot;get_state&quot;}</text>
+
+  <circle class="step-circle" cx="700" cy="360" r="9"/>
+  <text class="step-num" x="700" y="364" text-anchor="middle">2</text>
+  <path class="arrow-reply" d="M690 360 L250 360"/>
+  <text class="mono" x="470" y="354" text-anchor="middle">{&quot;ok&quot;:true,&quot;open_images&quot;:[{&quot;title&quot;:&quot;cells.tif&quot;,&quot;channels&quot;:3,&quot;slices&quot;:42,&quot;bit_depth&quot;:16,&quot;active&quot;:true}]}</text>
+
+  <circle class="step-circle" cx="250" cy="386" r="9"/>
+  <text class="step-num" x="250" y="390" text-anchor="middle">3</text>
+  <path class="arrow-cmd" d="M260 386 L700 386"/>
+  <text class="mono" x="480" y="380" text-anchor="middle">ij.get_image_info()   →   confirms 3 channels, 42 z-slices, calibrated 0.32 µm × 0.32 µm × 0.5 µm</text>
+
+  <circle class="step-circle" cx="250" cy="412" r="9"/>
+  <text class="step-num" x="250" y="416" text-anchor="middle">4</text>
+  <path class="arrow-cmd" d="M260 412 L700 412"/>
+  <text class="mono" x="480" y="406" text-anchor="middle">ij.execute_macro(&quot;Stack.setChannel(2); Stack.setSlice(21);&quot;)    ← move to a middle slice of ch2</text>
+
+  <!-- ===== PHASE B: LOOK ===== -->
+  <rect class="phase-tag" x="14" y="436" width="20" height="80"/>
+  <text class="phase-text" x="24" y="486" text-anchor="middle" transform="rotate(-90 24 486)">LOOK</text>
+
+  <circle class="step-circle" cx="250" cy="440" r="9"/>
+  <text class="step-num" x="250" y="444" text-anchor="middle">5</text>
+  <path class="arrow-cmd" d="M260 440 L700 440"/>
+  <text class="mono" x="480" y="434" text-anchor="middle">ij.capture_image(max_size=512)    ← agent looks at ch2 to confirm there really are ring shapes</text>
+
+  <circle class="step-circle-gate" cx="700" cy="464" r="9"/>
+  <text class="step-num" x="700" y="468" text-anchor="middle">6</text>
+  <rect class="gate-callout" x="600" y="472" width="200" height="18"/>
+  <text class="gate-callout-text" x="700" y="485" text-anchor="middle">★ SAFETY GATE — vision frame downsampled</text>
+
+  <circle class="step-circle" cx="700" cy="503" r="9"/>
+  <text class="step-num" x="700" y="507" text-anchor="middle">7</text>
+  <path class="arrow-reply" d="M690 503 L250 503"/>
+  <text class="mono" x="470" y="497" text-anchor="middle">{&quot;ok&quot;:true,&quot;base64&quot;:&quot;iVBORw0K…&quot;,&quot;width&quot;:512,&quot;height&quot;:512,&quot;_governance&quot;:{&quot;downsampled&quot;:true}}</text>
+
+  <!-- agent thinks -->
+  <circle class="step-circle-think" cx="170" cy="528" r="9"/>
+  <text class="step-num" x="170" y="532" text-anchor="middle">8</text>
+  <rect class="box think" x="50" y="538" width="430" height="36"/>
+  <text class="mono-think" x="60" y="554">agent looks at the thumbnail — confirms ring shapes are visible</text>
+  <text class="mono-think" x="60" y="568">decides: Tubeness filter will isolate them better than raw threshold</text>
+
+  <!-- ===== PHASE C: SUBSCRIBE + PROBE ===== -->
+  <rect class="phase-tag" x="14" y="586" width="20" height="84"/>
+  <text class="phase-text" x="24" y="638" text-anchor="middle" transform="rotate(-90 24 638)">PROBE</text>
+
+  <circle class="step-circle" cx="250" cy="592" r="9"/>
+  <text class="step-num" x="250" y="596" text-anchor="middle">9</text>
+  <path class="arrow-cmd" d="M260 592 L700 592"/>
+  <text class="mono" x="480" y="586" text-anchor="middle">ij.subscribe()   ← keep this socket open to receive macro.* and dialog.* events</text>
+
+  <circle class="step-circle" cx="250" cy="620" r="9"/>
+  <text class="step-num" x="250" y="624" text-anchor="middle">10</text>
+  <path class="arrow-cmd" d="M260 620 L700 620"/>
+  <text class="mono" x="480" y="614" text-anchor="middle">ij.probe_command(&quot;3D Viewer&quot;)   ← discover the dialog parameters before using it</text>
+
+  <circle class="step-circle" cx="700" cy="648" r="9"/>
+  <text class="step-num" x="700" y="652" text-anchor="middle">11</text>
+  <path class="arrow-reply" d="M690 648 L250 648"/>
+  <text class="mono" x="470" y="642" text-anchor="middle">{&quot;ok&quot;:true,&quot;params&quot;:[&quot;display_as&quot;:[&quot;Volume&quot;,&quot;Surface&quot;,&quot;Orthoslice&quot;],&quot;resampling_factor&quot;:int,&quot;threshold&quot;:int]}</text>
+
+  <!-- ===== PHASE D: ISOLATE ===== -->
+  <rect class="phase-tag" x="14" y="678" width="20" height="170"/>
+  <text class="phase-text" x="24" y="763" text-anchor="middle" transform="rotate(-90 24 763)">ISOLATE + ENHANCE</text>
+
+  <circle class="step-circle" cx="250" cy="684" r="9"/>
+  <text class="step-num" x="250" y="688" text-anchor="middle">12</text>
+  <path class="arrow-cmd" d="M260 684 L700 684"/>
+  <text class="mono" x="480" y="678" text-anchor="middle">ij.execute_macro(&quot;run(&#39;Duplicate...&#39;,&#39;title=ch2 duplicate channels=2&#39;);&quot;)</text>
+
+  <circle class="step-circle" cx="700" cy="710" r="9"/>
+  <text class="step-num" x="700" y="714" text-anchor="middle">13</text>
+  <path class="arrow-event" d="M690 710 L250 710"/>
+  <text class="mono-evt" x="470" y="704" text-anchor="middle">event: macro.started   →   event: image.opened (title: ch2)   →   event: macro.completed (84 ms)</text>
+
+  <circle class="step-circle" cx="250" cy="740" r="9"/>
+  <text class="step-num" x="250" y="744" text-anchor="middle">14</text>
+  <path class="arrow-cmd" d="M260 740 L700 740"/>
+  <text class="mono" x="480" y="734" text-anchor="middle">ij.execute_macro(&quot;run(&#39;Subtract Background...&#39;,&#39;rolling=25 stack&#39;);&quot;)</text>
+
+  <circle class="step-circle" cx="250" cy="766" r="9"/>
+  <text class="step-num" x="250" y="770" text-anchor="middle">15</text>
+  <path class="arrow-cmd" d="M260 766 L700 766"/>
+  <text class="mono" x="480" y="760" text-anchor="middle">ij.execute_macro(&quot;run(&#39;Tubeness&#39;,&#39;sigma=1.0 use&#39;);&quot;)   ← enhances ring/tubular structures</text>
+
+  <circle class="step-circle" cx="700" cy="792" r="9"/>
+  <text class="step-num" x="700" y="796" text-anchor="middle">16</text>
+  <path class="arrow-event" d="M690 792 L250 792"/>
+  <text class="mono-evt" x="470" y="786" text-anchor="middle">event: macro.completed (elapsed_ms: 1820)</text>
+
+  <circle class="step-circle" cx="250" cy="822" r="9"/>
+  <text class="step-num" x="250" y="826" text-anchor="middle">17</text>
+  <path class="arrow-cmd" d="M260 822 L700 822"/>
+  <text class="mono" x="480" y="816" text-anchor="middle">ij.execute_macro(&quot;setAutoThreshold(&#39;Otsu dark stack&#39;); run(&#39;Convert to Mask&#39;,&#39;stack&#39;);&quot;)</text>
+
+  <!-- ===== PHASE E: VERIFY MASK ===== -->
+  <rect class="phase-tag" x="14" y="856" width="20" height="100"/>
+  <text class="phase-text" x="24" y="908" text-anchor="middle" transform="rotate(-90 24 908)">VERIFY</text>
+
+  <circle class="step-circle" cx="250" cy="862" r="9"/>
+  <text class="step-num" x="250" y="866" text-anchor="middle">18</text>
+  <path class="arrow-cmd" d="M260 862 L700 862"/>
+  <text class="mono" x="480" y="856" text-anchor="middle">ij.capture_image()   ← agent checks the mask is sensible before committing to a 3D render</text>
+
+  <circle class="step-circle-gate" cx="700" cy="888" r="9"/>
+  <text class="step-num" x="700" y="892" text-anchor="middle">19</text>
+  <rect class="gate-callout" x="600" y="896" width="200" height="18"/>
+  <text class="gate-callout-text" x="700" y="909" text-anchor="middle">★ SAFETY GATE — vision frame downsampled</text>
+
+  <circle class="step-circle-think" cx="170" cy="930" r="9"/>
+  <text class="step-num" x="170" y="934" text-anchor="middle">20</text>
+  <rect class="box think" x="50" y="940" width="430" height="22"/>
+  <text class="mono-think" x="60" y="956">rings look clean → proceed.   if they didn&#39;t, agent would retune sigma + threshold.</text>
+
+  <!-- ===== PHASE F: 3D RENDER ===== -->
+  <rect class="phase-tag" x="14" y="976" width="20" height="170"/>
+  <text class="phase-text" x="24" y="1061" text-anchor="middle" transform="rotate(-90 24 1061)">3D RENDER</text>
+
+  <circle class="step-circle" cx="250" cy="982" r="9"/>
+  <text class="step-num" x="250" y="986" text-anchor="middle">21</text>
+  <path class="arrow-cmd" d="M260 982 L700 982"/>
+  <text class="mono" x="480" y="976" text-anchor="middle">ij.execute_macro(&quot;run(&#39;3D Viewer&#39;);&quot;)</text>
+
+  <circle class="step-circle" cx="700" cy="1010" r="9"/>
+  <text class="step-num" x="700" y="1014" text-anchor="middle">22</text>
+  <path class="arrow-event" d="M690 1010 L250 1010"/>
+  <text class="mono-evt" x="470" y="1004" text-anchor="middle">event: dialog.opened (title: &quot;Add ...&quot;)   ← 3D Viewer is waiting for parameters</text>
+
+  <circle class="step-circle" cx="250" cy="1038" r="9"/>
+  <text class="step-num" x="250" y="1042" text-anchor="middle">23</text>
+  <path class="arrow-cmd" d="M260 1038 L700 1038"/>
+  <text class="mono" x="480" y="1032" text-anchor="middle">ij.interact_dialog(set={&quot;display_as&quot;:&quot;Surface&quot;,&quot;resampling_factor&quot;:2,&quot;threshold&quot;:50},click=&quot;OK&quot;)</text>
+
+  <circle class="step-circle" cx="700" cy="1066" r="9"/>
+  <text class="step-num" x="700" y="1070" text-anchor="middle">24</text>
+  <path class="arrow-event" d="M690 1066 L250 1066"/>
+  <text class="mono-evt" x="470" y="1060" text-anchor="middle">event: dialog.closed   →   event: macro.completed (elapsed_ms: 6340 — 3D mesh built)</text>
+
+  <circle class="step-circle" cx="250" cy="1098" r="9"/>
+  <text class="step-num" x="250" y="1102" text-anchor="middle">25</text>
+  <path class="arrow-cmd" d="M260 1098 L700 1098"/>
+  <text class="mono" x="480" y="1092" text-anchor="middle">ij.execute_macro(&quot;call(&#39;ij3d.ImageJ3DViewer.setView&#39;,&#39;0&#39;,&#39;30&#39;,&#39;0&#39;);&quot;)   ← rotate to a useful angle</text>
+
+  <circle class="step-circle" cx="250" cy="1126" r="9"/>
+  <text class="step-num" x="250" y="1130" text-anchor="middle">26</text>
+  <path class="arrow-cmd" d="M260 1126 L700 1126"/>
+  <text class="mono" x="480" y="1120" text-anchor="middle">ij.capture_image(max_size=1024)   ← screenshot the 3D Viewer window</text>
+
+  <circle class="step-circle-gate" cx="700" cy="1152" r="9"/>
+  <text class="step-num" x="700" y="1156" text-anchor="middle">27</text>
+  <rect class="gate-callout" x="600" y="1160" width="200" height="18"/>
+  <text class="gate-callout-text" x="700" y="1173" text-anchor="middle">★ SAFETY GATE — frame downsampled, audit row</text>
+
+  <!-- ===== PHASE G: SAVE ===== -->
+  <rect class="phase-tag" x="14" y="1192" width="20" height="100"/>
+  <text class="phase-text" x="24" y="1244" text-anchor="middle" transform="rotate(-90 24 1244)">SAVE</text>
+
+  <circle class="step-circle" cx="250" cy="1198" r="9"/>
+  <text class="step-num" x="250" y="1202" text-anchor="middle">28</text>
+  <path class="arrow-cmd" d="M260 1198 L700 1198"/>
+  <text class="mono" x="480" y="1192" text-anchor="middle">ij.execute_macro(&quot;saveAs(&#39;PNG&#39;,&#39;…/AI_Exports/cells_ch2_3d.png&#39;);&quot;)</text>
+
+  <circle class="step-circle" cx="250" cy="1226" r="9"/>
+  <text class="step-num" x="250" y="1230" text-anchor="middle">29</text>
+  <path class="arrow-cmd" d="M260 1226 L700 1226"/>
+  <text class="mono" x="480" y="1220" text-anchor="middle">ij.execute_macro(&quot;call(&#39;ij3d.ImageJ3DViewer.exportContent&#39;,&#39;WaveFront&#39;,&#39;…/cells_ch2_3d.obj&#39;);&quot;)</text>
+
+  <circle class="step-circle" cx="700" cy="1254" r="9"/>
+  <text class="step-num" x="700" y="1258" text-anchor="middle">30</text>
+  <path class="arrow-reply" d="M690 1254 L250 1254"/>
+  <text class="mono" x="470" y="1248" text-anchor="middle">{&quot;ok&quot;:true,&quot;saved&quot;:[&quot;cells_ch2_3d.png&quot;,&quot;cells_ch2_3d.obj&quot;]}</text>
+
+  <!-- Final summary to user -->
+  <rect class="box agent" x="40" y="1278" width="800" height="32"/>
+  <text class="small" x="440" y="1298" text-anchor="middle" font-weight="700">Agent tells the user: &quot;rendered ch2 rings to AI_Exports/cells_ch2_3d.png + .obj — opening it now?&quot;</text>
+
+  <!-- ============== OUTPUTS PANEL ============== -->
+  <text class="section" x="40" y="1346">What landed on disk in AI_Exports/</text>
+
+  <rect class="box fiji" x="40" y="1358" width="320" height="124"/>
+  <rect x="56" y="1374" width="288" height="80" rx="4" fill="#1b2330"/>
+  <!-- mock 3D render preview: a few overlapping rings in 3D space -->
+  <g stroke="#a8f0a0" stroke-width="1.4" fill="none" opacity="0.85">
+    <ellipse cx="120" cy="1414" rx="32" ry="10"/>
+    <ellipse cx="160" cy="1404" rx="28" ry="9"/>
+    <ellipse cx="200" cy="1424" rx="36" ry="11"/>
+    <ellipse cx="240" cy="1410" rx="26" ry="8"/>
+    <ellipse cx="285" cy="1418" rx="30" ry="9"/>
+    <ellipse cx="140" cy="1430" rx="22" ry="7"/>
+    <ellipse cx="220" cy="1396" rx="24" ry="8"/>
+  </g>
+  <text class="tiny" x="60" y="1470" fill="#a9e0d4">cells_ch2_3d.png  ·  1024 × 1024  ·  surface render</text>
+
+  <rect class="box agent" x="380" y="1358" width="320" height="124"/>
+  <text class="label" x="400" y="1378">cells_ch2_3d.obj</text>
+  <text class="small" x="400" y="1396">WaveFront mesh of the segmented rings</text>
+  <text class="tiny"  x="400" y="1412">openable in Blender, MeshLab, ParaView</text>
+  <text class="label" x="400" y="1438">cells_ch2_3d.png</text>
+  <text class="small" x="400" y="1456">flat screenshot of the 3D Viewer window</text>
+  <text class="tiny"  x="400" y="1472">for embedding in a figure or slide</text>
+
+  <rect class="box safety" x="720" y="1358" width="320" height="124"/>
+  <text class="label" x="740" y="1378" fill="#8a2730">imagejai_audit.csv</text>
+  <text class="small" x="740" y="1396">one row per command, appended to</text>
+  <text class="mono"  x="740" y="1412">AI_Exports/imagejai_audit.csv</text>
+  <text class="tiny"  x="740" y="1432">timestamp · command · params · response size</text>
+  <text class="tiny"  x="740" y="1446">redactions applied · governance mode</text>
+  <text class="tiny"  x="740" y="1466" fill="#8a2730" font-weight="700">→ reviewable evidence of every step the agent took</text>
+
+  <rect class="box think" x="1060" y="1358" width="300" height="124"/>
+  <text class="label" x="1080" y="1378" fill="#6a5310">Agent state (in memory)</text>
+  <text class="small" x="1080" y="1396">macro it built across 11 turns</text>
+  <text class="small" x="1080" y="1412">two thumbnails it captured to check</text>
+  <text class="small" x="1080" y="1428">references it consulted</text>
+  <text class="tiny"  x="1080" y="1452" fill="#6a5310" font-style="italic">all of this is replayable —</text>
+  <text class="tiny"  x="1080" y="1466" fill="#6a5310" font-style="italic">the macro alone reproduces the result</text>
+</svg>

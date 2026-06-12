@@ -56,7 +56,7 @@ Out:
 
 ## Read first
 
-- `src/main/java/uk/ac/ucl/imagej/ai/engine/TCPCommandServer.java`
+- `src/main/java/imagejai/engine/TCPCommandServer.java`
   — `handleGetHistogram` already exists; reuse its binning logic.
 - `docs/tcp_upgrade/05_state_delta_and_pulse.md` — where in the
   reply envelope this new field sits.

@@ -70,7 +70,7 @@ Out:
 
 ## Read first
 
-- `src/main/java/uk/ac/ucl/imagej/ai/engine/TCPCommandServer.java`
+- `src/main/java/imagejai/engine/TCPCommandServer.java`
   — every call to `addProperty("error", ...)` and
   `detectIjMacroError`. Count them; plan the sweep.
 - `agent/ij.py` — how error strings are currently parsed and

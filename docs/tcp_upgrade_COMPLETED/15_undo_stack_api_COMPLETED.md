@@ -70,9 +70,9 @@ Out:
 
 ## Read first
 
-- `src/main/java/uk/ac/ucl/imagej/ai/engine/TCPCommandServer.java`
+- `src/main/java/imagejai/engine/TCPCommandServer.java`
   — `handleExecuteMacro` mutation points.
-- `src/main/java/uk/ac/ucl/imagej/ai/engine/ImageMonitor.java`
+- `src/main/java/imagejai/engine/ImageMonitor.java`
   — image state tracking.
 - `docs/tcp_upgrade/13_provenance_graph.md` — the graph gives
   us call IDs to reference.

@@ -18,19 +18,19 @@ forced settings dialog when Local Assistant is the active mode.
 - `docs/local_assistant/00_overview.md`
 - `docs/local_assistant/PLAN.md` §3, §4.2 ("Chat submission"), §6.1
   ("Classes")
-- `src/main/java/uk/ac/ucl/imagej/ai/ui/ChatView.java`
+- `src/main/java/imagejai/ui/ChatView.java`
   (`sendMessage()`, `refreshInputState()`, `setEnabled()`, the
   `ChatListener` interface, `appendMessage(...)`)
-- `src/main/java/uk/ac/ucl/imagej/ai/ui/ChatPanel.java` —
+- `src/main/java/imagejai/ui/ChatPanel.java` —
   understand that this is a compatibility wrapper around `ChatView`
-- `src/main/java/uk/ac/ucl/imagej/ai/ConversationLoop.java`
+- `src/main/java/imagejai/ConversationLoop.java`
   `onUserMessage()` and `processUserMessage()`
-- `src/main/java/uk/ac/ucl/imagej/ai/ImageJAIPlugin.java` `run()`
+- `src/main/java/imagejai/ImageJAIPlugin.java` `run()`
   — the first-run `SettingsDialog` open
 
 ## Scope
 
-- Create package `uk.ac.ucl.imagej.ai.local` with these stub
+- Create package `imagejai.local` with these stub
   classes:
   - `LocalAssistant.java` — owns `IntentLibrary` + `IntentMatcher` +
     `FijiBridge`. `handle(String input) -> AssistantReply`.
@@ -78,15 +78,15 @@ forced settings dialog when Local Assistant is the active mode.
 
 | Path | Action | Reason |
 |---|---|---|
-| `src/main/java/uk/ac/ucl/imagej/ai/local/LocalAssistant.java` | NEW | Top-level handler |
-| `src/main/java/uk/ac/ucl/imagej/ai/local/Intent.java` | NEW | Interface |
-| `src/main/java/uk/ac/ucl/imagej/ai/local/IntentLibrary.java` | NEW | Registry |
-| `src/main/java/uk/ac/ucl/imagej/ai/local/IntentMatcher.java` | NEW | Stub matcher |
-| `src/main/java/uk/ac/ucl/imagej/ai/local/AssistantReply.java` | NEW | Reply container |
-| `src/main/java/uk/ac/ucl/imagej/ai/local/FijiBridge.java` | NEW | Empty facade |
-| `src/main/java/uk/ac/ucl/imagej/ai/local/intents/HelpIntent.java` | NEW | Trivial proof-of-wiring intent |
-| `src/main/java/uk/ac/ucl/imagej/ai/ui/ChatView.java` | MODIFY | Route to `LocalAssistant` when active; bypass `hasApiKey()` gate |
-| `src/main/java/uk/ac/ucl/imagej/ai/ImageJAIPlugin.java` | MODIFY | Skip first-run `SettingsDialog` when Local Assistant is default |
+| `src/main/java/imagejai/local/LocalAssistant.java` | NEW | Top-level handler |
+| `src/main/java/imagejai/local/Intent.java` | NEW | Interface |
+| `src/main/java/imagejai/local/IntentLibrary.java` | NEW | Registry |
+| `src/main/java/imagejai/local/IntentMatcher.java` | NEW | Stub matcher |
+| `src/main/java/imagejai/local/AssistantReply.java` | NEW | Reply container |
+| `src/main/java/imagejai/local/FijiBridge.java` | NEW | Empty facade |
+| `src/main/java/imagejai/local/intents/HelpIntent.java` | NEW | Trivial proof-of-wiring intent |
+| `src/main/java/imagejai/ui/ChatView.java` | MODIFY | Route to `LocalAssistant` when active; bypass `hasApiKey()` gate |
+| `src/main/java/imagejai/ImageJAIPlugin.java` | MODIFY | Skip first-run `SettingsDialog` when Local Assistant is default |
 
 ## Implementation sketch
 

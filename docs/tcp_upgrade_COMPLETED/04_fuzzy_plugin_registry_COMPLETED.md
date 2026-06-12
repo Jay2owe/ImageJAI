@@ -62,7 +62,7 @@ Out:
 
 ## Read first
 
-- `src/main/java/uk/ac/ucl/imagej/ai/engine/TCPCommandServer.java`
+- `src/main/java/imagejai/engine/TCPCommandServer.java`
   — `handleExecuteMacro`, `handleRunPipeline`.
 - `ij.Menus` Javadoc — `getCommands()` returns
   `Hashtable<String, String>` (name → class).

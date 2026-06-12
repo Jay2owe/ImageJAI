@@ -1,0 +1,193 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 1600" font-family="Segoe UI, Arial, sans-serif">
+  <defs>
+    <style>
+      .bg { fill: #fbfcfe; }
+      .title { font-size: 28px; font-weight: 700; fill: #172033; }
+      .subtitle { font-size: 14px; fill: #526070; }
+      .box { fill: #ffffff; stroke: #c8d2df; stroke-width: 1.5; rx: 10; }
+      .start { fill: #eef5ff; stroke: #4d8fe8; }
+      .local { fill: #f2fbf6; stroke: #37a96b; }
+      .chat { fill: #fff7ed; stroke: #e58c2c; }
+      .cli { fill: #f6f2ff; stroke: #8a6be8; }
+      .shared { fill: #f7fafc; stroke: #708096; }
+      .safety { fill: #fff2f3; stroke: #d65b6a; }
+      .output { fill: #eefbf8; stroke: #169b88; }
+      .label { font-size: 14px; font-weight: 700; fill: #172033; }
+      .small { font-size: 11px; fill: #465466; }
+      .tiny { font-size: 10px; fill: #637184; }
+      .arrow { stroke: #667387; stroke-width: 2; fill: none; marker-end: url(#arrow); }
+      .return { stroke: #8a6be8; stroke-width: 2; fill: none; marker-end: url(#arrow-purple); }
+      .dashed { stroke-dasharray: 7 5; }
+    </style>
+    <marker id="arrow" markerWidth="10" markerHeight="8" refX="9" refY="4" orient="auto">
+      <path d="M0,0 L10,4 L0,8 Z" fill="#667387"/>
+    </marker>
+    <marker id="arrow-purple" markerWidth="10" markerHeight="8" refX="9" refY="4" orient="auto">
+      <path d="M0,0 L10,4 L0,8 Z" fill="#8a6be8"/>
+    </marker>
+  </defs>
+
+  <rect class="bg" x="0" y="0" width="1200" height="1600"/>
+
+  <text class="title" x="600" y="42" text-anchor="middle">ImageJAI Prompt-to-Output Flow</text>
+  <text class="subtitle" x="600" y="66" text-anchor="middle">Three prompt paths converge on Fiji execution, then raw results pass through safety governance before output.</text>
+
+  <!-- Start -->
+  <rect class="box start" x="470" y="95" width="260" height="64"/>
+  <text class="label" x="600" y="120" text-anchor="middle">User prompt</text>
+  <text class="small" x="600" y="139" text-anchor="middle">plain English request</text>
+
+  <path class="arrow" d="M600 159 L600 190"/>
+
+  <rect class="box start" x="420" y="190" width="360" height="72"/>
+  <text class="label" x="600" y="216" text-anchor="middle">ImageJAI plugin window</text>
+  <text class="small" x="600" y="236" text-anchor="middle">ImageJAIPlugin -> AiRootPanel -> ChatView</text>
+
+  <path class="arrow" d="M600 262 L600 300"/>
+
+  <rect class="box shared" x="420" y="300" width="360" height="70"/>
+  <text class="label" x="600" y="326" text-anchor="middle">Prompt route is selected</text>
+  <text class="small" x="600" y="346" text-anchor="middle">local assistant, in-app AI chat, or launched CLI agent</text>
+
+  <!-- Branch lines -->
+  <path class="arrow" d="M600 370 L600 400 L210 400 L210 430"/>
+  <path class="arrow" d="M600 370 L600 430"/>
+  <path class="arrow" d="M600 370 L600 400 L990 400 L990 430"/>
+
+  <!-- Local Assistant column -->
+  <rect class="box local" x="70" y="430" width="280" height="76"/>
+  <text class="label" x="210" y="456" text-anchor="middle">Local Assistant</text>
+  <text class="small" x="210" y="476" text-anchor="middle">ChatView handles directly</text>
+  <text class="tiny" x="210" y="493" text-anchor="middle">no external model, no TCP needed</text>
+
+  <path class="arrow" d="M210 506 L210 535"/>
+
+  <rect class="box local" x="70" y="535" width="280" height="90"/>
+  <text class="label" x="210" y="560" text-anchor="middle">Deterministic routing</text>
+  <text class="small" x="210" y="580" text-anchor="middle">IntentLibrary + IntentMatcher</text>
+  <text class="small" x="210" y="597" text-anchor="middle">SlashCommandRegistry + IntentRouter</text>
+  <text class="tiny" x="210" y="614" text-anchor="middle">known phrases and user-taught intents</text>
+
+  <path class="arrow" d="M210 625 L210 655"/>
+
+  <rect class="box local" x="70" y="655" width="280" height="84"/>
+  <text class="label" x="210" y="680" text-anchor="middle">FijiBridge</text>
+  <text class="small" x="210" y="700" text-anchor="middle">local-assistant Java facade</text>
+  <text class="tiny" x="210" y="718" text-anchor="middle">checks image state and resolves AI_Exports</text>
+
+  <!-- In-app AI column -->
+  <rect class="box chat" x="460" y="430" width="280" height="76"/>
+  <text class="label" x="600" y="456" text-anchor="middle">In-app AI chat</text>
+  <text class="small" x="600" y="476" text-anchor="middle">ChatView notifies ConversationLoop</text>
+  <text class="tiny" x="600" y="493" text-anchor="middle">runs inside ImageJAI panel</text>
+
+  <path class="arrow" d="M600 506 L600 535"/>
+
+  <rect class="box chat" x="460" y="535" width="280" height="90"/>
+  <text class="label" x="600" y="560" text-anchor="middle">Context + model</text>
+  <text class="small" x="600" y="580" text-anchor="middle">StateInspector + ImageCapture</text>
+  <text class="small" x="600" y="597" text-anchor="middle">BackendFactory + LLMBackend</text>
+  <text class="tiny" x="600" y="614" text-anchor="middle">PromptTemplates and AgentOrchestrator</text>
+
+  <path class="arrow" d="M600 625 L600 655"/>
+
+  <rect class="box chat" x="460" y="655" width="280" height="84"/>
+  <text class="label" x="600" y="680" text-anchor="middle">Macro or pipeline plan</text>
+  <text class="small" x="600" y="700" text-anchor="middle">single macro, multi-step workflow</text>
+  <text class="tiny" x="600" y="718" text-anchor="middle">or threshold comparison request</text>
+
+  <!-- CLI column -->
+  <rect class="box cli" x="850" y="430" width="280" height="76"/>
+  <text class="label" x="990" y="456" text-anchor="middle">Launched CLI agent</text>
+  <text class="small" x="990" y="476" text-anchor="middle">AgentLauncher starts terminal agent</text>
+  <text class="tiny" x="990" y="493" text-anchor="middle">Claude, Codex, Gemini CLI, Aider, Gemma</text>
+
+  <path class="arrow" d="M990 506 L990 535"/>
+
+  <rect class="box cli" x="850" y="535" width="280" height="90"/>
+  <text class="label" x="990" y="560" text-anchor="middle">Agent workspace tools</text>
+  <text class="small" x="990" y="580" text-anchor="middle">agent context docs + Python helpers</text>
+  <text class="small" x="990" y="597" text-anchor="middle">ij.py, pixels.py, probe_plugin.py</text>
+  <text class="tiny" x="990" y="614" text-anchor="middle">Gemma tools, recipes, references</text>
+
+  <path class="arrow" d="M990 625 L990 655"/>
+
+  <rect class="box cli" x="850" y="655" width="280" height="84"/>
+  <text class="label" x="990" y="680" text-anchor="middle">TCPCommandServer</text>
+  <text class="small" x="990" y="700" text-anchor="middle">JSON commands on loopback</text>
+  <text class="tiny" x="990" y="718" text-anchor="middle">default 7746, fallback 7747-7750</text>
+
+  <!-- Converge to execution dispatch -->
+  <path class="arrow" d="M210 739 L210 790 L405 790 L405 830"/>
+  <path class="arrow" d="M600 739 L600 790 L405 790 L405 830"/>
+  <path class="arrow" d="M990 739 L990 790 L795 790 L795 830"/>
+
+  <rect class="box shared" x="250" y="830" width="310" height="92"/>
+  <text class="label" x="405" y="858" text-anchor="middle">Direct Java execution</text>
+  <text class="small" x="405" y="878" text-anchor="middle">CommandEngine</text>
+  <text class="small" x="405" y="895" text-anchor="middle">PipelineBuilder / ExplorationEngine</text>
+  <text class="tiny" x="405" y="912" text-anchor="middle">local assistant and in-app AI chat</text>
+
+  <rect class="box shared" x="640" y="830" width="310" height="92"/>
+  <text class="label" x="795" y="858" text-anchor="middle">TCP command dispatch</text>
+  <text class="small" x="795" y="878" text-anchor="middle">execute_macro, run_script, jobs</text>
+  <text class="small" x="795" y="895" text-anchor="middle">dialogs, pixels, events, gui_action</text>
+  <text class="tiny" x="795" y="912" text-anchor="middle">launched agent path</text>
+
+  <path class="arrow" d="M405 922 L405 970 L600 970 L600 1010"/>
+  <path class="arrow" d="M795 922 L795 970 L600 970 L600 1010"/>
+
+  <rect class="box shared" x="380" y="1010" width="440" height="82"/>
+  <text class="label" x="600" y="1038" text-anchor="middle">Fiji / ImageJ runtime</text>
+  <text class="small" x="600" y="1058" text-anchor="middle">images, ROIs, Results table, dialogs, plugins</text>
+  <text class="tiny" x="600" y="1076" text-anchor="middle">macro language, Groovy/Jython, Bio-Formats</text>
+
+  <!-- Raw results, safety gateway, and feedback -->
+  <path class="arrow" d="M600 1092 L600 1125"/>
+
+  <rect class="box shared" x="390" y="1125" width="420" height="92"/>
+  <text class="label" x="600" y="1152" text-anchor="middle">Raw results + event stream</text>
+  <text class="small" x="600" y="1172" text-anchor="middle">JSON replies, EventBus frames, progress, captures</text>
+  <text class="small" x="600" y="1189" text-anchor="middle">ImageMonitor, DialogWatcher, GuiActionDispatcher</text>
+  <text class="tiny" x="600" y="1206" text-anchor="middle">not yet returned to chat, terminal, or files</text>
+
+  <path class="arrow" d="M600 1217 L600 1242"/>
+
+  <rect class="box safety" x="260" y="1242" width="680" height="150"/>
+  <text class="label" x="600" y="1268" text-anchor="middle">Safety + governance gateway</text>
+  <text class="small" x="600" y="1288" text-anchor="middle">required step before replies, event frames, captures, or saved outputs leave</text>
+  <text class="small" x="600" y="1310" text-anchor="middle">PostureController + PseudonymisationFilter redact outbound TCP JSON</text>
+  <text class="small" x="600" y="1328" text-anchor="middle">OutboundPromptScrubber guards embedded terminal prompts</text>
+  <text class="small" x="600" y="1346" text-anchor="middle">CaptureHandler + BurnInDetector gate visual access and screenshots</text>
+  <text class="small" x="600" y="1364" text-anchor="middle">Safe Mode records risky macros and preserves recoverable state</text>
+  <text class="small" x="600" y="1382" text-anchor="middle">AuditLog / Gemma safety.py write logs and enforce AI_Exports checks</text>
+
+  <path class="arrow" d="M360 1392 L360 1412 L220 1412 L220 1430"/>
+  <path class="arrow" d="M600 1392 L600 1430"/>
+  <path class="arrow" d="M840 1392 L840 1412 L980 1412 L980 1430"/>
+
+  <rect class="box output" x="70" y="1430" width="300" height="70"/>
+  <text class="label" x="220" y="1455" text-anchor="middle">Chat feedback</text>
+  <text class="small" x="220" y="1475" text-anchor="middle">plain answer, previews, confirmations</text>
+  <text class="tiny" x="220" y="1492" text-anchor="middle">shown inside the ImageJAI panel</text>
+
+  <rect class="box output" x="450" y="1430" width="300" height="70"/>
+  <text class="label" x="600" y="1455" text-anchor="middle">Approved files + logs</text>
+  <text class="small" x="600" y="1475" text-anchor="middle">Results table, AI_Exports, audit CSV</text>
+  <text class="tiny" x="600" y="1492" text-anchor="middle">safe save location checks applied</text>
+
+  <rect class="box cli" x="830" y="1430" width="300" height="70"/>
+  <text class="label" x="980" y="1455" text-anchor="middle">Governed CLI reply + events</text>
+  <text class="small" x="980" y="1475" text-anchor="middle">pseudonymised JSON + EventBus stream</text>
+  <text class="tiny" x="980" y="1492" text-anchor="middle">returned to the terminal agent</text>
+
+  <path class="return dashed" d="M1130 1465 L1145 1465 L1145 468 L1130 468"/>
+
+  <path class="arrow" d="M220 1500 L220 1520 L450 1520 L450 1538"/>
+  <path class="arrow" d="M600 1500 L600 1538"/>
+  <path class="arrow" d="M980 1500 L980 1520 L750 1520 L750 1538"/>
+
+  <rect class="box output" x="330" y="1538" width="540" height="52"/>
+  <text class="label" x="600" y="1560" text-anchor="middle">Output</text>
+  <text class="small" x="600" y="1579" text-anchor="middle">Fiji windows, Results table, files, logs, chat answer, or terminal answer</text>
+</svg>

@@ -90,7 +90,7 @@ Out:
 
 ## Read first
 
-- `src/main/java/uk/ac/ucl/imagej/ai/engine/TCPCommandServer.java`
+- `src/main/java/imagejai/engine/TCPCommandServer.java`
   — handler pattern and dispatch.
 - `ij.plugin.frame.RoiManager` Javadoc — `getInstance()`,
   `getCount()`, `getRoisAsArray()`, `getSelectedIndex()`,

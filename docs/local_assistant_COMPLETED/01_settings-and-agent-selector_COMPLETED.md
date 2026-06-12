@@ -17,12 +17,12 @@ None.
 - `docs/local_assistant/00_overview.md`
 - `docs/local_assistant/PLAN.md` §3 ("Verified Current Code") and
   §4.1 ("Agent selector")
-- `src/main/java/uk/ac/ucl/imagej/ai/config/Settings.java` — model
+- `src/main/java/imagejai/config/Settings.java` — model
   profile persistence pattern; existing fields `configs`,
   `activeConfigId`, `agentEmbeddedTerminal`, `tcpServerEnabled`
-- `src/main/java/uk/ac/ucl/imagej/ai/ui/AiRootPanel.java`
+- `src/main/java/imagejai/ui/AiRootPanel.java`
   `createHeader()` and `showAgentLaunchMenu()`
-- `src/main/java/uk/ac/ucl/imagej/ai/engine/AgentLauncher.java`
+- `src/main/java/imagejai/engine/AgentLauncher.java`
   `KNOWN_AGENTS`, `detectAgents()`, `launch(...)`
 - `CLAUDE.md` (project root) — house rules
 
@@ -60,9 +60,9 @@ None.
 
 | Path | Action | Reason |
 |---|---|---|
-| `src/main/java/uk/ac/ucl/imagej/ai/config/Settings.java` | MODIFY | Add `selectedAgentName` field + getter/setter + JSON load/save |
-| `src/main/java/uk/ac/ucl/imagej/ai/ui/AiRootPanel.java` | MODIFY | Add persistent agent selector to `createHeader()`, wire selection to `Settings` |
-| `src/main/java/uk/ac/ucl/imagej/ai/engine/AgentLauncher.java` | MODIFY | Add `LOCAL_ASSISTANT_NAME` constant |
+| `src/main/java/imagejai/config/Settings.java` | MODIFY | Add `selectedAgentName` field + getter/setter + JSON load/save |
+| `src/main/java/imagejai/ui/AiRootPanel.java` | MODIFY | Add persistent agent selector to `createHeader()`, wire selection to `Settings` |
+| `src/main/java/imagejai/engine/AgentLauncher.java` | MODIFY | Add `LOCAL_ASSISTANT_NAME` constant |
 
 ## Implementation sketch
 

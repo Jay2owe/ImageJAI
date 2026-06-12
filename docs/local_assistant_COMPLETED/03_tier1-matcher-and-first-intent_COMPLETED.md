@@ -20,10 +20,10 @@ later library growth.
 - `docs/local_assistant/00_overview.md`
 - `docs/local_assistant/PLAN.md` §6 ("Architecture") and §7
   ("Phrasebook and Handler Format")
-- `src/main/java/uk/ac/ucl/imagej/ai/engine/FrictionLog.java` —
+- `src/main/java/imagejai/engine/FrictionLog.java` —
   `record(...)` signature, `CAPACITY`, `WINDOW_MS`
-- `src/main/java/uk/ac/ucl/imagej/ai/local/IntentMatcher.java` (stub)
-- `src/main/java/uk/ac/ucl/imagej/ai/local/IntentLibrary.java` (stub)
+- `src/main/java/imagejai/local/IntentMatcher.java` (stub)
+- `src/main/java/imagejai/local/IntentLibrary.java` (stub)
 - ImageJ `ij.measure.Calibration` and `ij.ImagePlus.getCalibration()`
 
 ## Scope
@@ -69,12 +69,12 @@ later library growth.
 | Path | Action | Reason |
 |---|---|---|
 | `src/main/resources/phrasebook.json` | NEW | Starter phrasebook (`pixel_size` only) |
-| `src/main/java/uk/ac/ucl/imagej/ai/local/IntentLibrary.java` | MODIFY | JSON loader, registry of phrase → id and id → handler |
-| `src/main/java/uk/ac/ucl/imagej/ai/local/IntentMatcher.java` | MODIFY | `normalise()` and Tier 1 hash lookup |
-| `src/main/java/uk/ac/ucl/imagej/ai/local/LocalAssistant.java` | MODIFY | FrictionLog miss recording |
-| `src/main/java/uk/ac/ucl/imagej/ai/local/intents/PixelSizeIntent.java` | NEW | First real read-only intent |
+| `src/main/java/imagejai/local/IntentLibrary.java` | MODIFY | JSON loader, registry of phrase → id and id → handler |
+| `src/main/java/imagejai/local/IntentMatcher.java` | MODIFY | `normalise()` and Tier 1 hash lookup |
+| `src/main/java/imagejai/local/LocalAssistant.java` | MODIFY | FrictionLog miss recording |
+| `src/main/java/imagejai/local/intents/PixelSizeIntent.java` | NEW | First real read-only intent |
 | `tests/benchmark/biologist_phrasings.jsonl` | NEW | Seed accuracy benchmark |
-| `src/test/java/uk/ac/ucl/imagej/ai/local/IntentMatcherBenchmarkTest.java` | NEW | Loads benchmark, prints top-1 accuracy |
+| `src/test/java/imagejai/local/IntentMatcherBenchmarkTest.java` | NEW | Loads benchmark, prints top-1 accuracy |
 
 ## Implementation sketch
 
