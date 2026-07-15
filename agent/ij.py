@@ -79,6 +79,8 @@ import json
 import sys
 import os
 import base64
+import copy
+import threading
 
 HOST = os.environ.get("IMAGEJAI_TCP_HOST", "localhost")
 try:
@@ -92,6 +94,7 @@ MODEL_ENDPOINT = os.environ.get("IMAGEJAI_MODEL_ENDPOINT", "").strip()
 # REGRESSION GUARD: Past extensions added CLI/raw TCP commands without importable helpers, tests, or docs.
 # The fix: every stable agent-facing command must have a helper in __all__, CLI routing through it, and API tests.
 __all__ = [
+    "ImageJSession",
     "imagej_command",
     "hello",
     "normalize_error",
@@ -169,6 +172,14 @@ _HELLO_CAPS = {
 _HELLO_RESULT = None
 _HELLO_SENT = False
 
+_SESSION_FAILURE_CODES = frozenset([
+    "session_expired",
+    "session_revoked",
+    "session_unknown",
+    "session_required",
+    "session_token_mismatch",
+])
+
 # Phase 1: commands eligible for hash-based dedup. Server echoes a "hash"
 # field; we persist (hash, payload) per command and attach if_none_match on
 # the next call. Unchanged responses come back as {"ok": true, "unchanged": true, "hash": ...}.
@@ -223,8 +234,12 @@ _READONLY_CACHE_DIRTY = False
 
 
 def imagej_command(cmd, host=HOST, port=PORT, timeout=TIMEOUT):
-    """Send a JSON command to ImageJAI TCP server and return parsed response.
-    On timeout, automatically checks for open dialogs before returning.
+    """Send a command through the durable session for ``host`` and ``port``.
+
+    The first call negotiates authentication and capabilities. Each later
+    request carries that session on its own fresh TCP connection, matching the
+    server's one-request-per-socket protocol. Timeouts still trigger the
+    existing best-effort dialog check.
 
     For readonly commands, auto-attaches the last-seen hash as if_none_match.
     When the server replies unchanged, returns the cached result with
@@ -240,48 +255,7 @@ def imagej_command(cmd, host=HOST, port=PORT, timeout=TIMEOUT):
             cmd = dict(cmd)  # don't mutate caller's dict
             cmd["if_none_match"] = cached[0]
 
-    if isinstance(cmd, dict):
-        if (SESSION_ID and cmd.get("session_id") != SESSION_ID) or (
-                MODEL_ENDPOINT and cmd.get("model_endpoint") != MODEL_ENDPOINT):
-            cmd = dict(cmd)
-            if SESSION_ID:
-                cmd.setdefault("session_id", SESSION_ID)
-            if MODEL_ENDPOINT:
-                cmd.setdefault("model_endpoint", MODEL_ENDPOINT)
-
-    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    s.settimeout(timeout)
-    try:
-        s.connect((host, port))
-        payload = json.dumps(cmd) + "\n"
-        s.sendall(payload.encode("utf-8"))
-        # Read response
-        data = b""
-        while True:
-            try:
-                chunk = s.recv(65536)
-                if not chunk:
-                    break
-                data += chunk
-                # Check if we have a complete JSON response (ends with newline)
-                if data.endswith(b"\n"):
-                    break
-            except socket.timeout:
-                # TCP timeout — command may have opened a blocking dialog.
-                # Check for dialogs immediately.
-                s.close()
-                dialogs = _check_dialogs_fallback(host, port)
-                return {
-                    "ok": False,
-                    "error": "TCP timeout after {}s — command may be blocked by a dialog".format(timeout),
-                    "dialogs": dialogs,
-                }
-        resp = json.loads(data.decode("utf-8"))
-    finally:
-        try:
-            s.close()
-        except Exception:
-            pass
+    resp = _session_for(host, port).request(cmd, timeout=timeout)
 
     # Phase 1: resolve unchanged responses from cache; refresh cache on hash.
     global _READONLY_CACHE_DIRTY
@@ -339,44 +313,226 @@ def _read_server_token():
         return None
 
 
-def hello(host=HOST, port=PORT, timeout=10):
-    """Send the step 01 handshake. Records caps on the server side and
-    returns {server_version, session_id, enabled[], server_time_ms}.
-    On any failure returns the error response — callers can fall through
-    to the legacy no-handshake path without changing behaviour."""
-    global _HELLO_RESULT, _HELLO_SENT
-    req = {"command": "hello", "agent": "claude-code",
-           "capabilities": _HELLO_CAPS}
-    if SESSION_ID:
-        req["session_id"] = SESSION_ID
-    if MODEL_ENDPOINT:
-        req["model_endpoint"] = MODEL_ENDPOINT
-    tok = _read_server_token()
-    if tok:
-        req["token"] = tok
-    try:
-        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        s.settimeout(timeout)
+class ImageJSession:
+    """Authenticated capability session over ImageJAI's one-shot sockets.
+
+    The Java server closes each command socket after one reply, so persistence
+    belongs in this object rather than in a TCP connection. A session ID and
+    installation token are negotiated once, then copied into every request
+    envelope. Server-side authentication failures are returned to the caller;
+    commands are never replayed after such a failure.
+    """
+
+    def __init__(self, host=HOST, port=PORT, timeout=TIMEOUT,
+                 agent="claude-code", capabilities=None, token_loader=None,
+                 client_session_id=SESSION_ID, model_endpoint=MODEL_ENDPOINT):
+        self.host = host
+        self.port = int(port)
+        self.timeout = timeout
+        self.agent = agent
+        self.capabilities = copy.deepcopy(
+            _HELLO_CAPS if capabilities is None else capabilities)
+        self._token_loader = token_loader or _read_server_token
+        self.client_session_id = (client_session_id or "").strip()
+        self.model_endpoint = (model_endpoint or "").strip()
+        self._session_id = None
+        self._token = None
+        self._expires_at = None
+        self._hello_response = None
+        self._lock = threading.RLock()
+
+    @property
+    def session_id(self):
+        with self._lock:
+            return self._session_id
+
+    @property
+    def expires_at(self):
+        with self._lock:
+            return self._expires_at
+
+    @property
+    def hello_result(self):
+        with self._lock:
+            if not isinstance(self._hello_response, dict):
+                return None
+            return copy.deepcopy(self._hello_response.get("result"))
+
+    def invalidate(self):
+        """Forget local session state without revoking unrelated sessions."""
+        with self._lock:
+            self._session_id = None
+            self._token = None
+            self._expires_at = None
+            self._hello_response = None
+
+    def hello(self, timeout=10, force=False):
+        """Negotiate once and return the server's complete hello response."""
+        with self._lock:
+            if self._session_id and not force and not self._expired_locked():
+                return copy.deepcopy(self._hello_response)
+
+            token = self._token_loader()
+            caps = copy.deepcopy(self.capabilities)
+            if self.client_session_id:
+                # Preserve the launcher/audit correlation ID without allowing
+                # it to masquerade as the server-issued protocol session.
+                caps.setdefault("agent_id", self.client_session_id)
+            req = {
+                "command": "hello",
+                "agent": self.agent,
+                "capabilities": caps,
+            }
+            if self.client_session_id:
+                req["client_session_id"] = self.client_session_id
+            if self.model_endpoint:
+                req["model_endpoint"] = self.model_endpoint
+            if token:
+                req["token"] = token
+
+            try:
+                resp = self._exchange(req, timeout)
+            except (socket.error, OSError, ValueError) as exc:
+                return {"ok": False, "error": "hello failed: {}".format(exc)}
+
+            result = resp.get("result") if isinstance(resp, dict) else None
+            session_id = result.get("session_id") if isinstance(result, dict) else None
+            if not (resp.get("ok") if isinstance(resp, dict) else False):
+                return resp
+            if not isinstance(session_id, str) or not session_id.strip():
+                return {
+                    "ok": False,
+                    "error": {
+                        "code": "invalid_hello",
+                        "message": "Server hello did not return a session_id",
+                        "category": "protocol",
+                        "retry_safe": False,
+                    },
+                }
+
+            self._session_id = session_id.strip()
+            self._token = token
+            expires = result.get("expires_at")
+            self._expires_at = expires if isinstance(expires, (int, float)) else None
+            self._hello_response = copy.deepcopy(resp)
+            return resp
+
+    def request(self, cmd, timeout=None, _check_dialogs=True):
+        """Send one request, negotiating first and never replaying auth errors."""
+        if not isinstance(cmd, dict):
+            raise TypeError("ImageJAI command must be a dict")
+        if cmd.get("command") == "hello":
+            return self.hello(timeout=timeout or 10, force=True)
+
+        with self._lock:
+            if self._expired_locked():
+                self._clear_locked()
+            if not self._session_id:
+                hello_resp = self.hello(timeout=min(timeout or self.timeout, 10))
+                if not hello_resp.get("ok"):
+                    return hello_resp
+            session_id = self._session_id
+            token = self._token
+
+        request = dict(cmd)
+        request["session_id"] = session_id
+        if token:
+            request["token"] = token
+        else:
+            request.pop("token", None)
+        if self.client_session_id:
+            request.setdefault("client_session_id", self.client_session_id)
+        if self.model_endpoint:
+            request.setdefault("model_endpoint", self.model_endpoint)
+
+        effective_timeout = self.timeout if timeout is None else timeout
         try:
-            s.connect((host, port))
-            s.sendall((json.dumps(req) + "\n").encode("utf-8"))
-            data = b""
+            resp = self._exchange(request, effective_timeout)
+        except socket.timeout:
+            dialogs = []
+            if _check_dialogs:
+                dialogs = self._dialog_fallback()
+            return {
+                "ok": False,
+                "error": "TCP timeout after {}s — command may be blocked by a dialog".format(
+                    effective_timeout),
+                "dialogs": dialogs,
+            }
+
+        code = _response_error_code(resp)
+        if code in _SESSION_FAILURE_CODES:
+            # The failed command was rejected before dispatch, but do not
+            # replay it automatically. A later request will negotiate anew.
+            with self._lock:
+                if self._session_id == session_id:
+                    self._clear_locked()
+        return resp
+
+    def _dialog_fallback(self):
+        try:
+            resp = self.request(
+                {"command": "get_dialogs"}, timeout=5, _check_dialogs=False)
+            if resp.get("ok") and resp.get("result", {}).get("dialogs"):
+                return resp["result"]["dialogs"]
+        except Exception:
+            pass
+        return []
+
+    def _exchange(self, request, timeout):
+        data = b""
+        with socket.create_connection((self.host, self.port), timeout=timeout) as sock:
+            sock.settimeout(timeout)
+            sock.sendall((json.dumps(request) + "\n").encode("utf-8"))
             while True:
-                chunk = s.recv(65536)
+                chunk = sock.recv(65536)
                 if not chunk:
                     break
                 data += chunk
                 if data.endswith(b"\n"):
                     break
-            resp = json.loads(data.decode("utf-8"))
-        finally:
-            try:
-                s.close()
-            except Exception:
-                pass
-    except (socket.error, OSError, ValueError) as e:
-        return {"ok": False, "error": "hello failed: {}".format(e)}
-    _HELLO_SENT = True
+        if not data.strip():
+            raise ConnectionError("empty reply from ImageJAI")
+        return json.loads(data.decode("utf-8"))
+
+    def _expired_locked(self):
+        if self._expires_at is None:
+            return False
+        import time
+        return time.time() * 1000 >= self._expires_at
+
+    def _clear_locked(self):
+        self._session_id = None
+        self._token = None
+        self._expires_at = None
+        self._hello_response = None
+
+
+def _response_error_code(resp):
+    if not isinstance(resp, dict):
+        return None
+    error = resp.get("error")
+    return error.get("code") if isinstance(error, dict) else None
+
+
+_SESSIONS = {}
+_SESSIONS_LOCK = threading.Lock()
+
+
+def _session_for(host, port):
+    key = (host, int(port))
+    with _SESSIONS_LOCK:
+        session = _SESSIONS.get(key)
+        if session is None:
+            session = ImageJSession(host=host, port=port)
+            _SESSIONS[key] = session
+        return session
+
+
+def hello(host=HOST, port=PORT, timeout=10):
+    """Negotiate and cache a durable authenticated protocol session."""
+    global _HELLO_RESULT, _HELLO_SENT
+    resp = _session_for(host, port).hello(timeout=timeout)
+    _HELLO_SENT = bool(isinstance(resp, dict) and resp.get("ok"))
     if isinstance(resp, dict) and resp.get("ok"):
         _HELLO_RESULT = resp.get("result")
     return resp
@@ -456,30 +612,8 @@ def extract_error(resp):
 
 
 def _check_dialogs_fallback(host=HOST, port=PORT):
-    """Emergency dialog check after a timeout. Uses a short timeout."""
-    try:
-        s2 = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        s2.settimeout(5)
-        s2.connect((host, port))
-        s2.sendall((json.dumps({"command": "get_dialogs"}) + "\n").encode("utf-8"))
-        data = b""
-        while True:
-            try:
-                chunk = s2.recv(65536)
-                if not chunk:
-                    break
-                data += chunk
-                if data.endswith(b"\n"):
-                    break
-            except socket.timeout:
-                break
-        s2.close()
-        resp = json.loads(data.decode("utf-8"))
-        if resp.get("ok") and resp.get("result", {}).get("dialogs"):
-            return resp["result"]["dialogs"]
-    except Exception:
-        pass
-    return []
+    """Emergency authenticated dialog check after a command timeout."""
+    return _session_for(host, port)._dialog_fallback()
 
 
 def ping():

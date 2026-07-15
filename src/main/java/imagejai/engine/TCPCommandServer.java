@@ -356,12 +356,12 @@ public class TCPCommandServer {
      * Server version string emitted in the {@code hello} handshake response.
      * Bumped by steps that change the reply schema so clients can adapt.
      */
-    static final String SERVER_VERSION = "1.7.5";
+    static final String SERVER_VERSION = "1.8.0";
 
     /**
-     * Per-connection capability record negotiated via the {@code hello} handler.
-     * Clients that never call {@code hello} fall back to {@link #DEFAULT_CAPS}
-     * so today's reply shape is preserved. Fields are package-private because
+     * Per-session capability record negotiated via the {@code hello} handler.
+     * Network clients that never call {@code hello} receive deliberately
+     * restricted compatibility caps. Fields are package-private because
      * future-step handlers ({@code 02-07}) in this package read them directly.
      */
     static final class AgentCaps {
@@ -376,6 +376,7 @@ public class TCPCommandServer {
         // Defaults to false so a forgotten/wrong token cannot accidentally
         // unlock the server when the gate is later flipped on.
         boolean authenticated = false;
+        boolean compatibility = false;
         boolean vision = false;
         String outputFormat = "json";
         int tokenBudget = Integer.MAX_VALUE;
@@ -498,8 +499,29 @@ public class TCPCommandServer {
         public boolean scientificIntegrityScan = true;
     }
 
-    /** Fallback caps applied to any request from a socket that never said hello. */
+    /** Trusted in-process fallback used by package-level handler tests. */
     static final AgentCaps DEFAULT_CAPS = new AgentCaps();
+
+    /** Restricted network policy for old clients that do not send sessions. */
+    private static final AgentCaps LEGACY_CAPS = legacyCaps();
+
+    private static AgentCaps legacyCaps() {
+        AgentCaps caps = new AgentCaps();
+        caps.compatibility = true;
+        caps.safeMode = true;
+        caps.vision = false;
+        caps.structuredErrors = false;
+        caps.pulse = false;
+        caps.stateDelta = false;
+        caps.dedup = false;
+        caps.patternHints = false;
+        caps.graphDelta = false;
+        caps.ledger = false;
+        caps.undo = false;
+        caps.autoDismissPhantoms = false;
+        caps.acceptEvents = Collections.emptySet();
+        return caps;
+    }
 
     enum MacroState { RUNNING, PAUSED_ON_DIALOG }
 
@@ -567,12 +589,8 @@ public class TCPCommandServer {
         }
     }
 
-    /**
-     * Caps keyed by the connection that negotiated them. Populated by
-     * {@link #handleHello}, read by {@link #dispatch}, cleared in
-     * {@link #handleClient}'s finally block on disconnect.
-     */
-    private final Map<Socket, AgentCaps> capsBySocket = new ConcurrentHashMap<Socket, AgentCaps>();
+    /** Durable caps keyed by an opaque, expiring protocol session. */
+    private final SessionCapsRegistry<AgentCaps> sessionRegistry;
 
     java.util.List<AgentCaps> capsWitnessForTest = null;
 
@@ -671,11 +689,21 @@ public class TCPCommandServer {
                             StateInspector stateInspector,
                             PipelineBuilder pipelineBuilder,
                             ExplorationEngine explorationEngine) {
+        this(port, commandEngine, stateInspector, pipelineBuilder,
+                explorationEngine, new SessionCapsRegistry<AgentCaps>());
+    }
+
+    TCPCommandServer(int port, CommandEngine commandEngine,
+                     StateInspector stateInspector,
+                     PipelineBuilder pipelineBuilder,
+                     ExplorationEngine explorationEngine,
+                     SessionCapsRegistry<AgentCaps> sessionRegistry) {
         this.port = port;
         this.commandEngine = commandEngine;
         this.stateInspector = stateInspector;
         this.pipelineBuilder = pipelineBuilder;
         this.explorationEngine = explorationEngine;
+        this.sessionRegistry = sessionRegistry;
         this.jobRegistry = new JobRegistry(commandEngine);
         this.reactiveEngine = new ReactiveEngine(
                 eventBus, commandEngine, intentRouter, guiActionDispatcher);
@@ -705,8 +733,10 @@ public class TCPCommandServer {
      * @param listener callback for server events (may be null)
      */
     public void start(ServerListener listener) {
+        if (running) return;
         this.listener = listener;
         running = true;
+        sessionRegistry.activate();
 
         // Generate or reload the per-install shared token before opening the
         // listen socket. Always loaded — hello accepts and verifies it.
@@ -714,10 +744,18 @@ public class TCPCommandServer {
         // is gated on tokenAuthRequired() so existing CLI wrappers keep
         // working until they ship the token-reading code path.
         try {
-            this.serverToken = loadOrGenerateToken();
+            if (this.serverToken == null) {
+                this.serverToken = loadOrGenerateToken();
+            }
         } catch (Throwable t) {
             System.err.println("[ImageJAI-TCP] Token init failed: " + t.getMessage());
             this.serverToken = null;
+            running = false;
+            sessionRegistry.revokeAll();
+            if (listener != null) {
+                listener.onError("TCP authentication could not be initialized");
+            }
+            return;
         }
 
         // Step 07: install System.out / System.err tees into bounded ring
@@ -755,6 +793,7 @@ public class TCPCommandServer {
      */
     public void stop() {
         running = false;
+        sessionRegistry.revokeAll();
         // Phase 8: stop the reactive engine first so it unsubscribes from the
         // bus and tears down the WatchService thread cleanly before the rest
         // of the plugin shuts down.
@@ -800,6 +839,11 @@ public class TCPCommandServer {
             return serverSocket.getLocalPort();
         }
         return port;
+    }
+
+    /** Package-private deterministic token seam for loopback protocol tests. */
+    void setServerTokenForTest(String token) {
+        this.serverToken = token;
     }
 
     /**
@@ -956,10 +1000,6 @@ public class TCPCommandServer {
                 }
             }
         } finally {
-            // Drop this connection's caps first so a later socket cannot
-            // accidentally inherit stale state (ConcurrentHashMap keys are
-            // identity-based, but belt-and-braces keeps the map small).
-            capsBySocket.remove(socket);
             try {
                 if (reader != null) reader.close();
             } catch (Exception ignored) {}
@@ -1213,10 +1253,33 @@ public class TCPCommandServer {
     }
 
     private JsonObject dispatch(JsonObject request, Socket sock) {
-        AgentCaps caps = (sock != null)
-                ? capsBySocket.getOrDefault(sock, DEFAULT_CAPS)
-                : DEFAULT_CAPS;
-        return dispatchInternal(request, caps, sock);
+        if (sock == null) {
+            return dispatchInternal(request, DEFAULT_CAPS, null);
+        }
+        String command = optString(request, "command", "");
+        if ("hello".equals(command)) {
+            return dispatchInternal(request, DEFAULT_CAPS, sock);
+        }
+        // ping intentionally remains a public liveness probe. It never
+        // exposes image state or negotiated capabilities.
+        if ("ping".equals(command) && !request.has("session_id")) {
+            request.remove("token");
+            return dispatchInternal(request, LEGACY_CAPS, sock);
+        }
+
+        String sessionId = optString(request, "session_id", "");
+        String token = optString(request, "token", null);
+        SessionCapsRegistry.Lookup<AgentCaps> lookup =
+                sessionRegistry.lookup(sessionId, token);
+        request.remove("token");
+        if (lookup.status() == SessionCapsRegistry.Status.VALID) {
+            return dispatchInternal(request, lookup.caps(), sock);
+        }
+        if (lookup.status() == SessionCapsRegistry.Status.MISSING
+                && !tokenAuthRequired()) {
+            return dispatchInternal(request, LEGACY_CAPS, sock);
+        }
+        return sessionFailure(lookup.status());
     }
 
     private JsonObject dispatchInternal(JsonObject request, AgentCaps caps, Socket sock) {
@@ -1246,6 +1309,13 @@ public class TCPCommandServer {
                 PostureController.getInstance().current());
 
         JsonObject response = dispatchCore(command, request, caps, sock);
+
+        if (response != null && caps != null && caps.compatibility) {
+            JsonObject compatibility = new JsonObject();
+            compatibility.addProperty("mode", "legacy_restricted");
+            compatibility.addProperty("safe_mode", true);
+            response.add("_session", compatibility);
+        }
 
         // Phase 7: surface a handler-attached gui_action piggyback into the
         // outer response. Handlers may set result.gui_action = {...}; this
@@ -2275,19 +2345,26 @@ public class TCPCommandServer {
      */
     JsonObject handleHello(JsonObject request, Socket sock) {
         AgentCaps c = new AgentCaps();
-        // Validate shared token if presented. Always loaded; enforcement is
-        // gated by tokenAuthRequired(). The authenticated flag is recorded
-        // either way so the dispatch gate can refuse non-hello commands
-        // when enforcement flips on.
+        // Validate before parsing or storing any caller-controlled caps. A
+        // supplied-but-wrong token is always an error; it never degrades to a
+        // compatibility session. The null-token-server case exists only for
+        // direct headless unit tests because start() initializes the token
+        // before opening the listen socket.
         String supplied = optString(request, "token", null);
-        if (serverToken != null && supplied != null
-                && tokensEqual(serverToken, supplied)) {
+        request.remove("token"); // credentials must never reach audit payloads
+        if (supplied != null && serverToken != null
+                && !tokensEqual(serverToken, supplied)) {
+            return protocolError("invalid_token", "The installation token is invalid.");
+        }
+        if (serverToken == null || (supplied != null
+                && tokensEqual(serverToken, supplied))) {
             c.authenticated = true;
         }
         if (tokenAuthRequired() && !c.authenticated) {
-            return errorResponse("auth_required: hello must include a valid 'token' field. "
-                    + "Read the token from " + tokenFilePath().toString() + ".");
+            return protocolError("auth_required",
+                    "hello requires the installation token.");
         }
+        c.compatibility = !c.authenticated;
         c.agent = optString(request, "agent", "unknown");
         JsonObject caps = (request.has("capabilities")
                 && request.get("capabilities").isJsonObject())
@@ -2374,30 +2451,48 @@ public class TCPCommandServer {
         // shouldn't pay for it. Per plan:
         // docs/tcp_upgrade/15_undo_stack_api.md.
         c.undo = optBool(caps, "undo", false);
+        if (c.compatibility) {
+            // Compatibility sessions preserve old command reachability while
+            // refusing privileged capability opt-ins and forcing safety on.
+            c.vision = false;
+            c.safeMode = true;
+            c.autoDismissPhantoms = false;
+            c.undo = false;
+            c.acceptEvents = Collections.emptySet();
+            c.pulse = false;
+            c.dedup = false;
+            c.patternHints = false;
+            c.graphDelta = false;
+            c.ledger = false;
+        }
         int sockPort = (sock != null) ? sock.getPort() : 0;
         c.agentId = optString(caps, "agent_id", c.agent + "-" + sockPort);
-        c.acceptEvents = parseStringSet(caps, "accept_events");
-        if (sock != null) {
-            capsBySocket.put(sock, c);
+        if (!c.compatibility) {
+            c.acceptEvents = parseStringSet(caps, "accept_events");
         }
+
+        SessionCapsRegistry.Created<AgentCaps> created;
+        try {
+            created = sessionRegistry.create(c, c.authenticated ? supplied : null);
+        } catch (SessionCapsRegistry.CapacityException e) {
+            return protocolError("session_capacity",
+                    "The server has reached its active session limit.");
+        } catch (IllegalStateException e) {
+            return protocolError("server_stopping",
+                    "The server is not accepting new sessions.");
+        }
+        c.sessionId = created.id();
 
         JsonObject result = new JsonObject();
         result.addProperty("server_version", SERVER_VERSION);
-        result.addProperty("session_id", c.sessionId == null || c.sessionId.trim().isEmpty()
-                ? sessionIdFor(sock)
-                : c.sessionId.trim());
-        result.add("enabled", enabledCapsFor(c));
+        result.addProperty("session_id", created.id());
+        result.addProperty("expires_at", created.expiresAtEpochMillis());
+        JsonArray enabled = enabledCapsFor(c);
+        result.add("enabled", enabled);
+        result.add("capabilities", enabled.deepCopy());
+        result.addProperty("compatibility", c.compatibility);
         result.addProperty("server_time_ms", System.currentTimeMillis());
         return successResponse(result);
-    }
-
-    /** Stable-ish session tag for this connection. Port + millis suffix is
-     *  enough to tell two concurrent sessions apart in logs without needing
-     *  a full UUID generator. */
-    private String sessionIdFor(Socket sock) {
-        int sockPort = (sock != null) ? sock.getPort() : 0;
-        return "s-" + Integer.toHexString(sockPort) + "-"
-                + Long.toHexString(System.currentTimeMillis() & 0xffffL);
     }
 
     private String sessionKey(AgentCaps caps, Socket sock) {
@@ -6003,6 +6098,39 @@ public class TCPCommandServer {
         }
 
         return response;
+    }
+
+    private JsonObject protocolError(String code, String message) {
+        JsonObject response = new JsonObject();
+        response.addProperty("ok", false);
+        JsonObject error = new JsonObject();
+        error.addProperty("code", code);
+        error.addProperty("message", message);
+        error.addProperty("category", "authentication");
+        error.addProperty("retry_safe", false);
+        response.add("error", error);
+        return response;
+    }
+
+    private JsonObject sessionFailure(SessionCapsRegistry.Status status) {
+        if (status == SessionCapsRegistry.Status.MISSING) {
+            return protocolError("session_required",
+                    "This command requires a negotiated session.");
+        }
+        if (status == SessionCapsRegistry.Status.EXPIRED) {
+            return protocolError("session_expired",
+                    "The protocol session has expired; negotiate a new session.");
+        }
+        if (status == SessionCapsRegistry.Status.TOKEN_MISMATCH) {
+            return protocolError("session_token_mismatch",
+                    "The session credentials are invalid.");
+        }
+        if (status == SessionCapsRegistry.Status.REVOKED) {
+            return protocolError("session_revoked",
+                    "The protocol session has been revoked.");
+        }
+        return protocolError("session_unknown",
+                "The protocol session is not known to this server.");
     }
 
     private String errorJson(String message) {

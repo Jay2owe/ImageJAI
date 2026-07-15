@@ -41,7 +41,7 @@ Conflict watchlist:
 | 03 | pending | - | - |
 | 04 | pending | - | - |
 | 05 | pending | - | - |
-| 06 | pending | - | - |
+| 06 | completed | `0e51e0f` | 15 policy + 207 Gemma/provider tests passed; bundled import passed; Maven package 789 tests passed |
 | 07 | pending | - | - |
 | 08 | pending | - | - |
 | 09 | pending | - | - |

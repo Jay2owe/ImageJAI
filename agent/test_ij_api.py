@@ -1,6 +1,10 @@
 from __future__ import annotations
 
 import importlib.util
+import json
+import socket
+import threading
+import time
 from pathlib import Path
 
 
@@ -9,6 +13,49 @@ SPEC = importlib.util.spec_from_file_location("ij_under_test", IJ_PATH)
 ij = importlib.util.module_from_spec(SPEC)
 assert SPEC.loader is not None
 SPEC.loader.exec_module(ij)
+
+
+class ScriptedLoopbackServer:
+    def __init__(self, expected_requests, handler):
+        self.requests = []
+        self.errors = []
+        self._expected_requests = expected_requests
+        self._handler = handler
+        self._done = threading.Event()
+        self._listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self._listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self._listener.bind(("127.0.0.1", 0))
+        self._listener.listen(4)
+        self._listener.settimeout(3)
+        self.port = self._listener.getsockname()[1]
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def _run(self):
+        try:
+            for index in range(self._expected_requests):
+                conn, _ = self._listener.accept()
+                with conn:
+                    data = b""
+                    while not data.endswith(b"\n"):
+                        chunk = conn.recv(65536)
+                        if not chunk:
+                            break
+                        data += chunk
+                    request = json.loads(data.decode("utf-8"))
+                    self.requests.append(request)
+                    response = self._handler(index, request)
+                    conn.sendall((json.dumps(response) + "\n").encode("utf-8"))
+        except Exception as exc:  # surfaced deterministically by finish()
+            self.errors.append(exc)
+        finally:
+            self._listener.close()
+            self._done.set()
+
+    def finish(self):
+        assert self._done.wait(5), "loopback server did not finish"
+        self._thread.join(timeout=1)
+        assert self.errors == []
 
 
 def capture_imagej_command(monkeypatch):
@@ -38,9 +85,113 @@ def test_new_helpers_are_public():
         "reactive_disable",
         "reactive_reload",
         "reactive_stats",
+        "ImageJSession",
     ]:
         assert name in ij.__all__
         assert hasattr(ij, name)
+
+
+def test_imagej_session_negotiates_once_and_carries_credentials_across_sockets():
+    expires_at = int(time.time() * 1000) + 60_000
+
+    def reply(index, request):
+        if index == 0:
+            assert request["command"] == "hello"
+            assert request["token"] == "install-secret"
+            assert request["client_session_id"] == "launch-audit-id"
+            assert request["capabilities"]["agent_id"] == "launch-audit-id"
+            return {
+                "ok": True,
+                "result": {
+                    "session_id": "server-session-123",
+                    "expires_at": expires_at,
+                    "enabled": ["structured_errors", "safe_mode", "undo"],
+                },
+            }
+        assert request["command"] == "get_state"
+        assert request["session_id"] == "server-session-123"
+        assert request["token"] == "install-secret"
+        return {"ok": True, "result": {"title": "Blobs"}}
+
+    server = ScriptedLoopbackServer(2, reply)
+    session = ij.ImageJSession(
+        host="127.0.0.1",
+        port=server.port,
+        token_loader=lambda: "install-secret",
+        client_session_id="launch-audit-id",
+        capabilities={"structured_errors": True, "safe_mode": True, "undo": True},
+    )
+    command = {"command": "get_state"}
+
+    response = session.request(command)
+    server.finish()
+
+    assert response == {"ok": True, "result": {"title": "Blobs"}}
+    assert command == {"command": "get_state"}
+    assert session.session_id == "server-session-123"
+    assert len(server.requests) == 2
+
+
+def test_imagej_session_does_not_replay_authentication_failure():
+    def reply(index, request):
+        if index == 0:
+            return {
+                "ok": True,
+                "result": {
+                    "session_id": "server-session-456",
+                    "expires_at": int(time.time() * 1000) + 60_000,
+                    "enabled": [],
+                },
+            }
+        return {
+            "ok": False,
+            "error": {
+                "code": "session_token_mismatch",
+                "message": "invalid credentials",
+                "retry_safe": False,
+            },
+        }
+
+    server = ScriptedLoopbackServer(2, reply)
+    session = ij.ImageJSession(
+        host="127.0.0.1",
+        port=server.port,
+        token_loader=lambda: "wrong-after-hello",
+    )
+
+    response = session.request({"command": "get_state"})
+    server.finish()
+
+    assert response["error"]["code"] == "session_token_mismatch"
+    assert len(server.requests) == 2
+    assert session.session_id is None
+
+
+def test_imagej_session_compatibility_mode_still_uses_server_session_id():
+    def reply(index, request):
+        if index == 0:
+            assert "token" not in request
+            return {
+                "ok": True,
+                "result": {
+                    "session_id": "compat-session-789",
+                    "expires_at": int(time.time() * 1000) + 60_000,
+                    "compatibility": True,
+                    "enabled": ["safe_mode"],
+                },
+            }
+        assert request["session_id"] == "compat-session-789"
+        assert "token" not in request
+        return {"ok": True, "result": "pong"}
+
+    server = ScriptedLoopbackServer(2, reply)
+    session = ij.ImageJSession(
+        host="127.0.0.1", port=server.port, token_loader=lambda: None)
+
+    response = session.request({"command": "ping"})
+    server.finish()
+
+    assert response == {"ok": True, "result": "pong"}
 
 
 def test_run_script_defaults_to_groovy_with_cli_timeout(monkeypatch):

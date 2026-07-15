@@ -5,6 +5,18 @@ import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import org.junit.Test;
 
+import java.io.BufferedReader;
+import java.io.InputStreamReader;
+import java.io.OutputStreamWriter;
+import java.io.PrintWriter;
+import java.net.InetAddress;
+import java.net.Socket;
+import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
@@ -22,6 +34,107 @@ public class TCPCommandServerHelloTest {
 
     private static TCPCommandServer newServer() {
         return new TCPCommandServer(0, null, null, null, null);
+    }
+
+    @Test
+    public void strictSessionCarriesImmutableCapsAcrossFreshSockets() throws Exception {
+        String previous = System.getProperty("imagejai.tcp.requireToken");
+        System.setProperty("imagejai.tcp.requireToken", "true");
+        TCPCommandServer server = newServer();
+        server.setServerTokenForTest("loopback-secret");
+        List<TCPCommandServer.AgentCaps> witness =
+                new ArrayList<TCPCommandServer.AgentCaps>();
+        server.capsWitnessForTest = witness;
+        try {
+            int port = startAndAwait(server);
+            JsonObject hello = exchange(port, parse(
+                    "{\"command\":\"hello\",\"agent\":\"test-client\"," +
+                    "\"token\":\"loopback-secret\",\"capabilities\":{" +
+                    "\"structured_errors\":true,\"safe_mode\":false," +
+                    "\"pulse\":false,\"dedup\":false,\"undo\":true}}"));
+
+            assertTrue(hello.toString(), hello.get("ok").getAsBoolean());
+            JsonObject result = hello.getAsJsonObject("result");
+            String sessionId = result.get("session_id").getAsString();
+            assertTrue(sessionId.length() >= 32);
+            assertTrue(result.get("expires_at").getAsLong()
+                    > System.currentTimeMillis());
+
+            JsonObject ping = new JsonObject();
+            ping.addProperty("command", "ping");
+            ping.addProperty("session_id", sessionId);
+            ping.addProperty("token", "loopback-secret");
+            JsonObject pingResponse = exchange(port, ping);
+
+            assertTrue(pingResponse.toString(),
+                    pingResponse.get("ok").getAsBoolean());
+            TCPCommandServer.AgentCaps carried = witness.get(witness.size() - 1);
+            assertTrue(carried.authenticated);
+            assertFalse(carried.compatibility);
+            assertTrue(carried.structuredErrors);
+            assertFalse(carried.safeMode);
+            assertFalse(carried.pulse);
+            assertFalse(carried.dedup);
+            assertTrue(carried.undo);
+
+            JsonObject missing = exchange(port,
+                    parse("{\"command\":\"get_state\"}"));
+            assertEquals("session_required", errorCode(missing));
+
+            JsonObject unknown = exchange(port, parse(
+                    "{\"command\":\"ping\",\"session_id\":" +
+                    "\"01234567890123456789012345678901\"," +
+                    "\"token\":\"loopback-secret\"}"));
+            assertEquals("session_unknown", errorCode(unknown));
+
+            JsonObject wrongToken = exchange(port, parse(
+                    "{\"command\":\"ping\",\"session_id\":\"" +
+                    sessionId + "\",\"token\":\"wrong\"}"));
+            assertEquals("session_token_mismatch", errorCode(wrongToken));
+        } finally {
+            server.stop();
+            restoreProperty("imagejai.tcp.requireToken", previous);
+        }
+    }
+
+    @Test
+    public void liveLoopbackRejectsExpiredAndPostStopSessions() throws Exception {
+        FakeClock clock = new FakeClock();
+        SessionCapsRegistry<TCPCommandServer.AgentCaps> registry =
+                new SessionCapsRegistry<TCPCommandServer.AgentCaps>(
+                        4, 1000L, clock, clock,
+                        new SessionCapsRegistry.IdSource() {
+                            @Override
+                            public String nextId() {
+                                return "01234567890123456789012345678901";
+                            }
+                        });
+        TCPCommandServer server = new TCPCommandServer(
+                0, null, null, null, null, registry);
+        server.setServerTokenForTest("expiry-secret");
+        String sessionId = null;
+        try {
+            int port = startAndAwait(server);
+            JsonObject hello = exchange(port, parse(
+                    "{\"command\":\"hello\",\"token\":\"expiry-secret\"}"));
+            sessionId = hello.getAsJsonObject("result")
+                    .get("session_id").getAsString();
+            clock.nanos = 1_000_000_000L;
+
+            JsonObject expired = exchange(port, parse(
+                    "{\"command\":\"ping\",\"session_id\":\"" +
+                    sessionId + "\",\"token\":\"expiry-secret\"}"));
+            assertEquals("session_expired", errorCode(expired));
+        } finally {
+            server.stop();
+        }
+
+        assertNotNull(sessionId);
+        assertEquals(SessionCapsRegistry.Status.REVOKED,
+                registry.lookup(sessionId, "expiry-secret").status());
+        registry.activate();
+        assertEquals(SessionCapsRegistry.Status.UNKNOWN,
+                registry.lookup(sessionId, "expiry-secret").status());
     }
 
     /** Full hello request maps every declared field onto the response. */
@@ -403,6 +516,90 @@ public class TCPCommandServerHelloTest {
             String s = enabled.get(i).getAsString();
             assertFalse("master-off must hide every safe_mode_option entry, saw " + s,
                     s.startsWith("safe_mode_option:"));
+        }
+    }
+
+    private static int startAndAwait(TCPCommandServer server) throws Exception {
+        final CountDownLatch started = new CountDownLatch(1);
+        final int[] boundPort = new int[1];
+        final String[] error = new String[1];
+        server.start(new TCPCommandServer.ServerListener() {
+            @Override
+            public void onServerStarted(int port) {
+                boundPort[0] = port;
+                started.countDown();
+            }
+
+            @Override
+            public void onServerStopped() {
+                // no-op
+            }
+
+            @Override
+            public void onClientConnected(String clientInfo) {
+                // no-op
+            }
+
+            @Override
+            public void onCommandReceived(String command) {
+                // no-op
+            }
+
+            @Override
+            public void onError(String message) {
+                error[0] = message;
+                started.countDown();
+            }
+        });
+        assertTrue("server did not bind", started.await(5, TimeUnit.SECONDS));
+        if (error[0] != null) {
+            throw new AssertionError(error[0]);
+        }
+        return boundPort[0];
+    }
+
+    private static JsonObject exchange(int port, JsonObject request) throws Exception {
+        try (Socket socket = new Socket(InetAddress.getLoopbackAddress(), port)) {
+            socket.setSoTimeout(5000);
+            PrintWriter writer = new PrintWriter(new OutputStreamWriter(
+                    socket.getOutputStream(), StandardCharsets.UTF_8), true);
+            BufferedReader reader = new BufferedReader(new InputStreamReader(
+                    socket.getInputStream(), StandardCharsets.UTF_8));
+            writer.println(request.toString());
+            String response = reader.readLine();
+            assertNotNull("server closed without a response", response);
+            return parse(response);
+        }
+    }
+
+    private static String errorCode(JsonObject response) {
+        assertFalse(response.toString(), response.get("ok").getAsBoolean());
+        JsonObject error = response.getAsJsonObject("error");
+        assertFalse(error.get("retry_safe").getAsBoolean());
+        return error.get("code").getAsString();
+    }
+
+    private static void restoreProperty(String name, String previous) {
+        if (previous == null) {
+            System.clearProperty(name);
+        } else {
+            System.setProperty(name, previous);
+        }
+    }
+
+    private static final class FakeClock
+            implements SessionCapsRegistry.Ticker, SessionCapsRegistry.WallClock {
+        long nanos;
+        long wallMillis = 1_700_000_000_000L;
+
+        @Override
+        public long nanoTime() {
+            return nanos;
+        }
+
+        @Override
+        public long currentTimeMillis() {
+            return wallMillis;
         }
     }
 
