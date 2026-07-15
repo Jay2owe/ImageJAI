@@ -16,6 +16,37 @@ from dataclasses import dataclass
 from typing import Any, Literal
 
 
+HOST_CODE_CAPABILITY = "host_code"
+
+
+@dataclass(frozen=True)
+class ProviderToolPolicy:
+    """Trusted provider classification and explicitly granted capabilities.
+
+    ``is_local`` is assigned by the provider router, never inferred from an
+    endpoint URL supplied by a caller.  An absent policy is deliberately the
+    least-privileged cloud policy.
+    """
+
+    provider: str = "unknown"
+    is_local: bool = False
+    capabilities: frozenset[str] = frozenset()
+
+    def has_capability(self, capability: str) -> bool:
+        return capability in self.capabilities
+
+
+@dataclass(frozen=True)
+class HostCodeApprovalRequest:
+    """Exact, single-call preview passed to a cloud approval callback."""
+
+    provider: str
+    model: str
+    tool: str
+    preview: str
+    working_directory: str
+
+
 @dataclass(frozen=True)
 class ToolCall:
     """One model-issued tool invocation, normalised across providers."""
@@ -28,6 +59,20 @@ class ToolCall:
 
 class ProviderClient(ABC):
     """Five-method interface used by the ImageJAI tool loop."""
+
+    @property
+    def tool_policy(self) -> ProviderToolPolicy:
+        """Return the router-assigned policy, failing closed when absent."""
+
+        return getattr(self, "_imagejai_tool_policy", ProviderToolPolicy())
+
+    def configure_tool_policy(self, policy: ProviderToolPolicy) -> "ProviderClient":
+        """Attach the router's trusted policy and return this client."""
+
+        if not isinstance(policy, ProviderToolPolicy):
+            raise TypeError("policy must be a ProviderToolPolicy")
+        self._imagejai_tool_policy = policy
+        return self
 
     @abstractmethod
     def chat(

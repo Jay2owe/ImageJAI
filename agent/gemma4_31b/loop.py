@@ -26,6 +26,24 @@ import ollama
 from PIL import Image
 
 try:
+    from agent.providers.base import (
+        HOST_CODE_CAPABILITY,
+        HostCodeApprovalRequest,
+        ProviderToolPolicy,
+    )
+    from agent.providers.router import provider_tool_policy, validate_process_identifier
+except ImportError:  # pragma: no cover - bundled workspace import layout
+    from providers.base import (  # type: ignore
+        HOST_CODE_CAPABILITY,
+        HostCodeApprovalRequest,
+        ProviderToolPolicy,
+    )
+    from providers.router import (  # type: ignore
+        provider_tool_policy,
+        validate_process_identifier,
+    )
+
+try:
     from prompt_toolkit import prompt as _pt_prompt
     from prompt_toolkit.application.current import get_app_or_none
     from prompt_toolkit.completion import WordCompleter
@@ -58,7 +76,7 @@ from . import tools_recipes
 from . import tools_shell  # noqa: F401
 from . import triage_image  # noqa: F401
 from .console_text import normalize_inline_latex_symbols
-from .registry import REGISTRY, _rebuild_tool_map
+from .registry import is_host_code_tool, tools_for_policy
 
 # No model name is hardcoded here. This wrapper drives *any* Ollama model
 # (and, via a ProviderClient, any provider model); the model is always supplied
@@ -990,6 +1008,98 @@ def _normalise_provider(provider: str | None, model: str) -> str:
     return value or _infer_provider_for_model(model)
 
 
+def _resolve_tool_policy(
+    provider: str,
+    provider_client: Any | None,
+    provider_opts: dict | None,
+) -> ProviderToolPolicy:
+    """Resolve policy from router-owned metadata, failing closed on mismatch."""
+
+    attached = getattr(provider_client, "tool_policy", None)
+    if isinstance(attached, ProviderToolPolicy) and attached.provider == provider:
+        return attached
+    capabilities = (provider_opts or {}).get("capabilities")
+    return provider_tool_policy(provider, capabilities)
+
+
+def _host_code_approval_request(
+    provider: str,
+    model: str,
+    tool_name: str,
+    args: dict,
+) -> HostCodeApprovalRequest:
+    """Build an exact, immutable preview for one host-code invocation."""
+
+    if tool_name == "run_shell":
+        preview = tools_shell.preview_shell_call(args.get("argv"), args.get("cwd", ""))
+        working_directory = str(json.loads(preview)["cwd"])
+    elif tool_name == "run_script":
+        code = args.get("code")
+        language = args.get("language")
+        if not isinstance(code, str) or not isinstance(language, str):
+            raise ValueError("run_script requires string code and language arguments")
+        preview = json.dumps(
+            {"language": language, "code": code, "runtime": "Fiji JVM"},
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        working_directory = "Fiji JVM"
+    else:
+        preview = _canonical_json(args)
+        working_directory = "unspecified"
+    return HostCodeApprovalRequest(
+        provider=provider,
+        model=model,
+        tool=tool_name,
+        preview=preview,
+        working_directory=working_directory,
+    )
+
+
+def _host_code_abort_note(
+    tool_name: str,
+    args: dict,
+    *,
+    provider: str,
+    model: str,
+    policy: ProviderToolPolicy,
+    approval_callback: Any | None,
+) -> str | None:
+    """Authorize one host-code call; cloud approval is never remembered."""
+
+    if not is_host_code_tool(tool_name):
+        return None
+    if not policy.has_capability(HOST_CODE_CAPABILITY):
+        return "host-code capability is not enabled for this provider session"
+    if policy.is_local:
+        return None
+    if not callable(approval_callback):
+        return "cloud host-code elevation requires an explicit one-call approval callback"
+    try:
+        request = _host_code_approval_request(provider, model, tool_name, args)
+    except (TypeError, ValueError) as exc:
+        return "invalid host-code invocation: {}".format(exc)
+
+    _console_emit(
+        "\nHOST-CODE APPROVAL REQUIRED (one call only)\n"
+        "provider={}; model={}; tool={}; working_directory={}\n{}".format(
+            request.provider,
+            request.model,
+            request.tool,
+            request.working_directory,
+            request.preview,
+        ),
+        reserve_status_line=True,
+    )
+    try:
+        approved = approval_callback(request)
+    except Exception as exc:
+        return "host-code approval failed closed: {}: {}".format(type(exc).__name__, exc)
+    if approved is not True:
+        return "host-code call was denied by the one-call approval callback"
+    return None
+
+
 def _context_limit_for(provider: str, model: str) -> int:
     try:
         from agent.contexts import loader as _ctx_loader
@@ -1505,6 +1615,8 @@ def _one_turn(
     # Injectors can read/write any key; example: _stale_error_loop_injector
     # uses turn_state["last_tool_error"] to compare consecutive errors.
     turn_state: dict = {}
+    tool_policy = _resolve_tool_policy(provider, provider_client, provider_opts)
+    approval_callback = (provider_opts or {}).get("host_code_approval")
 
     ticker.start(_THINKING_STATUS)
     try:
@@ -1618,7 +1730,14 @@ def _one_turn(
                     ),
                     reserve_status_line=True,
                 )
-                pre_dispatch_note = _pre_dispatch_abort_note(name, args)
+                pre_dispatch_note = _host_code_abort_note(
+                    name,
+                    args,
+                    provider=provider,
+                    model=model,
+                    policy=tool_policy,
+                    approval_callback=approval_callback,
+                ) or _pre_dispatch_abort_note(name, args)
                 if pre_dispatch_note is not None:
                     _console_emit(
                         "  \033[31m⛔ pre-dispatch abort: {}\033[0m".format(
@@ -2195,10 +2314,18 @@ def run(
         model = _resolve_default_model()
 
     provider_key = _normalise_provider(provider, model)
+    validate_process_identifier(model, "model")
+    tool_policy = _resolve_tool_policy(provider_key, provider_client, provider_opts)
+    approval_callback = (provider_opts or {}).get("host_code_approval")
+    cloud_elevation = (
+        not tool_policy.is_local
+        and tool_policy.has_capability(HOST_CODE_CAPABILITY)
+        and callable(approval_callback)
+    )
     ctx_limit = _context_limit_for(provider_key, model)
     assistant_label = _assistant_label(provider_key)
-    tools = list(REGISTRY)
-    tool_map = _rebuild_tool_map()
+    tools = tools_for_policy(tool_policy, cloud_elevation=cloud_elevation)
+    tool_map = {fn.__name__: fn for fn in tools}
     slash_completer = _build_slash_completer()
     ctx_state = {"used": 0, "limit": ctx_limit}
     mode_state = {"lock": initial_mode_lock if initial_mode_lock in SAMPLING_PROFILES else None}

@@ -17,6 +17,11 @@ import json
 import os
 import socket
 
+try:
+    from agent.providers.base import HOST_CODE_CAPABILITY, ProviderToolPolicy
+except ImportError:  # pragma: no cover - direct package installs
+    from providers.base import HOST_CODE_CAPABILITY, ProviderToolPolicy  # type: ignore
+
 HOST = os.environ.get("IMAGEJAI_TCP_HOST", "localhost")
 try:
     PORT = int(os.environ.get("IMAGEJAI_TCP_PORT", "7746"))
@@ -43,6 +48,10 @@ GEMMA_CAPS = {
 
 REGISTRY: list = []
 
+# These tools can execute arbitrary host/JVM code.  Keep this set explicit so
+# a new tool cannot accidentally gain host-code privilege through name matching.
+HOST_CODE_TOOL_NAMES = frozenset({"run_shell", "run_script"})
+
 
 def tool(func):
     """Register a function as a tool exposed to Ollama.
@@ -64,6 +73,35 @@ def tool(func):
 def all_tools() -> list:
     """Return the list of registered tool callables."""
     return list(REGISTRY)
+
+
+def tools_for_policy(
+    policy: ProviderToolPolicy,
+    *,
+    cloud_elevation: bool = False,
+) -> list:
+    """Return only tools allowed by a trusted provider policy.
+
+    Locality alone is insufficient: local providers also need the explicit
+    ``host_code`` capability.  A cloud schema may contain host-code tools only
+    for the current session when it has that capability *and* a live one-call
+    approval callback (represented by ``cloud_elevation``).
+    """
+
+    if not isinstance(policy, ProviderToolPolicy):
+        policy = ProviderToolPolicy()
+    host_code_allowed = policy.has_capability(HOST_CODE_CAPABILITY) and (
+        policy.is_local or cloud_elevation
+    )
+    if host_code_allowed:
+        return list(REGISTRY)
+    return [fn for fn in REGISTRY if fn.__name__ not in HOST_CODE_TOOL_NAMES]
+
+
+def is_host_code_tool(name: str) -> bool:
+    """Return whether a tool is an arbitrary host/JVM code primitive."""
+
+    return name in HOST_CODE_TOOL_NAMES
 
 
 TOOL_MAP: dict = {}
