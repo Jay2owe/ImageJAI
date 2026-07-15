@@ -1,0 +1,16 @@
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "apply_patch",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python .claude/hooks/post_change_graphify.py",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}
