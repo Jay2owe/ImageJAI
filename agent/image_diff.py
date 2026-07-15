@@ -36,7 +36,7 @@ except ImportError:
 def _load_png_raw(path):
     """Parse a PNG file using only stdlib. Returns (width, height, pixels).
 
-    pixels is a flat list of grayscale values (averaged across RGB channels).
+    Pixels are normalized RGBA tuples so colour-only changes are preserved.
     This is a minimal parser — handles 8-bit RGB/RGBA/grayscale PNGs.
     """
     with open(path, "rb") as f:
@@ -129,19 +129,21 @@ def _load_png_raw(path):
                     pred = up_left
                 row_data[i] = (row_data[i] + pred) & 0xFF
 
-        # Convert to grayscale values
+        # Normalize to RGBA without discarding channel differences.
         for x in range(width):
             offset = x * bpp
             if color_type == 0:  # grayscale
-                pixels.append(row_data[offset])
+                value = row_data[offset]
+                pixels.append((value, value, value, 255))
             elif color_type == 2:  # RGB
                 r, g, b = row_data[offset], row_data[offset + 1], row_data[offset + 2]
-                pixels.append((r + g + b) // 3)
+                pixels.append((r, g, b, 255))
             elif color_type == 4:  # grayscale + alpha
-                pixels.append(row_data[offset])
+                value, alpha = row_data[offset], row_data[offset + 1]
+                pixels.append((value, value, value, alpha))
             elif color_type == 6:  # RGBA
                 r, g, b = row_data[offset], row_data[offset + 1], row_data[offset + 2]
-                pixels.append((r + g + b) // 3)
+                pixels.append((r, g, b, row_data[offset + 3]))
 
         prev_row = row_data
 
@@ -149,15 +151,16 @@ def _load_png_raw(path):
 
 
 def _load_image(path):
-    """Load image and return (width, height, grayscale_pixels_list).
+    """Load image and return (width, height, RGBA pixel tuples).
 
     Uses PIL if available, otherwise raw PNG parsing.
     """
     if _HAS_PIL:
-        img = Image.open(path).convert("L")
-        w, h = img.size
-        pixels = list(img.getdata())
-        return w, h, pixels
+        with Image.open(path) as source:
+            img = source.convert("RGBA")
+            w, h = img.size
+            pixels = list(img.getdata())
+            return w, h, pixels
     else:
         return _load_png_raw(path)
 
@@ -203,34 +206,54 @@ def compare_images(path_a, path_b, threshold=10, save_diff=False, diff_path=None
     if n == 0:
         return result
 
-    # Pixel difference
-    diffs = [abs(px1[i] - px2[i]) for i in range(n)]
-    changed = sum(1 for d in diffs if d > threshold)
-    mean_diff = sum(diffs) / n
+    # A pixel is changed when any channel exceeds the threshold. The mean
+    # remains a channel-level absolute difference so equal-luminance colour
+    # substitutions cannot disappear.
+    channel_diffs = [
+        tuple(abs(a - b) for a, b in zip(px1[i], px2[i]))
+        for i in range(n)
+    ]
+    diffs = [max(values) for values in channel_diffs]
+    changed = sum(1 for difference in diffs if difference > threshold)
+    channel_count = sum(len(values) for values in channel_diffs)
+    mean_diff = (
+        sum(sum(values) for values in channel_diffs) / channel_count
+        if channel_count else 0.0
+    )
 
     result["changed_pixels_pct"] = round(100.0 * changed / n, 2)
     result["mean_absolute_diff"] = round(mean_diff, 2)
     result["identical"] = all(d == 0 for d in diffs)
 
-    # Pearson correlation
-    mean1 = sum(px1) / n
-    mean2 = sum(px2) / n
-
-    sum_cross = 0.0
-    sum_sq1 = 0.0
-    sum_sq2 = 0.0
-    for i in range(n):
-        d1 = px1[i] - mean1
-        d2 = px2[i] - mean2
-        sum_cross += d1 * d2
-        sum_sq1 += d1 * d1
-        sum_sq2 += d2 * d2
-
-    denom = math.sqrt(sum_sq1 * sum_sq2)
-    if denom > 0:
-        result["correlation"] = round(sum_cross / denom, 4)
+    # Pearson correlation over every channel, not grayscale averages. Spatially
+    # constant but unequal images are not a perfect match merely because their
+    # channel vectors have the same shape.
+    spatially_constant1 = all(pixel == px1[0] for pixel in px1)
+    spatially_constant2 = all(pixel == px2[0] for pixel in px2)
+    if spatially_constant1 and spatially_constant2:
+        result["correlation"] = 1.0 if result["identical"] else 0.0
     else:
-        result["correlation"] = 1.0 if sum_sq1 == 0 and sum_sq2 == 0 else 0.0
+        flat1 = [channel for pixel in px1 for channel in pixel]
+        flat2 = [channel for pixel in px2 for channel in pixel]
+        sample_count = len(flat1)
+        mean1 = sum(flat1) / sample_count
+        mean2 = sum(flat2) / sample_count
+
+        sum_cross = 0.0
+        sum_sq1 = 0.0
+        sum_sq2 = 0.0
+        for i in range(sample_count):
+            d1 = flat1[i] - mean1
+            d2 = flat2[i] - mean2
+            sum_cross += d1 * d2
+            sum_sq1 += d1 * d1
+            sum_sq2 += d2 * d2
+
+        denom = math.sqrt(sum_sq1 * sum_sq2)
+        if denom > 0:
+            result["correlation"] = round(sum_cross / denom, 4)
+        else:
+            result["correlation"] = 1.0 if result["identical"] else 0.0
 
     # Save visual diff
     if save_diff:

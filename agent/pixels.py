@@ -21,10 +21,13 @@ As a module:
 import socket
 import json
 import base64
+import binascii
 import struct
 import sys
 import os
 import math
+from array import array
+from collections.abc import Sequence
 
 HOST = os.environ.get("IMAGEJAI_TCP_HOST", "localhost")
 try:
@@ -97,13 +100,118 @@ def send(cmd):
     return imagej_command(cmd)
 
 
+def _error_message(resp):
+    """Return a stable message for string or structured server errors."""
+    error = resp.get("error", "unknown") if isinstance(resp, dict) else resp
+    if isinstance(error, dict):
+        return str(error.get("message") or error.get("code") or json.dumps(error, sort_keys=True))
+    return str(error)
+
+
+class _CompactPlane(Sequence):
+    """A row-addressable float32 plane backed by one compact array."""
+
+    def __init__(self, values, width, height, offset=0):
+        self._values = values
+        self.width = width
+        self.height = height
+        self.offset = offset
+
+    def __len__(self):
+        return self.height
+
+    def __getitem__(self, index):
+        if isinstance(index, slice):
+            return [self[i] for i in range(*index.indices(self.height))]
+        if index < 0:
+            index += self.height
+        if index < 0 or index >= self.height:
+            raise IndexError(index)
+        start = self.offset + index * self.width
+        return memoryview(self._values)[start:start + self.width]
+
+    def __eq__(self, other):
+        try:
+            return len(other) == self.height and all(
+                list(self[row]) == list(other[row]) for row in range(self.height)
+            )
+        except (IndexError, TypeError):
+            return False
+
+    def iter_values(self):
+        end = self.offset + self.width * self.height
+        return iter(memoryview(self._values)[self.offset:end])
+
+
+class _CompactStack(Sequence):
+    """A slice-addressable float32 stack sharing one compact backing array."""
+
+    def __init__(self, values, width, height, slices):
+        self._values = values
+        self.width = width
+        self.height = height
+        self.slices = slices
+
+    def __len__(self):
+        return self.slices
+
+    def __getitem__(self, index):
+        if isinstance(index, slice):
+            return [self[i] for i in range(*index.indices(self.slices))]
+        if index < 0:
+            index += self.slices
+        if index < 0 or index >= self.slices:
+            raise IndexError(index)
+        return _CompactPlane(
+            self._values,
+            self.width,
+            self.height,
+            index * self.width * self.height,
+        )
+
+    def __eq__(self, other):
+        try:
+            return len(other) == self.slices and all(
+                self[slice_index] == other[slice_index]
+                for slice_index in range(self.slices)
+            )
+        except (IndexError, TypeError):
+            return False
+
+
+def _select_kth(values, k):
+    """Select one order statistic in-place without a Python-object sort copy."""
+    left = 0
+    right = len(values) - 1
+    while left < right:
+        pivot = values[(left + right) // 2]
+        i = left
+        j = right
+        while i <= j:
+            while values[i] < pivot:
+                i += 1
+            while values[j] > pivot:
+                j -= 1
+            if i <= j:
+                values[i], values[j] = values[j], values[i]
+                i += 1
+                j -= 1
+        if k <= j:
+            right = j
+        elif k >= i:
+            left = i
+        else:
+            break
+    return values[k]
+
+
 def get_pixels(x=None, y=None, width=None, height=None, slice_num=None, all_slices=False):
     """
     Fetch raw pixel data from ImageJ.
 
     Returns:
-        (pixels, meta) where pixels is a list of lists (2D) or list of 2D (3D),
-        and meta is a dict with width, height, sliceCount, type, etc.
+        (pixels, meta) where pixels is a row/slice-addressable sequence backed
+        by one compact float32 buffer, and meta contains dimensions and type.
     """
     cmd = {"command": "get_pixels"}
     if x is not None:
@@ -120,33 +228,42 @@ def get_pixels(x=None, y=None, width=None, height=None, slice_num=None, all_slic
         cmd["allSlices"] = True
 
     resp = send(cmd)
-    if not resp.get("ok"):
-        raise RuntimeError("get_pixels failed: " + resp.get("error", "unknown"))
+    if not isinstance(resp, dict) or not resp.get("ok"):
+        raise RuntimeError("get_pixels failed: " + _error_message(resp))
 
-    result = resp["result"]
-    b64 = result["data"]
-    raw = base64.b64decode(b64)
-    w = result["width"]
-    h = result["height"]
-    n_slices = result["sliceCount"]
-    n_pixels = result["nPixels"]
+    result = resp.get("result")
+    if not isinstance(result, dict):
+        raise RuntimeError("get_pixels failed: result is not an object")
+    try:
+        b64 = result["data"]
+        w = int(result["width"])
+        h = int(result["height"])
+        n_slices = int(result["sliceCount"])
+        n_pixels = int(result["nPixels"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise RuntimeError("get_pixels failed: malformed result metadata") from exc
+    if w <= 0 or h <= 0 or n_slices <= 0 or n_pixels != w * h * n_slices:
+        raise RuntimeError("get_pixels failed: inconsistent dimensions/pixel count")
+    if not isinstance(b64, str):
+        raise RuntimeError("get_pixels failed: data is not base64 text")
+    try:
+        raw = base64.b64decode(b64, validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise RuntimeError("get_pixels failed: invalid base64 pixel data") from exc
+    if len(raw) != n_pixels * 4:
+        raise RuntimeError("get_pixels failed: float32 byte length does not match metadata")
 
-    # Decode little-endian float32
-    floats = struct.unpack("<" + str(n_pixels) + "f", raw)
+    # Decode into one compact float32 buffer instead of materialising millions
+    # of Python float objects plus duplicated row lists.
+    floats = array("f")
+    floats.frombytes(raw)
+    if sys.byteorder != "little":
+        floats.byteswap()
 
-    # Reshape into 2D or 3D list
     if n_slices == 1:
-        pixels = []
-        for row in range(h):
-            pixels.append(list(floats[row * w:(row + 1) * w]))
+        pixels = _CompactPlane(floats, w, h)
     else:
-        pixels = []
-        for s in range(n_slices):
-            plane = []
-            offset = s * w * h
-            for row in range(h):
-                plane.append(list(floats[offset + row * w:offset + (row + 1) * w]))
-            pixels.append(plane)
+        pixels = _CompactStack(floats, w, h, n_slices)
 
     meta = {
         "x": result["x"],
@@ -163,21 +280,41 @@ def get_pixels(x=None, y=None, width=None, height=None, slice_num=None, all_slic
 
 def compute_stats(pixels_2d):
     """Compute basic statistics for a 2D pixel array."""
-    flat = []
-    for row in pixels_2d:
-        flat.extend(row)
+    if isinstance(pixels_2d, _CompactPlane):
+        flat = pixels_2d.iter_values()
+    else:
+        flat = (value for row in pixels_2d for value in row)
 
-    n = len(flat)
+    values = array("d")
+    for value in flat:
+        numeric = float(value)
+        if not math.isfinite(numeric):
+            raise ValueError("pixel data contains a non-finite value")
+        values.append(numeric)
+
+    n = len(values)
     if n == 0:
-        return {"count": 0}
+        return {
+            "count": 0,
+            "mean": None,
+            "std": None,
+            "min": None,
+            "max": None,
+            "median": None,
+        }
 
-    mean = sum(flat) / n
-    sorted_vals = sorted(flat)
-    median = sorted_vals[n // 2]
-    min_val = sorted_vals[0]
-    max_val = sorted_vals[-1]
-    variance = sum((x - mean) ** 2 for x in flat) / n
+    mean = math.fsum(values) / n
+    middle = n // 2
+    min_val = min(values)
+    max_val = max(values)
+    variance = math.fsum((x - mean) ** 2 for x in values) / n
     std = math.sqrt(variance)
+    if n % 2:
+        median = _select_kth(values, middle)
+    else:
+        upper = _select_kth(values, middle)
+        lower = _select_kth(values, middle - 1)
+        median = (lower + upper) / 2.0
 
     return {
         "count": n,
@@ -218,6 +355,8 @@ def find_bright_objects(pixels_2d, meta=None, threshold_factor=2.0, min_size=10)
     Returns list of objects with centroid, area, mean intensity.
     """
     stats = compute_stats(pixels_2d)
+    if stats["count"] == 0:
+        return []
     threshold = stats["mean"] + threshold_factor * stats["std"]
     h = len(pixels_2d)
     w = len(pixels_2d[0]) if h > 0 else 0

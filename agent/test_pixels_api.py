@@ -154,6 +154,68 @@ def test_get_pixels_decodes_3d_stack(monkeypatch):
     assert meta["sliceCount"] == 2
 
 
+def test_get_pixels_rejects_structured_errors_and_malformed_payloads(monkeypatch):
+    monkeypatch.setattr(
+        pixels,
+        "send",
+        lambda cmd: {"ok": False, "error": {"code": "NO_IMAGE", "message": "No image open"}},
+    )
+    with pytest.raises(RuntimeError, match="No image open"):
+        pixels.get_pixels()
+
+    monkeypatch.setattr(
+        pixels,
+        "send",
+        lambda cmd: pixel_response([1.0], width=2, height=2),
+    )
+    with pytest.raises(RuntimeError, match="inconsistent dimensions"):
+        pixels.get_pixels()
+
+
+def test_compute_stats_even_median_empty_and_nonfinite_policy():
+    assert pixels.compute_stats([[1.0, 2.0], [3.0, 4.0]])["median"] == 2.5
+    assert pixels.compute_stats([]) == {
+        "count": 0,
+        "mean": None,
+        "std": None,
+        "min": None,
+        "max": None,
+        "median": None,
+    }
+    with pytest.raises(ValueError, match="non-finite"):
+        pixels.compute_stats([[1.0, float("nan")]])
+
+
+def test_large_pixel_response_uses_one_compact_float32_backing_buffer(monkeypatch):
+    width = 2000
+    height = 2000
+    values = pixels.array("f", [1.25]) * (width * height)
+    raw = values.tobytes()
+    response = {
+        "ok": True,
+        "result": {
+            "data": base64.b64encode(raw).decode("ascii"),
+            "x": 0,
+            "y": 0,
+            "width": width,
+            "height": height,
+            "sliceStart": 1,
+            "sliceEnd": 1,
+            "sliceCount": 1,
+            "nPixels": width * height,
+            "type": "float32",
+        },
+    }
+    monkeypatch.setattr(pixels, "send", lambda cmd: response)
+
+    data, _ = pixels.get_pixels()
+
+    assert isinstance(data, pixels._CompactPlane)
+    assert data._values.itemsize == 4
+    assert len(data._values) == width * height
+    assert data[1999][1999] == pytest.approx(1.25)
+
+
 def test_stats_helpers_call_get_pixels_with_expected_args(monkeypatch):
     calls = []
     sample = [[1.0, 2.0], [3.0, 4.0]]

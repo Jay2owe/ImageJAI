@@ -37,7 +37,7 @@ Conflict watchlist:
 | Stage | Status | Commit | Verification |
 |---:|---|---|---|
 | 01 | completed | `f201e7b` | 360 offline Python passed; 2 known stage-18 context failures; 781 Java unit + 3 integration passed |
-| 02 | pending | - | - |
+| 02 | completed | `41ab3b4` | 5 hook tests passed; installer idempotent; post-commit returned in 81.9 ms; public CLI worker started |
 | 03 | pending | - | - |
 | 04 | pending | - | - |
 | 05 | pending | - | - |
