@@ -299,7 +299,9 @@ def _write_version_status(root: Path) -> dict[str, object]:
         "checked_at": time.time(),
         "graph_metadata_version": graph_version,
         "installed_version": installed,
-        "version_drift": graph_version is not None and graph_version != installed,
+        # Missing generator metadata is itself drift: the graph cannot prove
+        # that it was produced by the installed Graphify version.
+        "version_drift": graph_version != installed,
     }
     _atomic_write_json(_state_dir(root) / "version.json", status)
     return status

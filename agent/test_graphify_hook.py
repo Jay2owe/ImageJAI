@@ -124,3 +124,17 @@ def test_failed_update_writes_utf8_actionable_log(tmp_path: Path) -> None:
     content = logs[0].read_text(encoding="utf-8")
     assert "failure: μ" in content
     assert "exit code: 7" in content
+
+
+def test_missing_graph_generator_metadata_is_reported_as_version_drift(
+    tmp_path: Path, monkeypatch
+) -> None:
+    root = _make_root(tmp_path)
+    (root / "graphify-out").mkdir()
+    (root / "graphify-out" / "graph.json").write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(graphify_hook, "_graphify_version", lambda: "9.9.9")
+
+    status = graphify_hook._write_version_status(root)
+
+    assert status["graph_metadata_version"] is None
+    assert status["version_drift"] is True
