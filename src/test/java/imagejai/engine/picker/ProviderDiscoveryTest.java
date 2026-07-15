@@ -37,12 +37,16 @@ public class ProviderDiscoveryTest {
     }
 
     @Test
-    public void geminiEndpointEmbedsKeyInQueryString() {
+    public void geminiEndpointKeepsKeyInHeaderOnly() {
         Map<String, String> creds = new LinkedHashMap<String, String>();
         creds.put("gemini", "gemini-test-key");
         Map<String, ProviderDiscovery.Endpoint> endpoints =
                 ProviderDiscovery.defaultEndpoints(creds);
-        assertTrue(endpoints.get("gemini").url().endsWith("?key=gemini-test-key"));
+        ProviderDiscovery.Endpoint endpoint = endpoints.get("gemini");
+        assertEquals("https://generativelanguage.googleapis.com/v1beta/models",
+                endpoint.url());
+        assertEquals("gemini-test-key", endpoint.headers().get("x-goog-api-key"));
+        assertFalse(endpoint.url().contains("gemini-test-key"));
     }
 
     @Test
@@ -107,8 +111,8 @@ public class ProviderDiscoveryTest {
     public void discoverHandlesGeminiModelsPathPrefix() {
         Map<String, ProviderDiscovery.Endpoint> endpoints = new LinkedHashMap<String, ProviderDiscovery.Endpoint>();
         endpoints.put("gemini", new ProviderDiscovery.Endpoint("gemini",
-                "https://generativelanguage.googleapis.com/v1beta/models?key=x",
-                Collections.<String, String>emptyMap()));
+                "https://generativelanguage.googleapis.com/v1beta/models",
+                Collections.singletonMap("x-goog-api-key", "x")));
         ProviderDiscovery.HttpFetcher fetcher = (endpoint, timeout) ->
                 new ProviderDiscovery.HttpFetcher.HttpResult(200,
                         "{\"models\":[{\"name\":\"models/gemini-2.5-pro\"}]}");
@@ -206,6 +210,37 @@ public class ProviderDiscoveryTest {
                 reason.contains("401"));
         assertTrue("expected upstream message in error: " + reason,
                 reason.contains("invalid api key"));
+    }
+
+    @Test
+    public void lastErrorRedactsCredentialEchoes() {
+        Map<String, ProviderDiscovery.Endpoint> endpoints =
+                new LinkedHashMap<String, ProviderDiscovery.Endpoint>();
+        endpoints.put("gemini", new ProviderDiscovery.Endpoint("gemini",
+                "https://generativelanguage.googleapis.com/v1beta/models",
+                Collections.singletonMap("x-goog-api-key", "super-secret-key")));
+        ProviderDiscovery discovery = new ProviderDiscovery(endpoints,
+                (endpoint, timeout) -> new ProviderDiscovery.HttpFetcher.HttpResult(
+                        new IOException("request rejected: super-secret-key")));
+
+        discovery.discover("gemini", Duration.ofSeconds(1));
+
+        assertFalse(discovery.lastErrorFor("gemini").contains("super-secret-key"));
+        assertTrue(discovery.lastErrorFor("gemini").contains("[REDACTED]"));
+    }
+
+    @Test(expected = IllegalArgumentException.class)
+    public void endpointRejectsCredentialBearingUrl() {
+        new ProviderDiscovery.Endpoint("gemini",
+                "https://example.invalid/models?key=secret",
+                Collections.<String, String>emptyMap());
+    }
+
+    @Test(expected = IllegalArgumentException.class)
+    public void endpointRejectsUserInfoCredentials() {
+        new ProviderDiscovery.Endpoint("openai",
+                "https://user:secret@example.invalid/models",
+                Collections.<String, String>emptyMap());
     }
 
     @Test

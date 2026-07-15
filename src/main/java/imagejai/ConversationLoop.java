@@ -7,6 +7,7 @@ import imagejai.engine.CommandEngine;
 import imagejai.engine.ExecutionResult;
 import imagejai.engine.ExplorationEngine;
 import imagejai.engine.ImageCapture;
+import imagejai.engine.LaunchPolicy;
 import imagejai.engine.PipelineBuilder;
 import imagejai.engine.StateInspector;
 import imagejai.knowledge.PromptTemplates;
@@ -77,11 +78,12 @@ public class ConversationLoop implements ChatPanel.ChatListener {
      */
     public void refreshBackend() {
         try {
+            backendPolicy().enforce();
             this.backend = BackendFactory.create(settings);
-            System.err.println("[ImageJAI] Backend: " + backend.getProviderName()
-                    + " / " + backend.getModelName());
+            System.err.println("[ImageJAI] Approved backend is ready.");
         } catch (Exception e) {
-            System.err.println("[ImageJAI] Failed to create backend: " + e.getMessage());
+            System.err.println("[ImageJAI] Backend creation was denied or failed ("
+                    + e.getClass().getSimpleName() + ").");
             this.backend = null;
         }
         if (orchestrator != null) {
@@ -106,9 +108,11 @@ public class ConversationLoop implements ChatPanel.ChatListener {
                 try {
                     processUserMessage(text);
                 } catch (Exception e) {
-                    System.err.println("[ImageJAI] Error in conversation loop: " + e.getMessage());
+                    System.err.println("[ImageJAI] Conversation failed ("
+                            + e.getClass().getSimpleName() + ").");
                     e.printStackTrace();
-                    showAssistantMessage("An error occurred: " + e.getMessage());
+                    showAssistantMessage("The conversation could not be completed. "
+                            + "No credential or provider payload was written to the log.");
                 } finally {
                     // Re-enable input on EDT
                     SwingUtilities.invokeLater(new Runnable() {
@@ -129,6 +133,12 @@ public class ConversationLoop implements ChatPanel.ChatListener {
      * Core processing logic. Runs on a background thread.
      */
     private void processUserMessage(String userText) {
+        LaunchPolicy.Decision policy = backendPolicy();
+        if (!policy.allowed()) {
+            showAssistantMessage("This provider is blocked by the current Privacy Posture: "
+                    + policy.reason());
+            return;
+        }
         if (backend == null) {
             showAssistantMessage("No LLM backend configured. Please check your settings "
                     + "(click the gear icon).");
@@ -273,6 +283,26 @@ public class ConversationLoop implements ChatPanel.ChatListener {
                 executeMacroWithRetry(macroCode, systemPrompt, 0);
             }
         }
+    }
+
+    private LaunchPolicy.Decision backendPolicy() {
+        Settings.ModelConfig config = settings == null ? null : settings.getActiveConfig();
+        String provider = config == null || config.provider == null
+                ? "unconfigured"
+                : config.provider.trim().toLowerCase(Locale.ROOT);
+        String model = config == null || config.model == null ? "" : config.model.trim();
+        boolean local = LaunchPolicy.isLocalProviderEndpoint(
+                provider, config == null ? "" : config.url)
+                || (config != null && LaunchPolicy.isLoopbackEndpoint(config.url));
+        return LaunchPolicy.evaluate(provider, model,
+                settings == null ? null : settings.getPrivacyPosture(),
+                LaunchPolicy.RequestedCapabilities.builder(
+                                LaunchPolicy.Surface.LEGACY_CONVERSATION)
+                        .localProvider(local)
+                        .egress(!local)
+                        .mutation(true)
+                        .safeMode(settings == null || settings.safeModeEnabled)
+                        .build());
     }
 
     /**

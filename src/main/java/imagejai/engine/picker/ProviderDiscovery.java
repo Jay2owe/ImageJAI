@@ -1,10 +1,14 @@
 package imagejai.engine.picker;
 
+import imagejai.engine.LaunchPolicy;
+
 import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.net.HttpURLConnection;
+import java.net.URI;
+import java.net.URISyntaxException;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
@@ -38,14 +42,30 @@ public final class ProviderDiscovery {
 
     /** Endpoint metadata for one provider. */
     public static final class Endpoint {
+        private static final Pattern CREDENTIAL_QUERY = Pattern.compile(
+                "(?i)(?:[?&])(?:key|api_?key|token|access_token|secret|password)=");
         private final String providerId;
         private final String url;
         private final Map<String, String> headers;
 
         public Endpoint(String providerId, String url, Map<String, String> headers) {
-            this.providerId = providerId;
-            this.url = url;
-            this.headers = Collections.unmodifiableMap(new LinkedHashMap<String, String>(headers));
+            this.providerId = LaunchPolicy.requireProviderId(providerId);
+            String candidateUrl = url == null ? "" : url.trim();
+            if (candidateUrl.isEmpty() || CREDENTIAL_QUERY.matcher(candidateUrl).find()) {
+                throw new IllegalArgumentException("Provider endpoint must not contain credentials.");
+            }
+            try {
+                URI uri = new URI(candidateUrl);
+                if (uri.getUserInfo() != null) {
+                    throw new IllegalArgumentException(
+                            "Provider endpoint must not contain credentials.");
+                }
+            } catch (URISyntaxException invalid) {
+                throw new IllegalArgumentException("Provider endpoint is invalid.");
+            }
+            this.url = candidateUrl;
+            this.headers = Collections.unmodifiableMap(new LinkedHashMap<String, String>(
+                    headers == null ? Collections.<String, String>emptyMap() : headers));
         }
 
         public String providerId() { return providerId; }
@@ -100,9 +120,8 @@ public final class ProviderDiscovery {
                 "https://api.anthropic.com/v1/models",
                 anthropicHeaders(credentials.get("anthropic"))));
         out.put("gemini", new Endpoint("gemini",
-                "https://generativelanguage.googleapis.com/v1beta/models?key="
-                        + nullToEmpty(credentials.get("gemini")),
-                Collections.<String, String>emptyMap()));
+                "https://generativelanguage.googleapis.com/v1beta/models",
+                googleHeaders(credentials.get("gemini"))));
         out.put("groq", new Endpoint("groq",
                 "https://api.groq.com/openai/v1/models",
                 authBearer(credentials.get("groq"))));
@@ -148,10 +167,6 @@ public final class ProviderDiscovery {
         return Collections.unmodifiableMap(out);
     }
 
-    private static String nullToEmpty(String s) {
-        return s == null ? "" : s;
-    }
-
     /**
      * Normalise a keyless local server's base URL to its host root so a
      * {@code /v1/models} path can be appended cleanly. Accepts a saved override
@@ -185,6 +200,15 @@ public final class ProviderDiscovery {
             h.put("x-api-key", key);
         }
         h.put("anthropic-version", "2023-06-01");
+        return h;
+    }
+
+    private static Map<String, String> googleHeaders(String key) {
+        if (key == null || key.isEmpty()) {
+            return Collections.emptyMap();
+        }
+        Map<String, String> h = new LinkedHashMap<String, String>();
+        h.put("x-goog-api-key", key);
         return h;
     }
 
@@ -234,7 +258,7 @@ public final class ProviderDiscovery {
         }
         HttpFetcher.HttpResult response = fetcher.fetch(endpoint, timeout);
         if (!response.ok()) {
-            String reason = describeFailure(response);
+            String reason = describeFailure(response, endpoint);
             lastErrors.put(providerId, reason);
             return MergeFunction.LiveResult.failure(reason);
         }
@@ -243,15 +267,15 @@ public final class ProviderDiscovery {
         return MergeFunction.LiveResult.success(ids);
     }
 
-    private static String describeFailure(HttpFetcher.HttpResult response) {
+    private static String describeFailure(HttpFetcher.HttpResult response, Endpoint endpoint) {
         if (response.error != null) {
-            String message = response.error.getMessage();
+            String message = redactSecrets(response.error.getMessage(), endpoint);
             String name = response.error.getClass().getSimpleName();
             return message == null || message.isEmpty()
                     ? name
                     : name + ": " + message;
         }
-        String body = response.body == null ? "" : response.body.trim();
+        String body = redactSecrets(response.body, endpoint).trim();
         if (body.length() > 240) {
             body = body.substring(0, 240) + "…";
         }
@@ -259,6 +283,24 @@ public final class ProviderDiscovery {
             return "HTTP " + response.status + " from provider";
         }
         return "HTTP " + response.status + " — " + body;
+    }
+
+    private static String redactSecrets(String text, Endpoint endpoint) {
+        String safe = text == null ? "" : text;
+        if (endpoint != null) {
+            for (String value : endpoint.headers().values()) {
+                if (value == null || value.trim().isEmpty()) {
+                    continue;
+                }
+                safe = safe.replace(value, "[REDACTED]");
+                if (value.startsWith("Bearer ") && value.length() > "Bearer ".length()) {
+                    safe = safe.replace(value.substring("Bearer ".length()), "[REDACTED]");
+                }
+            }
+        }
+        return safe.replaceAll(
+                "(?i)([?&](?:key|api_?key|token|access_token|secret|password)=)[^&\\s]+",
+                "$1[REDACTED]");
     }
 
     /**
@@ -330,7 +372,8 @@ public final class ProviderDiscovery {
                 try {
                     connection = (HttpURLConnection) new URL(endpoint.url()).openConnection();
                     int timeoutMs = timeoutMillis(timeout);
-                    connection.setInstanceFollowRedirects(true);
+                    // Never forward a credential header to a redirect target.
+                    connection.setInstanceFollowRedirects(false);
                     connection.setConnectTimeout(timeoutMs);
                     connection.setReadTimeout(timeoutMs);
                     connection.setRequestMethod("GET");

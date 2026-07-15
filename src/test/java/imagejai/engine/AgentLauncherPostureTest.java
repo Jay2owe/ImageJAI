@@ -26,7 +26,8 @@ public class AgentLauncherPostureTest {
 
         List<AgentLauncher.AgentInfo> agents = launcher.detectAgents();
 
-        assertTrue(names(agents).contains("Gemma 4 31B"));
+        assertFalse("the bundled default is a cloud Ollama tag",
+                names(agents).contains("Gemma 4 31B"));
         assertFalse(names(agents).contains("Claude Code"));
         assertFalse(names(agents).contains("Codex CLI"));
         for (AgentLauncher.AgentInfo agent : agents) {
@@ -164,6 +165,114 @@ public class AgentLauncherPostureTest {
         } catch (PostureViolation violation) {
             assertEquals(AgentLauncher.CLOUD_OLLAMA_REFUSAL, violation.getMessage());
         }
+    }
+
+    @Test
+    public void dangerousClaudePermissionSkippingDefaultsOff() {
+        Settings settings = new Settings();
+        AgentLauncher launcher = launcherWithAllExecutables(settings);
+        AgentLauncher.AgentInfo claude = new AgentLauncher.AgentInfo(
+                "Claude Code", "claude", "", "claude", "");
+
+        assertFalse(settings.claudeUseGsdFlag);
+        assertFalse(launcher.buildAgentCommandString(claude)
+                .contains("--dangerously-skip-permissions"));
+    }
+
+    @Test(expected = IllegalArgumentException.class)
+    public void maliciousModelIdentifierCannotReachShellCommand() {
+        Settings settings = new Settings();
+        AgentLauncher launcher = launcherWithAllExecutables(settings);
+        AgentLauncher.AgentInfo malicious = new AgentLauncher.AgentInfo(
+                "Injected", "python -m agent.providers.agent_cli", "", "python",
+                "--provider openai --model good;whoami", false, "");
+
+        launcher.buildAgentCommandString(malicious);
+    }
+
+    @Test(expected = PostureViolation.class)
+    public void credentialCannotBeSmuggledIntoInspectableLaunchEnvironment() {
+        Settings settings = new Settings();
+        settings.setPrivacyPosture(PrivacyPosture.PSEUDONYMISED);
+        AgentLauncher launcher = launcherWithAllExecutables(settings);
+        AgentLauncher.AgentInfo agent = new AgentLauncher.AgentInfo(
+                "Provider", "python", "", "python", "", false, "");
+        Map<String, String> env = new LinkedHashMap<String, String>();
+        env.put("IMAGEJAI_API_KEY", "must-not-appear");
+
+        launcher.launch(agent, AgentLauncher.Mode.EXTERNAL, env);
+    }
+
+    @Test(expected = PostureViolation.class)
+    public void providerIdentityOverridesCallerClaimThatCloudAgentIsLocal() {
+        Settings settings = new Settings();
+        settings.setPrivacyPosture(PrivacyPosture.ON_PREMISES);
+        AgentLauncher launcher = launcherWithAllExecutables(settings);
+        AgentLauncher.AgentInfo falselyLocal = new AgentLauncher.AgentInfo(
+                "Provider", "python", "", "python", "", true, "");
+        Map<String, String> env = new LinkedHashMap<String, String>();
+        env.put("IMAGEJAI_PROVIDER", "openai");
+        env.put("IMAGEJAI_MODEL", "gpt-5");
+
+        launcher.launch(falselyLocal, AgentLauncher.Mode.EXTERNAL, env);
+    }
+
+    @Test(expected = PostureViolation.class)
+    public void remoteOllamaHostIsNotTreatedAsOnPremises() {
+        Settings settings = new Settings();
+        settings.setPrivacyPosture(PrivacyPosture.ON_PREMISES);
+        AgentLauncher launcher = launcherWithAllExecutables(settings);
+        AgentLauncher.AgentInfo ollama = new AgentLauncher.AgentInfo(
+                "Local model", "gemma4_31b_agent", "", "python", "",
+                true, "gemma3:27b");
+        Map<String, String> env = new LinkedHashMap<String, String>();
+        env.put("IMAGEJAI_PROVIDER", "ollama");
+        env.put("IMAGEJAI_MODEL", "gemma3:27b");
+        env.put("OLLAMA_HOST", "https://remote.example.invalid");
+
+        launcher.launch(ollama, AgentLauncher.Mode.EXTERNAL, env);
+    }
+
+    @Test
+    public void terminalTitleCannotInjectShellSyntax() {
+        Settings settings = new Settings();
+        AgentLauncher launcher = launcherWithAllExecutables(settings);
+        AgentLauncher.AgentInfo maliciousName = new AgentLauncher.AgentInfo(
+                "Agent\" & whoami & \"", "claude", "", "claude", "");
+
+        AgentLaunchSpec spec = launcher.buildExternalLaunchSpec(maliciousName);
+
+        assertFalse(spec.agentCommand.toString().contains("&"));
+    }
+
+    @Test
+    public void allEgressSurfacesShareOnPremisesDenial() {
+        for (LaunchPolicy.Surface surface : LaunchPolicy.Surface.values()) {
+            LaunchPolicy.Decision decision = LaunchPolicy.evaluate(
+                    "openai", "gpt-5", PrivacyPosture.ON_PREMISES,
+                    LaunchPolicy.RequestedCapabilities.builder(surface)
+                            .localProvider(false)
+                            .egress(true)
+                            .build());
+            assertFalse(surface.name(), decision.allowed());
+        }
+    }
+
+    @Test
+    public void loopbackAndLocalAssistantRemainAllowedOnPremises() {
+        assertTrue(LaunchPolicy.isLoopbackEndpoint("http://127.0.0.1:11434/v1"));
+        assertFalse(LaunchPolicy.isLocalProviderEndpoint(
+                "ollama", "https://remote.example.invalid"));
+        LaunchPolicy.Decision decision = LaunchPolicy.evaluate(
+                "local-assistant", "builtin", PrivacyPosture.ON_PREMISES,
+                LaunchPolicy.RequestedCapabilities.builder(
+                                LaunchPolicy.Surface.LOCAL_ASSISTANT)
+                        .localProvider(true)
+                        .egress(false)
+                        .mutation(true)
+                        .safeMode(true)
+                        .build());
+        assertTrue(decision.reason(), decision.allowed());
     }
 
     private static AgentLauncher launcherWithAllExecutables(Settings settings) {

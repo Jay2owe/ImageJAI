@@ -1,8 +1,12 @@
 package imagejai.engine.picker;
 
+import imagejai.engine.LaunchPolicy;
+
 import java.io.BufferedReader;
 import java.io.BufferedWriter;
 import java.io.IOException;
+import java.net.URI;
+import java.net.URISyntaxException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -71,7 +75,7 @@ public final class ModelsCache {
     }
 
     public Path pathFor(String providerId) {
-        return rootDir.resolve(providerId + ".json");
+        return rootDir.resolve(LaunchPolicy.requireProviderId(providerId) + ".json");
     }
 
     public boolean has(String providerId) {
@@ -113,20 +117,24 @@ public final class ModelsCache {
                       Instant fetchedAt,
                       String endpoint,
                       Set<String> modelIds) throws IOException {
+        providerId = LaunchPolicy.requireProviderId(providerId);
         if (!Files.exists(rootDir)) {
             Files.createDirectories(rootDir);
         }
         Path target = pathFor(providerId);
         Path tmp = Files.createTempFile(rootDir, providerId + "-", ".tmp");
-        Set<String> ids = modelIds == null
-                ? Collections.<String>emptySet()
-                : new LinkedHashSet<String>(modelIds);
+        Set<String> ids = new LinkedHashSet<String>();
+        if (modelIds != null) {
+            for (String id : modelIds) {
+                ids.add(LaunchPolicy.requireModelId(id));
+            }
+        }
         try (BufferedWriter w = new BufferedWriter(
                 Files.newBufferedWriter(tmp, StandardCharsets.UTF_8))) {
             w.write("{\n");
             w.write("  \"provider\": " + jsonString(providerId) + ",\n");
             w.write("  \"fetched_at\": " + jsonString(fetchedAt.toString()) + ",\n");
-            w.write("  \"endpoint\": " + jsonString(endpoint == null ? "" : endpoint) + ",\n");
+            w.write("  \"endpoint\": " + jsonString(credentialFreeEndpoint(endpoint)) + ",\n");
             w.write("  \"models\": [");
             boolean first = true;
             for (String id : ids) {
@@ -155,8 +163,36 @@ public final class ModelsCache {
         } catch (RuntimeException ex) {
             return null;
         }
-        List<String> ids = extractIds(body);
+        List<String> ids = new ArrayList<String>();
+        for (String id : extractIds(body)) {
+            try {
+                ids.add(LaunchPolicy.requireModelId(id));
+            } catch (IllegalArgumentException ignored) {
+                // Treat attacker-controlled or corrupt cache entries as absent.
+            }
+        }
         return new Snapshot(providerId, fetchedAt, ids);
+    }
+
+    static String credentialFreeEndpoint(String endpoint) {
+        if (endpoint == null || endpoint.trim().isEmpty()) {
+            return "";
+        }
+        String candidate = endpoint.trim();
+        try {
+            URI uri = new URI(candidate);
+            if (uri.isAbsolute() && uri.getHost() != null) {
+                return new URI(uri.getScheme(), null, uri.getHost(), uri.getPort(),
+                        uri.getPath(), null, null).toString();
+            }
+        } catch (URISyntaxException ignored) {
+            return "";
+        }
+        String lower = candidate.toLowerCase(java.util.Locale.ROOT);
+        if (lower.matches(".*(?:key|api_?key|token|secret|password)=.*")) {
+            return "";
+        }
+        return candidate;
     }
 
     private static String extractStringField(String body, String key) {

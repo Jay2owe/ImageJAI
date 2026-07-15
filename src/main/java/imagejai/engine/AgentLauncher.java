@@ -103,7 +103,7 @@ public class AgentLauncher {
         {"Aider", "aider", "AI pair programming in your terminal", "--read .aider.conventions.md", "false", ""},
         {"GitHub Copilot CLI", "gh copilot", "GitHub Copilot in the terminal", "", "false", ""},
         {"Gemini CLI", "gemini", "Google's Gemini CLI agent", "--yolo", "false", ""},
-        {"Open Interpreter", "interpreter", "Open-source code interpreter", "--system_message \"$(cat CLAUDE.md)\"", "false", ""},
+        {"Open Interpreter", "interpreter", "Open-source code interpreter", "", "false", ""},
         {"Cline", "cline", "Autonomous coding agent", "", "false", ""},
         {"Codex CLI", "codex", "OpenAI Codex CLI", "--dangerously-bypass-approvals-and-sandbox", "false", ""},
         {"Gemma 4 31B", GEMMA_WRAPPER_COMMAND, "Ollama-backed Gemma agent", "", "true", "gemma4:31b-cloud"},
@@ -220,34 +220,36 @@ public class AgentLauncher {
                 ? SessionAction.NEW_SESSION
                 : sessionAction;
         try {
-            refuseCloudTagIfOnPremises(agent, null);
+            LaunchPolicy.Decision decision = evaluateLaunch(agent, extraEnv).enforce();
+            Map<String, String> permittedEnv = decision.permittedEnvironment();
             syncContextFiles();
 
             if (mode == Mode.EMBEDDED) {
                 AgentLaunchSpec spec = buildEmbeddedLaunchSpec(agent, action);
-                if (extraEnv != null) {
-                    spec.env.putAll(extraEnv);
+                if (!permittedEnv.isEmpty()) {
+                    spec.env.putAll(permittedEnv);
                 }
                 try {
                     return createEmbeddedSession(agent, spec);
                 } catch (IOException e) {
-                    return fallbackToExternalAfterEmbeddedFailure(agent, extraEnv, action, e);
+                    return fallbackToExternalAfterEmbeddedFailure(agent, permittedEnv, action, e);
                 } catch (RuntimeException e) {
                     if (e instanceof PostureViolation) {
                         throw e;
                     }
-                    return fallbackToExternalAfterEmbeddedFailure(agent, extraEnv, action, e);
+                    return fallbackToExternalAfterEmbeddedFailure(agent, permittedEnv, action, e);
                 } catch (LinkageError e) {
-                    return fallbackToExternalAfterEmbeddedFailure(agent, extraEnv, action, e);
+                    return fallbackToExternalAfterEmbeddedFailure(agent, permittedEnv, action, e);
                 }
             }
 
-            return launchExternalSession(agent, extraEnv, "", action);
+            return launchExternalSession(agent, permittedEnv, "", action);
         } catch (IOException e) {
-            IJ.log("[AgentLauncher] Failed to launch " + agent.name + ": " + e.getMessage());
+            IJ.log("[AgentLauncher] Approved agent process could not be started: "
+                    + e.getClass().getSimpleName());
             return null;
         } catch (UnsupportedOperationException uoe) {
-            IJ.log("[AgentLauncher] " + uoe.getMessage());
+            IJ.log("[AgentLauncher] The requested launch mode is unavailable.");
             return null;
         }
     }
@@ -266,16 +268,17 @@ public class AgentLauncher {
                                        Map<String, String> extraEnv,
                                        String notice,
                                        SessionAction sessionAction) throws IOException {
+        LaunchPolicy.Decision decision = evaluateLaunch(agent, extraEnv).enforce();
         AgentLaunchSpec spec = buildExternalLaunchSpec(agent, sessionAction);
-        if (extraEnv != null) {
-            spec.env.putAll(extraEnv);
+        if (!decision.permittedEnvironment().isEmpty()) {
+            spec.env.putAll(decision.permittedEnvironment());
         }
         ProcessBuilder pb = new ProcessBuilder(spec.agentCommand);
         pb.directory(spec.workingDir);
         pb.environment().putAll(spec.env);
         pb.start();
 
-        IJ.log("[AgentLauncher] Launched: " + agent.name + " (" + agent.command + ")");
+        IJ.log("[AgentLauncher] Launched an approved agent session.");
         return new ExternalAgentSession(agent, true, notice);
     }
 
@@ -284,10 +287,9 @@ public class AgentLauncher {
                                                                SessionAction sessionAction,
                                                                Throwable failure)
             throws IOException {
-        String reason = "Embedded terminal failed for " + agent.name + ": "
-                + describeThrowable(failure);
+        String reason = "Embedded terminal failed (" + safeFailureCategory(failure) + ")";
         IJ.log("[AgentLauncher] " + reason + ". Falling back to external terminal.");
-        String notice = reason + ". Launching agent in an external window.";
+        String notice = reason + ". Launching the approved agent in an external window.";
         if (sessionAction == SessionAction.NEW_SESSION) {
             return launchExternalSession(agent, extraEnv, notice);
         }
@@ -305,7 +307,7 @@ public class AgentLauncher {
     }
 
     AgentLaunchSpec buildExternalLaunchSpec(AgentInfo agent, SessionAction sessionAction) {
-        refuseCloudTagIfOnPremises(agent, null);
+        evaluateLaunch(agent, null).enforce();
         String fullCommand = buildAgentCommandString(agent, sessionAction);
 
         String os = System.getProperty("os.name", "").toLowerCase();
@@ -315,7 +317,7 @@ public class AgentLauncher {
             cmd.add("cmd.exe");
             cmd.add("/c");
             cmd.add("start");
-            cmd.add("\"" + agent.name + "\"");
+            cmd.add("\"" + safeTerminalTitle(agent) + "\"");
             cmd.add("cmd.exe");
             cmd.add("/k");
             cmd.add(fullCommand);
@@ -355,7 +357,7 @@ public class AgentLauncher {
     }
 
     AgentLaunchSpec buildEmbeddedLaunchSpec(AgentInfo agent, SessionAction sessionAction) {
-        refuseCloudTagIfOnPremises(agent, null);
+        evaluateLaunch(agent, null).enforce();
         String fullCommand = buildAgentCommandString(agent, sessionAction);
 
         String os = System.getProperty("os.name", "").toLowerCase();
@@ -370,7 +372,10 @@ public class AgentLauncher {
             cmd.add("exec " + fullCommand);
         }
 
-        Map<String, String> env = new LinkedHashMap<>(System.getenv());
+        // Process creation inherits the host environment itself. Keep only
+        // ImageJAI-approved additions in the inspectable launch spec so keys
+        // can never leak through tests, logs, caches, or diagnostics.
+        Map<String, String> env = new LinkedHashMap<>();
         env.put("IMAGEJAI_TCP_PORT", String.valueOf(tcpPort));
         env.put("IMAGEJAI_SAFE_MODE", settings.safeModeEnabled ? "1" : "0");
         env.put("TERM", "xterm-256color");
@@ -439,12 +444,19 @@ public class AgentLauncher {
         }
         String flags = agent == null ? "" : agent.contextFlags;
         if (flags != null && !flags.trim().isEmpty()) {
+            LaunchPolicy.requireSafeCommandText(flags, "agent arguments");
+            validateEmbeddedIdentifiers(flags);
             parts.add(flags.trim());
         }
         if (isClaudeAgent(agent)
                 && settings.claudeUseGsdFlag
                 && AgentPlannerDetector.isInstalled(settings)) {
-            parts.add("--dangerously-skip-permissions");
+            LaunchPolicy.Decision decision = evaluateLaunch(agent, null, true).enforce();
+            if (decision.dangerousPermissionsAllowed()) {
+                parts.add("--dangerously-skip-permissions");
+                // Consent is for this launch only, never a persistent default.
+                settings.claudeUseGsdFlag = false;
+            }
         }
         StringBuilder sb = new StringBuilder();
         for (String part : parts) {
@@ -479,9 +491,13 @@ public class AgentLauncher {
             return "";
         }
         if (GEMMA_WRAPPER_COMMAND.equals(agent.command) && bundledGemmaModuleAvailable()) {
-            return pythonCommand() + " -m " + GEMMA_BUNDLED_MODULE;
+            return LaunchPolicy.requireSafeCommandText(
+                    pythonCommand() + " -m " + GEMMA_BUNDLED_MODULE,
+                    "agent command");
         }
-        return agent.command;
+        String command = LaunchPolicy.requireSafeCommandText(agent.command, "agent command");
+        validateEmbeddedIdentifiers(command);
+        return command;
     }
 
     private static boolean isClaudeAgent(AgentInfo agent) {
@@ -520,6 +536,17 @@ public class AgentLauncher {
             return "this agent";
         }
         return agent.name;
+    }
+
+    private static String safeTerminalTitle(AgentInfo agent) {
+        String name = agent == null || agent.name == null ? "ImageJAI Agent" : agent.name;
+        String safe = name.replaceAll("[^A-Za-z0-9 ._()-]+", " ")
+                .replaceAll("\\s+", " ")
+                .trim();
+        if (safe.isEmpty()) {
+            safe = "ImageJAI Agent";
+        }
+        return safe.length() > 64 ? safe.substring(0, 64) : safe;
     }
 
     /**
@@ -613,12 +640,13 @@ public class AgentLauncher {
 
     private List<AgentInfo> filterAgentsForPosture(List<AgentInfo> agents) {
         List<AgentInfo> filtered = new ArrayList<AgentInfo>();
-        PrivacyPosture posture = currentPosture();
         for (AgentInfo agent : agents) {
-            if (posture == PrivacyPosture.ON_PREMISES && !agent.isLocal()) {
-                continue;
+            try {
+                evaluateLaunch(agent, null).enforce();
+                filtered.add(agent);
+            } catch (PostureViolation denied) {
+                // A denied launch is not offered in the picker.
             }
-            filtered.add(agent);
         }
         return filtered;
     }
@@ -638,6 +666,97 @@ public class AgentLauncher {
         String tag = resolveOllamaModelTag(agent, env);
         if (isCloudOllamaTag(tag)) {
             throw new PostureViolation(CLOUD_OLLAMA_REFUSAL);
+        }
+    }
+
+    private LaunchPolicy.Decision evaluateLaunch(AgentInfo agent, Map<String, String> env) {
+        return evaluateLaunch(agent, env, false);
+    }
+
+    private LaunchPolicy.Decision evaluateLaunch(AgentInfo agent, Map<String, String> env,
+                                                 boolean dangerousPermissions) {
+        if (agent == null) {
+            return LaunchPolicy.evaluate("cli", "", currentPosture(),
+                    LaunchPolicy.RequestedCapabilities.builder(LaunchPolicy.Surface.CLI)
+                            .egress(true)
+                            .dangerousPermissions(dangerousPermissions)
+                            .environment(env)
+                            .build());
+        }
+        String provider = env == null ? "" : valueOrEmpty(env.get("IMAGEJAI_PROVIDER"));
+        String model = env == null ? "" : valueOrEmpty(env.get("IMAGEJAI_MODEL"));
+        if (isBlank(provider)) {
+            provider = providerFor(agent);
+        }
+        if (isBlank(model) && agent.isOllama()) {
+            model = resolveOllamaModelTag(agent, env);
+        }
+        boolean cloudOllama = agent.isOllama() && isCloudOllamaTag(model);
+        LaunchPolicy.Surface surface = env != null && env.containsKey("IMAGEJAI_PROVIDER")
+                ? LaunchPolicy.Surface.PROVIDER
+                : LaunchPolicy.Surface.CLI;
+        // Provider launches must derive locality from the provider identity,
+        // never from a caller-controlled AgentInfo boolean.
+        String ollamaHost = env == null ? null : env.get("OLLAMA_HOST");
+        if (isBlank(ollamaHost) && agent.isOllama()) {
+            ollamaHost = System.getenv("OLLAMA_HOST");
+        }
+        boolean local = surface == LaunchPolicy.Surface.PROVIDER
+                ? LaunchPolicy.isLocalProviderEndpoint(provider, ollamaHost) && !cloudOllama
+                : agent.isLocal() && !cloudOllama
+                        && (isBlank(ollamaHost) || LaunchPolicy.isLoopbackEndpoint(ollamaHost));
+        LaunchPolicy.Decision decision = LaunchPolicy.evaluate(provider, model,
+                currentPosture(),
+                LaunchPolicy.RequestedCapabilities.builder(surface)
+                        .localProvider(local)
+                        .egress(!local)
+                        .mutation(true)
+                        .safeMode(settings.safeModeEnabled)
+                        .dangerousPermissions(dangerousPermissions)
+                        .environment(env)
+                        .build());
+        if (!decision.allowed() && currentPosture() == PrivacyPosture.ON_PREMISES
+                && cloudOllama) {
+            throw new PostureViolation(CLOUD_OLLAMA_REFUSAL);
+        }
+        return decision;
+    }
+
+    private static String providerFor(AgentInfo agent) {
+        if (agent == null) {
+            return "cli";
+        }
+        if (agent.isOllama()) {
+            String tag = agent.defaultOllamaModel();
+            return isCloudOllamaTag(tag) ? "ollama-cloud" : "ollama";
+        }
+        String command = firstCommandToken(agent.command).toLowerCase(Locale.ROOT);
+        if ("claude".equals(command)) return "anthropic";
+        if ("gemini".equals(command)) return "gemini";
+        if ("codex".equals(command)) return "openai";
+        return "cli";
+    }
+
+    private static String valueOrEmpty(String value) {
+        return value == null ? "" : value.trim();
+    }
+
+    private static void validateEmbeddedIdentifiers(String text) {
+        List<String> tokens = shellLikeTokens(text);
+        for (int i = 0; i < tokens.size(); i++) {
+            String token = tokens.get(i);
+            if (("--provider".equals(token) || "--model".equals(token))
+                    && i + 1 < tokens.size()) {
+                if ("--provider".equals(token)) {
+                    LaunchPolicy.requireProviderId(tokens.get(++i));
+                } else {
+                    LaunchPolicy.requireModelId(tokens.get(++i));
+                }
+            } else if (token.startsWith("--provider=")) {
+                LaunchPolicy.requireProviderId(token.substring("--provider=".length()));
+            } else if (token.startsWith("--model=")) {
+                LaunchPolicy.requireModelId(token.substring("--model=".length()));
+            }
         }
     }
 
@@ -790,25 +909,18 @@ public class AgentLauncher {
         return cleaned;
     }
 
-    private static String describeThrowable(Throwable failure) {
-        if (failure == null) {
-            return "unknown error";
-        }
-        StringBuilder sb = new StringBuilder(failure.getClass().getSimpleName());
-        String message = failure.getMessage();
-        if (message != null && !message.trim().isEmpty()) {
-            sb.append(": ").append(message.trim());
-        }
-        Throwable cause = failure.getCause();
-        if (cause != null && cause != failure) {
-            sb.append("; cause ");
-            sb.append(cause.getClass().getSimpleName());
-            String causeMessage = cause.getMessage();
-            if (causeMessage != null && !causeMessage.trim().isEmpty()) {
-                sb.append(": ").append(causeMessage.trim());
+    private static String safeFailureCategory(Throwable failure) {
+        Throwable current = failure;
+        for (int depth = 0; current != null && depth < 6; depth++) {
+            String className = current.getClass().getName();
+            String message = current.getMessage();
+            if ((className != null && className.toLowerCase(Locale.ROOT).contains("winpty"))
+                    || (message != null && message.toLowerCase(Locale.ROOT).contains("winpty"))) {
+                return "WinPty unavailable";
             }
+            current = current.getCause();
         }
-        return sb.toString();
+        return failure == null ? "unknown error" : failure.getClass().getSimpleName();
     }
 
     private static boolean isBlank(String value) {

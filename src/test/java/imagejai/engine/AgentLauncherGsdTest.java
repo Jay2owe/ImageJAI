@@ -28,6 +28,10 @@ public class AgentLauncherGsdTest {
         assertTrue(launcher.buildAgentCommandString(claude)
                 .contains("--dangerously-skip-permissions"));
 
+        // Consent is consumed by exactly one command construction.
+        assertFalse(launcher.buildAgentCommandString(claude)
+                .contains("--dangerously-skip-permissions"));
+
         AgentPlannerDetector.setProbeForTests(new FixedProbe(false));
         assertFalse(launcher.buildAgentCommandString(claude)
                 .contains("--dangerously-skip-permissions"));

@@ -98,7 +98,12 @@ public class Settings {
             "4278337fd0ff3c68bfb6291042cad8ab363e1d9fbc43dcb499fe91c871902474";
     public boolean miniLmInstalled = false;
     public String miniLmModelSha256 = DEFAULT_MINILM_MODEL_SHA256;
-    public boolean claudeUseGsdFlag = true;
+    /**
+     * One-launch consent for Claude's permission-skipping flag. AgentLauncher
+     * consumes and clears this value when it constructs an approved Claude
+     * command; it is deliberately false for new and migrated configurations.
+     */
+    public transient boolean claudeUseGsdFlag = false;
     public String gsdSkillsPath = "";
 
     public String claudeInstallCommand = "npm i -g @anthropic-ai/claude-code";

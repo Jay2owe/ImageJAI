@@ -104,4 +104,23 @@ public class ModelsCacheTest {
         long tmpCount = Files.list(dir).filter(p -> p.getFileName().toString().endsWith(".tmp")).count();
         assertEquals("tmp file must be moved into place atomically", 0, tmpCount);
     }
+
+    @Test
+    public void writeStripsCredentialsAndQueryFromEndpointMetadata() throws IOException {
+        Path dir = Files.createTempDirectory("mc-test");
+        ModelsCache cache = new ModelsCache(dir);
+        cache.write("gemini", Instant.parse("2026-05-02T00:00:00Z"),
+                "https://user:secret@example.invalid/models?key=top-secret",
+                new LinkedHashSet<String>(Arrays.asList("gemini-2.5-pro")));
+
+        String json = Files.readString(cache.pathFor("gemini"));
+        assertFalse(json.contains("secret"));
+        assertFalse(json.contains("?key="));
+        assertTrue(json.contains("https://example.invalid/models"));
+    }
+
+    @Test(expected = IllegalArgumentException.class)
+    public void providerIdCannotEscapeCacheDirectory() {
+        new ModelsCache(java.nio.file.Paths.get("cache")).pathFor("../secrets");
+    }
 }

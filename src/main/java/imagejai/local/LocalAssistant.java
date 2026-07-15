@@ -6,6 +6,7 @@ import imagejai.engine.CommandEngine;
 import imagejai.engine.FuzzyMatcher;
 import imagejai.engine.FrictionLog;
 import imagejai.engine.IntentRouter;
+import imagejai.engine.LaunchPolicy;
 
 import java.util.ArrayList;
 import java.util.Collections;
@@ -120,6 +121,19 @@ public class LocalAssistant {
     }
 
     public AssistantReply handle(String input) {
+        LaunchPolicy.Decision policy = LaunchPolicy.evaluate(
+                "local-assistant", "builtin", settings.getPrivacyPosture(),
+                LaunchPolicy.RequestedCapabilities.builder(
+                                LaunchPolicy.Surface.LOCAL_ASSISTANT)
+                        .localProvider(true)
+                        .egress(false)
+                        .mutation(true)
+                        .safeMode(settings.safeModeEnabled)
+                        .build());
+        if (!policy.allowed()) {
+            return AssistantReply.text("Local Assistant is blocked by the current policy: "
+                    + policy.reason());
+        }
         if (improveSession != null) {
             if (isClearCommand(input)) {
                 improveSession = null;

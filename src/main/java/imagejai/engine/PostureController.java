@@ -71,6 +71,7 @@ public final class PostureController {
     private FolderPostureStore store = new FolderPostureStore();
     private EventBus eventBus = EventBus.getInstance();
     private Presenter presenter = NO_OP_PRESENTER;
+    private Path activeFolder;
 
     public PostureController() {
     }
@@ -92,6 +93,7 @@ public final class PostureController {
         this.settings = settings == null ? new Settings() : settings;
         this.store = store == null ? new FolderPostureStore() : store;
         this.eventBus = eventBus == null ? EventBus.getInstance() : eventBus;
+        this.activeFolder = null;
         this.settings.setPrivacyPosture(this.settings.getPrivacyPosture());
     }
 
@@ -128,7 +130,13 @@ public final class PostureController {
 
     public void onFolderOpened(Path folder) {
         Path normalised = normaliseFolder(folder);
-        if (normalised == null || isDebounced(normalised)) {
+        if (normalised == null) {
+            return;
+        }
+        synchronized (this) {
+            activeFolder = normalised;
+        }
+        if (isDebounced(normalised)) {
             return;
         }
 
@@ -157,24 +165,28 @@ public final class PostureController {
                 ? PrivacyPosture.defaultPosture()
                 : posture;
         Path normalised = normaliseFolder(folder);
+        if (normalised == null) {
+            synchronized (this) {
+                normalised = activeFolder;
+            }
+        }
         PrivacyPosture from = current();
         boolean weakens = from != null && from.isStricterThan(target);
 
         setCurrent(target, normalised, "data_governance.posture.requested", reason);
 
         if (normalised != null) {
-            Path postureFile = store().postureFile(normalised);
-            if (!Files.exists(postureFile)) {
-                try {
-                    store().write(normalised, target, "user", reason == null ? "" : reason);
-                    publish("data_governance.posture.folder_saved",
-                            from, target, normalised, reason);
-                    notifyEvent("data_governance.posture.folder_saved",
-                            from, target, normalised, reason);
-                } catch (IOException e) {
-                    warn(normalised, "Could not write " + FolderPostureStore.FILE_NAME
-                            + "; Privacy Posture is in-memory only for this session.");
-                }
+            try {
+                // Always replace the sidecar atomically. Keeping an existing
+                // record left stale policy behind after a settings change.
+                store().write(normalised, target, "user", reason == null ? "" : reason);
+                publish("data_governance.posture.folder_saved",
+                        from, target, normalised, reason);
+                notifyEvent("data_governance.posture.folder_saved",
+                        from, target, normalised, reason);
+            } catch (IOException e) {
+                warn(normalised, "Could not write " + FolderPostureStore.FILE_NAME
+                        + "; Privacy Posture is in-memory only for this session.");
             }
         }
 
@@ -184,6 +196,26 @@ public final class PostureController {
             notifyEvent("data_governance.posture.override_logged",
                     from, target, normalised, reason);
             auditPostureEvent("posture.override", from, target, normalised, reason);
+        }
+    }
+
+    /** Remove a folder decision when the user revokes it. */
+    public void revokeFolderPosture(Path folder, String reason) {
+        Path normalised = normaliseFolder(folder);
+        if (normalised == null) {
+            synchronized (this) {
+                normalised = activeFolder;
+            }
+        }
+        if (normalised == null) {
+            return;
+        }
+        try {
+            Files.deleteIfExists(store().postureFile(normalised));
+            setCurrent(PrivacyPosture.defaultPosture(), normalised,
+                    "data_governance.posture.folder_revoked", reason);
+        } catch (IOException e) {
+            warn(normalised, "Could not revoke " + FolderPostureStore.FILE_NAME + ".");
         }
     }
 
@@ -236,6 +268,9 @@ public final class PostureController {
                     : target;
             changed = from != to;
             settings.setPrivacyPosture(to);
+            if (folder != null) {
+                activeFolder = folder;
+            }
             target = to;
         }
         publish(eventType, from, target, folder, reason);

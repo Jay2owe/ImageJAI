@@ -15,6 +15,8 @@ import java.util.Comparator;
 import java.util.List;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertTrue;
 
 public class PostureControllerTest {
 
@@ -69,5 +71,34 @@ public class PostureControllerTest {
         controller.onFolderOpened(folder);
 
         assertEquals(PrivacyPosture.ON_PREMISES, controller.current());
+    }
+
+    @Test
+    public void postureChangeAtomicallyReplacesExistingSidecar() throws IOException {
+        Path folder = Files.createDirectory(tmpDir.resolve("changing-folder"));
+        store.write(folder, PrivacyPosture.STANDARD, "test", "old");
+        Settings settings = new Settings();
+        PostureController controller = new PostureController(settings, store, null);
+        controller.onFolderOpened(folder);
+
+        controller.requestPosture(PrivacyPosture.ON_PREMISES, folder, "new");
+
+        assertEquals(PrivacyPosture.ON_PREMISES, store.read(folder).get().posture());
+        assertEquals("new", store.read(folder).get().notes());
+        assertFalse(Files.exists(folder.resolve(FolderPostureStore.FILE_NAME + ".tmp")));
+    }
+
+    @Test
+    public void revokeDeletesActiveFolderSidecar() throws IOException {
+        Path folder = Files.createDirectory(tmpDir.resolve("revoked-folder"));
+        store.write(folder, PrivacyPosture.ON_PREMISES, "test", "");
+        Settings settings = new Settings();
+        PostureController controller = new PostureController(settings, store, null);
+        controller.onFolderOpened(folder);
+
+        controller.revokeFolderPosture(null, "user revoked");
+
+        assertFalse(Files.exists(folder.resolve(FolderPostureStore.FILE_NAME)));
+        assertEquals(PrivacyPosture.PSEUDONYMISED, controller.current());
     }
 }
