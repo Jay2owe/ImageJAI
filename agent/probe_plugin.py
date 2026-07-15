@@ -9,16 +9,21 @@ Usage:
     python probe_plugin.py --list                          # list all cached
 """
 
+import hashlib
 import json
 import os
 import re
 import socket
 import sys
+import tempfile
+import unicodedata
 
 HOST = "localhost"
 PORT = 7746
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 CACHE_DIR = os.path.join(SCRIPT_DIR, ".tmp", "plugin_args")
+CACHE_SCHEMA_VERSION = 2
+_FINGERPRINT_CACHE = {"signature": None, "value": None}
 
 # REGRESSION GUARD: Past probe features mixed terse legacy names, CLI-only behavior, and raw TCP cache logic.
 # The fix: add clear helper names to __all__, keep compatibility aliases, and test cache plus CLI routing.
@@ -108,9 +113,95 @@ def _request_probe_command(plugin_name):
 
 
 def cache_key(plugin_name):
-    """Convert plugin name to a safe filename."""
+    """Convert a plugin name to a safe, collision-resistant filename."""
     safe = re.sub(r'[^\w\-]', '_', plugin_name).strip('_')
-    return safe + ".json"
+    if not safe:
+        safe = "plugin"
+    exact_name = unicodedata.normalize("NFKC", plugin_name).strip()
+    digest = hashlib.sha256(exact_name.encode("utf-8")).hexdigest()[:12]
+    return "{}-{}.json".format(safe, digest)
+
+
+def plugin_fingerprint():
+    """Return a stable identity for the installed Fiji command inventory."""
+    paths = [os.path.join(SCRIPT_DIR, ".tmp", name)
+             for name in ("commands.raw.txt", "update_sites.json")]
+    stats = []
+    for path in paths:
+        try:
+            stat = os.stat(path)
+            stats.append((path, stat.st_size, stat.st_mtime_ns))
+        except OSError:
+            stats.append((path, None, None))
+    signature = (os.environ.get("IMAGEJAI_PLUGIN_FINGERPRINT", ""), tuple(stats))
+    if _FINGERPRINT_CACHE["signature"] == signature:
+        return _FINGERPRINT_CACHE["value"]
+
+    digest = hashlib.sha256()
+    digest.update(b"imagejai-probe-cache-v2\0")
+    digest.update(signature[0].encode("utf-8"))
+    for path in paths:
+        digest.update(os.path.basename(path).encode("utf-8"))
+        try:
+            with open(path, "rb") as handle:
+                for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                    digest.update(chunk)
+        except OSError:
+            digest.update(b"<missing>")
+    value = digest.hexdigest()
+    _FINGERPRINT_CACHE.update(signature=signature, value=value)
+    return value
+
+
+def _atomic_json_write(path, payload):
+    """Atomically replace *path*, preserving an existing file on failure."""
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    temp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(
+                mode="w", encoding="utf-8", dir=os.path.dirname(path),
+                prefix=os.path.basename(path) + ".", suffix=".tmp",
+                delete=False) as handle:
+            temp_path = handle.name
+            json.dump(payload, handle, indent=2, ensure_ascii=False)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp_path, path)
+        temp_path = None
+    finally:
+        if temp_path:
+            try:
+                os.unlink(temp_path)
+            except OSError:
+                pass
+
+
+def _read_cache_record(path, expected_name=None):
+    try:
+        with open(path, encoding="utf-8") as handle:
+            record = json.load(handle)
+    except (OSError, ValueError, TypeError):
+        return None
+    if not isinstance(record, dict):
+        return None
+    if record.get("schema_version") != CACHE_SCHEMA_VERSION:
+        return None
+    if record.get("fingerprint") != plugin_fingerprint():
+        return None
+    if expected_name is not None and record.get("plugin") != expected_name:
+        return None
+    result = record.get("result")
+    return result if isinstance(result, dict) else None
+
+
+def _write_cache_record(path, plugin_name, result):
+    _atomic_json_write(path, {
+        "schema_version": CACHE_SCHEMA_VERSION,
+        "plugin": plugin_name,
+        "fingerprint": plugin_fingerprint(),
+        "result": result,
+    })
 
 
 def probe_plugin(plugin_name, force=False):
@@ -119,9 +210,10 @@ def probe_plugin(plugin_name, force=False):
 
     # Check cache first
     cpath = os.path.join(CACHE_DIR, cache_key(plugin_name))
-    if not force and os.path.exists(cpath):
-        with open(cpath, encoding="utf-8") as f:
-            return json.load(f)
+    if not force:
+        cached = _read_cache_record(cpath, expected_name=plugin_name)
+        if cached is not None:
+            return cached
 
     # Probe via TCP
     resp = _request_probe_command(plugin_name)
@@ -131,8 +223,7 @@ def probe_plugin(plugin_name, force=False):
     result = resp["result"]
 
     # Cache it
-    with open(cpath, "w", encoding="utf-8") as f:
-        json.dump(result, f, indent=2)
+    _write_cache_record(cpath, plugin_name, result)
 
     return result
 
@@ -140,10 +231,7 @@ def probe_plugin(plugin_name, force=False):
 def lookup_cached_probe(plugin_name):
     """Look up cached plugin info without probing."""
     cpath = os.path.join(CACHE_DIR, cache_key(plugin_name))
-    if os.path.exists(cpath):
-        with open(cpath, encoding="utf-8") as f:
-            return json.load(f)
-    return None
+    return _read_cache_record(cpath, expected_name=plugin_name)
 
 
 def search_cached_probes(keyword):
@@ -156,8 +244,9 @@ def search_cached_probes(keyword):
         if not fname.endswith(".json"):
             continue
         fpath = os.path.join(CACHE_DIR, fname)
-        with open(fpath, encoding="utf-8") as f:
-            data = json.load(f)
+        data = _read_cache_record(fpath)
+        if data is None:
+            continue
         # Search in plugin name, field labels, macro keys, options
         blob = json.dumps(data).lower()
         if keyword_lower in blob:
@@ -174,8 +263,9 @@ def list_cached_probes():
         if not fname.endswith(".json"):
             continue
         fpath = os.path.join(CACHE_DIR, fname)
-        with open(fpath, encoding="utf-8") as f:
-            data = json.load(f)
+        data = _read_cache_record(fpath)
+        if data is None:
+            continue
         results.append(data.get("plugin", fname))
     return results
 

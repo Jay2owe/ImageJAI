@@ -22,7 +22,9 @@ import json
 import math
 import os
 import random
+import shutil
 import sys
+import tempfile
 import time
 from datetime import datetime
 
@@ -34,6 +36,8 @@ TMP_DIR = os.path.join(SCRIPT_DIR, ".tmp")
 IMAGE_EXTENSIONS = {".tif", ".tiff", ".nd2", ".lif", ".czi", ".png", ".jpg", ".jpeg"}
 BIOFORMATS_EXTENSIONS = {".nd2", ".lif", ".czi"}
 MAX_IMAGES = 20
+DEFAULT_TRAINING_SEED = 0
+_TRAINING_RNG = random.Random(DEFAULT_TRAINING_SEED)
 
 THRESHOLD_METHODS = ["Otsu", "Triangle", "Li", "Huang", "MaxEntropy", "Yen", "Default"]
 SEGMENTATION_BLUR_SIGMAS = [0.5, 1.0, 1.5, 2.0, 3.0]
@@ -43,6 +47,211 @@ PARTICLE_MIN_SIZES = [20, 50, 100, 200, 500]
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+def _macro_string(value):
+    """Quote a value for an ImageJ macro string literal."""
+    return '"{}"'.format(str(value).replace("\\", "/").replace('"', '\\"'))
+
+
+def _response_result(response):
+    if isinstance(response, dict) and response.get("ok"):
+        result = response.get("result")
+        return result if isinstance(result, dict) else {}
+    return {}
+
+
+class ImageJWorkflowGuard(object):
+    """Transactionally isolate trainer/practice work from the user's Fiji state.
+
+    Images created during the workflow are closed by title. Results and ROIs
+    are snapshotted to private temporary files and restored in ``finally``;
+    measurement preferences and the active image/cursor are restored too.
+    """
+
+    def __init__(self, ij_module, temp_root=TMP_DIR):
+        self.ij = ij_module
+        self.temp_root = temp_root
+        self.temp_dir = None
+        self.results_path = None
+        self.rois_path = None
+        self.baseline_titles = set()
+        self.active_title = None
+        self.display_state = {}
+        self.settings = {}
+        self._entered = False
+
+    def _state(self):
+        try:
+            return _response_result(self.ij.get_state())
+        except Exception:
+            return {}
+
+    def _run_groovy(self, code):
+        if hasattr(self.ij, "run_groovy"):
+            return self.ij.run_groovy(code)
+        return self.ij.imagej_command({
+            "command": "run_script", "language": "groovy", "code": code,
+        })
+
+    def __enter__(self):
+        os.makedirs(self.temp_root, exist_ok=True)
+        self.temp_dir = tempfile.mkdtemp(prefix="workflow-state-", dir=self.temp_root)
+        self.results_path = os.path.join(self.temp_dir, "results.csv").replace("\\", "/")
+        self.rois_path = os.path.join(self.temp_dir, "rois.zip").replace("\\", "/")
+
+        state = self._state()
+        self.baseline_titles = {
+            image.get("title") for image in state.get("allImages", [])
+            if isinstance(image, dict) and image.get("title")
+        }
+        active = state.get("activeImage")
+        if isinstance(active, dict):
+            self.active_title = active.get("title")
+        self.results_present = bool(state.get("resultsTable", "").strip())
+        try:
+            self.display_state = _response_result(self.ij.get_display_state())
+        except Exception:
+            self.display_state = {}
+
+        snapshot = """
+import groovy.json.JsonOutput
+import ij.Prefs
+import ij.WindowManager
+import ij.measure.ResultsTable
+import ij.plugin.filter.Analyzer
+import ij.plugin.frame.RoiManager
+def resultPath = %s
+def roiPath = %s
+def rt = ResultsTable.getResultsTable()
+def resultsWindowPresent = WindowManager.getWindow("Results") != null
+if (rt != null && (rt.size() > 0 || resultsWindowPresent)) rt.save(resultPath)
+def rm = RoiManager.getInstance()
+if (rm != null && rm.getCount() > 0) rm.runCommand("Save", roiPath)
+def redirectTargetField = Analyzer.class.getDeclaredField("redirectTarget")
+redirectTargetField.setAccessible(true)
+def redirectTarget = redirectTargetField.getInt(null)
+def redirect = redirectTarget == 0 ? null : WindowManager.getImage(redirectTarget)
+if (redirect == null && redirectTarget != 0) {
+    def redirectImageField = Analyzer.class.getDeclaredField("redirectImage")
+    redirectImageField.setAccessible(true)
+    redirect = redirectImageField.get(null)
+}
+return JsonOutput.toJson([
+    blackBackground: Prefs.blackBackground,
+    measurements: Analyzer.getMeasurements(),
+    precision: Analyzer.getPrecision(),
+    redirectTitle: redirect == null ? null : redirect.getTitle(),
+    resultsWindowPresent: resultsWindowPresent,
+    roiManagerPresent: rm != null,
+    roiCount: rm == null ? 0 : rm.getCount(),
+    roiSelectedIndex: rm == null ? -1 : rm.getSelectedIndex()
+])
+""" % (json.dumps(self.results_path), json.dumps(self.rois_path))
+        try:
+            response = self._run_groovy(snapshot)
+            output = _response_result(response).get("output", "")
+            if output:
+                self.settings = json.loads(output.strip().splitlines()[-1])
+        except Exception:
+            self.settings = {}
+        if not self.settings:
+            shutil.rmtree(self.temp_dir, ignore_errors=True)
+            self.temp_dir = None
+            raise RuntimeError("Could not snapshot Fiji Results/ROI/settings; workflow was not started")
+        self._entered = True
+        return self
+
+    def close_created_images(self):
+        """Close only images absent from the entry snapshot."""
+        state = self._state()
+        current = [
+            image.get("title") for image in state.get("allImages", [])
+            if isinstance(image, dict) and image.get("title")
+        ]
+        created = [title for title in current if title not in self.baseline_titles]
+        if not created:
+            return
+        macro = "".join(
+            "if (isOpen({0})) {{ selectWindow({0}); close(); }}".format(_macro_string(title))
+            for title in reversed(created)
+        )
+        self.ij.execute_macro(macro)
+
+    def clear_workflow_state(self):
+        """Start a task cleanly after its user state has been snapshotted."""
+        self.close_created_images()
+        self.ij.execute_macro(
+            'run("Clear Results");'
+            'if (roiManager("count") > 0) roiManager("reset");'
+        )
+
+    def restore(self):
+        if not self._entered:
+            return
+        try:
+            self.close_created_images()
+            settings = self.settings
+            restore = """
+import ij.Prefs
+import ij.WindowManager
+import ij.measure.ResultsTable
+import ij.plugin.filter.Analyzer
+import ij.plugin.frame.RoiManager
+def resultPath = %s
+def roiPath = %s
+def current = ResultsTable.getResultsTable()
+if (current != null) current.reset()
+if (new File(resultPath).isFile()) {
+    def restored = ResultsTable.open(resultPath)
+    Analyzer.setResultsTable(restored)
+    if (%s) restored.show("Results")
+} else if (current != null) {
+    Analyzer.setResultsTable(current)
+    def resultsWindow = WindowManager.getWindow("Results")
+    if (resultsWindow != null) resultsWindow.close()
+}
+def rm = RoiManager.getInstance()
+if (rm != null) rm.reset()
+if (new File(roiPath).isFile()) {
+    if (rm == null) rm = new RoiManager()
+    rm.runCommand("Open", roiPath)
+}
+if (%d >= 0 && rm != null && rm.getCount() > %d) rm.select(%d)
+if (!%s && rm != null) rm.close()
+Analyzer.setMeasurements(%d)
+Analyzer.setPrecision(%d)
+Prefs.blackBackground = %s
+def redirectTitle = %s
+Analyzer.setRedirectImage(redirectTitle == null ? null : WindowManager.getImage(redirectTitle))
+return "restored"
+""" % (
+                json.dumps(self.results_path), json.dumps(self.rois_path),
+                "true" if settings.get("resultsWindowPresent", False) else "false",
+                int(settings.get("roiSelectedIndex", -1)),
+                int(settings.get("roiSelectedIndex", -1)),
+                int(settings.get("roiSelectedIndex", -1)),
+                "true" if settings.get("roiManagerPresent", False) else "false",
+                int(settings.get("measurements", 0)), int(settings.get("precision", 3)),
+                "true" if settings.get("blackBackground", False) else "false",
+                json.dumps(settings.get("redirectTitle")),
+            )
+            if settings:
+                self._run_groovy(restore)
+            if self.active_title:
+                display = self.display_state
+                macro = "selectWindow({});".format(_macro_string(self.active_title))
+                if all(key in display for key in ("c", "z", "t")):
+                    macro += "Stack.setPosition({},{},{});".format(
+                        int(display["c"]), int(display["z"]), int(display["t"]))
+                self.ij.execute_macro(macro)
+        finally:
+            self._entered = False
+            if self.temp_dir:
+                shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        self.restore()
+        return False
 
 def _import_ij():
     """Import ij.py functions from the same directory."""
@@ -70,8 +279,10 @@ def _connect_or_die(ij):
 
 
 def _close_all(ij):
-    """Close all open images (but not Fiji toolbar)."""
-    ij.execute_macro('close("*");')
+    """Close only images created inside the active training transaction."""
+    guard = getattr(ij, "_imagejai_workflow_guard", None)
+    if guard is not None:
+        guard.close_created_images()
     time.sleep(0.3)
 
 
@@ -80,10 +291,38 @@ def _open_image(ij, filepath):
     filepath_escaped = filepath.replace("\\", "/")
     ext = os.path.splitext(filepath)[1].lower()
     if ext in BIOFORMATS_EXTENSIONS:
+        # Container files may hold hundreds of series. Enumerate metadata
+        # without pixels, then deliberately open the first series only.
+        series_code = """
+import loci.formats.ImageReader
+def reader = new ImageReader()
+try {
+    reader.setId(%s)
+    return String.valueOf(reader.getSeriesCount())
+} finally {
+    reader.close()
+}
+""" % json.dumps(filepath_escaped)
+        series_count = 0
+        try:
+            if hasattr(ij, "run_groovy"):
+                series_response = ij.run_groovy(series_code)
+            else:
+                series_response = ij.imagej_command({
+                    "command": "run_script", "language": "groovy", "code": series_code,
+                })
+            series_count = _safe_int(_response_result(series_response).get("output", "").strip())
+        except Exception:
+            return False
+        if series_count < 1:
+            return False
+        setattr(ij, "_imagejai_last_series_count", series_count)
+        macro_path = filepath_escaped.replace("]", "\\]")
         macro = (
             'run("Bio-Formats Importer", '
-            '"open=[' + filepath_escaped + '] '
-            'color_mode=Default view=Hyperstack stack_order=XYCZT");'
+            '"open=[' + macro_path + '] '
+            'autoscale=false color_mode=Default view=Hyperstack '
+            'stack_order=XYCZT series_1");'
         )
     else:
         macro = 'open("' + filepath_escaped + '");'
@@ -191,6 +430,10 @@ def characterize_image(ij, filepath):
     if not _open_image(ij, filepath):
         record["error"] = "Failed to open"
         return record
+    series_count = getattr(ij, "_imagejai_last_series_count", None)
+    if series_count is not None and os.path.splitext(filepath)[1].lower() in BIOFORMATS_EXTENSIONS:
+        record["series_count"] = series_count
+        record["series_selected"] = 1
 
     # Image info
     info_resp = ij.get_image_info()
@@ -256,7 +499,7 @@ def discover_thresholds(ij, image_records, image_dir):
     # Pick up to 5 representative images
     candidates = [r for r in image_records if "error" not in r]
     if len(candidates) > 5:
-        candidates = random.sample(candidates, 5)
+        candidates = _TRAINING_RNG.sample(candidates, 5)
 
     threshold_results = []
     for i, rec in enumerate(candidates):
@@ -312,7 +555,7 @@ def test_segmentation(ij, image_records, image_dir):
     """Test classical and plugin-based segmentation on representative images."""
     candidates = [r for r in image_records if "error" not in r]
     if len(candidates) > 3:
-        candidates = random.sample(candidates, 3)
+        candidates = _TRAINING_RNG.sample(candidates, 3)
 
     seg_results = []
     for i, rec in enumerate(candidates):
@@ -336,6 +579,7 @@ def test_segmentation(ij, image_records, image_dir):
             macro = (
                 'run("Gaussian Blur...", "sigma=1.5");'
                 'setAutoThreshold("Otsu dark");'
+                'setOption("BlackBackground", true);'
                 'run("Convert to Mask");'
                 'run("Watershed");'
                 'run("Set Measurements...", "area mean min centroid shape redirect=None decimal=3");'
@@ -422,6 +666,7 @@ def test_segmentation(ij, image_records, image_dir):
                 macro = (
                     'run("Gaussian Blur 3D...", "x=2 y=2 z=1");'
                     'setAutoThreshold("Otsu dark");'
+                    'setOption("BlackBackground", true);'
                     'run("Convert to Mask", "method=Otsu background=Dark");'
                     'run("3D Objects Counter", '
                     '"threshold=128 min.=100 max.=9999999 objects");'
@@ -459,7 +704,7 @@ def tune_parameters(ij, image_records, best_threshold):
     """Vary blur sigma and min particle size to find optimal parameters."""
     candidates = [r for r in image_records if "error" not in r]
     if len(candidates) > 3:
-        candidates = random.sample(candidates, 3)
+        candidates = _TRAINING_RNG.sample(candidates, 3)
 
     best_params = {"sigma": 1.5, "min_size": 50, "threshold": best_threshold}
     all_runs = []
@@ -492,6 +737,7 @@ def tune_parameters(ij, image_records, best_threshold):
                 macro = (
                     'run("Gaussian Blur...", "sigma={sigma}");'
                     'setAutoThreshold("{thresh} dark");'
+                    'setOption("BlackBackground", true);'
                     'run("Convert to Mask");'
                     'run("Watershed");'
                     'run("Set Measurements...", "area mean min centroid shape redirect=None decimal=3");'
@@ -614,7 +860,7 @@ def build_profile(image_dir, image_records, threshold_results, seg_results,
     if tuned_params and valid:
         avg_area = _median([r.get("width", 0) * r.get("height", 0) for r in valid])
         # Use the count from the tuned parameters' typical run
-        sample_counts = [run.get("count", 0) for run in seg_results
+        sample_counts = [a.get("count", 0) for run in seg_results
                          for a in run.get("approaches", {}).values()
                          if a.get("success") and a.get("count", 0) > 0]
         if sample_counts:
@@ -706,10 +952,26 @@ def write_learnings(profile):
 # Main pipeline
 # ---------------------------------------------------------------------------
 
-def train(image_dir, domain=None):
-    """Run all training phases."""
+def train(image_dir, domain=None, seed=DEFAULT_TRAINING_SEED):
+    """Run all training phases inside an isolated, deterministic transaction."""
     ij = _import_ij()
     _connect_or_die(ij)
+    _TRAINING_RNG.seed(seed)
+    guard = ImageJWorkflowGuard(ij)
+    with guard:
+        setattr(ij, "_imagejai_workflow_guard", guard)
+        try:
+            guard.clear_workflow_state()
+            return _train_connected(ij, image_dir, domain=domain)
+        finally:
+            try:
+                delattr(ij, "_imagejai_workflow_guard")
+            except AttributeError:
+                pass
+
+
+def _train_connected(ij, image_dir, domain=None):
+    """Implementation for an already-connected, guarded Fiji session."""
 
     image_dir = os.path.abspath(image_dir)
     if not os.path.isdir(image_dir):
@@ -732,10 +994,12 @@ def train(image_dir, domain=None):
         print("Supported formats: {}".format(", ".join(sorted(IMAGE_EXTENSIONS))))
         sys.exit(1)
 
+    all_files.sort(key=lambda path: path.casefold())
+
     # Sample if too many
     if len(all_files) > MAX_IMAGES:
-        print("Found {} images, sampling {} randomly.".format(len(all_files), MAX_IMAGES))
-        all_files = random.sample(all_files, MAX_IMAGES)
+        print("Found {} images, sampling {} deterministically.".format(len(all_files), MAX_IMAGES))
+        all_files = _TRAINING_RNG.sample(all_files, MAX_IMAGES)
     else:
         print("Found {} images.".format(len(all_files)))
 
@@ -920,6 +1184,8 @@ Examples:
                         help="Show current lab profile")
     parser.add_argument("--reset", action="store_true",
                         help="Clear lab-specific learnings")
+    parser.add_argument("--seed", type=int, default=DEFAULT_TRAINING_SEED,
+                        help="Deterministic sampling seed (default: %(default)s)")
 
     args = parser.parse_args()
 
@@ -928,7 +1194,7 @@ Examples:
     elif args.reset:
         reset_profile()
     elif args.image_dir:
-        train(args.image_dir, domain=args.domain)
+        train(args.image_dir, domain=args.domain, seed=args.seed)
     else:
         parser.print_help()
         sys.exit(1)

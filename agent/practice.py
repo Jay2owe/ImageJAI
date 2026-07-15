@@ -32,11 +32,13 @@ RESULTS_FILE = os.path.join(TMP_DIR, "practice_results.json")
 
 # Try to import agent tools -- graceful fallback if unavailable
 try:
+    import ij as _ij_module
     from ij import imagej_command, execute_macro, get_state, get_image_info, \
         get_results_table, explore_thresholds, get_histogram, capture_image
     HAS_IJ = True
 except ImportError:
-    HAS_IJ = True  # module exists, connection may not
+    _ij_module = None
+    HAS_IJ = False
 
 try:
     from results_parser import parse_results, column_stats, detect_outliers, summarize
@@ -49,6 +51,9 @@ try:
     HAS_AUTOPSY = True
 except ImportError:
     HAS_AUTOPSY = False
+
+from train_agent import ImageJWorkflowGuard
+from macro_lint import lint_macro
 
 
 # ---------------------------------------------------------------------------
@@ -69,8 +74,10 @@ class PracticeRunner(object):
         self.results = {
             "session": datetime.now().isoformat(),
             "tasks": [],
+            "lint_warnings": [],
         }
         self.autopsy = Autopsy() if HAS_AUTOPSY else None
+        self._workflow_guard = None
         os.makedirs(TMP_DIR, exist_ok=True)
 
         if self.live:
@@ -88,6 +95,30 @@ class PracticeRunner(object):
         """Execute a macro and return the response. Logs failures to autopsy."""
         if not self.connected:
             return {"ok": False, "error": "Not connected to TCP server"}
+
+        # Never allow a practice macro to close unrelated user images. Legacy
+        # tasks still contain Close All calls; translate those into scoped
+        # cleanup while leaving the rest of a compound macro intact.
+        close_pattern = re.compile(
+            r'(?:run\s*\(\s*["\']Close All["\']\s*\)|close\s*\(\s*["\']\*["\']\s*\))\s*;?',
+            re.IGNORECASE,
+        )
+        if close_pattern.search(code):
+            if self._workflow_guard is None:
+                return {"ok": False, "error": "Unsafe Close All outside workflow transaction"}
+            self._workflow_guard.close_created_images()
+            code = close_pattern.sub("", code)
+            if not code.strip():
+                return {"ok": True, "result": {"success": True, "output": ""}}
+        if (re.search(r'run\s*\(\s*["\']Convert to Mask["\']', code, re.IGNORECASE)
+                and not re.search(r'setOption\s*\(\s*["\']BlackBackground["\']\s*,\s*true',
+                                  code, re.IGNORECASE)):
+            code = 'setOption("BlackBackground", true);\n' + code
+        for warning in lint_macro(code):
+            self.results["lint_warnings"].append({
+                "description": description,
+                "warning": warning,
+            })
 
         try:
             resp = execute_macro(code)
@@ -128,13 +159,10 @@ class PracticeRunner(object):
         return []
 
     def _close_all(self):
-        """Close all images to start fresh."""
-        self._run_macro('run("Close All");', "Close all images")
-        # Clear results
-        self._run_macro(
-            'if (isOpen("Results")) { selectWindow("Results"); run("Close"); }',
-            "Clear Results table"
-        )
+        """Clear only state protected by the current workflow transaction."""
+        if self._workflow_guard is None:
+            raise RuntimeError("Practice cleanup requires a workflow transaction")
+        self._workflow_guard.clear_workflow_state()
 
     def _capture(self, name):
         """Save a screenshot to .tmp/."""
@@ -195,14 +223,15 @@ class PracticeRunner(object):
             self.results["tasks"].append(result)
             return result
 
-        # Close everything before starting
-        self._close_all()
-        time.sleep(0.3)
-
+        guard = ImageJWorkflowGuard(_ij_module)
         try:
-            result = task_func(self)
-            result["name"] = task_name
-            result["description"] = description
+            with guard:
+                self._workflow_guard = guard
+                guard.clear_workflow_state()
+                time.sleep(0.3)
+                result = task_func(self)
+                result["name"] = task_name
+                result["description"] = description
         except Exception as e:
             result = {
                 "name": task_name,
@@ -212,6 +241,8 @@ class PracticeRunner(object):
                 "attempts": [],
                 "learnings": ["Task crashed: %s" % str(e)],
             }
+        finally:
+            self._workflow_guard = None
 
         self.results["tasks"].append(result)
 

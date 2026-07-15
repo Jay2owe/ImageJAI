@@ -24,6 +24,7 @@ import re
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 RECIPES_DIR = os.path.join(SCRIPT_DIR, "recipes")
+REFERENCES_DIR = os.path.join(SCRIPT_DIR, "references")
 TMP_DIR = os.path.join(SCRIPT_DIR, ".tmp")
 
 
@@ -95,9 +96,13 @@ def _parse_yaml_simple(path):
 
 def load_reference(name):
     """Load a reference document."""
-    path = os.path.join(SCRIPT_DIR, name)
+    # References are shipped in agent/references. Refuse traversal so a query
+    # cannot turn this research-only helper into an arbitrary file reader.
+    path = os.path.abspath(os.path.join(REFERENCES_DIR, name))
+    if os.path.commonpath((path, os.path.abspath(REFERENCES_DIR))) != os.path.abspath(REFERENCES_DIR):
+        return ""
     if os.path.exists(path):
-        with open(path) as f:
+        with open(path, encoding="utf-8") as f:
             return f.read()
     return ""
 

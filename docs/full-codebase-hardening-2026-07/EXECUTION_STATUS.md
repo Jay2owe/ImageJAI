@@ -39,7 +39,7 @@ Conflict watchlist:
 | 01 | completed | `f201e7b` | 360 offline Python passed; 2 known stage-18 context failures; 781 Java unit + 3 integration passed |
 | 02 | completed | `41ab3b4`, `a0dfb36` | 6 hook tests passed; installer idempotent; post-commit returned in 81.9 ms; public CLI rebuilt 25,707 nodes |
 | 03 | completed | `30aa947` | 9 Python loopback + 27 focused Java passed; Maven package 789; offline Python 401 passed with 2 stage-18 failures |
-| 04 | pending | - | - |
+| 04 | completed | `2f4b81f` | 12 focused Java + 11 Python API tests passed; Maven package green; authenticated privacy-governed streams retain 8/256 bounds; live Fiji stream deferred |
 | 05 | pending | - | - |
 | 06 | completed | `0e51e0f` | 15 policy + 207 Gemma/provider tests passed; bundled import passed; Maven package 789 tests passed |
 | 07 | pending | - | - |
