@@ -16,6 +16,7 @@ import socket
 import sys
 import time
 import argparse
+import secrets
 
 TCP_HOST = os.environ.get("IMAGEJAI_TCP_HOST", "127.0.0.1")
 try:
@@ -55,6 +56,11 @@ def _snapshot_file(host=None, port=None):
 
 def _subscriber_pid_file(host=None, port=None):
     return os.path.join(CACHE_DIR, "event_subscriber_{}.pid".format(
+        _endpoint_slug(host, port)))
+
+
+def _subscriber_lease_file(host=None, port=None):
+    return os.path.join(CACHE_DIR, "event_subscriber_{}.lease".format(
         _endpoint_slug(host, port)))
 
 
@@ -122,40 +128,221 @@ def _snapshot_matches_endpoint(snap, host=None, port=None):
             and snap_port == int(port))
 
 
-def _pid_alive(pid):
-    """True if a process with the given PID is currently running. Windows-
-    friendly — uses ``tasklist`` rather than ``os.kill(pid, 0)`` which has
-    spotty behaviour on Windows Python."""
+def _process_identity(pid):
+    """Return a PID-reuse-safe process start marker where available."""
     if pid is None or pid <= 0:
-        return False
+        return None
     try:
         if sys.platform == "win32":
-            import subprocess as _sp
-            out = _sp.check_output(
-                ["tasklist", "/FI", "PID eq " + str(pid), "/NH"],
-                stderr=_sp.DEVNULL, timeout=3).decode(errors="ignore")
-            return str(pid) in out
-        else:
-            os.kill(pid, 0)
-            return True
+            import ctypes
+            handle = ctypes.windll.kernel32.OpenProcess(0x1000, False, int(pid))
+            if not handle:
+                return None
+            try:
+                creation = ctypes.c_ulonglong()
+                exit_time = ctypes.c_ulonglong()
+                kernel = ctypes.c_ulonglong()
+                user = ctypes.c_ulonglong()
+                ok = ctypes.windll.kernel32.GetProcessTimes(
+                    handle,
+                    ctypes.byref(creation),
+                    ctypes.byref(exit_time),
+                    ctypes.byref(kernel),
+                    ctypes.byref(user),
+                )
+                return str(creation.value) if ok else str(int(pid))
+            finally:
+                ctypes.windll.kernel32.CloseHandle(handle)
+        proc_stat = "/proc/{}/stat".format(int(pid))
+        if os.path.exists(proc_stat):
+            with open(proc_stat, "r", encoding="ascii") as handle:
+                fields = handle.read().split()
+            return fields[21] if len(fields) > 21 else str(int(pid))
+        os.kill(pid, 0)
+        return str(int(pid))
     except Exception:
+        return None
+
+
+def _pid_alive(pid):
+    return _process_identity(pid) is not None
+
+
+def _atomic_write_json(path, value):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    temporary = path + ".{}.tmp".format(os.getpid())
+    try:
+        with open(temporary, "w", encoding="utf-8") as handle:
+            json.dump(value, handle, sort_keys=True, separators=(",", ":"))
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    finally:
+        try:
+            if os.path.exists(temporary):
+                os.remove(temporary)
+        except OSError:
+            pass
+
+
+def _atomic_write_pid(path, pid):
+    temporary = path + ".{}.tmp".format(os.getpid())
+    try:
+        with open(temporary, "w", encoding="ascii") as handle:
+            handle.write(str(int(pid)))
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    finally:
+        try:
+            if os.path.exists(temporary):
+                os.remove(temporary)
+        except OSError:
+            pass
+
+
+def _read_subscriber_lease(path=None):
+    path = path or _subscriber_lease_file()
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            value = json.load(handle)
+        return value if isinstance(value, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _take_lease_guard(path, timeout_seconds=0.5):
+    """Take the endpoint lease guard with an atomic create operation."""
+    guard_path = path + ".lock"
+    deadline = time.monotonic() + timeout_seconds
+    while True:
+        try:
+            fd = os.open(guard_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            os.write(fd, str(os.getpid()).encode("ascii"))
+            return guard_path, fd
+        except FileExistsError:
+            try:
+                with open(guard_path, "r", encoding="ascii") as handle:
+                    guard_pid = int(handle.read().strip() or "0")
+            except (OSError, ValueError):
+                guard_pid = 0
+            if not _pid_alive(guard_pid):
+                try:
+                    os.remove(guard_path)
+                    continue
+                except OSError:
+                    pass
+            if time.monotonic() >= deadline:
+                return None
+            time.sleep(0.01)
+
+
+def _drop_lease_guard(guard):
+    if guard is None:
+        return
+    path, fd = guard
+    try:
+        os.close(fd)
+    finally:
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+
+
+def _acquire_subscriber_lease(owner, pid, ttl_seconds=120, now=None):
+    """Atomically elect one daemon owner for the current Fiji endpoint."""
+    lease_path = _subscriber_lease_file()
+    os.makedirs(CACHE_DIR, exist_ok=True)
+    guard = _take_lease_guard(lease_path)
+    if guard is None:
         return False
+    try:
+        current_time = time.time() if now is None else float(now)
+        existing = _read_subscriber_lease(lease_path)
+        existing_owner = existing.get("owner")
+        try:
+            existing_pid = int(existing.get("pid", 0))
+            existing_expiry = float(existing.get("expires_ts", 0))
+        except (TypeError, ValueError):
+            existing_pid = 0
+            existing_expiry = 0
+        if existing_owner and existing_owner != owner:
+            # Never steal from a demonstrably live process. A short reservation
+            # also bridges the parent-spawn/child-adoption window.
+            current_identity = _process_identity(existing_pid)
+            recorded_identity = existing.get("process_identity")
+            same_process = (current_identity is not None
+                            and (not recorded_identity
+                                 or current_identity == recorded_identity))
+            if (same_process
+                    or (existing_pid <= 0 and existing_expiry > current_time)):
+                return False
+        created_ts = current_time
+        if existing_owner == owner:
+            try:
+                created_ts = float(existing.get("created_ts", current_time))
+            except (TypeError, ValueError):
+                created_ts = current_time
+        _atomic_write_json(lease_path, {
+            "owner": str(owner),
+            "pid": int(pid),
+            "process_identity": _process_identity(pid),
+            "created_ts": created_ts,
+            "expires_ts": current_time + float(ttl_seconds),
+            "tcp_host": TCP_HOST,
+            "tcp_port": TCP_PORT,
+        })
+        return True
+    finally:
+        _drop_lease_guard(guard)
+
+
+def _release_subscriber_lease(owner, pid=None):
+    lease_path = _subscriber_lease_file()
+    guard = _take_lease_guard(lease_path)
+    if guard is None:
+        return
+    try:
+        existing = _read_subscriber_lease(lease_path)
+        if existing.get("owner") != owner:
+            return
+        try:
+            os.remove(lease_path)
+        except OSError:
+            pass
+        pid_path = _subscriber_pid_file()
+        if pid is not None:
+            try:
+                with open(pid_path, "r", encoding="ascii") as handle:
+                    recorded_pid = int(handle.read().strip() or "0")
+                if recorded_pid == int(pid):
+                    os.remove(pid_path)
+            except (OSError, ValueError):
+                pass
+    finally:
+        _drop_lease_guard(guard)
 
 
 def _snapshot_is_fresh(snap, max_age_seconds=90):
-    """True if the snapshot was written within ``max_age_seconds``.
+    """True when both snapshot data and stream liveness are recent.
 
-    The subscriber writes its own wall-clock ``updated_ts`` on every event
-    and every heartbeat (~30s). 90s gives a 3-interval tolerance before we
-    treat the snapshot as stale and fall back to polling.
+    A reconnect acknowledgement may rewrite ``updated_ts`` but never advances
+    ``last_heartbeat_ts``. This prevents a stale stream from looking fresh just
+    because its client reconnected.
     """
     try:
-        ts = float(snap.get("updated_ts", 0)) / 1000.0
+        updated_ts = float(snap.get("updated_ts", 0)) / 1000.0
+        heartbeat_ts = float(snap.get("last_heartbeat_ts", 0)) / 1000.0
     except (TypeError, ValueError):
         return False
-    if ts <= 0:
+    if updated_ts <= 0 or heartbeat_ts <= 0:
         return False
-    return (time.time() - ts) < max_age_seconds
+    now = time.time()
+    updated_age = now - updated_ts
+    heartbeat_age = now - heartbeat_ts
+    return (0 <= updated_age < max_age_seconds
+            and 0 <= heartbeat_age < max_age_seconds)
 
 
 def _save_cache(cache):
@@ -340,10 +527,9 @@ def fiji_available():
 def _ensure_subscriber_running():
     """Spawn the event-bus subscriber sidecar if it's not already running.
 
-    Freshness is checked via the snapshot file's ``updated_ts``. If the
-    snapshot hasn't been touched within the heartbeat window, we assume the
-    previous sidecar died and spawn a replacement. The sidecar is fully
-    detached so it outlives this hook subprocess.
+    Freshness requires recent snapshot data and stream liveness. An atomic
+    endpoint lease prevents concurrent hook processes from spawning duplicate
+    owners. The sidecar is fully detached so it outlives this hook subprocess.
     """
     # Always leave a breadcrumb so we can confirm this function actually ran.
     trace_file = _ensure_trace_file()
@@ -366,9 +552,17 @@ def _ensure_subscriber_running():
     except OSError:
         return
 
+    # Reserve the endpoint before spawning. The detached child adopts this
+    # owner token, closing the check-then-spawn race between concurrent hooks.
+    lease_owner = secrets.token_hex(16)
+    if not _acquire_subscriber_lease(
+            lease_owner, os.getpid(), ttl_seconds=15):
+        return
+
     import subprocess
     script = os.path.abspath(__file__)
     python_exe = sys.executable or "python"
+    err_log = None
     try:
         # Trace so we can see where Popen blew up if it did.
         with open(trace_file, "a") as _f:
@@ -401,12 +595,15 @@ def _ensure_subscriber_running():
         else:
             kwargs["start_new_session"] = True
 
+        child_env = os.environ.copy()
+        child_env["IMAGEJAI_SUBSCRIBER_LEASE_OWNER"] = lease_owner
         p = subprocess.Popen(
             [python_exe, script, "--subscriber-daemon"],
             cwd=PROJECT_DIR,
-            env=os.environ.copy(),  # explicit passthrough
+            env=child_env,
             **kwargs,
         )
+        _atomic_write_pid(_subscriber_pid_file(), p.pid)
         with open(trace_file, "a") as _f:
             _f.write("[popen_spawned] pid={}\n".format(p.pid))
         # Our parent process doesn't need the shared file handle after the
@@ -417,6 +614,12 @@ def _ensure_subscriber_running():
         except Exception:
             pass
     except Exception as _e:
+        _release_subscriber_lease(lease_owner)
+        try:
+            if err_log is not None:
+                err_log.close()
+        except Exception:
+            pass
         # Sidecar is an optimisation; failure just means we fall back to polling.
         try:
             with open(_subscriber_stderr_file(), "a") as f:
@@ -561,7 +764,7 @@ def run_subscriber_daemon():
     - Subscribes to ``*`` on the event bus.
     - Mirrors image/dialog/results/macro state into an in-memory dict.
     - Writes the dict to SNAPSHOT_FILE after every event (atomic rename).
-    - Refreshes ``updated_ts`` every heartbeat so staleness checks pass.
+    - Tracks data writes separately from heartbeat/stream liveness.
     - Exits if its PID file is removed or it receives SIGTERM/KeyboardInterrupt.
     """
     snapshot_path = _snapshot_file()
@@ -580,39 +783,29 @@ def run_subscriber_daemon():
     except Exception:
         pass
 
+    lease_owner = os.environ.get("IMAGEJAI_SUBSCRIBER_LEASE_OWNER")
+    if not lease_owner:
+        lease_owner = secrets.token_hex(16)
+    if not _acquire_subscriber_lease(
+            lease_owner, os.getpid(), ttl_seconds=120):
+        try:
+            with open(log_path, "a") as f:
+                f.write("[exit: another daemon owns the endpoint]\n")
+        except Exception:
+            pass
+        return
     try:
-        if os.path.exists(pid_path):
-            with open(pid_path) as f:
-                prev_pid = int(f.read().strip() or "0")
-            if prev_pid > 0 and prev_pid != os.getpid() and _pid_alive(prev_pid):
-                existing = _load_snapshot(snapshot_path)
-                if (_snapshot_is_fresh(existing, max_age_seconds=45)
-                        and _snapshot_matches_endpoint(existing)):
-                    try:
-                        with open(log_path, "a") as f:
-                            f.write("[exit: prior daemon {} is healthy]\n".format(prev_pid))
-                    except Exception:
-                        pass
-                    return
+        _atomic_write_pid(pid_path, os.getpid())
     except Exception:
-        pass
-
-    try:
-        with open(pid_path, "w") as f:
-            f.write(str(os.getpid()))
-    except Exception:
-        pass
+        _release_subscriber_lease(lease_owner, os.getpid())
+        return
 
     # Import after process-spawn so the subscriber has access to the helper.
     sys.path.insert(0, os.path.join(PROJECT_DIR, "agent"))
     try:
         from ij import imagej_events  # noqa: E402
     except Exception:
-        try:
-            if os.path.exists(pid_path):
-                os.remove(pid_path)
-        except Exception:
-            pass
+        _release_subscriber_lease(lease_owner, os.getpid())
         return
 
     snapshot = {
@@ -625,10 +818,16 @@ def run_subscriber_daemon():
         "progress": None,
         "log": None,
         "updated_ts": 0,
+        "last_heartbeat_ts": 0,
     }
 
-    def _persist():
-        snapshot["updated_ts"] = int(time.time() * 1000)
+    def _persist(heartbeat=False):
+        now_ms = int(time.time() * 1000)
+        snapshot["updated_ts"] = now_ms
+        if heartbeat:
+            snapshot["last_heartbeat_ts"] = now_ms
+            _acquire_subscriber_lease(
+                lease_owner, os.getpid(), ttl_seconds=120)
         tmp = snapshot_path + ".tmp"
         try:
             with open(tmp, "w", encoding="utf-8") as f:
@@ -682,6 +881,7 @@ def run_subscriber_daemon():
 
     _bootstrap_state()
 
+    subscription_established = False
     try:
         for event in imagej_events(["*"], host=TCP_HOST, port=TCP_PORT,
                                    reconnect=True, reconnect_delay=2.0):
@@ -691,11 +891,18 @@ def run_subscriber_daemon():
             data = event.get("data", {}) or {}
 
             if topic == "heartbeat":
-                _persist()
+                _persist(heartbeat=True)
                 continue
             if topic == "subscribed":
                 snapshot["subscription"] = data
-                _persist()
+                # The first acknowledgement proves the newly started stream is
+                # alive. A later acknowledgement is a reconnect and must not
+                # revive an already expired heartbeat.
+                first_subscription = not subscription_established
+                subscription_established = True
+                _persist(heartbeat=(
+                    first_subscription
+                    and snapshot.get("last_heartbeat_ts", 0) <= 0))
                 continue
             if topic == "event_dropped":
                 snapshot["last_event_dropped"] = data
@@ -768,14 +975,7 @@ def run_subscriber_daemon():
     except Exception:
         return
     finally:
-        try:
-            if os.path.exists(pid_path):
-                with open(pid_path) as f:
-                    owner = f.read().strip()
-                if owner == str(os.getpid()):
-                    os.remove(pid_path)
-        except Exception:
-            pass
+        _release_subscriber_lease(lease_owner, os.getpid())
 
 
 # ---------------------------------------------------------------------------

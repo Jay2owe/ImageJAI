@@ -401,7 +401,44 @@ and grep `get_log`.
 
 ---
 
-# Family — GPT
+# Capability — No vision
 
-(No family-specific quirks recorded yet. Add observed friction
-patterns here as the model accumulates session history.)
+You cannot see images. Do not call `capture_image` (or its CLI
+equivalent `python ij.py capture` followed by a file read) — the
+screenshot would be sent to a model that ignores it and the call
+costs you a tool round.
+
+Instead, after every step that changes the image, call:
+
+- `histogram_summary` — intensity distribution (mean, median,
+  skew, percentiles, shape hint).
+- `region_stats(x, y, w, h)` — mean/stddev/min/max on a rectangle.
+- `quick_object_count(threshold)` — connected-component count at
+  a fixed cutoff.
+- `describe_image` (where available) — rough object counts and
+  histogram shape together.
+
+The numbers replace the visual sanity check. Trust the numbers;
+do not narrate what the image "would look like" — describe what
+the stats say.
+
+---
+
+# Reliability — Good tool calling
+
+You are reliable at calling tools but occasional schema slips
+happen. On a schema error:
+
+- Read the error string for the missing/extra field name.
+- Retry **once** with the corrected arguments.
+- Do **not** retry blind. If the second attempt fails the same
+  way, stop and reread the tool's signature.
+
+---
+
+# Other model families
+
+No family-specific exceptions are known for this model. Follow the universal
+workflow and the selected harness instructions exactly. Do not infer a model's
+syntax, vision support, or tool abilities from its display name; use only the
+capabilities exposed by the harness.

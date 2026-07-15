@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import os
 import sys
+import tempfile
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 # Make `agent.contexts.loader` importable both when run directly
@@ -53,15 +54,39 @@ BANNER = (
 
 
 def sync() -> list[tuple[str, str]]:
-    """Regenerate every CLI context file from the overlay loader."""
+    """Regenerate every CLI context file deterministically and atomically."""
     generated: list[tuple[str, str]] = []
     for filename, model_id in AGENT_FILES.items():
-        composed = loader.load_context(model_id)
+        content = BANNER + loader.load_context(model_id)
         target = os.path.join(SCRIPT_DIR, filename)
-        with open(target, "w", encoding="utf-8") as fh:
-            fh.write(BANNER + composed)
+        try:
+            with open(target, "r", encoding="utf-8") as fh:
+                unchanged = fh.read() == content
+        except FileNotFoundError:
+            unchanged = False
+        if not unchanged:
+            fd, temporary = tempfile.mkstemp(
+                prefix="." + os.path.basename(target) + ".",
+                suffix=".tmp",
+                dir=os.path.dirname(target),
+                text=True,
+            )
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as fh:
+                    fh.write(content)
+                    fh.flush()
+                    os.fsync(fh.fileno())
+                os.replace(temporary, target)
+            except Exception:
+                try:
+                    os.unlink(temporary)
+                except OSError:
+                    pass
+                raise
         generated.append((filename, model_id))
-        print("  [OK] {} <- loader.load_context({!r})".format(filename, model_id))
+        status = "unchanged" if unchanged else "updated"
+        print("  [OK] {} ({}) <- loader.load_context({!r})".format(
+            filename, status, model_id))
     return generated
 
 

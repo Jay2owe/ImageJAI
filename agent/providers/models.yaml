@@ -115,7 +115,7 @@ models:
     last_verified: 2026-05-01
     pinned: false
     curated: true
-    harness: cli_shell
+    harness: tool_loop
     family: claude
     context_size: large
     deprecated_since: null
@@ -137,7 +137,7 @@ models:
     last_verified: 2026-05-01
     pinned: false
     curated: true
-    harness: cli_shell
+    harness: tool_loop
     family: gpt
     context_size: large
     deprecated_since: null
@@ -156,7 +156,7 @@ models:
     last_verified: 2026-05-01
     pinned: false
     curated: true
-    harness: cli_shell
+    harness: tool_loop
     family: gpt
     context_size: large
     deprecated_since: null
@@ -929,6 +929,7 @@ models:
     pinned: false
     curated: true
     harness: tool_loop
+    family: other
     context_size: large
     deprecated_since: null
     replacement: null
@@ -1327,6 +1328,7 @@ models:
     pinned: false
     curated: true
     harness: tool_loop
+    family: other
     context_size: large
     deprecated_since: null
     replacement: null
@@ -1344,6 +1346,7 @@ models:
     pinned: false
     curated: true
     harness: tool_loop
+    family: other
     context_size: large
     deprecated_since: null
     replacement: null
@@ -1361,6 +1364,7 @@ models:
     pinned: false
     curated: true
     harness: tool_loop
+    family: other
     context_size: large
     deprecated_since: null
     replacement: null
@@ -1378,6 +1382,7 @@ models:
     pinned: false
     curated: true
     harness: tool_loop
+    family: other
     context_size: large
     deprecated_since: null
     replacement: null
@@ -1395,6 +1400,7 @@ models:
     pinned: false
     curated: true
     harness: tool_loop
+    family: other
     context_size: large
     deprecated_since: null
     replacement: null
@@ -1484,6 +1490,7 @@ models:
     pinned: false
     curated: true
     harness: tool_loop
+    family: other
     context_size: large
     deprecated_since: null
     replacement: null
@@ -1501,6 +1508,7 @@ models:
     pinned: false
     curated: true
     harness: tool_loop
+    family: other
     context_size: large
     deprecated_since: null
     replacement: null
@@ -1518,6 +1526,7 @@ models:
     pinned: false
     curated: true
     harness: tool_loop
+    family: other
     context_size: large
     deprecated_since: null
     replacement: null
@@ -1662,6 +1671,7 @@ models:
     pinned: false
     curated: true
     harness: tool_loop
+    family: other
     context_size: large
     deprecated_since: null
     replacement: null
