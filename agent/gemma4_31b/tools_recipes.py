@@ -17,8 +17,26 @@ promotes a parameter on its own.
 
 from __future__ import annotations
 
+import json
+import importlib
+import sys
+from pathlib import Path
+
 from . import harvest_recipe
 from .registry import tool
+
+
+def _agent_module(name: str):
+    """Import a canonical agent-level helper from editable/bundle layouts."""
+    try:
+        return importlib.import_module(name)
+    except ImportError:
+        agent_root = Path(__file__).resolve().parent.parent
+        if not (agent_root / (name + ".py")).is_file():
+            raise
+        if str(agent_root) not in sys.path:
+            sys.path.insert(0, str(agent_root))
+        return importlib.import_module(name)
 
 
 @tool
@@ -64,5 +82,44 @@ def save_recipe(name: str, description: str, promote: list[str]) -> str:
             "ERROR: no successful workflow steps were found in the current session. "
             "Finish one clean run first, then save the recipe."
         )
+    try:
+        issues = _agent_module("recipe_search").validate_recipe(recipe)
+    except Exception as exc:
+        return "ERROR: canonical recipe validation unavailable: {}".format(exc)
+    if issues:
+        return "ERROR: recipe contract validation failed: {}".format("; ".join(issues))
     path = harvest_recipe.save_recipe_file(recipe)
     return "Saved recipe to {}".format(path)
+
+
+@tool
+def run_saved_recipe(recipe_name: str, dry_run: bool = False) -> str:
+    """Run a saved recipe through the canonical prevalidating recipe runner.
+
+    Args:
+        recipe_name: Recipe id, filename, or absolute YAML path.
+        dry_run: Resolve the complete recipe without connecting to or mutating Fiji.
+    """
+    try:
+        recipe_runner = _agent_module("run_recipe")
+        path = recipe_runner.recipe_path(recipe_name)
+        recipe = recipe_runner.load_recipe(path)
+        # Build the whole plan before deciding whether this provider surface
+        # can run it. This catches bad later steps without touching Fiji.
+        plan = recipe_runner.dry_run_recipe(recipe, path)
+        if not dry_run and recipe_runner.requires_acknowledgement(recipe):
+            return (
+                "ERROR: recipe requires manual/visual acknowledgement. "
+                "Run it in the interactive terminal with: python run_recipe.py {}"
+            ).format(recipe_name)
+        if dry_run:
+            return json.dumps({"ok": True, "recipe": recipe.get("id"), "plan": plan},
+                              sort_keys=True, default=str)
+        receipt = recipe_runner.execute_recipe_file(
+            path,
+            dry_run=False,
+            emit=lambda _message: None,
+        )
+        return json.dumps(receipt, sort_keys=True, default=str)
+    except Exception as exc:
+        return "ERROR: recipe did not run: {}".format(exc)

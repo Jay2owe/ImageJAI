@@ -1,3 +1,4 @@
+schema_version: 1
 name: Cell Counting (StarDist 2D)
 id: cell_counting_stardist
 description: >
@@ -15,6 +16,12 @@ preconditions:
   notes: "Single-channel image of nuclei. For multi-channel, extract the nuclear channel first."
 
 parameters:
+  - name: image_title
+    label: "Input image title"
+    type: string
+    default: "image.tif"
+    description: "Exact title of the currently open single-channel image."
+
   - name: model
     label: "StarDist model"
     type: choice
@@ -59,7 +66,8 @@ parameters:
 steps:
   - id: 1
     description: "Capture the original image for reference"
-    macro: ""
+    type: manual
+    instructions: "Capture the original image and confirm that the image_title parameter names this single-channel nuclei image exactly."
     decision_point: false
     decision_logic: ""
     capture_after: true

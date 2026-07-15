@@ -1,3 +1,4 @@
+schema_version: 1
 name: Publication Montage
 id: montage
 description: >
@@ -92,7 +93,8 @@ steps:
 
   - id: 2
     description: "Add scale bars to individual panels if needed"
-    macro: |
+    type: manual
+    instructions: |
       // Add scale bar to each slice BEFORE making montage
       // (scale bar on montage itself may not be at the right scale)
       // run("Scale Bar...", "width=50 height=5 font=18 color=White background=None location=[Lower Right] bold");
@@ -115,7 +117,8 @@ steps:
 
   - id: 4
     description: "Add panel labels (A, B, C, etc.) if needed"
-    macro: |
+    type: manual
+    instructions: |
       // Optional: add letter labels to panels
       // Calculate panel positions based on grid layout
       // setFont("SansSerif", 24, "bold");

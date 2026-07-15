@@ -1,3 +1,4 @@
+schema_version: 1
 name: Threshold Method Comparison
 id: threshold_comparison
 description: >
@@ -15,6 +16,13 @@ preconditions:
   notes: "Best applied after background subtraction and optional denoising."
 
 parameters:
+  - name: recommended_method
+    label: "Chosen threshold method"
+    type: choice
+    default: Otsu
+    options: [Otsu, Triangle, Li, Huang, MaxEntropy, Yen, Default]
+    description: "Set this after comparing the candidate masks in step 2."
+
   - name: methods
     label: "Methods to compare"
     type: string
@@ -37,7 +45,8 @@ parameters:
 steps:
   - id: 1
     description: "Check the current image histogram"
-    macro: |
+    type: manual
+    instructions: |
       // Agent should run: python ij.py histogram
       // Look for bimodal distribution (two peaks = easy threshold)
       // or unimodal (one peak = harder, may need pre-processing)
@@ -52,7 +61,8 @@ steps:
 
   - id: 2
     description: "Run explore_thresholds to compare all methods"
-    macro: |
+    type: manual
+    instructions: |
       // Agent should run: python ij.py explore ${methods}
       // This tests each method and returns:
       // - particle count

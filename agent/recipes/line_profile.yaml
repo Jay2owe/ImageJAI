@@ -1,3 +1,4 @@
+schema_version: 1
 name: Intensity Line Profile
 id: line_profile
 description: >
@@ -54,7 +55,8 @@ parameters:
 steps:
   - id: 1
     description: "Capture image and identify the feature to profile"
-    macro: ""
+    type: manual
+    instructions: "Capture the image, identify the feature, and set x1, y1, x2, and y2 to a line that crosses it in the intended direction."
     decision_point: true
     decision_logic: >
       The agent should capture the image and visually identify the feature of

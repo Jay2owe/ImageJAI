@@ -1,3 +1,4 @@
+schema_version: 1
 name: Split and Process Channels
 id: split_channels
 description: >
@@ -65,7 +66,8 @@ steps:
 
   - id: 4
     description: "Rename channels if names provided"
-    macro: |
+    type: manual
+    instructions: |
       // If channel_names is provided, rename each window:
       // selectWindow("C1-original");
       // rename("DAPI");

@@ -1,3 +1,4 @@
+schema_version: 1
 name: Install Fiji Toolbar Button
 id: install_toolbar_tool
 description: >
@@ -64,14 +65,16 @@ parameters:
 steps:
   - id: 1
     description: "Write and install the tool macro (this session)"
-    macro: |
+    type: script
+    language: groovy
+    notes: |
       // This recipe runs through run_script (Groovy), not macro.
       // Use the Groovy block below via: python ij.py script --file <path>.groovy
     decision_point: false
     decision_logic: ""
     capture_after: false
     validate: "After install, the toolbar should show the new icon."
-    groovy: |
+    script: |
       import ij.IJ
       import ij.plugin.MacroInstaller
 
@@ -93,7 +96,7 @@ steps:
       // the exact same label to avoid silent overwrite surprises.
       def existing = tsFile.exists() ? tsFile.text : ""
       def stripped = existing.replaceAll(
-          /(?ms)^macro\s+"\Q${label}\E\s+Tool\s+-\s+[^"]*"\s*\{.*?^\}\s*/,
+          /(?ms)^macro\s+"\Q$${label}\E\s+Tool\s+-\s+[^"]*"\s*\{.*?^\}\s*/,
           ""
       )
       tsFile.text = stripped + "\n" + toolMacro
@@ -103,7 +106,9 @@ steps:
 
   - id: 2
     description: "Persist across restarts (optional)"
-    macro: |
+    type: script
+    language: groovy
+    notes: |
       // Only runs if persistent=true. Appends the same tool macro to
       // StartupMacros.fiji.ijm so Fiji reinstalls it on startup.
     decision_point: true
@@ -112,8 +117,8 @@ steps:
       append. Always append — never overwrite StartupMacros.
     capture_after: false
     validate: "After restart (not tested here), the button should reappear."
-    when: "persistent == true"
-    groovy: |
+    when: {parameter: persistent, equals: true}
+    script: |
       import ij.IJ
 
       def label = "${tool_label}"
@@ -132,7 +137,8 @@ steps:
 
   - id: 3
     description: "Verify the button exists"
-    macro: |
+    type: manual
+    instructions: |
       // The toolbar does not expose its contents through the macro language.
       // Verification is by capture_image + visual check, or by clicking the
       // button and observing the expected action.

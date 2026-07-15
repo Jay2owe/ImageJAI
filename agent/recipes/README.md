@@ -26,7 +26,17 @@ All recipes live in `agent/recipes/` as `.yaml` files.
 
 ## Schema
 
+`schema.json` is the canonical versioned contract. Every recipe declares
+`schema_version: 1`; unknown fields and step types are errors; and the complete
+document is validated before Fiji is contacted.
+
+```bash
+python agent/recipe_search.py --validate
+python agent/run_recipe.py <recipe-id> --dry-run
+```
+
 ```yaml
+schema_version: 1
 name: Human-readable name
 id: snake_case_unique_id
 description: What this analysis does and when to use it
@@ -52,6 +62,7 @@ parameters:
 steps:
   - id: 1
     description: "What this step does"
+    type: macro | script | manual
     macro: |
       run("Command...", "args");
     decision_point: false       # true if step needs conditional logic
@@ -70,6 +81,14 @@ known_issues:
 
 tags: [keyword1, keyword2, keyword3]
 ```
+
+An executable step has exactly one payload. `macro`/`code` runs through
+`execute_macro`; `script`/`groovy`/a safe relative `file` runs through
+`run_script`; and `manual` requires explicit acknowledgement of its
+`instructions`. `when` is a structured predicate, for example
+`{parameter: persistent, equals: true}`. A false condition is reported as
+`not_applicable`, never as successful execution. Decisions, captures, step
+validation, postconditions, and final validation are blocking contracts.
 
 ## Field reference
 

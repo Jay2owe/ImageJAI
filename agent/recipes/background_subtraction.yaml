@@ -1,3 +1,4 @@
+schema_version: 1
 name: Background Subtraction
 id: background_subtraction
 description: >
@@ -45,7 +46,8 @@ parameters:
 steps:
   - id: 1
     description: "Capture the original image and check histogram"
-    macro: ""
+    type: manual
+    instructions: "Capture the original image, inspect its histogram, and note background level and spatial gradients."
     decision_point: true
     decision_logic: >
       Check histogram to see if background is uniform. If the histogram shows
@@ -79,7 +81,8 @@ steps:
 
   - id: 4
     description: "Verify background correction with histogram"
-    macro: |
+    type: manual
+    instructions: |
       // Agent should run: python ij.py histogram
       // Background peak should be near zero
       // Signal peak should be preserved

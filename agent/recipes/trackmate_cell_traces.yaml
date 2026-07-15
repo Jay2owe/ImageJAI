@@ -1,42 +1,55 @@
+schema_version: 1
 name: TrackMate Cell Intensity Traces
+id: trackmate_cell_traces
 description: >
   Extract per-cell mean intensity over time from a TrackMate label image,
   using the label image as a mask on the corresponding intensity image.
   Exports a CSV (Frame, CellID, MeanIntensity, Area) and generates two
   plots: individual cell traces and population mean +/- SEM.
 domain: tracking, measurement, time-series
+difficulty: advanced
 tags: [trackmate, label-image, intensity, traces, time-series, plotting]
 
 preconditions:
-  - TrackMate label image (32-bit, exported with Track ID labels)
-  - Matching intensity image (same dimensions and number of frames)
-  - Both images must be open in ImageJ
+  image_type: [32-bit]
+  min_channels: 1
+  needs_stack: false
+  needs_time: true
+  needs_calibration: false
+  notes: >
+    Open both the TrackMate label image and its matching intensity image. They
+    must have identical dimensions and frame counts.
 
 parameters:
-  min_frames:
+  - name: min_frames
+    label: "Minimum tracked frames"
+    type: numeric
     description: Minimum number of frames a cell must be tracked to appear in plots
     default: 50
-    notes: >
+    note: >
       Set relative to total frames. For 111 frames, 50 is reasonable.
       For 20 frames, use 10.
 
 steps:
   - description: Export label image from TrackMate
+    type: manual
     notes: >
       In TrackMate: run tracking, then use Action > Export label image.
       Set "Label ID is: Track ID". This gives each tracked cell a consistent
       integer label across frames. Untracked spots get unique IDs above max track ID.
 
   - description: Extract per-cell intensity using label mask
+    type: manual
     notes: >
       For each frame, iterate all pixels. Where label > 0, accumulate
       intensity from the matching intensity image pixel. Compute mean
       per label per frame. Export as CSV.
-    code: >
+    instructions: >
       // See Groovy script: TrackMate_Cell_Traces.groovy
       // Installed to Fiji scripts/Plugins/
 
   - description: Plot individual traces and population mean
+    type: manual
     notes: >
       Filter to cells tracked >= min_frames. Plot each cell as a coloured
       line (turbo colourmap). Separately plot population mean +/- SEM.

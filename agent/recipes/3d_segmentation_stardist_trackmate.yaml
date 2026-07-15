@@ -1,3 +1,4 @@
+schema_version: 1
 name: 3D Segmentation (StarDist via TrackMate)
 id: 3d_segmentation_stardist_trackmate
 description: >
@@ -46,7 +47,8 @@ parameters:
 steps:
   - id: 1
     description: "Check image dimensions and calibration"
-    macro: |
+    type: manual
+    instructions: |
       // Agent should run:
       //   python ij.py state
       //   python ij.py metadata
@@ -86,7 +88,8 @@ steps:
 
   - id: 4
     description: "Run TrackMate with StarDist detector"
-    macro: |
+    type: manual
+    instructions: |
       // This step must be done via Groovy/script because TrackMate's
       // programmatic API is needed (not a simple macro command).
       // Use: python ij.py script --file scripts/stardist_trackmate.groovy
@@ -180,7 +183,8 @@ steps:
 
   - id: 9
     description: "Review and export results"
-    macro: |
+    type: manual
+    instructions: |
       // Agent should run: python ij.py results
       // Check for reasonable values:
       //   - Volume range matches expected cell/nucleus size

@@ -1,30 +1,44 @@
+schema_version: 1
 name: Incucyte GFP Extraction (hIba1-GFP)
+id: incucyte_gfp_extraction
 description: >
   Extract GFP fluorescence signal from Incucyte RGB time-lapse stacks.
   Uses HSB Saturation channel to isolate GFP from phase contrast,
   double sliding paraboloid to remove ventricle/ambient glow,
   and median filter to fix HSB conversion artifacts.
 domain: fluorescence, incucyte, microglia
+difficulty: intermediate
 tags: [gfp, hsb, background-subtraction, incucyte, microglia, hiba1]
 
 preconditions:
-  - RGB stack (Incucyte phase+fluorescence overlay)
-  - May have inch calibration (0.01 inch/px) — must remove before processing
+  image_type: [RGB]
+  min_channels: 1
+  needs_stack: true
+  needs_calibration: false
+  notes: "Incucyte inch calibration is removed by the first step before processing."
 
 parameters:
-  paraboloid_r1:
+  - name: paraboloid_r1
+    label: "Broad background radius"
+    type: numeric
     description: First sliding paraboloid radius (broad background removal)
     default: 50
     range: [25, 100]
-  paraboloid_r2:
+  - name: paraboloid_r2
+    label: "Edge glow radius"
+    type: numeric
     description: Second sliding paraboloid radius (edge glow cleanup)
     default: 15
     range: [5, 30]
-  median_radius:
+  - name: median_radius
+    label: "Median radius"
+    type: numeric
     description: Median filter radius for HSB hole filling
     default: 1
     range: [1, 2]
-  lut:
+  - name: lut
+    label: "Output LUT"
+    type: choice
     description: LUT to apply to output
     default: Green
     options: [Green, Grays, Cyan Hot, Fire]
@@ -47,21 +61,21 @@ steps:
 
   - description: Remove broad ambient glow (sliding paraboloid pass 1)
     code: >
-      run("Subtract Background...", "rolling=50 sliding stack");
+      run("Subtract Background...", "rolling=${paraboloid_r1} sliding stack");
     notes: >
       Sliding paraboloid preserves sharp cell peaks (~73% brightness retained)
       while removing broad diffuse background like ventricle glow.
 
   - description: Clean residual edge glow (sliding paraboloid pass 2)
     code: >
-      run("Subtract Background...", "rolling=15 sliding stack");
+      run("Subtract Background...", "rolling=${paraboloid_r2} sliding stack");
     notes: >
       Second pass at smaller radius catches intermediate-scale glow at
       ventricle edges that the first pass misses.
 
   - description: Fill single-pixel holes from HSB conversion
     code: >
-      run("Median...", "radius=1 stack");
+      run("Median...", "radius=${median_radius} stack");
     notes: >
       HSB conversion creates dark pixel holes where brightness is near zero
       (hue/saturation undefined). Median after paraboloid catches any holes
@@ -69,7 +83,7 @@ steps:
 
   - description: Apply LUT
     code: >
-      run("Green");
+      run("${lut}");
 
 validation:
   - Check histogram — cells should be bright, background near zero

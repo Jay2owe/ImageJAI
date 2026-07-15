@@ -1,3 +1,4 @@
+schema_version: 1
 name: Even-Brightness Time-Lapse Video
 id: normalise_timeseries_video
 description: >
@@ -62,14 +63,32 @@ parameters:
     description: "JPEG small+shareable; PNG lossless+large; None uncompressed."
   - name: output_dir
     label: "Output subfolder"
-    type: string
+    type: choice
     default: "AI_Exports"
+    options: ["AI_Exports"]
     description: "Created next to the source image(s). Never write elsewhere."
+  - name: batch
+    label: "Batch a source folder"
+    type: boolean
+    default: false
+    description: "False processes only the active image; true processes TIFF files in batch_dir."
+  - name: batch_dir
+    label: "Batch source folder"
+    type: string
+    default: ""
+    description: "Required only when batch=true. Outputs still go to AI_Exports inside this folder."
+  - name: max_per_run
+    label: "Maximum files per run"
+    type: numeric
+    default: 5
+    range: [1, 50]
+    description: "Bounds each batch so the client timeout is not exceeded."
 
 steps:
   - id: 1
     description: "Inspect the per-frame brightness trend before deciding to flatten"
-    macro: |
+    type: manual
+    instructions: |
       // Groovy (run via: python ij.py script --file trend.groovy):
       //   imp = ij.IJ.getImage(); st = imp.getStack();
       //   for (i in [1, (int)(st.size()/2), st.size()])
@@ -91,13 +110,13 @@ steps:
       import java.io.File
 
       // ---- config ----
-      double saturation = 0.35
-      int fps = 25
-      String compression = "JPEG"          // JPEG | PNG | None
-      String outName = "AI_Exports"
-      boolean BATCH = true                  // false = just the active image
-      String dir = "/full/path/to/folder"   // batch source folder (use forward slashes)
-      int MAXPERRUN = 5                     // keep each call < ij.py's 180 s socket timeout
+      double saturation = ${saturation}
+      int fps = ${fps}
+      String compression = "${compression}" // JPEG | PNG | None
+      String outName = "${output_dir}"
+      boolean BATCH = ${batch}
+      String dir = "${batch_dir}"
+      int MAXPERRUN = ${max_per_run}
 
       ContrastEnhancer ce = new ContrastEnhancer()
       ce.setNormalize(false)                // DISPLAY-ONLY: never rewrites pixels
@@ -130,6 +149,7 @@ steps:
           String outDir = new File(imp.getOriginalFileInfo().directory, outName).getPath()
           println("saved " + makeMovie(imp, outDir))
       } else {
+          if (dir == null || dir.trim().isEmpty()) throw new IllegalArgumentException("batch_dir is required when batch=true")
           String outDir = dir + "/" + outName
           // idempotent + chunked: skip wells whose AVI already exists; >100 MB output = stale, redo.
           def todo = new File(dir).listFiles()

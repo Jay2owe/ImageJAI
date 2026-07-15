@@ -1,17 +1,49 @@
+schema_version: 1
 name: 3D Ring Render (Ch4 around DAPI)
+id: 3d_ring_render
 description: >
   Publication-quality 3D render of ring structures (e.g. amyloid plaques) in
   channel 4 surrounding DAPI-labelled nuclei. Uses strict display ranges (no
   masks) with median 3D filtering and 3Dscript combined transparency rendering.
 
 domain: amyloid, immunofluorescence
+difficulty: advanced
 tags: [3d, render, ring, plaque, dapi, 3dscript, batch]
 
 preconditions:
-  - Multi-channel z-stack open (16-bit), typically from .lif file
-  - Ch1 = DAPI, Ch4 = ring signal (e.g. MOAB-2 AF488)
-  - 3Dscript installed in Fiji
-  - TCP server running on port 7746
+  image_type: [16-bit]
+  min_channels: 4
+  needs_stack: true
+  needs_calibration: true
+  notes: >
+    A multi-channel z-stack must be open, with Ch1 as DAPI and Ch4 as the
+    ring signal. Confirm that 3Dscript is installed before starting.
+
+parameters:
+  - name: candidate_mode
+    label: "Candidate selection"
+    type: choice
+    default: all
+    options: [all, pick, single]
+    description: "Render all viable candidates, a user-picked subset, or the best single candidate."
+  - name: background_mode
+    label: "Background mode"
+    type: choice
+    default: isolated
+    options: [isolated, context]
+    description: "Choose whether neighbouring nuclei remain visible. Run twice to produce both variants."
+  - name: animation_mode
+    label: "Animation"
+    type: choice
+    default: both
+    options: [both, rotate, spin]
+    description: "Choose the 3Dscript animation file(s) to execute."
+  - name: output_format
+    label: "Output format"
+    type: choice
+    default: tif
+    options: [tif, both]
+    description: "Save a TIF stack, or both TIF and AVI."
 
 # ============================================================
 # BEST QUALITY SETTINGS (proven 2026-03-23)
@@ -173,6 +205,8 @@ animations:
 steps:
   - id: 1
     description: "Open .lif series and find ring candidates"
+    type: manual
+    instructions: "Use candidate_mode=${candidate_mode}; identify the requested candidate set before proceeding."
     notes: >
       Use Bio-Formats to open the correct series. To find series indices, open
       series one at a time in batch mode and print titles to the log (slow but
@@ -189,6 +223,7 @@ steps:
 
   - id: 2
     description: "Save candidate montage"
+    type: manual
     notes: >
       Crop ch4+ch1 around each candidate (80×80 px / ~23 um), merge as green+blue composite,
       set display ranges (ch4: 8000-45000, ch1: 2000-20000), flatten, arrange
@@ -197,12 +232,13 @@ steps:
 
   - id: 3
     description: "Save ROI overlay image"
+    type: manual
     notes: >
       Max-project ch4 and ch1, apply GREEN and Blue LUTs respectively, merge,
       flatten to RGB, draw numbered yellow rectangles (lineWidth=3) at each
       candidate location. Save as PNG. The GREEN LUT on ch4 is important —
       matches the ring colour in the 3D render.
-    code: |
+    instructions: |
       // Ch4 max proj with GREEN LUT
       selectWindow("SOURCE");
       run("Duplicate...", "title=rov_ch4 duplicate channels=4");
@@ -213,7 +249,8 @@ steps:
 
   - id: 4
     description: "Crop ROI from original z-stack"
-    code: |
+    type: manual
+    instructions: |
       selectWindow("SOURCE");
       run("Select None");
       makeRectangle(X0, Y0, CROP_SIZE, CROP_SIZE);
@@ -224,7 +261,8 @@ steps:
 
   - id: 5
     description: "Split channels, keep ch4 + ch1"
-    code: |
+    type: manual
+    instructions: |
       selectWindow("ring_crop");
       run("Split Channels");
       selectWindow("C2-ring_crop"); close();
@@ -233,8 +271,9 @@ steps:
 
   - id: 5b
     description: "ISOLATED MODE ONLY: Zero out DAPI outside center"
-    condition: "mode == isolated"
-    code: |
+    type: manual
+    when: {parameter: background_mode, equals: isolated}
+    instructions: |
       // Zero out DAPI outside a central square (DAPI_INNER_RADIUS px from center)
       selectWindow("C1-ring_crop");
       half = CROP / 2;
@@ -263,7 +302,8 @@ steps:
 
   - id: 6
     description: "Median 3D filter (radius=2 for compact rings, radius=1 for diffuse/wispy)"
-    code: |
+    type: manual
+    instructions: |
       selectWindow("C4-ring_crop");
       run("Median 3D...", "x=2 y=2 z=2");   // radius=1 for diffuse/wispy plaques
       selectWindow("C1-ring_crop");
@@ -280,7 +320,8 @@ steps:
 
   - id: 7
     description: "Merge channels with correct LUT slots"
-    code: |
+    type: manual
+    instructions: |
       // c2 slot = Green LUT, c3 slot = Blue LUT
       run("Merge Channels...", "c2=[C4-ring_crop] c3=[C1-ring_crop] create");
       rename("ring_merged");
@@ -288,7 +329,8 @@ steps:
 
   - id: 8
     description: "Set display ranges, convert to 8-bit, reapply LUTs"
-    code: |
+    type: manual
+    instructions: |
       selectWindow("ring_merged");
       Stack.setPosition(1, 7, 1);
       setMinAndMax(RING_MIN, RING_MAX);
@@ -305,7 +347,8 @@ steps:
 
   - id: 9
     description: "Scale up XY with Bicubic interpolation (keep output <= ~2000px)"
-    code: |
+    type: manual
+    instructions: |
       selectWindow("ring_merged");
       run("Scale...", "x=15 y=15 z=1.0 interpolation=Bicubic process create title=ring_render");
       selectWindow("ring_merged"); close();
@@ -322,7 +365,8 @@ steps:
 
   - id: 10
     description: "Save pre-render TIF"
-    code: |
+    type: manual
+    instructions: |
       selectWindow("ring_render");
       saveAs("Tiff", "EXPORT_DIR/NAME_prerender.tif");
       rename("ring_render");
@@ -333,7 +377,9 @@ steps:
 
   - id: 11
     description: "Render with 3Dscript Batch Animation"
-    code: |
+    type: manual
+    instructions: |
+      Use animation_mode=${animation_mode} and output_format=${output_format}.
       selectWindow("ring_render");
       run("Batch Animation", "animation=[/path/to/animation.txt]");
     notes: >
@@ -344,7 +390,8 @@ steps:
 
   - id: 12
     description: "Save render as TIF stack"
-    code: |
+    type: manual
+    instructions: |
       list = getList("image.titles");
       for (i = 0; i < list.length; i++) {
           selectWindow(list[i]);

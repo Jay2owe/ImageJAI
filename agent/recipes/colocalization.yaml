@@ -1,3 +1,4 @@
+schema_version: 1
 name: Colocalization Analysis (Coloc 2)
 id: colocalization
 description: >
@@ -18,6 +19,12 @@ preconditions:
     contrast enhancement. Background subtraction recommended first.
 
 parameters:
+  - name: image_title
+    label: "Input image title"
+    type: string
+    default: "image.tif"
+    description: "Exact title of the open multi-channel image."
+
   - name: channel_1
     label: "Channel 1"
     type: numeric
@@ -90,7 +97,8 @@ steps:
 
   - id: 4
     description: "Read colocalization results from Log"
-    macro: |
+    type: manual
+    instructions: |
       // Results are printed to the Log window
       // Agent reads with: python ij.py log
       // Key values to extract:

@@ -52,7 +52,7 @@ Conflict watchlist:
 | 14 | pending | - | - |
 | 15 | pending | - | - |
 | 16 | completed | `6ad41c7` | 37 helper regressions passed; compact 4M-pixel buffer and randomized exact-median check passed |
-| 17 | pending | - | - |
+| 17 | completed | `20ca91d` | 24 workflow/cache/lint tests passed; practice dry-run and Python compilation passed; trainer/practice restore images, active cursor, Results, ROIs, measurements, redirect, and BlackBackground on success/failure |
 | 18 | completed | `cdf13d1` | 120 context/runtime tests passed; zero-polling integration passed twice; generated contexts byte-stable; full offline suite exceeded the 120 s stage check and is deferred to convergence |
 | 19 | pending | - | - |
 | 20 | pending | - | - |
