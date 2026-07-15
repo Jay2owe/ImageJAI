@@ -50,7 +50,7 @@ Conflict watchlist:
 | 12 | pending | - | - |
 | 13 | pending | - | - |
 | 14 | pending | - | - |
-| 15 | pending | - | - |
+| 15 | completed | `ff6bf39` | 16 contract/legacy tests passed; all 28 recipes validate and whole-directory dry-run; unsafe file traversal/symlink escapes and unsupported later steps block before Fiji mutation |
 | 16 | completed | `6ad41c7` | 37 helper regressions passed; compact 4M-pixel buffer and randomized exact-median check passed |
 | 17 | completed | `20ca91d` | 24 workflow/cache/lint tests passed; practice dry-run and Python compilation passed; trainer/practice restore images, active cursor, Results, ROIs, measurements, redirect, and BlackBackground on success/failure |
 | 18 | completed | `cdf13d1` | 120 context/runtime tests passed; zero-polling integration passed twice; generated contexts byte-stable; full offline suite exceeded the 120 s stage check and is deferred to convergence |

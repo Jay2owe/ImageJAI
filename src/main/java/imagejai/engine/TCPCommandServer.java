@@ -34,6 +34,7 @@ import imagejai.engine.security.SelectionBroker;
 import imagejai.engine.security.VisualOverrideRegistry;
 import imagejai.engine.safeMode.DestructiveScanner;
 import imagejai.engine.safeMode.RoiAutoBackup;
+import imagejai.engine.safeMode.SourceImageTagger;
 import imagejai.ui.ChatPanelController;
 
 import javax.swing.SwingUtilities;
@@ -675,6 +676,7 @@ public class TCPCommandServer {
             PseudonymisationFilter.getInstance();
     private AuditLog auditLog = AuditLog.getInstance();
     IntentRouter intentRouter = new IntentRouter();
+    private final MutationCoordinator mutationCoordinator;
     private final JobRegistry jobRegistry;
     // Phase 8: reactive rules engine. Subscribes to the bus, fires rule
     // actions in response to matching events. Lifecycle tied to the TCP
@@ -712,7 +714,15 @@ public class TCPCommandServer {
         this.pipelineBuilder = pipelineBuilder;
         this.explorationEngine = explorationEngine;
         this.sessionRegistry = sessionRegistry;
-        this.jobRegistry = new JobRegistry(commandEngine);
+        // Share the legacy JVM macro monitor during staged migration. New
+        // coordinator jobs therefore cannot overlap the older synchronized
+        // paths that stages 09/10/13 will move behind the same API.
+        this.mutationCoordinator = new MutationCoordinator(
+                MutationCoordinator.DEFAULT_CAPACITY, MACRO_MUTEX);
+        if (commandEngine != null) {
+            commandEngine.setMutationCoordinator(mutationCoordinator);
+        }
+        this.jobRegistry = new JobRegistry(commandEngine, mutationCoordinator);
         this.reactiveEngine = new ReactiveEngine(
                 eventBus, commandEngine, intentRouter, guiActionDispatcher);
         // Step 15: surface global LRU evictions to FrictionLog so an
@@ -1120,6 +1130,7 @@ public class TCPCommandServer {
             @Override
             public void onEvent(JsonObject frame) {
                 JsonObject governed = governEventFrame(frame, caps, socket);
+                if (governed == null) return;
                 droppedFrames.addAndGet(offerSubscriberFrame(
                         queue, governed, caps, socket));
             }
@@ -1338,6 +1349,18 @@ public class TCPCommandServer {
         JsonObject frame = source == null ? new JsonObject() : source.deepCopy();
         PrivacyPosture posture = PostureController.getInstance().current();
         String topic = optString(frame, "event", "");
+        JsonObject data = frame.has("data") && frame.get("data").isJsonObject()
+                ? frame.getAsJsonObject("data") : null;
+        if (topic.startsWith("job.") && data != null
+                && data.has(JobRegistry.EVENT_OWNER_FIELD)) {
+            String owner = optString(data, JobRegistry.EVENT_OWNER_FIELD, "");
+            data.remove(JobRegistry.EVENT_OWNER_FIELD);
+            String subscriber = caps == null || caps.sessionId == null
+                    ? "" : caps.sessionId;
+            if (owner.isEmpty() || !owner.equals(subscriber)) {
+                return null;
+            }
+        }
         boolean eventRedacted = false;
         if (posture != null && posture != PrivacyPosture.STANDARD) {
             String safeTopic = safeEventTopic(topic);
@@ -1346,8 +1369,6 @@ public class TCPCommandServer {
                 topic = safeTopic;
                 eventRedacted = true;
             }
-            JsonObject data = frame.has("data") && frame.get("data").isJsonObject()
-                    ? frame.getAsJsonObject("data") : null;
             eventRedacted |= pseudonymiseEventPayload(topic, data);
         }
         pseudonymisationFilter.apply(frame, "event:" + topic, posture,
@@ -2200,13 +2221,13 @@ public class TCPCommandServer {
         } else if ("gui_action".equals(command)) {
             return handleGuiAction(request);
         } else if ("execute_macro_async".equals(command)) {
-            return handleExecuteMacroAsync(request);
+            return handleExecuteMacroAsync(request, caps);
         } else if ("job_status".equals(command)) {
-            return handleJobStatus(request);
+            return handleJobStatus(request, caps);
         } else if ("job_cancel".equals(command)) {
-            return handleJobCancel(request);
+            return handleJobCancel(request, caps);
         } else if ("job_list".equals(command)) {
-            return handleJobList();
+            return handleJobList(caps);
         } else if ("list_reactive_rules".equals(command)) {
             return handleListReactiveRules();
         } else if ("reactive_stats".equals(command)) {
@@ -6232,13 +6253,108 @@ public class TCPCommandServer {
      * {@code execute_macro} — this command only wins when the caller cannot
      * afford to block the socket.
      */
-    private JsonObject handleExecuteMacroAsync(JsonObject request) {
+    private JsonObject handleExecuteMacroAsync(final JsonObject request,
+                                               final AgentCaps caps) {
         JsonElement codeEl = request.get("code");
         if (codeEl == null || !codeEl.isJsonPrimitive()) {
             return errorResponse("Missing 'code' field for execute_macro_async");
         }
-        String code = codeEl.getAsString();
-        JobRegistry.Job job = jobRegistry.submit(code);
+        final String owner = mutationOwner(caps);
+        if (owner == null) {
+            return errorResponse("execute_macro_async requires a durable session; call hello first");
+        }
+        final String code = codeEl.getAsString();
+        final String source = optString(request, "source", "tcp-async");
+        final long timeoutMs = resolveTimeoutMs(request, MACRO_TIMEOUT_MS);
+        final boolean safetyEnabled = isScientificIntegrityScanEnabled(caps);
+        final boolean undoEnabled = caps != null && caps.undo;
+
+        MutationCoordinator.Lifecycle<ExecutionResult> lifecycle =
+                new MutationCoordinator.Lifecycle<ExecutionResult>() {
+            private Set<String> graphTitlesBefore;
+            private String graphActiveTitleBefore;
+            private long graphMarkerBefore;
+            private SourceImageTagger sourceTagger;
+            private boolean prepared;
+
+            @Override public void checkSafety() throws Exception {
+                DestructiveScanner.Context context = captureScannerContext(caps);
+                List<DestructiveScanner.DestructiveOp> findings =
+                        DestructiveScanner.scan(code, context);
+                List<DestructiveScanner.DestructiveOp> rejected =
+                        DestructiveScanner.rejections(findings);
+                if (!rejected.isEmpty()) {
+                    StringBuilder message = new StringBuilder(
+                            "Macro blocked by safe-mode scanner: ");
+                    for (int i = 0; i < rejected.size(); i++) {
+                        if (i > 0) message.append("; ");
+                        DestructiveScanner.DestructiveOp op = rejected.get(i);
+                        message.append(op.ruleId).append(" @ line ").append(op.line);
+                    }
+                    throw new MutationCoordinator.SafetyException(message.toString());
+                }
+                for (DestructiveScanner.DestructiveOp op
+                        : DestructiveScanner.backups(findings)) {
+                    if (DestructiveScanner.RULE_ROI_WIPE.equals(op.ruleId)
+                            && caps.safeModeOptions != null
+                            && caps.safeModeOptions.autoBackupRoiOnReset) {
+                        runRoiAutoBackup(op, caps);
+                    }
+                }
+            }
+
+            @Override public void beforeMutation() {
+                graphTitlesBefore = ImageGraph.captureOpenTitles();
+                graphActiveTitleBefore = ImageGraph.captureActiveTitle();
+                graphMarkerBefore = imageGraph.currentMarker();
+                prepared = true;
+                if (undoEnabled) {
+                    captureUndoFrameIfEnabled(nextCallId(), code, caps);
+                }
+                if (caps != null && caps.safeMode
+                        && caps.safeModeOptions != null
+                        && caps.safeModeOptions.autoSourceImageColumn
+                        && !SourceImageTagger.macroOptsOut(code)) {
+                    sourceTagger = new SourceImageTagger();
+                    sourceTagger.preExec(WindowManager.getCurrentImage());
+                }
+            }
+
+            @Override public void afterMutation(
+                    MutationCoordinator.Outcome<ExecutionResult> outcome) {
+                if (!prepared) return;
+                if (sourceTagger != null) {
+                    sourceTagger.postExec(WindowManager.getCurrentImage());
+                }
+                Set<String> after = ImageGraph.captureOpenTitles();
+                imageGraph.trackMacroChange(graphTitlesBefore, graphActiveTitleBefore,
+                        after, code, "macro");
+                if (caps != null && caps.graphDelta) {
+                    // Materialise the delta while still serialized so later
+                    // mutations cannot move the marker before provenance is observed.
+                    imageGraph.deltaSince(graphMarkerBefore);
+                }
+            }
+
+            @Override public void onCompletion(
+                    MutationCoordinator.Completion<ExecutionResult> completion) {
+                boolean success = completion.state() == MutationCoordinator.State.SUCCEEDED
+                        && completion.result() != null
+                        && completion.result().isSuccess();
+                String failure = completion.error() == null
+                        ? null : completion.error().getMessage();
+                SessionCodeJournal.INSTANCE.record("ijm", code, source, 0L,
+                        completion.startedAtMs(), completion.elapsedMs(), success, failure);
+            }
+        };
+
+        final JobRegistry.Job job;
+        try {
+            job = jobRegistry.submit(code, owner, timeoutMs,
+                    safetyEnabled, undoEnabled, true, lifecycle);
+        } catch (IllegalArgumentException | java.util.concurrent.RejectedExecutionException e) {
+            return errorResponse("Mutation admission rejected: " + e.getMessage());
+        }
         JsonObject result = new JsonObject();
         result.addProperty("job_id", job.id);
         result.addProperty("state", job.state);
@@ -6246,41 +6362,55 @@ public class TCPCommandServer {
         return successResponse(result);
     }
 
-    private JsonObject handleJobStatus(JsonObject request) {
+    private JsonObject handleJobStatus(JsonObject request, AgentCaps caps) {
         JsonElement idEl = request.get("job_id");
         if (idEl == null || !idEl.isJsonPrimitive()) {
             return errorResponse("Missing 'job_id' for job_status");
         }
+        String owner = mutationOwner(caps);
+        if (owner == null) return errorResponse("job_status requires a durable session");
         String id = idEl.getAsString();
-        JobRegistry.Job j = jobRegistry.get(id);
+        JobRegistry.Job j = jobRegistry.get(owner, id);
         if (j == null) return errorResponse("Unknown job_id: " + id);
         return successResponse(jobRegistry.toJson(j));
     }
 
-    private JsonObject handleJobCancel(JsonObject request) {
+    private JsonObject handleJobCancel(JsonObject request, AgentCaps caps) {
         JsonElement idEl = request.get("job_id");
         if (idEl == null || !idEl.isJsonPrimitive()) {
             return errorResponse("Missing 'job_id' for job_cancel");
         }
+        String owner = mutationOwner(caps);
+        if (owner == null) return errorResponse("job_cancel requires a durable session");
         String id = idEl.getAsString();
-        JobRegistry.Job j = jobRegistry.get(id);
+        JobRegistry.Job j = jobRegistry.get(owner, id);
         if (j == null) return errorResponse("Unknown job_id: " + id);
-        boolean signalled = jobRegistry.cancel(id);
+        boolean signalled = jobRegistry.cancel(owner, id);
         JsonObject result = new JsonObject();
         result.addProperty("job_id", id);
         result.addProperty("cancelled", signalled);
-        result.addProperty("state", j.state);
+        result.addProperty("state", jobRegistry.toJson(j).get("state").getAsString());
+        result.addProperty("workerExited", j.handle.isWorkerExited());
         return successResponse(result);
     }
 
-    private JsonObject handleJobList() {
-        List<JobRegistry.Job> all = jobRegistry.list();
+    private JsonObject handleJobList(AgentCaps caps) {
+        String owner = mutationOwner(caps);
+        if (owner == null) return errorResponse("job_list requires a durable session");
+        List<JobRegistry.Job> all = jobRegistry.list(owner);
         JsonArray arr = new JsonArray();
         for (JobRegistry.Job j : all) arr.add(jobRegistry.toJson(j));
         JsonObject result = new JsonObject();
         result.addProperty("count", arr.size());
         result.add("jobs", arr);
         return successResponse(result);
+    }
+
+    private static String mutationOwner(AgentCaps caps) {
+        if (caps == null || caps.sessionId == null || caps.sessionId.trim().isEmpty()) {
+            return null;
+        }
+        return caps.sessionId;
     }
 
     // -----------------------------------------------------------------------

@@ -121,6 +121,87 @@ public class TCPCommandServerDataGovernanceTest {
     }
 
     @Test
+    public void jobEventsAreDeliveredOnlyToTheirOwningSession() throws Exception {
+        String previous = System.getProperty("imagejai.tcp.requireToken");
+        System.setProperty("imagejai.tcp.requireToken", "true");
+        Settings settings = new Settings();
+        settings.setPrivacyPosture(PrivacyPosture.STANDARD);
+        PostureController.getInstance().configure(settings);
+        CountDownLatch macroEntered = new CountDownLatch(1);
+        CountDownLatch releaseMacro = new CountDownLatch(1);
+        CommandEngine fake = new CommandEngine() {
+            @Override public ExecutionResult executeMacroOnCurrentThread(
+                    String code, java.util.function.DoubleConsumer callback) {
+                macroEntered.countDown();
+                boolean interrupted = false;
+                while (true) {
+                    try {
+                        releaseMacro.await();
+                        break;
+                    } catch (InterruptedException e) {
+                        interrupted = true;
+                    }
+                }
+                if (interrupted) Thread.currentThread().interrupt();
+                return ExecutionResult.success("ok", null,
+                        java.util.Collections.<String>emptyList(), 1L);
+            }
+        };
+        TCPCommandServer server = new TCPCommandServer(0, fake, null, null, null);
+        server.setServerTokenForTest("job-event-secret");
+        Socket ownerStream = null;
+        Socket foreignStream = null;
+        try {
+            int port = startAndAwait(server);
+            JsonObject ownerHello = exchange(port, parse(
+                    "{\"command\":\"hello\",\"token\":\"job-event-secret\"," +
+                    "\"capabilities\":{\"accept_events\":[\"job.*\"]}}"));
+            JsonObject foreignHello = exchange(port, parse(
+                    "{\"command\":\"hello\",\"token\":\"job-event-secret\"," +
+                    "\"capabilities\":{\"accept_events\":[\"job.*\"]}}"));
+            String owner = ownerHello.getAsJsonObject("result")
+                    .get("session_id").getAsString();
+            String foreign = foreignHello.getAsJsonObject("result")
+                    .get("session_id").getAsString();
+            ownerStream = openSubscription(
+                    port, owner, "job-event-secret", "job.*");
+            foreignStream = openSubscription(
+                    port, foreign, "job-event-secret", "job.*");
+            assertEquals("subscribed", readFrame(ownerStream)
+                    .get("event").getAsString());
+            assertEquals("subscribed", readFrame(foreignStream)
+                    .get("event").getAsString());
+
+            JsonObject submit = new JsonObject();
+            submit.addProperty("command", "execute_macro_async");
+            submit.addProperty("code", "owner-only-work;");
+            submit.addProperty("session_id", owner);
+            submit.addProperty("token", "job-event-secret");
+            JsonObject submitted = exchange(port, submit);
+            assertTrue(submitted.toString(), submitted.get("ok").getAsBoolean());
+            assertTrue(macroEntered.await(2, TimeUnit.SECONDS));
+
+            JsonObject started = readEvent(ownerStream, "job.started");
+            assertFalse(started.toString(), started.getAsJsonObject("data")
+                    .has(JobRegistry.EVENT_OWNER_FIELD));
+            assertNoStreamFrame(foreignStream);
+
+            releaseMacro.countDown();
+            JsonObject completed = readEvent(ownerStream, "job.completed");
+            assertFalse(completed.toString(), completed.getAsJsonObject("data")
+                    .has(JobRegistry.EVENT_OWNER_FIELD));
+            assertNoStreamFrame(foreignStream);
+        } finally {
+            releaseMacro.countDown();
+            if (ownerStream != null) ownerStream.close();
+            if (foreignStream != null) foreignStream.close();
+            server.stop();
+            restoreProperty("imagejai.tcp.requireToken", previous);
+            resetPosture();
+        }
+    }
+
+    @Test
     public void streamFramesUsePrivacyEnvelopeAndAuditOnlyMetadata()
             throws Exception {
         Settings settings = new Settings();
@@ -414,6 +495,20 @@ public class TCPCommandServerDataGovernanceTest {
             }
         }
         throw new AssertionError("event not received: " + event);
+    }
+
+    private static void assertNoStreamFrame(Socket socket) throws Exception {
+        socket.setSoTimeout(250);
+        BufferedReader reader = new BufferedReader(new InputStreamReader(
+                socket.getInputStream(), StandardCharsets.UTF_8));
+        try {
+            String line = reader.readLine();
+            throw new AssertionError("foreign session received job frame: " + line);
+        } catch (java.net.SocketTimeoutException expected) {
+            // No frame was queued or sent to the foreign session.
+        } finally {
+            socket.setSoTimeout(5000);
+        }
     }
 
     private static void assertGoverned(JsonObject frame) {

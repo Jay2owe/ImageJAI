@@ -8,20 +8,11 @@ import ij.WindowManager;
 import ij.measure.ResultsTable;
 import imagejai.config.Constants;
 
-import javax.swing.SwingUtilities;
-import java.lang.reflect.InvocationTargetException;
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
-import java.util.concurrent.Callable;
-import java.util.concurrent.ExecutionException;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-import java.util.concurrent.Future;
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.TimeoutException;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.DoubleConsumer;
@@ -37,9 +28,33 @@ public class CommandEngine {
     private final StateInspector inspector;
     private final EventBus bus = EventBus.getInstance();
     private static final AtomicLong MACRO_ID_SEQ = new AtomicLong(0);
+    private volatile MutationCoordinator mutationCoordinator;
 
     public CommandEngine() {
         this.inspector = new StateInspector();
+    }
+
+    /** Attach the server-owned coordinator before accepting mutation work. */
+    void setMutationCoordinator(MutationCoordinator coordinator) {
+        if (coordinator == null) throw new IllegalArgumentException("coordinator is required");
+        synchronized (this) {
+            if (mutationCoordinator != null && mutationCoordinator != coordinator
+                    && mutationCoordinator.activeCount() > 0) {
+                throw new IllegalStateException("cannot replace an active mutation coordinator");
+            }
+            mutationCoordinator = coordinator;
+        }
+    }
+
+    private MutationCoordinator coordinator() {
+        MutationCoordinator current = mutationCoordinator;
+        if (current != null) return current;
+        synchronized (this) {
+            if (mutationCoordinator == null) {
+                mutationCoordinator = new MutationCoordinator();
+            }
+            return mutationCoordinator;
+        }
     }
 
     /**
@@ -63,75 +78,64 @@ public class CommandEngine {
         if (macroCode == null || macroCode.trim().isEmpty()) {
             return ExecutionResult.failure("Empty macro code", 0);
         }
-
-        long startTime = System.currentTimeMillis();
-        long macroId = MACRO_ID_SEQ.incrementAndGet();
-        publishMacroStarted(macroId, macroCode);
-
-        // Snapshot state before execution
-        final Set<String> imagesBefore = getOpenImageTitles();
-        final int resultsRowsBefore = getResultsTableRowCount();
-
-        // Run the macro with timeout using a background thread + EDT dispatch
-        ExecutorService executor = Executors.newSingleThreadExecutor();
+        final long startTime = System.currentTimeMillis();
+        final String code = macroCode;
+        MutationCoordinator.Handle<ExecutionResult> handle;
         try {
-            Future<String> future = executor.submit(new MacroTask(macroCode));
-            String macroReturn;
-            try {
-                macroReturn = future.get(timeoutMs, TimeUnit.MILLISECONDS);
-            } catch (TimeoutException e) {
-                future.cancel(true);
-                long elapsed = System.currentTimeMillis() - startTime;
-                String err = "Macro execution timed out after " + timeoutMs + "ms";
-                publishMacroCompleted(macroId, false, err, null);
-                return ExecutionResult.failure(err, elapsed);
-            } catch (ExecutionException e) {
-                long elapsed = System.currentTimeMillis() - startTime;
-                Throwable cause = e.getCause();
-                String msg = cause != null ? cause.getMessage() : e.getMessage();
-                String err = "Macro error: " + msg;
-                publishMacroCompleted(macroId, false, err, null);
-                return ExecutionResult.failure(err, elapsed);
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-                long elapsed = System.currentTimeMillis() - startTime;
-                String err = "Macro execution interrupted";
-                publishMacroCompleted(macroId, false, err, null);
-                return ExecutionResult.failure(err, elapsed);
-            }
-
-            long elapsed = System.currentTimeMillis() - startTime;
-
-            // Detect new images
-            Set<String> imagesAfter = getOpenImageTitles();
-            List<String> newImages = new ArrayList<String>();
-            for (String title : imagesAfter) {
-                if (!imagesBefore.contains(title)) {
-                    newImages.add(title);
-                }
-            }
-
-            // Capture ResultsTable if it grew
-            String resultsCSV = null;
-            int resultsRowsAfter = getResultsTableRowCount();
-            if (resultsRowsAfter > resultsRowsBefore) {
-                resultsCSV = inspector.getResultsTableCSV();
-                // Notify the bus that the results table grew.
-                JsonObject rdata = new JsonObject();
-                rdata.addProperty("rows", resultsRowsAfter);
-                rdata.addProperty("delta", resultsRowsAfter - resultsRowsBefore);
-                bus.publish("results.changed", rdata);
-            }
-
-            // Build output string from macro return value
-            String output = macroReturn != null ? macroReturn : "";
-
-            publishMacroCompleted(macroId, true, null, newImages);
-            return ExecutionResult.success(output, resultsCSV, newImages, elapsed);
-
-        } finally {
-            executor.shutdownNow();
+            MutationCoordinator.Request<ExecutionResult> request =
+                    MutationCoordinator.Request.<ExecutionResult>builder()
+                            .ownerSession("__imagejai_command_engine__")
+                            .sourceKind("macro")
+                            .code(code)
+                            .timeoutMs(timeoutMs)
+                            .operation(new MutationCoordinator.Operation<ExecutionResult>() {
+                                @Override public ExecutionResult run() {
+                                    return executeMacroOnCurrentThread(code, null);
+                                }
+                            })
+                            .cancellationAction(new MutationCoordinator.CancellationAction() {
+                                @Override public void cancel() {
+                                    requestOwnedMacroAbort();
+                                }
+                            })
+                            .build();
+            MutationCoordinator activeCoordinator = coordinator();
+            handle = activeCoordinator.isMonitorHeldByCurrentThread()
+                    ? activeCoordinator.submitWhileMonitorHeld(request)
+                    : activeCoordinator.submit(request);
+        } catch (RejectedExecutionException e) {
+            return ExecutionResult.failure(e.getMessage(),
+                    System.currentTimeMillis() - startTime);
         }
+
+        boolean interrupted = false;
+        MutationCoordinator.Completion<ExecutionResult> completion;
+        while (true) {
+            try {
+                completion = handle.awaitCompletion();
+                break;
+            } catch (InterruptedException e) {
+                interrupted = true;
+                handle.cancel();
+            }
+        }
+        if (interrupted) Thread.currentThread().interrupt();
+
+        if (completion.state() == MutationCoordinator.State.SUCCEEDED
+                && completion.result() != null) {
+            return completion.result();
+        }
+        String error;
+        if (completion.state() == MutationCoordinator.State.TIMED_OUT) {
+            error = "Macro execution timed out after " + timeoutMs + "ms";
+        } else if (completion.state() == MutationCoordinator.State.CANCELLED) {
+            error = "Macro execution interrupted";
+        } else {
+            Throwable failure = completion.error();
+            String detail = failure == null ? "unknown error" : failure.getMessage();
+            error = "Macro error: " + (detail == null ? "unknown error" : detail);
+        }
+        return ExecutionResult.failure(error, completion.elapsedMs());
     }
 
     private void publishMacroStarted(long macroId, String code) {
@@ -146,7 +150,8 @@ public class CommandEngine {
         }
     }
 
-    private void publishMacroCompleted(long macroId, boolean success, String error, List<String> newImages) {
+    private void publishMacroCompleted(long macroId, boolean success,
+                                       String error, List<String> newImages) {
         try {
             JsonObject data = new JsonObject();
             data.addProperty("macro_id", macroId);
@@ -154,7 +159,7 @@ public class CommandEngine {
             if (error != null) data.addProperty("error", error);
             if (newImages != null && !newImages.isEmpty()) {
                 JsonArray arr = new JsonArray();
-                for (String t : newImages) arr.add(t);
+                for (String title : newImages) arr.add(title);
                 data.add("new_images", arr);
             }
             bus.publish("macro.completed", data);
@@ -193,19 +198,6 @@ public class CommandEngine {
      * which handles EDT dispatch internally, so we run it directly on the
      * executor thread to avoid blocking the EDT event loop.
      */
-    private static class MacroTask implements Callable<String> {
-        private final String macroCode;
-
-        MacroTask(String macroCode) {
-            this.macroCode = macroCode;
-        }
-
-        @Override
-        public String call() throws Exception {
-            return IJ.runMacro(macroCode);
-        }
-    }
-
     /**
      * Phase 3: run a macro on the calling thread (intended for the async job
      * worker — off both the EDT and the usual ExecutorService). Polls
@@ -300,6 +292,21 @@ public class CommandEngine {
         } finally {
             done.set(true);
             if (poller != null) poller.interrupt();
+        }
+    }
+
+    /**
+     * Request ImageJ's process-global macro abort. This is safe only when the
+     * caller has proved it owns the shared mutation monitor; the coordinator
+     * is the sole production caller.
+     */
+    static void requestOwnedMacroAbort() {
+        try {
+            Class<?> macroClass = Class.forName("ij.Macro");
+            java.lang.reflect.Method abort = macroClass.getMethod("abort");
+            abort.invoke(null);
+        } catch (Throwable ignore) {
+            // Worker interruption remains the fallback.
         }
     }
 

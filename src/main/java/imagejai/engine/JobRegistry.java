@@ -10,40 +10,37 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ThreadLocalRandom;
-import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Consumer;
 import java.util.function.DoubleConsumer;
 
 /**
- * Phase 3: registry of asynchronous macro jobs.
+ * Session-owned view of asynchronous macro jobs.
  *
- * <p>Each {@link #submit(String)} call spawns a dedicated daemon worker thread
- * that runs the macro off the EDT via
- * {@link CommandEngine#executeMacroOnCurrentThread(String, DoubleConsumer)}.
- * Progress, completion, failure and cancellation are published as
- * {@code job.*} events on the {@link EventBus}.
- *
- * <p>Bounded retention: a janitor daemon prunes completed/failed/cancelled
- * jobs older than {@link #RETENTION_MS} ms and caps the total number of
- * tracked jobs at {@link #MAX_JOBS}. Eviction prefers terminal jobs first.
- *
- * <p>Thread-safe; in-memory only.
+ * <p>{@link MutationCoordinator} owns admission, worker creation,
+ * serialization, cancellation, timeout, and terminal completion. This class
+ * owns only retained job records and their protocol/event representation.</p>
  */
 public class JobRegistry {
 
-    /** How often the janitor runs. */
     public static final long JANITOR_INTERVAL_MS = 60_000L;
-    /** Completed jobs older than this are evicted. */
     public static final long RETENTION_MS = 60L * 60_000L;
-    /** Hard cap on retained job entries. */
     public static final int MAX_JOBS = 256;
 
     public static final String STATE_RUNNING = "running";
+    public static final String STATE_CANCEL_REQUESTED = "cancel_requested";
+    public static final String STATE_TIMEOUT_REQUESTED = "timeout_requested";
     public static final String STATE_COMPLETED = "completed";
     public static final String STATE_FAILED = "failed";
     public static final String STATE_CANCELLED = "cancelled";
+    public static final String STATE_TIMED_OUT = "timed_out";
+    /** Internal routing metadata removed before a job event reaches the wire. */
+    static final String EVENT_OWNER_FIELD = "_owner_session";
 
-    /** Public job state. Fields are volatile because the worker thread mutates them. */
+    private static final String TRUSTED_OWNER = "__imagejai_in_process__";
+
+    /** Public retained job state. Terminal fields change only after worker exit. */
     public static class Job {
         public final String id;
         public final String code;
@@ -53,210 +50,299 @@ public class JobRegistry {
         public volatile String error;
         public final long startedAt;
         public volatile long endedAt;
+        final String ownerSession;
+        final MutationCoordinator.Handle<ExecutionResult> handle;
 
-        // Worker is set after the Job is registered to avoid leaking a
-        // partially-initialised reference into the worker's run() body.
-        volatile Thread worker;
-        // Flips true the first time cancel() is requested. Lets the worker
-        // distinguish a user-cancellation from a macro that just threw.
-        final AtomicBoolean cancelled = new AtomicBoolean(false);
-
-        Job(String id, String code) {
-            this.id = id;
-            this.code = code;
-            this.startedAt = System.currentTimeMillis();
+        Job(MutationCoordinator.Handle<ExecutionResult> handle, String code) {
+            this.handle = handle;
+            this.id = handle.id();
+            this.code = code == null ? "" : code;
+            this.ownerSession = handle.ownerSession();
+            this.startedAt = handle.startedAtMs();
         }
     }
 
-    private final ConcurrentHashMap<String, Job> jobs = new ConcurrentHashMap<String, Job>();
+    private static final class MacroFailure extends Exception {
+        MacroFailure(String message) { super(message); }
+    }
+
+    private final ConcurrentHashMap<String, Job> jobs =
+            new ConcurrentHashMap<String, Job>();
     private final EventBus bus = EventBus.getInstance();
     private final CommandEngine commandEngine;
+    private final MutationCoordinator coordinator;
     private final Thread janitor;
-    private volatile boolean shutdown = false;
+    private volatile boolean shutdown;
 
     public JobRegistry(CommandEngine commandEngine) {
+        this(commandEngine, new MutationCoordinator());
+        if (commandEngine != null) commandEngine.setMutationCoordinator(coordinator);
+    }
+
+    public JobRegistry(CommandEngine commandEngine, MutationCoordinator coordinator) {
+        if (coordinator == null) throw new IllegalArgumentException("coordinator is required");
         this.commandEngine = commandEngine;
+        this.coordinator = coordinator;
         this.janitor = new Thread(new Runnable() {
-            @Override
-            public void run() {
-                janitorLoop();
-            }
+            @Override public void run() { janitorLoop(); }
         }, "ImageJAI-JobRegistry-Janitor");
         this.janitor.setDaemon(true);
         this.janitor.start();
     }
 
-    /**
-     * Submit a macro for asynchronous execution. Returns immediately with the
-     * Job (state="running", worker thread already started).
-     */
-    public Job submit(final String code) {
-        final String id = newId();
-        final Job job = new Job(id, code == null ? "" : code);
-        jobs.put(id, job);
-        Thread t = new Thread(new Runnable() {
-            @Override
-            public void run() {
-                runJob(job);
+    /** Trusted in-process compatibility overload. Network callers use an owner. */
+    public Job submit(String code) {
+        return submit(code, TRUSTED_OWNER, 0L, false, false, false, null);
+    }
+
+    public Job submit(final String code,
+                      final String ownerSession,
+                      long timeoutMs,
+                      boolean safetyEnabled,
+                      boolean undoEnabled,
+                      boolean provenanceEnabled,
+                      MutationCoordinator.Lifecycle<ExecutionResult> lifecycle) {
+        if (shutdown) throw new RejectedExecutionException("job registry is stopped");
+        if (ownerSession == null || ownerSession.trim().isEmpty()) {
+            throw new IllegalArgumentException("owner session is required");
+        }
+        if (commandEngine == null) {
+            throw new RejectedExecutionException("macro engine is unavailable");
+        }
+
+        final MutationCoordinator.Lifecycle<ExecutionResult> delegate = lifecycle == null
+                ? new MutationCoordinator.Lifecycle<ExecutionResult>() {}
+                : lifecycle;
+        final AtomicReference<Job> jobRef = new AtomicReference<Job>();
+
+        MutationCoordinator.Lifecycle<ExecutionResult> wrapped =
+                new MutationCoordinator.Lifecycle<ExecutionResult>() {
+            @Override public void checkSafety() throws Exception {
+                delegate.checkSafety();
             }
-        }, "ImageJAI-Job-" + id);
-        t.setDaemon(true);
-        job.worker = t;
-        // Publish job.started before starting the thread so a subscriber
-        // that reacts to the started event sees state="running" if it
-        // immediately calls job_status.
-        bus.publish("job.started", startFrame(job));
-        t.start();
+
+            @Override public void beforeMutation() throws Exception {
+                delegate.beforeMutation();
+            }
+
+            @Override public void afterMutation(
+                    MutationCoordinator.Outcome<ExecutionResult> outcome) throws Exception {
+                delegate.afterMutation(outcome);
+            }
+
+            @Override public void onCompletion(
+                    MutationCoordinator.Completion<ExecutionResult> completion) {
+                Job job = jobRef.get();
+                try {
+                    if (job != null) finishJob(job, completion);
+                } finally {
+                    delegate.onCompletion(completion);
+                }
+            }
+        };
+
+        MutationCoordinator.Request<ExecutionResult> request =
+                MutationCoordinator.Request.<ExecutionResult>builder()
+                        .ownerSession(ownerSession)
+                        .sourceKind("macro")
+                        .code(code)
+                        .timeoutMs(timeoutMs)
+                        .safetyEnabled(safetyEnabled)
+                        .undoEnabled(undoEnabled)
+                        .provenanceEnabled(provenanceEnabled)
+                        .operation(new MutationCoordinator.Operation<ExecutionResult>() {
+                            @Override public ExecutionResult run() throws Exception {
+                                Job job = jobRef.get();
+                                DoubleConsumer progress = new DoubleConsumer() {
+                                    @Override public void accept(double pct) {
+                                        Job current = jobRef.get();
+                                        if (current == null || Double.isNaN(pct) || pct < 0) return;
+                                        current.progress = Math.min(1.0, pct);
+                                        bus.publish("job.progress", progressFrame(current));
+                                    }
+                                };
+                                ExecutionResult result = commandEngine.executeMacroOnCurrentThread(
+                                        code == null ? "" : code, progress);
+                                if (result == null) throw new MacroFailure("macro returned no result");
+                                if (!result.isSuccess()) {
+                                    throw new MacroFailure(result.getError() == null
+                                            ? "macro error" : result.getError());
+                                }
+                                return result;
+                            }
+                        })
+                        .cancellationAction(new MutationCoordinator.CancellationAction() {
+                            @Override public void cancel() {
+                                CommandEngine.requestOwnedMacroAbort();
+                            }
+                        })
+                        .lifecycle(wrapped)
+                        .build();
+
+        coordinator.submit(request,
+                new Consumer<MutationCoordinator.Handle<ExecutionResult>>() {
+                    @Override public void accept(
+                            MutationCoordinator.Handle<ExecutionResult> handle) {
+                        Job job = new Job(handle, code);
+                        Job prior = jobs.putIfAbsent(job.id, job);
+                        if (prior != null) {
+                            throw new IllegalStateException("cryptographic job id collision");
+                        }
+                        jobRef.set(job);
+                        try {
+                            bus.publish("job.started", startFrame(job));
+                        } catch (Throwable ignored) {
+                            // Event telemetry cannot invalidate admission.
+                        }
+                    }
+                });
         enforceCap();
-        return job;
+        return jobRef.get();
     }
 
+    /** Owner-scoped lookup for protocol callers. */
+    public Job get(String ownerSession, String id) {
+        if (id == null || ownerSession == null) return null;
+        Job job = jobs.get(id);
+        return job != null && ownerSession.equals(job.ownerSession) ? job : null;
+    }
+
+    /** Trusted in-process lookup retained for plugin tests/admin code. */
     public Job get(String id) {
-        if (id == null) return null;
-        return jobs.get(id);
+        return id == null ? null : jobs.get(id);
     }
 
-    /** All jobs, newest-started first. */
-    public List<Job> list() {
-        List<Job> out = new ArrayList<Job>(jobs.values());
-        Collections.sort(out, new Comparator<Job>() {
-            @Override
-            public int compare(Job a, Job b) {
-                return Long.compare(b.startedAt, a.startedAt);
+    public List<Job> list(String ownerSession) {
+        List<Job> out = new ArrayList<Job>();
+        if (ownerSession != null) {
+            for (Job job : jobs.values()) {
+                if (ownerSession.equals(job.ownerSession)) out.add(job);
             }
-        });
+        }
+        sortNewestFirst(out);
         return out;
     }
 
-    public int size() {
-        return jobs.size();
+    /** Trusted in-process list retained for diagnostics. */
+    public List<Job> list() {
+        List<Job> out = new ArrayList<Job>(jobs.values());
+        sortNewestFirst(out);
+        return out;
     }
 
-    /**
-     * Request cancellation of a running job. First calls {@code ij.Macro.abort()}
-     * (via reflection so the registry doesn't compile-time-depend on it via this
-     * class); then interrupts the worker thread as a fallback. Returns true if
-     * the cancel signal was delivered, false if the job is unknown or already
-     * in a terminal state.
-     */
+    private static void sortNewestFirst(List<Job> jobs) {
+        Collections.sort(jobs, new Comparator<Job>() {
+            @Override public int compare(Job a, Job b) {
+                return Long.compare(b.startedAt, a.startedAt);
+            }
+        });
+    }
+
+    public int size() { return jobs.size(); }
+
+    public boolean cancel(String ownerSession, String id) {
+        Job job = get(ownerSession, id);
+        return requestCancel(job);
+    }
+
+    /** Trusted in-process cancellation retained for plugin teardown/tests. */
     public boolean cancel(String id) {
-        Job j = get(id);
-        if (j == null) return false;
-        if (!STATE_RUNNING.equals(j.state)) return false;
-        j.cancelled.set(true);
-        try {
-            Class<?> macroClass = Class.forName("ij.Macro");
-            java.lang.reflect.Method abort = macroClass.getMethod("abort");
-            abort.invoke(null);
-        } catch (Throwable ignore) {
-            // ij.Macro absent or signature changed — fall through to interrupt.
-        }
-        Thread w = j.worker;
-        if (w != null && w.isAlive()) {
-            w.interrupt();
-        }
-        return true;
+        return requestCancel(get(id));
     }
 
-    /** Cancel every running job. Used by the TCP server's stop() hook. */
+    private boolean requestCancel(Job job) {
+        if (job == null || job.handle.isTerminal()) return false;
+        boolean accepted = job.handle.cancel();
+        refreshTransientState(job);
+        return accepted;
+    }
+
     public void cancelAll() {
-        for (Job j : jobs.values()) {
-            if (STATE_RUNNING.equals(j.state)) cancel(j.id);
-        }
+        for (Job job : jobs.values()) requestCancel(job);
     }
 
-    /** Cancel everything, stop the janitor, prepare for plugin teardown. */
     public void shutdown() {
         shutdown = true;
-        cancelAll();
+        coordinator.shutdown();
         janitor.interrupt();
     }
 
-    /** On-the-wire JSON representation of a Job. */
-    public JsonObject toJson(Job j) {
+    public JsonObject toJson(Job job) {
+        refreshTransientState(job);
         JsonObject o = new JsonObject();
-        o.addProperty("job_id", j.id);
-        o.addProperty("state", j.state);
-        o.addProperty("progress", j.progress);
-        o.addProperty("startedAt", j.startedAt);
-        long end = j.endedAt;
+        o.addProperty("job_id", job.id);
+        o.addProperty("state", job.state);
+        o.addProperty("progress", job.progress);
+        o.addProperty("startedAt", job.startedAt);
+        long end = job.endedAt;
         long elapsed;
-        if (end > 0) {
+        if (end > 0L) {
             o.addProperty("endedAt", end);
-            elapsed = end - j.startedAt;
+            elapsed = end - job.startedAt;
         } else {
-            elapsed = System.currentTimeMillis() - j.startedAt;
+            elapsed = System.currentTimeMillis() - job.startedAt;
         }
-        o.addProperty("elapsedMs", elapsed);
-        if (j.result != null) o.add("result", j.result);
-        if (j.error != null) o.addProperty("error", j.error);
-        // Short preview lets the agent recognise the job it submitted without
-        // echoing arbitrarily large macro bodies back through every status call.
-        String preview = j.code == null ? "" : j.code.trim();
+        o.addProperty("elapsedMs", Math.max(0L, elapsed));
+        o.addProperty("cancelRequested", job.handle.isCancellationRequested());
+        o.addProperty("workerExited", job.handle.isWorkerExited());
+        if (job.result != null) o.add("result", job.result);
+        if (job.error != null) o.addProperty("error", job.error);
+        String preview = job.code == null ? "" : job.code.trim();
         if (preview.length() > 160) preview = preview.substring(0, 160) + "...";
         o.addProperty("preview", preview);
         return o;
     }
 
-    // ------------------------------------------------------------------
-    // Internal: id generation, worker, frames, janitor
-    // ------------------------------------------------------------------
-
-    private String newId() {
-        for (int i = 0; i < 32; i++) {
-            String id = "j_" + Integer.toHexString(ThreadLocalRandom.current().nextInt(0x1000000));
-            if (!jobs.containsKey(id)) return id;
+    private void refreshTransientState(Job job) {
+        if (job == null || isTerminal(job.state)) return;
+        MutationCoordinator.State state = job.handle.state();
+        if (state == MutationCoordinator.State.TIMEOUT_REQUESTED) {
+            job.state = STATE_TIMEOUT_REQUESTED;
+        } else if (state == MutationCoordinator.State.CANCEL_REQUESTED) {
+            job.state = STATE_CANCEL_REQUESTED;
+        } else {
+            job.state = STATE_RUNNING;
         }
-        // Practically unreachable — fall back to a nanosecond-keyed id.
-        return "j_" + Long.toHexString(System.nanoTime());
     }
 
-    private void runJob(final Job job) {
+    private void finishJob(Job job,
+                           MutationCoordinator.Completion<ExecutionResult> completion) {
+        job.endedAt = completion.endedAtMs();
+        MutationCoordinator.State state = completion.state();
+        if (state == MutationCoordinator.State.CANCELLED) {
+            job.state = STATE_CANCELLED;
+            job.error = "cancelled";
+            publish("job.failed", failedFrame(job));
+        } else if (state == MutationCoordinator.State.TIMED_OUT) {
+            job.state = STATE_TIMED_OUT;
+            job.error = "timed out";
+            publish("job.failed", failedFrame(job));
+        } else if (state == MutationCoordinator.State.SUCCEEDED
+                && completion.result() != null
+                && completion.result().isSuccess()) {
+            job.result = executionResultToJson(completion.result());
+            job.progress = 1.0;
+            job.state = STATE_COMPLETED;
+            publish("job.completed", completedFrame(job));
+        } else {
+            Throwable error = completion.error();
+            String message = error == null ? "macro error" : error.getMessage();
+            job.error = message == null || message.isEmpty()
+                    ? (error == null ? "macro error" : error.getClass().getSimpleName())
+                    : message;
+            job.state = STATE_FAILED;
+            publish("job.failed", failedFrame(job));
+        }
+    }
+
+    private void publish(String topic, JsonObject frame) {
         try {
-            DoubleConsumer cb = new DoubleConsumer() {
-                @Override
-                public void accept(double pct) {
-                    if (Double.isNaN(pct) || pct < 0) return;
-                    if (pct > 1.0) pct = 1.0;
-                    job.progress = pct;
-                    bus.publish("job.progress", progressFrame(job));
-                }
-            };
-            ExecutionResult r = commandEngine.executeMacroOnCurrentThread(job.code, cb);
-            // Cancellation may have raced the macro to completion; prefer the
-            // cancelled state if the user signalled it before we got back.
-            if (job.cancelled.get()) {
-                job.error = "cancelled";
-                job.state = STATE_CANCELLED;
-                bus.publish("job.failed", failedFrame(job));
-                return;
-            }
-            if (r.isSuccess()) {
-                job.result = executionResultToJson(r);
-                job.progress = 1.0;
-                job.state = STATE_COMPLETED;
-                bus.publish("job.completed", completedFrame(job));
-            } else {
-                job.error = r.getError() != null ? r.getError() : "macro error";
-                job.state = STATE_FAILED;
-                bus.publish("job.failed", failedFrame(job));
-            }
-        } catch (Throwable t) {
-            if (job.cancelled.get()) {
-                job.error = "cancelled";
-                job.state = STATE_CANCELLED;
-            } else {
-                String m = t.getMessage();
-                job.error = (m != null && !m.isEmpty()) ? m : t.getClass().getSimpleName();
-                job.state = STATE_FAILED;
-            }
-            bus.publish("job.failed", failedFrame(job));
-        } finally {
-            job.endedAt = System.currentTimeMillis();
+            bus.publish(topic, frame);
+        } catch (Throwable ignored) {
+            // Events are observers; they cannot change terminal state.
         }
     }
 
-    /** Mirror of TCPCommandServer.executionResultToJson — kept here so the registry is self-contained. */
     static JsonObject executionResultToJson(ExecutionResult r) {
         JsonObject json = new JsonObject();
         json.addProperty("success", r.isSuccess());
@@ -264,9 +350,7 @@ public class JobRegistry {
             json.addProperty("output", r.getOutput() != null ? r.getOutput() : "");
             json.addProperty("resultsTable", r.getResultsTable() != null ? r.getResultsTable() : "");
             JsonArray newImages = new JsonArray();
-            for (String img : r.getNewImages()) {
-                newImages.add(img);
-            }
+            for (String img : r.getNewImages()) newImages.add(img);
             json.add("newImages", newImages);
             json.addProperty("executionTimeMs", r.getExecutionTimeMs());
         } else {
@@ -275,60 +359,60 @@ public class JobRegistry {
         return json;
     }
 
-    private JsonObject startFrame(Job j) {
+    private JsonObject startFrame(Job job) {
         JsonObject d = new JsonObject();
-        d.addProperty("job_id", j.id);
-        d.addProperty("startedAt", j.startedAt);
-        String preview = j.code == null ? "" : j.code.trim();
+        d.addProperty(EVENT_OWNER_FIELD, job.ownerSession);
+        d.addProperty("job_id", job.id);
+        d.addProperty("startedAt", job.startedAt);
+        String preview = job.code == null ? "" : job.code.trim();
         if (preview.length() > 160) preview = preview.substring(0, 160) + "...";
         d.addProperty("preview", preview);
         return d;
     }
 
-    private JsonObject progressFrame(Job j) {
+    private JsonObject progressFrame(Job job) {
         JsonObject d = new JsonObject();
-        d.addProperty("job_id", j.id);
-        d.addProperty("progress", j.progress);
-        d.addProperty("elapsedMs", System.currentTimeMillis() - j.startedAt);
+        d.addProperty(EVENT_OWNER_FIELD, job.ownerSession);
+        d.addProperty("job_id", job.id);
+        d.addProperty("progress", job.progress);
+        d.addProperty("elapsedMs", System.currentTimeMillis() - job.startedAt);
         return d;
     }
 
-    private JsonObject completedFrame(Job j) {
+    private JsonObject completedFrame(Job job) {
         JsonObject d = new JsonObject();
-        d.addProperty("job_id", j.id);
-        d.addProperty("state", j.state);
-        d.addProperty("elapsedMs", j.endedAt - j.startedAt);
-        if (j.result != null) d.add("result", j.result);
+        d.addProperty(EVENT_OWNER_FIELD, job.ownerSession);
+        d.addProperty("job_id", job.id);
+        d.addProperty("state", job.state);
+        d.addProperty("elapsedMs", job.endedAt - job.startedAt);
+        if (job.result != null) d.add("result", job.result);
         return d;
     }
 
-    private JsonObject failedFrame(Job j) {
+    private JsonObject failedFrame(Job job) {
         JsonObject d = new JsonObject();
-        d.addProperty("job_id", j.id);
-        d.addProperty("state", j.state);
-        long end = j.endedAt > 0 ? j.endedAt : System.currentTimeMillis();
-        d.addProperty("elapsedMs", end - j.startedAt);
-        if (j.error != null) d.addProperty("error", j.error);
+        d.addProperty(EVENT_OWNER_FIELD, job.ownerSession);
+        d.addProperty("job_id", job.id);
+        d.addProperty("state", job.state);
+        d.addProperty("elapsedMs", Math.max(0L, job.endedAt - job.startedAt));
+        if (job.error != null) d.addProperty("error", job.error);
         return d;
     }
 
     private void enforceCap() {
         if (jobs.size() <= MAX_JOBS) return;
-        // Evict terminal jobs oldest-first; only touch running jobs if the
-        // table is *still* over cap after pruning all terminal entries.
-        List<Job> all = new ArrayList<Job>(jobs.values());
-        Collections.sort(all, new Comparator<Job>() {
-            @Override
-            public int compare(Job a, Job b) {
-                int as = isTerminal(a.state) ? 0 : 1;
-                int bs = isTerminal(b.state) ? 0 : 1;
-                if (as != bs) return Integer.compare(as, bs);
-                return Long.compare(a.startedAt, b.startedAt);
+        List<Job> terminal = new ArrayList<Job>();
+        for (Job job : jobs.values()) {
+            if (isTerminal(job.state)) terminal.add(job);
+        }
+        Collections.sort(terminal, new Comparator<Job>() {
+            @Override public int compare(Job a, Job b) {
+                return Long.compare(a.endedAt, b.endedAt);
             }
         });
-        int toRemove = jobs.size() - MAX_JOBS;
-        for (int i = 0; i < toRemove && i < all.size(); i++) {
-            jobs.remove(all.get(i).id);
+        int remove = jobs.size() - MAX_JOBS;
+        for (int i = 0; i < remove && i < terminal.size(); i++) {
+            jobs.remove(terminal.get(i).id, terminal.get(i));
         }
     }
 
@@ -336,24 +420,24 @@ public class JobRegistry {
         while (!shutdown) {
             try {
                 Thread.sleep(JANITOR_INTERVAL_MS);
-            } catch (InterruptedException ie) {
+            } catch (InterruptedException e) {
                 if (shutdown) return;
-                Thread.currentThread().interrupt();
                 continue;
             }
+            long cutoff = System.currentTimeMillis() - RETENTION_MS;
             try {
-                long cutoff = System.currentTimeMillis() - RETENTION_MS;
                 Iterator<Map.Entry<String, Job>> it = jobs.entrySet().iterator();
                 while (it.hasNext()) {
-                    Map.Entry<String, Job> e = it.next();
-                    Job j = e.getValue();
-                    if (isTerminal(j.state) && j.endedAt > 0 && j.endedAt < cutoff) {
-                        it.remove();
+                    Map.Entry<String, Job> entry = it.next();
+                    Job job = entry.getValue();
+                    if (isTerminal(job.state) && job.endedAt > 0L
+                            && job.endedAt < cutoff) {
+                        jobs.remove(entry.getKey(), job);
                     }
                 }
                 enforceCap();
-            } catch (Throwable ignore) {
-                // Janitor must never die — swallow and retry next cycle.
+            } catch (Throwable ignored) {
+                // Retry next cycle; the janitor must not affect execution.
             }
         }
     }
@@ -361,6 +445,7 @@ public class JobRegistry {
     static boolean isTerminal(String state) {
         return STATE_COMPLETED.equals(state)
                 || STATE_FAILED.equals(state)
-                || STATE_CANCELLED.equals(state);
+                || STATE_CANCELLED.equals(state)
+                || STATE_TIMED_OUT.equals(state);
     }
 }
