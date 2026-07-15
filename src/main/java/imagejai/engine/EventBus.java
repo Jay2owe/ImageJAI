@@ -3,12 +3,17 @@ package imagejai.engine;
 import com.google.gson.JsonObject;
 
 import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.LongSupplier;
 
 /**
  * Phase 2: in-JVM publish/subscribe event bus for ImageJAI TCP push notifications.
@@ -17,7 +22,9 @@ import java.util.concurrent.atomic.AtomicLong;
  * events by topic string. Subscribers (TCP streaming sockets) register patterns
  * and receive framed JSON objects: {@code {event, data, ts, seq}}.
  * <p>
- * Per-topic coalescing: identical-topic publishes within 200ms are dropped.
+ * Only explicitly declared state-like topics are coalesced. Their identity is
+ * part of the key, so an update for one job or image can never suppress an
+ * update for another one.
  * Monotonic {@code seq} lets clients reorder interleaved events.
  * <p>
  * Singleton — shared across the whole plugin JVM.
@@ -29,6 +36,13 @@ public class EventBus {
     }
 
     private static final long COALESCE_MS = 200L;
+    private static final int MAX_COALESCE_KEYS = 1024;
+    private static final Set<String> COALESCIBLE_TOPICS =
+            Collections.unmodifiableSet(new HashSet<String>(Arrays.asList(
+                    "image.updated",
+                    "job.progress",
+                    "results.changed"
+            )));
 
     private static final EventBus INSTANCE = new EventBus();
 
@@ -48,6 +62,7 @@ public class EventBus {
     private final CopyOnWriteArrayList<Subscription> subs = new CopyOnWriteArrayList<Subscription>();
     private final ConcurrentHashMap<String, Long> lastPublish = new ConcurrentHashMap<String, Long>();
     private final AtomicLong seqCounter = new AtomicLong(0);
+    private final LongSupplier clock;
     // Nestable per-pattern suppression. Publishers check isSuppressed(topic)
     // before dispatching. Used by handleExecuteMacro to drop image.* events
     // while a macro is in flight — those events trigger the agent to send
@@ -57,7 +72,24 @@ public class EventBus {
     // (setAutoThreshold / Convert to Mask) runs.
     private final ConcurrentHashMap<String, AtomicInteger> suppressCounts = new ConcurrentHashMap<String, AtomicInteger>();
 
-    private EventBus() {}
+    private EventBus() {
+        this(new LongSupplier() {
+            @Override
+            public long getAsLong() {
+                return System.currentTimeMillis();
+            }
+        });
+    }
+
+    /** Package-private deterministic clock seam for focused coalescing tests. */
+    EventBus(LongSupplier clock) {
+        this.clock = clock == null ? new LongSupplier() {
+            @Override
+            public long getAsLong() {
+                return System.currentTimeMillis();
+            }
+        } : clock;
+    }
 
     /** Monotonic global sequence used by both published and synthetic frames. */
     public long nextSeq() {
@@ -81,19 +113,24 @@ public class EventBus {
     }
 
     /**
-     * Publish an event. Coalesces per-topic at 200ms (identical-topic events
-     * within the window are dropped). Dispatches synchronously to matching
+     * Publish an event. Only topics in {@link #COALESCIBLE_TOPICS} coalesce,
+     * and only when both their topic and stable identity match. Lifecycle
+     * events are never coalesced. Dispatches synchronously to matching
      * listeners; listeners are expected to queue asynchronously.
      */
     public void publish(String topic, JsonObject data) {
         if (topic == null) return;
         if (isSuppressed(topic)) return;
-        long now = System.currentTimeMillis();
-        Long prev = lastPublish.get(topic);
-        if (prev != null && (now - prev) < COALESCE_MS) {
-            return;
+        long now = clock.getAsLong();
+        String key = coalescingKey(topic, data);
+        if (key != null) {
+            Long prev = lastPublish.get(key);
+            if (prev != null && (now - prev) < COALESCE_MS) {
+                return;
+            }
+            lastPublish.put(key, now);
+            pruneCoalescingKeys(now);
         }
-        lastPublish.put(topic, now);
 
         JsonObject frame = new JsonObject();
         frame.addProperty("event", topic);
@@ -119,6 +156,74 @@ public class EventBus {
     /** Current subscriber count — used by TCPCommandServer to enforce the 8-subscriber cap. */
     public int subscriberCount() {
         return subs.size();
+    }
+
+    /** True only for state-like frames whose replacement is lossless. */
+    static boolean isCoalescible(JsonObject frame) {
+        return coalescingKey(frame) != null;
+    }
+
+    /**
+     * Return the internal replacement key for a frame, or {@code null} when
+     * the frame must retain its own queue slot. The key is never serialized.
+     */
+    static String coalescingKey(JsonObject frame) {
+        if (frame == null || !frame.has("event")
+                || !frame.get("event").isJsonPrimitive()) {
+            return null;
+        }
+        JsonObject data = frame.has("data") && frame.get("data").isJsonObject()
+                ? frame.getAsJsonObject("data") : null;
+        return coalescingKey(frame.get("event").getAsString(), data);
+    }
+
+    static String coalescingKey(String topic, JsonObject data) {
+        if (topic == null || !COALESCIBLE_TOPICS.contains(topic)) {
+            return null;
+        }
+        if ("results.changed".equals(topic)) {
+            return topic + "|singleton";
+        }
+        String identity = firstString(data,
+                "job_id", "image_id", "dialog_id", "macro_id", "id", "title");
+        if (identity == null || identity.isEmpty()) {
+            // An identity-bearing topic without an identity is unsafe to
+            // collapse: retain every frame until its publisher is repaired.
+            return null;
+        }
+        return topic + "|" + identity;
+    }
+
+    private static String firstString(JsonObject data, String... keys) {
+        if (data == null) return null;
+        for (String key : keys) {
+            try {
+                if (data.has(key) && data.get(key).isJsonPrimitive()) {
+                    String value = data.get(key).getAsString();
+                    if (value != null && !value.isEmpty()) return value;
+                }
+            } catch (RuntimeException ignored) {
+            }
+        }
+        return null;
+    }
+
+    private void pruneCoalescingKeys(long now) {
+        if (lastPublish.size() <= MAX_COALESCE_KEYS) return;
+        long cutoff = now - COALESCE_MS;
+        for (Map.Entry<String, Long> entry : lastPublish.entrySet()) {
+            Long value = entry.getValue();
+            if (value == null || value <= cutoff) {
+                lastPublish.remove(entry.getKey(), value);
+            }
+        }
+        // An extreme same-window identity burst remains bounded. Removing an
+        // arbitrary key can only reduce coalescing; it cannot drop an event.
+        while (lastPublish.size() > MAX_COALESCE_KEYS) {
+            java.util.Iterator<String> it = lastPublish.keySet().iterator();
+            if (!it.hasNext()) break;
+            lastPublish.remove(it.next());
+        }
     }
 
     /**

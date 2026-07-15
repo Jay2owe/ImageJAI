@@ -79,6 +79,7 @@ import java.util.concurrent.LinkedBlockingDeque;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 import javax.script.ScriptEngine;
 import javax.script.ScriptEngineManager;
 import javax.script.ScriptException;
@@ -281,8 +282,14 @@ public class TCPCommandServer {
     // Phase 2: event-bus subscription caps.
     private static final int MAX_SUBSCRIBERS = 8;
     private static final int SUBSCRIBER_QUEUE_CAPACITY = 256;
+    private static final int MAX_SUBSCRIPTION_TOPICS = 64;
+    private static final int MAX_SUBSCRIPTION_TOPIC_LENGTH = 128;
     private static final long SUBSCRIBER_HEARTBEAT_MS = 30_000L;
     private final AtomicInteger activeSubscribers = new AtomicInteger(0);
+    private final Set<Socket> subscriberSockets =
+            Collections.newSetFromMap(new ConcurrentHashMap<Socket, Boolean>());
+    private final Set<Thread> subscriberThreads =
+            Collections.newSetFromMap(new ConcurrentHashMap<Thread, Boolean>());
     private final EventBus eventBus = EventBus.getInstance();
     // Monotonic macro-id counter so TCP-path execute_macro emits a well-formed
     // macro.started/macro.completed pair like CommandEngine does.
@@ -666,6 +673,7 @@ public class TCPCommandServer {
     private final FrictionLog frictionLog = new FrictionLog();
     private final PseudonymisationFilter pseudonymisationFilter =
             PseudonymisationFilter.getInstance();
+    private AuditLog auditLog = AuditLog.getInstance();
     IntentRouter intentRouter = new IntentRouter();
     private final JobRegistry jobRegistry;
     // Phase 8: reactive rules engine. Subscribes to the bus, fires rule
@@ -810,6 +818,20 @@ public class TCPCommandServer {
         } catch (Exception e) {
             System.err.println("[ImageJAI-TCP] Error shutting down job registry: " + e.getMessage());
         }
+        // Long-lived subscribers are not accepted through ServerSocket again,
+        // so closing only the listener would leave their client threads
+        // blocked in queue.poll until the next heartbeat.
+        for (Socket subscriber : subscriberSockets) {
+            try {
+                subscriber.close();
+            } catch (Exception ignore) {
+            }
+        }
+        subscriberSockets.clear();
+        for (Thread subscriberThread : subscriberThreads) {
+            subscriberThread.interrupt();
+        }
+        subscriberThreads.clear();
         if (serverSocket != null && !serverSocket.isClosed()) {
             try {
                 serverSocket.close();
@@ -844,6 +866,11 @@ public class TCPCommandServer {
     /** Package-private deterministic token seam for loopback protocol tests. */
     void setServerTokenForTest(String token) {
         this.serverToken = token;
+    }
+
+    /** Package-private audit destination seam for side-effect-free tests. */
+    void setAuditLogForTest(AuditLog auditLog) {
+        this.auditLog = auditLog == null ? AuditLog.getInstance() : auditLog;
     }
 
     /**
@@ -968,25 +995,29 @@ public class TCPCommandServer {
             // Phase 2: intercept "subscribe" — upgrade to a streaming channel
             // instead of the standard request/response cycle.
             String trimmed = line.trim();
-            if (isSubscribeCommand(trimmed)) {
-                JsonObject req;
-                try {
-                    req = JsonParser.parseString(trimmed).getAsJsonObject();
-                } catch (Exception e) {
-                    writeOutbound(writer, "error", errorJson("Invalid JSON: "
-                            + e.getMessage()));
-                    return;
+            JsonObject request;
+            try {
+                JsonElement parsed = JsonParser.parseString(trimmed);
+                if (!parsed.isJsonObject()) {
+                    throw new IllegalArgumentException("Request must be a JSON object");
                 }
-                if (listener != null) {
-                    listener.onCommandReceived("subscribe");
-                }
-                handleSubscribeStream(socket, req);
+                request = parsed.getAsJsonObject();
+            } catch (Exception e) {
+                writeOutbound(writer, "error", errorJson("Invalid JSON: "
+                        + e.getMessage()));
+                return;
+            }
+
+            // Upgrade only an exactly parsed command. Text elsewhere in a
+            // request cannot turn a one-shot command into a stream.
+            String commandName = optString(request, "command", "");
+            if ("subscribe".equals(commandName)) {
+                handleSubscribeStream(socket, request,
+                        line.getBytes(UTF8).length);
                 return; // finally closes the socket
             }
 
-            // Parse and dispatch
-            String commandName = commandNameFromRequest(trimmed);
-            JsonObject response = dispatch(trimmed, socket);
+            JsonObject response = dispatch(request, socket);
             writeOutbound(writer, commandName, GSON.toJson(response));
 
         } catch (Exception e) {
@@ -1012,13 +1043,6 @@ public class TCPCommandServer {
         }
     }
 
-    /** Cheap peek: true if the incoming line is a subscribe command. */
-    private boolean isSubscribeCommand(String jsonStr) {
-        if (jsonStr == null) return false;
-        // Fast path — avoid full JSON parse on non-subscribe commands.
-        return jsonStr.contains("\"subscribe\"") && jsonStr.contains("\"command\"");
-    }
-
     /**
      * Phase 2: long-lived subscribe stream. The socket is held open and event
      * frames are written as newline-terminated JSON: {@code {"event": ..., "data": ..., "ts": ..., "seq": ...}}.
@@ -1033,12 +1057,39 @@ public class TCPCommandServer {
      *   <li>Unsubscribes and releases the slot when the socket closes or the server stops.</li>
      * </ul>
      */
-    private void handleSubscribeStream(final Socket socket, JsonObject req) {
+    private void handleSubscribeStream(final Socket socket, JsonObject req,
+                                       int requestBytes) {
         final OutputStream rawOut;
         try {
             rawOut = socket.getOutputStream();
         } catch (IOException e) {
             return;
+        }
+
+        String sessionId = optString(req, "session_id", "");
+        String token = optString(req, "token", null);
+        SessionCapsRegistry.Lookup<AgentCaps> lookup =
+                sessionRegistry.lookup(sessionId, token);
+        req.remove("token");
+        if (lookup.status() != SessionCapsRegistry.Status.VALID) {
+            writeRawJson(rawOut, sessionFailure(lookup.status()));
+            return;
+        }
+        final AgentCaps caps = lookup.caps();
+        final List<String> patterns = parseSubscriptionPatterns(req);
+        if (patterns == null) {
+            writeRawJson(rawOut, protocolError("invalid_subscription",
+                    "topics must be an array of at most "
+                            + MAX_SUBSCRIPTION_TOPICS + " valid topic patterns."));
+            return;
+        }
+        if (!subscriptionTopicsAllowed(patterns, caps.acceptEvents)) {
+            writeRawJson(rawOut, protocolError("event_subscription_forbidden",
+                    "The session did not negotiate every requested event topic."));
+            return;
+        }
+        if (listener != null) {
+            listener.onCommandReceived("subscribe");
         }
 
         // Disable read timeout — subscriptions are long-lived write-only streams.
@@ -1052,69 +1103,32 @@ public class TCPCommandServer {
         int newCount = activeSubscribers.incrementAndGet();
         if (newCount > MAX_SUBSCRIBERS) {
             activeSubscribers.decrementAndGet();
-            writeRawJson(rawOut, errorJsonObject(
+            writeRawJson(rawOut, protocolError("subscriber_capacity",
                     "Subscriber cap reached (max " + MAX_SUBSCRIBERS + ")"));
             return;
         }
-
-        // Parse requested topic patterns. Default to "*" when omitted or empty.
-        final List<String> patterns = new ArrayList<String>();
-        JsonElement topicsEl = req.get("topics");
-        if (topicsEl != null && topicsEl.isJsonArray()) {
-            JsonArray arr = topicsEl.getAsJsonArray();
-            for (int i = 0; i < arr.size(); i++) {
-                JsonElement t = arr.get(i);
-                if (t != null && t.isJsonPrimitive()) {
-                    String s = t.getAsString();
-                    if (s != null && !s.isEmpty()) patterns.add(s);
-                }
-            }
-        }
-        if (patterns.isEmpty()) patterns.add("*");
+        subscriberSockets.add(socket);
+        subscriberThreads.add(Thread.currentThread());
 
         // Per-socket bounded queue with drop-oldest semantics.
         final LinkedBlockingDeque<JsonObject> queue =
                 new LinkedBlockingDeque<JsonObject>(SUBSCRIBER_QUEUE_CAPACITY);
-        final Object queueLock = new Object();
+        final AtomicLong droppedFrames = new AtomicLong(0L);
+        final AtomicLong sentFrames = new AtomicLong(0L);
 
         final EventBus.Listener listener = new EventBus.Listener() {
             @Override
             public void onEvent(JsonObject frame) {
-                synchronized (queueLock) {
-                    if (queue.offerLast(frame)) return;
-                    // Overflow: drop oldest, inject sentinel, retry with the new frame.
-                    JsonObject dropped = queue.pollFirst();
-                    JsonObject sentinel = new JsonObject();
-                    sentinel.addProperty("event", "event_dropped");
-                    JsonObject data = new JsonObject();
-                    if (dropped != null) {
-                        if (dropped.has("event")) {
-                            data.addProperty("oldest_event",
-                                    dropped.get("event").getAsString());
-                        }
-                        if (dropped.has("seq")) {
-                            data.addProperty("oldest_seq",
-                                    dropped.get("seq").getAsLong());
-                        }
-                    }
-                    data.addProperty("queue_capacity", SUBSCRIBER_QUEUE_CAPACITY);
-                    sentinel.add("data", data);
-                    sentinel.addProperty("ts", System.currentTimeMillis());
-                    sentinel.addProperty("seq", eventBus.nextSeq());
-                    // Defensive: if the deque is *still* full (extreme bursts),
-                    // keep discarding until both sentinel and new frame fit.
-                    while (!queue.offerLast(sentinel)) {
-                        if (queue.pollFirst() == null) break;
-                    }
-                    while (!queue.offerLast(frame)) {
-                        if (queue.pollFirst() == null) break;
-                    }
-                }
+                JsonObject governed = governEventFrame(frame, caps, socket);
+                droppedFrames.addAndGet(offerSubscriberFrame(
+                        queue, governed, caps, socket));
             }
         };
 
         // Register the listener for every requested pattern.
         for (String p : patterns) eventBus.subscribe(p, listener);
+        appendSubscriptionAudit("subscribe.open", req, caps, patterns,
+                "accepted", requestBytes, 0L, 0L);
 
         // Initial "subscribed" ack frame so the client can confirm connection.
         JsonObject ack = new JsonObject();
@@ -1130,9 +1144,14 @@ public class TCPCommandServer {
         ack.addProperty("seq", eventBus.nextSeq());
 
         try {
-            writeFrame(rawOut, ack);
+            writeFrame(rawOut, governEventFrame(ack, caps, socket));
+            sentFrames.incrementAndGet();
         } catch (IOException e) {
             eventBus.unsubscribe(listener);
+            subscriberSockets.remove(socket);
+            subscriberThreads.remove(Thread.currentThread());
+            appendSubscriptionAudit("subscribe.close", req, caps, patterns,
+                    "ack_write_failed", 0, sentFrames.get(), droppedFrames.get());
             activeSubscribers.decrementAndGet();
             return;
         }
@@ -1140,8 +1159,16 @@ public class TCPCommandServer {
         // Main pump: pull frames until the socket dies; inject heartbeats
         // during idle windows.
         long lastSent = System.currentTimeMillis();
+        String closeReason = "client_disconnected";
         try {
             while (running && !socket.isClosed()) {
+                SessionCapsRegistry.Lookup<AgentCaps> currentSession =
+                        sessionRegistry.lookup(sessionId, token);
+                if (currentSession.status() != SessionCapsRegistry.Status.VALID) {
+                    closeReason = "session_" + currentSession.status().name()
+                            .toLowerCase(Locale.ROOT);
+                    break;
+                }
                 long now = System.currentTimeMillis();
                 long sinceLastSent = now - lastSent;
                 long waitMs = SUBSCRIBER_HEARTBEAT_MS - sinceLastSent;
@@ -1153,8 +1180,10 @@ public class TCPCommandServer {
                     hb.addProperty("ts", now);
                     hb.addProperty("seq", eventBus.nextSeq());
                     try {
-                        writeFrame(rawOut, hb);
+                        writeFrame(rawOut, governEventFrame(hb, caps, socket));
+                        sentFrames.incrementAndGet();
                     } catch (IOException e) {
+                        closeReason = "write_failed";
                         break;
                     }
                     lastSent = now;
@@ -1166,20 +1195,326 @@ public class TCPCommandServer {
                     frame = queue.pollFirst(waitMs, TimeUnit.MILLISECONDS);
                 } catch (InterruptedException e) {
                     Thread.currentThread().interrupt();
+                    closeReason = "interrupted";
                     break;
                 }
                 if (frame == null) continue; // back to heartbeat check
+                SessionCapsRegistry.Lookup<AgentCaps> beforeWrite =
+                        sessionRegistry.lookup(sessionId, token);
+                if (beforeWrite.status() != SessionCapsRegistry.Status.VALID) {
+                    closeReason = "session_" + beforeWrite.status().name()
+                            .toLowerCase(Locale.ROOT);
+                    break;
+                }
                 try {
                     writeFrame(rawOut, frame);
+                    sentFrames.incrementAndGet();
                 } catch (IOException e) {
+                    closeReason = "write_failed";
                     break; // socket died
                 }
                 lastSent = System.currentTimeMillis();
             }
+            if (!running) closeReason = "server_stopped";
         } finally {
             eventBus.unsubscribe(listener);
+            subscriberSockets.remove(socket);
+            subscriberThreads.remove(Thread.currentThread());
+            appendSubscriptionAudit("subscribe.close", req, caps, patterns,
+                    closeReason, 0, sentFrames.get(), droppedFrames.get());
             activeSubscribers.decrementAndGet();
         }
+    }
+
+    private List<String> parseSubscriptionPatterns(JsonObject req) {
+        List<String> patterns = new ArrayList<String>();
+        JsonElement topics = req == null ? null : req.get("topics");
+        if (topics == null || topics.isJsonNull()) {
+            patterns.add("*");
+            return patterns;
+        }
+        if (!topics.isJsonArray()) return null;
+        JsonArray values = topics.getAsJsonArray();
+        if (values.size() == 0 || values.size() > MAX_SUBSCRIPTION_TOPICS) return null;
+        for (JsonElement value : values) {
+            if (value == null || !value.isJsonPrimitive()
+                    || !value.getAsJsonPrimitive().isString()) return null;
+            String pattern = value.getAsString();
+            if (!validTopicPattern(pattern)) return null;
+            if (!patterns.contains(pattern)) patterns.add(pattern);
+        }
+        return patterns.isEmpty() ? null : patterns;
+    }
+
+    private static boolean validTopicPattern(String value) {
+        if (value == null || value.isEmpty()
+                || value.length() > MAX_SUBSCRIPTION_TOPIC_LENGTH) return false;
+        return "*".equals(value) || value.matches("[A-Za-z0-9_.-]+\\*?");
+    }
+
+    private static boolean subscriptionTopicsAllowed(List<String> requested,
+                                                     Set<String> accepted) {
+        if (requested == null || accepted == null || accepted.isEmpty()) return false;
+        for (String request : requested) {
+            boolean allowed = false;
+            for (String grant : accepted) {
+                if (patternContains(grant, request)) {
+                    allowed = true;
+                    break;
+                }
+            }
+            if (!allowed) return false;
+        }
+        return true;
+    }
+
+    private static boolean patternContains(String grant, String request) {
+        if (grant == null || request == null) return false;
+        if ("*".equals(grant) || grant.equals(request)) return true;
+        if ("*".equals(request) || !grant.endsWith("*")) return false;
+        String grantPrefix = grant.substring(0, grant.length() - 1);
+        if (!request.startsWith(grantPrefix)) return false;
+        return !request.endsWith("*")
+                || request.substring(0, request.length() - 1)
+                .startsWith(grantPrefix);
+    }
+
+    /**
+     * Queue a governed frame. State-like frames replace only an older frame
+     * with the same topic and identity; lifecycle frames always retain their
+     * own slot. Returns the number dropped because the hard cap was reached.
+     */
+    int offerSubscriberFrame(LinkedBlockingDeque<JsonObject> queue,
+                             JsonObject frame, AgentCaps caps, Socket socket) {
+        if (queue == null || frame == null) return 0;
+        synchronized (queue) {
+            String key = EventBus.coalescingKey(frame);
+            if (key != null) {
+                java.util.Iterator<JsonObject> iterator = queue.descendingIterator();
+                while (iterator.hasNext()) {
+                    JsonObject previous = iterator.next();
+                    if (key.equals(EventBus.coalescingKey(previous))) {
+                        iterator.remove();
+                        break;
+                    }
+                }
+            }
+            if (queue.offerLast(frame)) return 0;
+
+            JsonObject oldest = queue.pollFirst();
+            int dropped = oldest == null ? 0 : 1;
+            while (queue.remainingCapacity() < 2) {
+                if (queue.pollFirst() == null) break;
+                dropped++;
+            }
+
+            JsonObject sentinel = new JsonObject();
+            sentinel.addProperty("event", "event_dropped");
+            JsonObject data = new JsonObject();
+            if (oldest != null) {
+                data.addProperty("oldest_event", safeEventTopic(
+                        optString(oldest, "event", "")));
+                if (oldest.has("seq") && oldest.get("seq").isJsonPrimitive()) {
+                    data.addProperty("oldest_seq", oldest.get("seq").getAsLong());
+                }
+            }
+            data.addProperty("queue_capacity", queue.size() + queue.remainingCapacity());
+            data.addProperty("dropped_count", dropped);
+            sentinel.add("data", data);
+            sentinel.addProperty("ts", System.currentTimeMillis());
+            sentinel.addProperty("seq", eventBus.nextSeq());
+            sentinel = governEventFrame(sentinel, caps, socket);
+
+            if (queue.remainingCapacity() >= 2) {
+                queue.offerLast(sentinel);
+            }
+            queue.offerLast(frame);
+            return dropped;
+        }
+    }
+
+    private JsonObject governEventFrame(JsonObject source, AgentCaps caps,
+                                        Socket socket) {
+        JsonObject frame = source == null ? new JsonObject() : source.deepCopy();
+        PrivacyPosture posture = PostureController.getInstance().current();
+        String topic = optString(frame, "event", "");
+        boolean eventRedacted = false;
+        if (posture != null && posture != PrivacyPosture.STANDARD) {
+            String safeTopic = safeEventTopic(topic);
+            if (!safeTopic.equals(topic)) {
+                frame.addProperty("event", safeTopic);
+                topic = safeTopic;
+                eventRedacted = true;
+            }
+            JsonObject data = frame.has("data") && frame.get("data").isJsonObject()
+                    ? frame.getAsJsonObject("data") : null;
+            eventRedacted |= pseudonymiseEventPayload(topic, data);
+        }
+        pseudonymisationFilter.apply(frame, "event:" + topic, posture,
+                sessionKey(caps, socket));
+        if (eventRedacted && frame.has("_governance")
+                && frame.get("_governance").isJsonObject()) {
+            JsonObject governance = frame.getAsJsonObject("_governance");
+            JsonArray fields = governance.has("fields_pseudonymised")
+                    && governance.get("fields_pseudonymised").isJsonArray()
+                    ? governance.getAsJsonArray("fields_pseudonymised")
+                    : new JsonArray();
+            boolean present = false;
+            for (JsonElement field : fields) {
+                if (field.isJsonPrimitive()
+                        && "event_sensitive".equals(field.getAsString())) {
+                    present = true;
+                }
+            }
+            if (!present) fields.add("event_sensitive");
+            governance.add("fields_pseudonymised", fields);
+        }
+        return frame;
+    }
+
+    private boolean pseudonymiseEventPayload(String topic, JsonObject data) {
+        if (data == null) return false;
+        boolean changed = false;
+        String[] titles = {
+                "title", "window_title", "image_title", "dialog_title",
+                "blocking_dialog_title", "target_image"
+        };
+        for (String key : titles) {
+            changed |= replaceEventString(data, key, "image");
+        }
+        String[] sensitiveText = {
+                "preview", "text", "code", "macro", "script", "error"
+        };
+        for (String key : sensitiveText) {
+            changed |= replaceEventString(data, key, "event");
+        }
+        if (topic != null && topic.startsWith("dialog.")) {
+            changed |= tokeniseStringArray(data, "buttons", "dialog-option");
+        }
+        changed |= tokeniseStringArray(data, "new_images", "image");
+        changed |= tokeniseStringArray(data, "newImages", "image");
+        if (topic != null && topic.startsWith("job.") && data.has("result")) {
+            data.remove("result");
+            data.addProperty("result_available", true);
+            changed = true;
+        }
+        return changed;
+    }
+
+    private boolean replaceEventString(JsonObject data, String key, String prefix) {
+        JsonElement value = data.get(key);
+        if (value == null || !value.isJsonPrimitive()
+                || !value.getAsJsonPrimitive().isString()) return false;
+        String original = value.getAsString();
+        if (original.isEmpty()) return false;
+        data.addProperty(key, pseudonymisationFilter.pathTokenMap()
+                .tokenForSensitiveText(original, prefix));
+        return true;
+    }
+
+    private boolean tokeniseStringArray(JsonObject data, String key, String prefix) {
+        JsonElement value = data.get(key);
+        if (value == null || !value.isJsonArray()) return false;
+        boolean changed = false;
+        JsonArray array = value.getAsJsonArray();
+        for (int i = 0; i < array.size(); i++) {
+            JsonElement item = array.get(i);
+            if (item != null && item.isJsonPrimitive()
+                    && item.getAsJsonPrimitive().isString()
+                    && !item.getAsString().isEmpty()) {
+                array.set(i, new JsonPrimitive(pseudonymisationFilter.pathTokenMap()
+                        .tokenForSensitiveText(item.getAsString(), prefix)));
+                changed = true;
+            }
+        }
+        return changed;
+    }
+
+    private static String safeEventTopic(String topic) {
+        String value = topic == null ? "" : topic;
+        if ("heartbeat".equals(value) || "subscribed".equals(value)
+                || "event_dropped".equals(value)) return value;
+        String[] prefixes = {
+                "image.", "job.", "dialog.", "macro.", "results.",
+                "memory.", "safe_mode.", "gui_action.",
+                "data_governance.", "reactive."
+        };
+        for (String prefix : prefixes) {
+            if (value.startsWith(prefix)
+                    && value.matches("[a-z0-9_.-]{1,128}")) return value;
+        }
+        return value.isEmpty() ? "event" : "custom";
+    }
+
+    private void appendSubscriptionAudit(String command, JsonObject request,
+                                         AgentCaps caps, List<String> patterns,
+                                         String reason, int bytesIn,
+                                         long frames, long dropped) {
+        try {
+            PrivacyPosture posture = PostureController.getInstance().current();
+            List<String> fields = posture == PrivacyPosture.STANDARD
+                    ? Collections.<String>emptyList()
+                    : Collections.singletonList("stream_payload");
+            StringBuilder notes = new StringBuilder();
+            notes.append("topics=");
+            for (int i = 0; i < patterns.size(); i++) {
+                if (i > 0) notes.append(',');
+                notes.append(safeAuditTopic(patterns.get(i)));
+            }
+            notes.append(" reason=").append(scrubAuditTokenNote(reason));
+            notes.append(" frames=").append(Math.max(0L, frames));
+            notes.append(" dropped=").append(Math.max(0L, dropped));
+            auditLog.append(new AuditRow(
+                    java.time.Instant.now(),
+                    sessionAuditPseudonym(caps == null ? "" : caps.sessionId),
+                    command,
+                    posture,
+                    "",
+                    "",
+                    0,
+                    Math.max(0, bytesIn),
+                    "",
+                    posture != PrivacyPosture.STANDARD,
+                    fields,
+                    truncateAuditNote(notes.toString()),
+                    ""));
+        } catch (Throwable t) {
+            System.err.println("[ImageJAI-Audit] subscription row failed: "
+                    + t.getMessage());
+        }
+    }
+
+    private static String sessionAuditPseudonym(String sessionId) {
+        String value = sessionId == null ? "" : sessionId;
+        if (value.isEmpty()) return "";
+        try {
+            byte[] digest = MessageDigest.getInstance("SHA-256")
+                    .digest(value.getBytes(StandardCharsets.UTF_8));
+            StringBuilder out = new StringBuilder("session-");
+            for (byte b : digest) {
+                int v = b & 0xff;
+                if (v < 16) out.append('0');
+                out.append(Integer.toHexString(v));
+                if (out.length() >= 24) break;
+            }
+            return out.toString();
+        } catch (Exception impossible) {
+            return "session-redacted";
+        }
+    }
+
+    private static String safeAuditTopic(String pattern) {
+        if ("*".equals(pattern)) return "*";
+        String value = pattern == null ? "" : pattern;
+        String[] prefixes = {
+                "image.", "job.", "dialog.", "macro.", "results.",
+                "memory.", "safe_mode.", "gui_action.",
+                "data_governance.", "reactive."
+        };
+        for (String prefix : prefixes) {
+            if (value.startsWith(prefix) && validTopicPattern(value)) return value;
+        }
+        return value.isEmpty() ? "custom" : "custom-" + sessionAuditPseudonym(value);
     }
 
     /** Write a JSON frame followed by '\n' to the raw output stream. */
@@ -1189,14 +1524,9 @@ public class TCPCommandServer {
             out.write(bytes);
             out.flush();
         }
-        String command = "stream";
-        try {
-            if (frame != null && frame.has("event")) {
-                command = "stream:" + frame.get("event").getAsString();
-            }
-        } catch (Exception ignore) {
-        }
-        OutboundEvent.publish(command, bytes.length);
+        String topic = optString(frame, "event", "");
+        String identity = EventBus.coalescingKey(frame);
+        OutboundEvent.publishStream(topic, identity, bytes.length);
     }
 
     /** Best-effort raw JSON write — swallows IO errors. Used for rejection frames. */
@@ -1204,13 +1534,6 @@ public class TCPCommandServer {
         try {
             writeFrame(out, obj);
         } catch (IOException ignore) {}
-    }
-
-    private JsonObject errorJsonObject(String msg) {
-        JsonObject o = new JsonObject();
-        o.addProperty("ok", false);
-        o.addProperty("error", msg);
-        return o;
     }
 
     /**
@@ -1237,16 +1560,6 @@ public class TCPCommandServer {
     // -----------------------------------------------------------------------
     // Command dispatch
     // -----------------------------------------------------------------------
-
-    private JsonObject dispatch(String jsonStr, Socket sock) {
-        JsonObject request;
-        try {
-            request = JsonParser.parseString(jsonStr).getAsJsonObject();
-        } catch (Exception e) {
-            return errorResponse("Invalid JSON: " + e.getMessage());
-        }
-        return dispatch(request, sock);
-    }
 
     JsonObject dispatch(JsonObject request, AgentCaps caps) {
         return dispatchInternal(request, caps == null ? DEFAULT_CAPS : caps, null);
@@ -1439,7 +1752,7 @@ public class TCPCommandServer {
                     || (rowPosture != PrivacyPosture.STANDARD
                     && response != null && response.has("_governance"));
             String sessionId = auditSessionId(request, caps, sock);
-            AuditLog.getInstance().append(new AuditRow(
+            auditLog.append(new AuditRow(
                     java.time.Instant.now(),
                     sessionId,
                     command,
@@ -1492,15 +1805,6 @@ public class TCPCommandServer {
         writer.flush();
         int newlineBytes = System.lineSeparator().getBytes(UTF8).length;
         OutboundEvent.publish(command, body.getBytes(UTF8).length + newlineBytes);
-    }
-
-    private String commandNameFromRequest(String rawJson) {
-        try {
-            JsonObject request = JsonParser.parseString(rawJson).getAsJsonObject();
-            return optString(request, "cmd", optString(request, "command", ""));
-        } catch (Exception e) {
-            return "";
-        }
     }
 
     private String auditSessionId(JsonObject request, AgentCaps caps, Socket sock) {

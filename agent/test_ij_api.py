@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import importlib.util
 import json
 import socket
@@ -192,6 +193,56 @@ def test_imagej_session_compatibility_mode_still_uses_server_session_id():
     server.finish()
 
     assert response == {"ok": True, "result": "pong"}
+
+
+def test_event_stream_carries_durable_session_credentials():
+    def reply(index, request):
+        if index == 0:
+            assert request["command"] == "hello"
+            assert request["token"] == "install-secret"
+            assert request["capabilities"]["accept_events"] == ["*"]
+            return {
+                "ok": True,
+                "result": {
+                    "session_id": "stream-session-123",
+                    "expires_at": int(time.time() * 1000) + 60_000,
+                    "enabled": [],
+                },
+            }
+        assert request == {
+            "command": "subscribe",
+            "topics": ["job.*"],
+            "session_id": "stream-session-123",
+            "token": "install-secret",
+        }
+        return {"event": "subscribed", "data": {"topics": ["job.*"]}}
+
+    server = ScriptedLoopbackServer(2, reply)
+    session = ij.ImageJSession(
+        host="127.0.0.1",
+        port=server.port,
+        token_loader=lambda: "install-secret",
+        client_session_id="",
+        model_endpoint="",
+    )
+
+    frames = list(session.events(["job.*"], reconnect=False))
+    server.finish()
+
+    assert frames == [
+        {"event": "subscribed", "data": {"topics": ["job.*"]}}
+    ]
+
+
+def test_imagej_events_has_one_public_implementation():
+    tree = ast.parse(IJ_PATH.read_text(encoding="utf-8"))
+    definitions = [
+        node for node in tree.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and node.name == "imagej_events"
+    ]
+
+    assert len(definitions) == 1
 
 
 def test_run_script_defaults_to_groovy_with_cli_timeout(monkeypatch):

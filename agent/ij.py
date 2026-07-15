@@ -164,7 +164,10 @@ _HELLO_CAPS = {
     "verbose": True,
     "pulse": False,
     "state_delta": True,
-    "accept_events": ["macro.*", "image.*", "dialog.*"],
+    # Event subscriptions are authorized against this immutable handshake
+    # capability. The public helper intentionally supports every governed
+    # event topic; payload privacy is still enforced server-side per frame.
+    "accept_events": ["*"],
 }
 # Cache of the last hello response so `ij.py capabilities` can show the
 # server's enabled features without re-hitting the socket. Best-effort: a
@@ -467,6 +470,90 @@ class ImageJSession:
                 if self._session_id == session_id:
                     self._clear_locked()
         return resp
+
+    def events(self, topics=None, reconnect=True, reconnect_delay=2.0,
+               read_timeout=None):
+        """Yield authenticated event frames for this durable session.
+
+        A stream uses a long-lived socket, but its authorization still comes
+        from the same session ID and installation token as one-shot requests.
+        Authentication/protocol errors are yielded once and never replayed.
+        """
+        import time as _time
+        if not topics:
+            topics = ["*"]
+        elif isinstance(topics, str):
+            topics = [topics]
+        else:
+            topics = list(topics)
+
+        while True:
+            with self._lock:
+                if self._expired_locked():
+                    self._clear_locked()
+                if not self._session_id:
+                    hello_resp = self.hello(timeout=min(self.timeout, 10))
+                    if not hello_resp.get("ok"):
+                        yield hello_resp
+                        return
+                session_id = self._session_id
+                token = self._token
+
+            request = {
+                "command": "subscribe",
+                "topics": topics,
+                "session_id": session_id,
+            }
+            if token:
+                request["token"] = token
+            if self.client_session_id:
+                request["client_session_id"] = self.client_session_id
+            if self.model_endpoint:
+                request["model_endpoint"] = self.model_endpoint
+
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(read_timeout)
+            saw_protocol_error = False
+            try:
+                sock.connect((self.host, self.port))
+                sock.sendall((json.dumps(request) + "\n").encode("utf-8"))
+                buf = b""
+                while True:
+                    chunk = sock.recv(8192)
+                    if not chunk:
+                        break
+                    buf += chunk
+                    while b"\n" in buf:
+                        line, buf = buf.split(b"\n", 1)
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            frame = json.loads(line.decode("utf-8"))
+                        except (UnicodeDecodeError, ValueError):
+                            continue
+                        yield frame
+                        if isinstance(frame, dict) and frame.get("ok") is False:
+                            saw_protocol_error = True
+                            code = _response_error_code(frame)
+                            if code in _SESSION_FAILURE_CODES:
+                                with self._lock:
+                                    if self._session_id == session_id:
+                                        self._clear_locked()
+                            return
+            except (socket.error, OSError, ConnectionError):
+                pass
+            finally:
+                try:
+                    sock.close()
+                except Exception:
+                    pass
+            if saw_protocol_error or not reconnect:
+                return
+            try:
+                _time.sleep(reconnect_delay)
+            except KeyboardInterrupt:
+                return
 
     def _dialog_fallback(self):
         try:
@@ -875,62 +962,36 @@ def wait_for_job(job_id, timeout=None, host=HOST, port=PORT,
     if not initial.get("ok"):
         return initial  # unknown job — surface error immediately
 
-    # Try the subscription channel first.
-    s = None
+    # Try the shared authenticated subscription client first.
     try:
-        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        s.settimeout(None)
-        s.connect((host, port))
-        req = json.dumps({"command": "subscribe", "topics": ["job.*"]}) + "\n"
-        s.sendall(req.encode("utf-8"))
-
-        # Re-check status after subscribing to avoid a TOCTOU miss where the
-        # job completed between our initial poll and the subscribe ack.
-        recheck = job_status(job_id)
-        term = _terminal_status(recheck)
-        if term is not None:
-            return term
-
-        buf = b""
-        while True:
-            if deadline is not None:
-                remaining = deadline - _time.time()
-                if remaining <= 0:
-                    return {"ok": False, "error": "timeout", "job_id": job_id}
-                s.settimeout(remaining)
-            try:
-                chunk = s.recv(8192)
-            except socket.timeout:
+        read_timeout = None if deadline is None else max(0.01, deadline - _time.time())
+        subscribed = False
+        for frame in _session_for(host, port).events(
+                topics=["job.*"], reconnect=False,
+                read_timeout=read_timeout):
+            if deadline is not None and _time.time() >= deadline:
                 return {"ok": False, "error": "timeout", "job_id": job_id}
-            if not chunk:
-                break  # socket dropped — fall back to polling
-            buf += chunk
-            while b"\n" in buf:
-                line, buf = buf.split(b"\n", 1)
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    frame = json.loads(line.decode("utf-8"))
-                except Exception:
-                    continue
-                ev = frame.get("event") or ""
-                if not ev.startswith("job."):
-                    continue
-                data = frame.get("data") or {}
-                if data.get("job_id") != job_id:
-                    continue
-                if ev in ("job.completed", "job.failed"):
-                    return job_status(job_id)
+            if not isinstance(frame, dict):
+                continue
+            if frame.get("ok") is False:
+                break
+            event = frame.get("event") or ""
+            if event == "subscribed" and not subscribed:
+                subscribed = True
+                # Registration happens before the ack. This closes the poll /
+                # subscribe race while any concurrent completion stays queued.
+                recheck = job_status(job_id)
+                term = _terminal_status(recheck)
+                if term is not None:
+                    return term
+                continue
+            data = frame.get("data") or {}
+            if data.get("job_id") == job_id \
+                    and event in ("job.completed", "job.failed"):
+                return job_status(job_id)
     except (socket.error, OSError, ConnectionError):
         if not reconnect:
             return {"ok": False, "error": "connection failed"}
-    finally:
-        if s is not None:
-            try:
-                s.close()
-            except Exception:
-                pass
 
     # Polling fallback — also reached if the subscription socket dropped.
     while True:
@@ -1072,108 +1133,11 @@ def gui_confirm(prompt, options, timeout=300):
 # ---------------------------------------------------------------------------
 
 def imagej_events(topics=None, host=HOST, port=PORT, reconnect=True, reconnect_delay=2.0):
-    """Generator that yields event dicts from the Fiji TCP event bus.
-
-    Usage:
-        for event in imagej_events(["dialog.*", "macro.completed"]):
-            print(event["event"], event["data"])
-
-    Topics default to ``["*"]``. The helper maintains a long-lived socket
-    and yields one decoded JSON object per frame. If ``reconnect`` is True
-    (default), a dropped connection triggers a retry after ``reconnect_delay``
-    seconds. Set ``reconnect=False`` to exit the generator on first drop.
-    """
-    import time as _time
-    if not topics:
-        topics = ["*"]
-    elif isinstance(topics, str):
-        topics = [topics]
-
-    while True:
-        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        # Disable read timeout — heartbeats keep the socket alive.
-        s.settimeout(None)
-        try:
-            s.connect((host, port))
-            req = json.dumps({"command": "subscribe", "topics": list(topics)}) + "\n"
-            s.sendall(req.encode("utf-8"))
-            buf = b""
-            while True:
-                chunk = s.recv(8192)
-                if not chunk:
-                    break
-                buf += chunk
-                while b"\n" in buf:
-                    line, buf = buf.split(b"\n", 1)
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        yield json.loads(line.decode("utf-8"))
-                    except Exception:
-                        # Malformed line — skip but keep streaming.
-                        continue
-        except (socket.error, OSError, ConnectionError):
-            pass
-        finally:
-            try:
-                s.close()
-            except Exception:
-                pass
-        if not reconnect:
-            return
-        try:
-            _time.sleep(reconnect_delay)
-        except KeyboardInterrupt:
-            return
-
-
-def imagej_events(topics=None, host=HOST, port=PORT, reconnect=True, reconnect_delay=2.0):
-    """Generator that yields event dicts from the Fiji TCP event bus."""
-    import time as _time
-    if not topics:
-        topics = ["*"]
-    elif isinstance(topics, str):
-        topics = [topics]
-
-    while True:
-        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        s.settimeout(None)
-        try:
-            s.connect((host, port))
-            req = json.dumps({"command": "subscribe", "topics": list(topics)}) + "\n"
-            s.sendall(req.encode("utf-8"))
-            buf = b""
-            while True:
-                chunk = s.recv(8192)
-                if not chunk:
-                    break
-                buf += chunk
-                while b"\n" in buf:
-                    line, buf = buf.split(b"\n", 1)
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        frame = json.loads(line.decode("utf-8"))
-                    except Exception:
-                        continue
-                    yield frame
-                    if isinstance(frame, dict) and frame.get("ok") is False:
-                        return
-        except (socket.error, OSError, ConnectionError):
-            pass
-        finally:
-            try:
-                s.close()
-            except Exception:
-                pass
-        if not reconnect:
-            return
-        try:
-            _time.sleep(reconnect_delay)
-        except KeyboardInterrupt:
-            return
+    """Generator that yields authenticated, governed Fiji event frames."""
+    for frame in _session_for(host, port).events(
+            topics=topics, reconnect=reconnect,
+            reconnect_delay=reconnect_delay):
+        yield frame
 
 
 def main():

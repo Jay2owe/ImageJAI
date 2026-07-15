@@ -43,7 +43,7 @@ Conflict watchlist:
 | 05 | pending | - | - |
 | 06 | completed | `0e51e0f` | 15 policy + 207 Gemma/provider tests passed; bundled import passed; Maven package 789 tests passed |
 | 07 | pending | - | - |
-| 08 | pending | - | - |
+| 08 | completed | `0120743` | 48 focused privacy/launch tests passed; integrated Maven clean package passed 802 tests; credential-bearing metadata and unsafe launches rejected |
 | 09 | pending | - | - |
 | 10 | pending | - | - |
 | 11 | pending | - | - |
