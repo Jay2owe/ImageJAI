@@ -61,9 +61,9 @@ public class SeriesScannerTest {
                 });
 
         scanner.scan(file);
-        Thread.sleep(5L);
+        long previousMtime = Files.getLastModifiedTime(file).toMillis();
         Files.setLastModifiedTime(file,
-                java.nio.file.attribute.FileTime.fromMillis(System.currentTimeMillis() + 2000L));
+                java.nio.file.attribute.FileTime.fromMillis(previousMtime + 2000L));
         scanner.scan(file);
 
         assertEquals(2, created.get());

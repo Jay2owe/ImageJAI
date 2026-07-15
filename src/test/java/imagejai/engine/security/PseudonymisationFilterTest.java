@@ -4,6 +4,8 @@ import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 import imagejai.config.PrivacyPosture;
 import org.junit.Test;
+import org.junit.experimental.categories.Category;
+import imagejai.test.Benchmark;
 
 import java.nio.file.Paths;
 
@@ -417,6 +419,7 @@ public class PseudonymisationFilterTest {
     }
 
     @Test
+    @Category(Benchmark.class)
     public void fiftyKilobytePayloadFiltersUnderTenMillisecondsOnAverage() {
         PathTokenMap map = new PathTokenMap(bytes(18));
         PseudonymisationFilter filter = filter(map);

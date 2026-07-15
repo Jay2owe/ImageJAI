@@ -34,7 +34,11 @@ Thumbs.db
 /AGENTS.md
 /CLAUDE.md
 /GEMINI.md
-.claude/
+.claude/*
+!.claude/settings.json
+!.claude/hooks/
+.claude/hooks/*
+!.claude/hooks/post_change_graphify.py
 .codex-m2/
 .codex_pytest_tmp/
 .tmp/
@@ -55,7 +59,9 @@ agent_implementation_plan.txt
 agent/gemma4_31b/.plugin_cache/
 agent/providers/proxy.port
 agent/providers/proxy.port.lock
-test-scripts/
+test-scripts/*
+!test-scripts/live_fiji_smoke.py
+!test-scripts/zero_polling_test.py
 
 # Excluded from public release: unpublished lab research + publication-prep
 agent/scripts/

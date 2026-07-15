@@ -30,6 +30,7 @@ AGENT_DIR = CTX_DIR.parent
 REGISTRY_PATH = AGENT_DIR / "providers" / "models.yaml"
 SNAPSHOT_DIR = CTX_DIR / "_snapshots"
 CLAUDE_MD_PATH = AGENT_DIR / "CLAUDE.md"
+UPDATE_SNAPSHOTS_ENV = "IMAGEJAI_UPDATE_CONTEXT_SNAPSHOTS"
 
 
 # --------------------------------------------------------------------------- #
@@ -68,6 +69,25 @@ def _meaningful_lines(text: str) -> list[str]:
             continue
         out.append(line)
     return out
+
+
+def _assert_snapshot(model_id: str, composed: str, snap_path: Path) -> None:
+    """Assert a tracked snapshot, updating only after an explicit opt-in."""
+    if not snap_path.exists():
+        if os.environ.get(UPDATE_SNAPSHOTS_ENV) == "1":
+            snap_path.parent.mkdir(parents=True, exist_ok=True)
+            snap_path.write_text(composed, encoding="utf-8")
+            pytest.skip(f"wrote requested snapshot for {model_id}; review and rerun")
+        pytest.fail(
+            f"tracked context snapshot is missing for {model_id}: {snap_path}. "
+            f"To create it intentionally, set {UPDATE_SNAPSHOTS_ENV}=1, run this "
+            "test, then review and commit the generated file."
+        )
+    expected = snap_path.read_text(encoding="utf-8")
+    assert composed == expected, (
+        f"composition for {model_id} drifted from snapshot at {snap_path}; "
+        f"set {UPDATE_SNAPSHOTS_ENV}=1 only when intentionally regenerating it."
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -203,19 +223,20 @@ SNAPSHOT_CANDIDATES = sorted(_canonical_per_family().items())
 def test_snapshot_canonical_per_family(family, model_id):
     """Compositions are snapshotted; unintended drift fails the test.
 
-    Update by deleting agent/contexts/_snapshots/<slug>.md and re-running.
+    Missing snapshots fail. Intentional creation requires
+    ``IMAGEJAI_UPDATE_CONTEXT_SNAPSHOTS=1`` and review of the generated file.
     """
     composed = loader.load_context(model_id)
-    SNAPSHOT_DIR.mkdir(exist_ok=True)
     snap_path = SNAPSHOT_DIR / f"{_slug(model_id)}.md"
-    if not snap_path.exists():
-        snap_path.write_text(composed, encoding="utf-8")
-        pytest.skip(f"wrote new snapshot for {model_id}; rerun to assert")
-    expected = snap_path.read_text(encoding="utf-8")
-    assert composed == expected, (
-        f"composition for {model_id} drifted from snapshot at {snap_path}; "
-        "delete the snapshot file and rerun to update if change is intended."
-    )
+    _assert_snapshot(model_id, composed, snap_path)
+
+
+def test_missing_snapshot_requires_explicit_update(monkeypatch, tmp_path):
+    monkeypatch.delenv(UPDATE_SNAPSHOTS_ENV, raising=False)
+    missing = tmp_path / "missing.md"
+    with pytest.raises(pytest.fail.Exception, match="tracked context snapshot is missing"):
+        _assert_snapshot("test/missing", "COMPOSED", missing)
+    assert not missing.exists()
 
 
 # --------------------------------------------------------------------------- #

@@ -15,6 +15,9 @@ import java.util.List;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
@@ -41,19 +44,25 @@ public class FrictionLogJournalTest {
         CountDownLatch writerEntered = new CountDownLatch(1);
         CountDownLatch releaseWriter = new CountDownLatch(1);
         BlockingJournal journal = new BlockingJournal(root, writerEntered, releaseWriter);
+        ExecutorService caller = Executors.newSingleThreadExecutor();
         try {
             journal.append(entry(1, "first"));
             assertTrue(writerEntered.await(5, TimeUnit.SECONDS));
 
-            long start = System.nanoTime();
-            journal.append(entry(2, "second"));
-            long elapsedMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start);
-
-            assertTrue("append should only enqueue work, elapsed=" + elapsedMs + " ms", elapsedMs < 20);
+            Future<?> append = caller.submit(new Runnable() {
+                @Override
+                public void run() {
+                    journal.append(entry(2, "second"));
+                }
+            });
+            // This is a liveness assertion with a generous deadlock timeout,
+            // not a machine-speed performance ceiling.
+            append.get(2, TimeUnit.SECONDS);
             releaseWriter.countDown();
             journal.awaitIdle(5, TimeUnit.SECONDS);
         } finally {
             releaseWriter.countDown();
+            caller.shutdownNow();
             journal.close();
         }
     }

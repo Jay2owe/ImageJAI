@@ -19,7 +19,6 @@ import imagejai.engine.PostureController;
 import imagejai.engine.StateInspector;
 import imagejai.engine.TCPCommandServer;
 import org.junit.Test;
-import org.junit.jupiter.api.Tag;
 
 import java.io.BufferedReader;
 import java.io.File;
@@ -52,7 +51,6 @@ import static org.junit.Assert.assertTrue;
  * run excludes {@code *IntegrationTest} classes so this socket-level sweep does
  * not slow down the unit-test cycle.
  */
-@Tag("integration")
 public class PseudonymisationIntegrationTest {
     private static final String SENSITIVE_ID = "MOAB2_subject_017_visit3";
     private static final String OME_PHI = "Jane Donor subject_017 visit3";
