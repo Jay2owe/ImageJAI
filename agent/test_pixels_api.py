@@ -19,6 +19,7 @@ def pixel_response(values, width, height, slice_count=1, **overrides):
     raw = struct.pack("<" + str(len(values)) + "f", *values)
     result = {
         "data": base64.b64encode(raw).decode("ascii"),
+        "encoding": "base64_float32_le",
         "image_id": "image-123",
         "image_revision": 7,
         "display_revision": 11,
@@ -229,6 +230,7 @@ def test_get_pixels_builds_payload_and_decodes_2d(monkeypatch):
         "frames": 5,
         "nPixels": 4,
         "type": "float32",
+        "encoding": "base64_float32_le",
         "value_domain": pixel_response([1.0], 1, 1)["result"]["value_domain"],
         "acquisition_min_count": None,
         "acquisition_max_count": None,
@@ -483,6 +485,43 @@ def test_get_pixels_rejects_structured_errors_and_malformed_payloads(monkeypatch
 
 
 @pytest.mark.parametrize(
+    "encoding",
+    [None, True, 7, "", "base64_float32_be", " base64_float32_le"],
+)
+def test_get_pixels_rejects_noncanonical_encoding_before_decoding(monkeypatch, encoding):
+    response = pixel_response([1.0], width=1, height=1, encoding=encoding)
+    # This is deliberately invalid base64.  The encoding boundary must reject
+    # the response before attempting to decode the data field.
+    response["result"]["data"] = "not base64!"
+    monkeypatch.setattr(pixels, "send", lambda cmd: response)
+
+    with pytest.raises(RuntimeError, match="encoding must be exactly base64_float32_le"):
+        pixels.get_pixels()
+
+
+def test_get_pixels_rejects_missing_encoding_before_decoding(monkeypatch):
+    response = pixel_response([1.0], width=1, height=1)
+    del response["result"]["encoding"]
+    response["result"]["data"] = "not base64!"
+    monkeypatch.setattr(pixels, "send", lambda cmd: response)
+
+    with pytest.raises(RuntimeError, match="encoding must be exactly base64_float32_le"):
+        pixels.get_pixels()
+
+
+def test_get_pixels_rejects_big_endian_float_payload(monkeypatch):
+    raw = struct.pack(">2f", 1.0, 2.0)
+    response = pixel_response(
+        [1.0, 2.0], width=2, height=1, encoding="base64_float32_be"
+    )
+    response["result"]["data"] = base64.b64encode(raw).decode("ascii")
+    monkeypatch.setattr(pixels, "send", lambda cmd: response)
+
+    with pytest.raises(RuntimeError, match="encoding must be exactly base64_float32_le"):
+        pixels.get_pixels()
+
+
+@pytest.mark.parametrize(
     ("field", "value"),
     [
         ("image_id", 7),
@@ -542,6 +581,7 @@ def test_large_pixel_response_uses_one_compact_float32_backing_buffer(monkeypatc
         "ok": True,
         "result": {
             "data": base64.b64encode(raw).decode("ascii"),
+            "encoding": "base64_float32_le",
             "image_id": "image-large",
             "image_revision": 1,
             "display_revision": 1,

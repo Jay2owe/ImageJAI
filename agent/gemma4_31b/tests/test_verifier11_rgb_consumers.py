@@ -60,10 +60,46 @@ def _pixels(revision: int, domain_overrides=None, type_label="RGB"):
             "sliceCount": 1,
             "nPixels": 3,
             "type": type_label,
+            "encoding": "base64_float32_le",
             "value_domain": domain,
             "data": base64.b64encode(packed.tobytes()).decode("ascii"),
         },
     }
+
+
+def test_visual_decode_requires_exact_little_endian_float32_encoding():
+    response = _pixels(7)
+
+    plane, meta = visual_diff._decode_pixels(response)
+
+    assert plane is not None
+    assert meta["encoding"] == "base64_float32_le"
+
+    missing = _pixels(7)
+    del missing["result"]["encoding"]
+    invalid = [missing]
+    for encoding in (
+        None,
+        True,
+        32,
+        "base64_float32_be",
+        "BASE64_FLOAT32_LE",
+        " base64_float32_le",
+    ):
+        malformed = _pixels(7)
+        malformed["result"]["encoding"] = encoding
+        invalid.append(malformed)
+
+    # A declared big-endian transport must be rejected even when its payload
+    # has the otherwise valid byte length for the requested dimensions.
+    invalid[4]["result"]["data"] = base64.b64encode(
+        np.asarray([0x00FF0000, 0x0000FF00, 0x000000FF], dtype=">f4").tobytes()
+    ).decode("ascii")
+
+    for malformed in invalid:
+        plane, error = visual_diff._decode_pixels(malformed)
+        assert plane is None
+        assert "encoding" in error["error"]
 
 
 def _histogram(revision: int, weights=None, *, n_pixels=3, domain_overrides=None):

@@ -165,6 +165,7 @@ def _value_domain(result):
 
 def _pixel_metadata(result, width, height, slice_count, pixel_count):
     """Validate and preserve the server's geometry and C/Z/T attribution."""
+    encoding = _pixel_encoding(result)
     try:
         image_id = _nonempty_string(result["image_id"], "image_id")
         image_revision = _exact_int(result["image_revision"], "image_revision", 1)
@@ -237,11 +238,22 @@ def _pixel_metadata(result, width, height, slice_count, pixel_count):
         "frames": frames,
         "nPixels": pixel_count,
         "type": image_type,
+        "encoding": encoding,
         "value_domain": value_domain,
         "acquisition_min_count": min_count,
         "acquisition_max_count": max_count,
         "acquisition_limit_counts_exact": counts_exact,
     }
+
+
+def _pixel_encoding(result):
+    """Require the one byte encoding that this client can decode safely."""
+    encoding = result.get("encoding")
+    if not isinstance(encoding, str) or encoding != "base64_float32_le":
+        raise RuntimeError(
+            "get_pixels failed: encoding must be exactly base64_float32_le"
+        )
+    return encoding
 
 
 def _is_rgb_image_type(value):
@@ -610,6 +622,10 @@ def get_pixels(
     result = resp.get("result")
     if not isinstance(result, dict):
         raise RuntimeError("get_pixels failed: result is not an object")
+    # Validate the byte-order contract before touching the encoded bytes.  A
+    # valid-length float32 payload with the wrong endianness otherwise decodes
+    # successfully into scientifically incorrect values.
+    _pixel_encoding(result)
     try:
         b64 = result["data"]
         w = _exact_int(result["width"], "width", 1)

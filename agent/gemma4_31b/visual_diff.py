@@ -292,6 +292,14 @@ def _decode_pixels(resp):
     result = resp.get("result")
     if not isinstance(result, dict):
         return None, {"error": "get_pixels result is not an object"}
+    encoding = result.get("encoding")
+    if not isinstance(encoding, str) or encoding != "base64_float32_le":
+        return None, {
+            "error": (
+                "get_pixels returned unsupported encoding; "
+                "expected base64_float32_le"
+            )
+        }
     b64 = result.get("data")
     if not isinstance(b64, str) or not b64:
         return None, {"error": "get_pixels reply missing data field"}
@@ -337,6 +345,7 @@ def _decode_pixels(resp):
         "nPixels": n_pixels,
         "sliceCount": slice_count,
         "type": result.get("type", ""),
+        "encoding": encoding,
         "value_domain": value_domain,
     })
     return plane, meta
