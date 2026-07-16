@@ -36,6 +36,10 @@ public final class CaptureHandler {
         if (result == null) {
             return;
         }
+        JsonElement internalImageToken = result.remove("_visual_image_token");
+        boolean hasInternalImageToken = internalImageToken != null
+                && internalImageToken.isJsonPrimitive()
+                && internalImageToken.getAsJsonPrimitive().isString();
 
         CaptureSource source = CaptureSource.from(optString(result, "source",
                 optString(response, "source", "ACTIVE_IMAGE_CONTENT")));
@@ -60,7 +64,10 @@ public final class CaptureHandler {
         }
         boolean consumeOverride = posture == PrivacyPosture.PSEUDONYMISED
                 && source == CaptureSource.ACTIVE_IMAGE_CONTENT
-                && visualOverrideRegistry.consumeIfPresent(sessionId);
+                && (hasInternalImageToken
+                ? visualOverrideRegistry.consumeIfPresent(
+                        sessionId, internalImageToken.getAsString())
+                : visualOverrideRegistry.consumeIfPresent(sessionId));
         byte[] processed = consumeOverride
                 ? burnInDetector.mask(png)
                 : burnInDetector.mask(downsampleTo(png, MAX_PSEUDONYMISED_DIMENSION));

@@ -34,4 +34,14 @@ public class SelectionBrokerTest {
 
         assertEquals(Collections.singletonList("image-7a3f.lif:1"), brief.tokens());
     }
+
+    @Test
+    public void briefAcceptsStrongTokensWhileRetainingLegacyCompatibility() {
+        String strong = "image-0123456789abcdef0123456789abcdef.lif:2";
+        String legacy = "image-7a3f.lif:1";
+        Brief brief = new Brief("s1", Arrays.asList(strong, legacy),
+                "", Collections.<String, Object>emptyMap());
+
+        assertEquals(Arrays.asList(strong, legacy), brief.tokens());
+    }
 }

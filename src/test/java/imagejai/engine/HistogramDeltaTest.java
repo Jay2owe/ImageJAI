@@ -3,6 +3,8 @@ package imagejai.engine;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
+import ij.ImagePlus;
+import ij.process.ByteProcessor;
 import org.junit.Test;
 
 import static org.junit.Assert.assertEquals;
@@ -18,6 +20,53 @@ import static org.junit.Assert.assertTrue;
  * {@code ImagePlus}. Per plan: docs/tcp_upgrade/09_histogram_delta.md.
  */
 public class HistogramDeltaTest {
+
+    @Test
+    public void snapshotUsesDeterministicBoundedSamplingAboveExactBudget() {
+        byte[] pixels = new byte[100];
+        for (int i = 0; i < pixels.length; i++) pixels[i] = (byte) i;
+        ImagePlus image = new ImagePlus("gradient", new ByteProcessor(10, 10, pixels));
+
+        HistogramDelta.Snapshot first = HistogramDelta.snapshot(image, 10L, 10L);
+        HistogramDelta.Snapshot second = HistogramDelta.snapshot(image, 10L, 10L);
+
+        assertNotNull(first);
+        assertTrue(first.approximate);
+        assertEquals(100L, first.totalPixels);
+        assertEquals(10L, first.pixelsExamined);
+        assertEquals(10L, first.sampleStride);
+        assertTrue(java.util.Arrays.equals(first.bins, second.bins));
+        assertEquals(first.mean, second.mean, 0.0);
+        assertEquals(first.entropy, second.entropy, 0.0);
+    }
+
+    @Test
+    public void sampledEnvelopeDisclosesApproximationAndWork() {
+        int[] bins = new int[HistogramDelta.BINS];
+        bins[4] = 8;
+        HistogramDelta.Snapshot sampled = new HistogramDelta.Snapshot(
+                bins, 32.0, 1.0, null, true, 100L, 8L, 13L);
+
+        JsonObject envelope = HistogramDelta.compute(sampled, sampled);
+
+        assertTrue(envelope.get("approximate").getAsBoolean());
+        assertTrue(envelope.get("truncated").getAsBoolean());
+        JsonObject metadata = envelope.getAsJsonObject("sampling");
+        assertEquals("deterministic_stride", metadata.get("method").getAsString());
+        assertEquals(100L, metadata.get("totalPixelsBefore").getAsLong());
+        assertEquals(8L, metadata.get("pixelsExaminedBefore").getAsLong());
+        assertEquals(13L, metadata.get("strideBefore").getAsLong());
+    }
+
+    @Test
+    public void exhaustedSamplingBudgetReturnsTypedSkip() {
+        ImagePlus image = new ImagePlus("tiny", new ByteProcessor(2, 2));
+        HistogramDelta.Snapshot snapshot = HistogramDelta.snapshot(image, 0L, 0L);
+        JsonObject envelope = HistogramDelta.compute(snapshot, snapshot);
+
+        assertEquals("sampling_budget_exhausted",
+                envelope.get("skipped").getAsString());
+    }
 
     // ------------------------------------------------------------------
     // rebin

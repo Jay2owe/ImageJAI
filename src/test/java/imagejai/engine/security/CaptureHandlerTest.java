@@ -114,7 +114,9 @@ public class CaptureHandlerTest {
     @Test
     public void visualOverrideIsConsumedOnceAndThenDownsamplesAgain() throws Exception {
         VisualOverrideRegistry registry = new VisualOverrideRegistry();
-        registry.grant("session-a", "test");
+        VisualOverrideRegistry.PendingRequest pending =
+                registry.request("session-a", "test", "no-active-image");
+        assertTrue(registry.grant("session-a", pending.requestId, "test"));
         CaptureHandler handler = new CaptureHandler(new BurnInDetector(), registry);
 
         JsonObject first = captureResponse(png(900, 700, false), "ACTIVE_IMAGE_CONTENT");
@@ -134,6 +136,49 @@ public class CaptureHandlerTest {
         assertTrue(downsampled.getWidth() <= 512);
         assertEquals(512, secondResult.get("downsampled_to").getAsInt());
         assertFalse(registry.hasGrant("session-a"));
+    }
+
+    @Test
+    public void internalImageTokenIsStrippedAndConsumedAtomically() throws Exception {
+        VisualOverrideRegistry registry = new VisualOverrideRegistry();
+        VisualOverrideRegistry.PendingRequest pending =
+                registry.request("session-a", "test", "image-token-a");
+        assertTrue(registry.grant("session-a", pending.requestId, "test"));
+        CaptureHandler handler = new CaptureHandler(new BurnInDetector(), registry);
+        JsonObject response = captureResponse(
+                png(900, 700, false), "ACTIVE_IMAGE_CONTENT");
+        response.getAsJsonObject("result").addProperty(
+                "_visual_image_token", "image-token-a");
+
+        handler.apply(response, PrivacyPosture.PSEUDONYMISED, "session-a",
+                RedactionReport.builder().posture(PrivacyPosture.PSEUDONYMISED));
+
+        JsonObject result = response.getAsJsonObject("result");
+        assertFalse(result.has("_visual_image_token"));
+        assertEquals("consumed", result.get("visual_override").getAsString());
+        assertFalse(registry.hasGrant("session-a", "image-token-a"));
+    }
+
+    @Test
+    public void mismatchedInternalImageTokenDownsamplesWithoutConsumingGrant()
+            throws Exception {
+        VisualOverrideRegistry registry = new VisualOverrideRegistry();
+        VisualOverrideRegistry.PendingRequest pending =
+                registry.request("session-a", "test", "image-token-a");
+        assertTrue(registry.grant("session-a", pending.requestId, "test"));
+        CaptureHandler handler = new CaptureHandler(new BurnInDetector(), registry);
+        JsonObject response = captureResponse(
+                png(900, 700, false), "ACTIVE_IMAGE_CONTENT");
+        response.getAsJsonObject("result").addProperty(
+                "_visual_image_token", "image-token-b");
+
+        handler.apply(response, PrivacyPosture.PSEUDONYMISED, "session-a",
+                RedactionReport.builder().posture(PrivacyPosture.PSEUDONYMISED));
+
+        JsonObject result = response.getAsJsonObject("result");
+        assertFalse(result.has("_visual_image_token"));
+        assertEquals(512, result.get("downsampled_to").getAsInt());
+        assertTrue(registry.hasGrant("session-a", "image-token-a"));
     }
 
     private static JsonObject captureResponse(byte[] png, String source) {

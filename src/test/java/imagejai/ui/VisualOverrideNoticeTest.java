@@ -17,7 +17,10 @@ public class VisualOverrideNoticeTest {
         VisualOverrideNotice notice = new VisualOverrideNotice(
                 EventBus.getInstance(), registry);
         try {
-            JsonObject frame = frame("session-a", "check focus", "req-1");
+            VisualOverrideRegistry.PendingRequest pending =
+                    registry.request("session-a", "check focus", "image-a");
+            JsonObject frame = frame(
+                    "session-a", "check focus", pending.requestId);
 
             notice.onEvent(frame);
             SwingUtilities.invokeAndWait(new Runnable() {
@@ -32,7 +35,7 @@ public class VisualOverrideNoticeTest {
             notice.allowForTest();
 
             assertFalse(notice.isVisible());
-            assertTrue(registry.hasGrant("session-a"));
+            assertTrue(registry.hasGrant("session-a", "image-a"));
         } finally {
             notice.dispose();
         }
@@ -41,11 +44,13 @@ public class VisualOverrideNoticeTest {
     @Test
     public void visualRequestEventCanBeDenied() throws Exception {
         VisualOverrideRegistry registry = new VisualOverrideRegistry();
-        registry.request("session-b", "check contamination");
+        VisualOverrideRegistry.PendingRequest pending =
+                registry.request("session-b", "check contamination", "image-b");
         VisualOverrideNotice notice = new VisualOverrideNotice(
                 EventBus.getInstance(), registry);
         try {
-            notice.onEvent(frame("session-b", "check contamination", "req-2"));
+            notice.onEvent(frame("session-b", "check contamination",
+                    pending.requestId));
             SwingUtilities.invokeAndWait(new Runnable() {
                 @Override
                 public void run() {

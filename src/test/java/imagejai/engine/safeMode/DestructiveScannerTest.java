@@ -2,6 +2,9 @@ package imagejai.engine.safeMode;
 
 import org.junit.Test;
 
+import java.io.IOException;
+import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
@@ -183,6 +186,61 @@ public class DestructiveScannerTest {
         DestructiveScanner.Context ctx = baseCtx();
         String code = "saveAs(\"PNG\", \"/raw/AI_Exports/figure.png\");";
         assertTrue(DestructiveScanner.scan(code, ctx).isEmpty());
+    }
+
+    @Test
+    public void aiExportsLexicalTraversalIsRejected() {
+        DestructiveScanner.Context ctx = baseCtx();
+        String code = "saveAs(\"PNG\", \"/raw/AI_Exports/../cells.lif\");";
+
+        List<DestructiveScanner.DestructiveOp> ops =
+                DestructiveScanner.scan(code, ctx);
+
+        assertEquals(1, ops.size());
+        assertEquals(DestructiveScanner.RULE_AI_EXPORTS_ESCAPE,
+                ops.get(0).ruleId);
+        assertEquals(DestructiveScanner.Severity.REJECT, ops.get(0).severity);
+    }
+
+    @Test
+    public void canonicalSymlinkEscapeCannotClaimAiExportsContainment() {
+        final Path root = Paths.get("safe", "AI_Exports")
+                .toAbsolutePath().normalize();
+        final Path target = root.resolve("link").resolve("figure.png");
+        final Path outside = root.getParent().resolve("outside").resolve("figure.png");
+        DestructiveScanner.CanonicalPathResolver resolver =
+                new DestructiveScanner.CanonicalPathResolver() {
+                    @Override
+                    public Path canonicalise(Path intended) {
+                        return intended.equals(root) ? root : outside;
+                    }
+                };
+
+        assertEquals("ESCAPE", DestructiveScanner.containmentForTest(
+                target.toString(), root.toString(), resolver));
+    }
+
+    @Test
+    public void unreadableAiExportsParentFailsClosedInsteadOfLookingEmpty() {
+        final Path root = Paths.get("safe", "AI_Exports")
+                .toAbsolutePath().normalize();
+        Path target = root.resolve("figure.png");
+        DestructiveScanner.CanonicalPathResolver unreadable =
+                new DestructiveScanner.CanonicalPathResolver() {
+                    @Override
+                    public Path canonicalise(Path intended) throws IOException {
+                        throw new IOException("access denied");
+                    }
+                };
+
+        assertEquals("ESCAPE", DestructiveScanner.containmentForTest(
+                target.toString(), root.toString(), unreadable));
+    }
+
+    @Test
+    public void literalAiExportsSegmentWithoutResolvedRootIsNotTrusted() {
+        assertFalse(DestructiveScanner.isUnderAiExports(
+                "AI_Exports/figure.png", null));
     }
 
     /** PNG saveAs over an existing .lif file → reject. */

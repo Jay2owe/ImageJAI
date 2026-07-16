@@ -42,7 +42,7 @@ public class SeriesScannerTest {
         assertEquals(first, second);
         assertEquals("wt_8w_male_001", first.get(0).label());
         assertEquals(1, first.get(0).series());
-        assertTrue(first.get(0).token().matches("image-[0-9a-f]{4}\\.lif:1"));
+        assertTrue(first.get(0).token().matches("image-[0-9a-f]{32}\\.lif:1"));
         assertEquals(4, first.get(0).sizeC());
         assertEquals("64x32x5", first.get(0).dimensionsLabel());
     }

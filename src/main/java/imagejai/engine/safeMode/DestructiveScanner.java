@@ -1,5 +1,11 @@
 package imagejai.engine.safeMode;
 
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.InvalidPathException;
+import java.nio.file.LinkOption;
+import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
@@ -66,6 +72,7 @@ public final class DestructiveScanner {
     public static final String RULE_ROI_WIPE            = "roi_wipe_with_backup";
     public static final String RULE_ZPROJECT_OVERWRITE  = "zproject_overwrite";
     public static final String RULE_MICROSCOPY_OVERWRITE = "microscopy_overwrite";
+    public static final String RULE_AI_EXPORTS_ESCAPE    = "ai_exports_escape";
     public static final String RULE_BIT_DEPTH_NARROWING = "bit_depth_narrowing";
     public static final String RULE_NORMALIZE_CONTRAST  = "normalize_contrast";
 
@@ -396,7 +403,18 @@ public final class DestructiveScanner {
             String target = m.group(2);
 
             if (!isWatchedSaveFormat(fmt)) continue;
-            if (isUnderAiExports(target, ctx.aiExportsRoot)) continue;
+            Containment containment = aiExportsContainment(
+                    target, ctx.aiExportsRoot, REAL_PATH_RESOLVER);
+            if (containment == Containment.INSIDE) continue;
+            if (containment == Containment.ESCAPE) {
+                out.add(new DestructiveOp(
+                        RULE_AI_EXPORTS_ESCAPE, Severity.REJECT,
+                        target,
+                        lineOf(code, m.start()),
+                        "Output path claims AI_Exports but escapes its canonical root "
+                                + "through traversal, a symbolic link, or an unreadable parent."));
+                continue;
+            }
 
             boolean overwritesOriginal =
                     ctx.activeImagePath != null
@@ -496,24 +514,99 @@ public final class DestructiveScanner {
     }
 
     private static String normalisePath(String p) {
-        String n = p.replace('\\', '/');
-        while (n.endsWith("/")) n = n.substring(0, n.length() - 1);
-        return n;
+        try {
+            return Paths.get(p).toAbsolutePath().normalize().toString()
+                    .replace('\\', '/');
+        } catch (InvalidPathException e) {
+            String n = p.replace('\\', '/');
+            while (n.endsWith("/")) n = n.substring(0, n.length() - 1);
+            return n;
+        }
     }
 
-    /** True when {@code target} sits anywhere under {@code root} (prefix match). */
-    static boolean isUnderAiExports(String target, String root) {
-        if (target == null || target.isEmpty()) return false;
-        if (root == null || root.isEmpty()) {
-            // No resolved root — allow the literal "AI_Exports/" segment
-            // anywhere in the path so static unit tests work without a Fiji.
-            return target.replace('\\', '/').contains("/AI_Exports/")
-                    || target.replace('\\', '/').startsWith("AI_Exports/");
+    private enum Containment { INSIDE, OUTSIDE, ESCAPE }
+
+    interface CanonicalPathResolver {
+        Path canonicalise(Path intended) throws IOException;
+    }
+
+    private static final CanonicalPathResolver REAL_PATH_RESOLVER =
+            new CanonicalPathResolver() {
+                @Override
+                public Path canonicalise(Path intended) throws IOException {
+                    return canonicaliseIntendedPath(intended);
+                }
+            };
+
+    private static Containment aiExportsContainment(
+            String target, String root, CanonicalPathResolver resolver) {
+        if (target == null || target.trim().isEmpty()
+                || root == null || root.trim().isEmpty()) {
+            return Containment.OUTSIDE;
         }
-        String t = normalisePath(target);
-        String r = normalisePath(root);
-        return t.toLowerCase(Locale.ROOT).startsWith(r.toLowerCase(Locale.ROOT) + "/")
-                || t.equalsIgnoreCase(r);
+        try {
+            Path rawTarget = Paths.get(target).toAbsolutePath();
+            Path rawRoot = Paths.get(root).toAbsolutePath();
+            Path lexicalTarget = rawTarget.normalize();
+            Path lexicalRoot = rawRoot.normalize();
+            boolean claimsRoot = rawTarget.startsWith(lexicalRoot)
+                    || lexicalTarget.startsWith(lexicalRoot);
+            if (!claimsRoot) return Containment.OUTSIDE;
+            if (!lexicalTarget.startsWith(lexicalRoot)) return Containment.ESCAPE;
+
+            CanonicalPathResolver effective = resolver == null
+                    ? REAL_PATH_RESOLVER : resolver;
+            Path canonicalRoot = effective.canonicalise(lexicalRoot);
+            Path canonicalTarget = effective.canonicalise(lexicalTarget);
+            if (canonicalRoot == null || canonicalTarget == null) {
+                return Containment.ESCAPE;
+            }
+            return canonicalTarget.startsWith(canonicalRoot)
+                    ? Containment.INSIDE : Containment.ESCAPE;
+        } catch (IOException | InvalidPathException | SecurityException e) {
+            return claimsAiExportsLexically(target, root)
+                    ? Containment.ESCAPE : Containment.OUTSIDE;
+        }
+    }
+
+    static String containmentForTest(String target, String root,
+                                     CanonicalPathResolver resolver) {
+        return aiExportsContainment(target, root, resolver).name();
+    }
+
+    private static boolean claimsAiExportsLexically(String target, String root) {
+        try {
+            Path targetPath = Paths.get(target).toAbsolutePath();
+            Path rootPath = Paths.get(root).toAbsolutePath().normalize();
+            return targetPath.startsWith(rootPath)
+                    || targetPath.normalize().startsWith(rootPath);
+        } catch (RuntimeException e) {
+            return false;
+        }
+    }
+
+    /** Resolve an intended output through its nearest existing ancestor. */
+    private static Path canonicaliseIntendedPath(Path intended) throws IOException {
+        Path absolute = intended.toAbsolutePath().normalize();
+        Path existing = absolute;
+        while (existing != null
+                && !Files.exists(existing, LinkOption.NOFOLLOW_LINKS)) {
+            if (!Files.notExists(existing, LinkOption.NOFOLLOW_LINKS)) {
+                throw new IOException("Unreadable output path ancestor");
+            }
+            existing = existing.getParent();
+        }
+        if (existing == null) {
+            throw new IOException("No readable ancestor for output path");
+        }
+        Path realAncestor = existing.toRealPath();
+        Path suffix = existing.relativize(absolute);
+        return realAncestor.resolve(suffix).normalize();
+    }
+
+    static boolean isUnderAiExports(String target, String root) {
+        return aiExportsContainment(target, root, REAL_PATH_RESOLVER)
+                == Containment.INSIDE;
     }
 
     private static boolean isWatchedSaveFormat(String fmt) {

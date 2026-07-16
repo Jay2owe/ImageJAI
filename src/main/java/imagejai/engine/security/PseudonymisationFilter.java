@@ -8,8 +8,10 @@ import com.google.gson.JsonPrimitive;
 import imagejai.config.PrivacyPosture;
 
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -18,6 +20,7 @@ import java.util.regex.Pattern;
  * On-premises modes it tokenises identifiers before JSON leaves the JVM.
  */
 public class PseudonymisationFilter {
+    public static final int MAX_FREE_TEXT_CHARS = 1_048_576;
     private static final PseudonymisationFilter INSTANCE = new PseudonymisationFilter(
             PathTokenMap.getInstance(),
             new OmeXmlScrubber(),
@@ -29,9 +32,9 @@ public class PseudonymisationFilter {
     private static final Pattern PATH_SUBSTRING = Pattern.compile(
             "(?i)([A-Za-z]:[\\\\/][^\\r\\n\"'<>|]+?\\.(?:lif|tif|tiff|czi|nd2|lsm|oib|oif|vsi|svs|png|jpe?g|csv|tsv|md|pdf|json|xml|txt)"
                     + "|/[A-Za-z0-9._~+()\\- /]+?\\.(?:lif|tif|tiff|czi|nd2|lsm|oib|oif|vsi|svs|png|jpe?g|csv|tsv|md|pdf|json|xml|txt)"
-                    + "|\\b(?!image-[0-9a-f]{4}\\b)[A-Za-z0-9._+()\\- ]+\\.(?:lif|tif|tiff|czi|nd2|lsm|oib|oif|vsi|svs|png|jpe?g|csv|tsv|md|pdf|json|xml|txt))");
+                    + "|\\b(?!image-[0-9a-f]{4,32}\\b)[A-Za-z0-9._+()\\- ]+\\.(?:lif|tif|tiff|czi|nd2|lsm|oib|oif|vsi|svs|png|jpe?g|csv|tsv|md|pdf|json|xml|txt))");
     private static final Pattern PATH_TOKEN = Pattern.compile(
-            "(?i)image-[0-9a-f]{4,12}(?:\\.[A-Za-z0-9.]+)?(?::\\d+)?");
+            "(?i)image-[0-9a-f]{4,32}(?:\\.[A-Za-z0-9.]+)?(?::\\d+)?");
     private static final String[] PATH_EXTENSIONS = {
             ".lif", ".tif", ".tiff", ".czi", ".nd2", ".lsm", ".oib", ".oif",
             ".vsi", ".svs", ".png", ".jpg", ".jpeg", ".csv", ".tsv", ".md",
@@ -41,6 +44,8 @@ public class PseudonymisationFilter {
     private final PathTokenMap pathTokenMap;
     private final OmeXmlScrubber omeXmlScrubber;
     private final CaptureHandler captureHandler;
+    private final AtomicLong matcherBuilds = new AtomicLong(0L);
+    private volatile MatcherSnapshot matcherSnapshot = MatcherSnapshot.empty();
 
     public PseudonymisationFilter(PathTokenMap pathTokenMap,
                                   OmeXmlScrubber omeXmlScrubber,
@@ -499,21 +504,12 @@ public class PseudonymisationFilter {
         if (value == null || value.isEmpty()) {
             return value;
         }
-        List<Map.Entry<String, String>> entries =
-                pathTokenMap.snapshotSensitiveStringsLongestFirst();
-        if (entries.isEmpty()) {
-            return value;
+        if (value.length() > MAX_FREE_TEXT_CHARS) {
+            throw new IllegalArgumentException("Free-text field exceeds "
+                    + MAX_FREE_TEXT_CHARS + " characters");
         }
-        boolean possibleMatch = false;
-        for (Map.Entry<String, String> entry : entries) {
-            String original = entry.getKey();
-            if (original != null && !original.isEmpty()
-                    && value.indexOf(original) >= 0) {
-                possibleMatch = true;
-                break;
-            }
-        }
-        if (!possibleMatch) {
+        MatcherSnapshot snapshot = matcherForCurrentVersion();
+        if (snapshot.root.children.isEmpty()) {
             return value;
         }
 
@@ -528,20 +524,10 @@ public class PseudonymisationFilter {
                 hasToken = tokenMatcher.find();
                 continue;
             }
-            Map.Entry<String, String> match = null;
-            for (Map.Entry<String, String> entry : entries) {
-                String original = entry.getKey();
-                if (original == null || original.isEmpty()) {
-                    continue;
-                }
-                if (startsWithAt(value, original, i)) {
-                    match = entry;
-                    break;
-                }
-            }
+            TrieMatch match = snapshot.root.longestMatch(value, i);
             if (match != null) {
-                out.append(match.getValue());
-                i += match.getKey().length();
+                out.append(match.replacement);
+                i += match.length;
             } else {
                 out.append(value.charAt(i));
                 i++;
@@ -550,12 +536,89 @@ public class PseudonymisationFilter {
         return out.toString();
     }
 
-    private static boolean startsWithAt(String value, String needle, int index) {
-        int n = needle.length();
-        if (index < 0 || n == 0 || index + n > value.length()) {
-            return false;
+    long matcherBuildCountForTest() {
+        return matcherBuilds.get();
+    }
+
+    private MatcherSnapshot matcherForCurrentVersion() {
+        long version = pathTokenMap.sensitiveVersion();
+        MatcherSnapshot cached = matcherSnapshot;
+        if (cached.version == version) return cached;
+        synchronized (this) {
+            cached = matcherSnapshot;
+            version = pathTokenMap.sensitiveVersion();
+            if (cached.version == version) return cached;
+
+            PathTokenMap.SensitiveSnapshot source = pathTokenMap.sensitiveSnapshot();
+            TrieNode root = new TrieNode();
+            for (Map.Entry<String, String> entry : source.entries) {
+                String original = entry.getKey();
+                if (original != null && !original.isEmpty()) {
+                    root.insert(original, entry.getValue());
+                }
+            }
+            cached = new MatcherSnapshot(source.version, root);
+            matcherSnapshot = cached;
+            matcherBuilds.incrementAndGet();
+            return cached;
         }
-        return value.regionMatches(index, needle, 0, n);
+    }
+
+    private static final class MatcherSnapshot {
+        final long version;
+        final TrieNode root;
+
+        MatcherSnapshot(long version, TrieNode root) {
+            this.version = version;
+            this.root = root;
+        }
+
+        static MatcherSnapshot empty() {
+            return new MatcherSnapshot(-1L, new TrieNode());
+        }
+    }
+
+    private static final class TrieMatch {
+        final int length;
+        final String replacement;
+
+        TrieMatch(int length, String replacement) {
+            this.length = length;
+            this.replacement = replacement;
+        }
+    }
+
+    private static final class TrieNode {
+        final Map<Character, TrieNode> children =
+                new HashMap<Character, TrieNode>();
+        String replacement;
+
+        void insert(String original, String token) {
+            TrieNode node = this;
+            for (int i = 0; i < original.length(); i++) {
+                Character key = Character.valueOf(original.charAt(i));
+                TrieNode next = node.children.get(key);
+                if (next == null) {
+                    next = new TrieNode();
+                    node.children.put(key, next);
+                }
+                node = next;
+            }
+            node.replacement = token;
+        }
+
+        TrieMatch longestMatch(String text, int start) {
+            TrieNode node = this;
+            TrieMatch best = null;
+            for (int i = start; i < text.length(); i++) {
+                node = node.children.get(Character.valueOf(text.charAt(i)));
+                if (node == null) break;
+                if (node.replacement != null) {
+                    best = new TrieMatch(i - start + 1, node.replacement);
+                }
+            }
+            return best;
+        }
     }
 
     private static boolean looksLikeOmeField(String key, String value) {

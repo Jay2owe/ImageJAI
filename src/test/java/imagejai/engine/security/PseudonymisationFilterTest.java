@@ -166,6 +166,57 @@ public class PseudonymisationFilterTest {
     }
 
     @Test
+    public void freeTextMatcherIsCachedUntilTokenMapVersionChanges() {
+        PathTokenMap map = new PathTokenMap(bytes(31));
+        String firstToken = map.tokenForSensitiveText("subject-017", "label");
+        PseudonymisationFilter filter = filter(map);
+
+        assertEquals(firstToken, filter.freeTextScrubString("subject-017"));
+        assertEquals(firstToken, filter.freeTextScrubString("subject-017"));
+        assertEquals(1L, filter.matcherBuildCountForTest());
+
+        String secondToken = map.tokenForSensitiveText("visit-3", "label");
+        assertEquals(secondToken, filter.freeTextScrubString("visit-3"));
+        assertEquals(2L, filter.matcherBuildCountForTest());
+    }
+
+    @Test
+    public void oversizedFreeTextFailsClosedInsteadOfReturningEmptySuccess() {
+        PathTokenMap map = new PathTokenMap(bytes(32));
+        map.tokenForSensitiveText("subject-017", "label");
+        PseudonymisationFilter filter = filter(map);
+        JsonObject response = okObject();
+        StringBuilder oversized = new StringBuilder(
+                PseudonymisationFilter.MAX_FREE_TEXT_CHARS + 1);
+        while (oversized.length() <= PseudonymisationFilter.MAX_FREE_TEXT_CHARS) {
+            oversized.append('x');
+        }
+        response.getAsJsonObject("result").addProperty("log", oversized.toString());
+
+        RedactionReport report = filter.apply(response, "get_state",
+                PrivacyPosture.PSEUDONYMISED, "s");
+
+        assertTrue(report.failed());
+        assertFalse(response.get("ok").getAsBoolean());
+        assertEquals("redaction_failed", response.get("error").getAsString());
+        assertFalse(response.has("result"));
+    }
+
+    @Test
+    public void cachedMatcherPreservesDeterministicLongestMatchWithManyTokens() {
+        PathTokenMap map = new PathTokenMap(bytes(33));
+        for (int i = 0; i < 500; i++) {
+            map.tokenForSensitiveText("prefix-" + i, "label");
+        }
+        String longest = map.tokenForSensitiveText("prefix-499-extra", "label");
+        PseudonymisationFilter filter = filter(map);
+
+        assertEquals(longest + " done",
+                filter.freeTextScrubString("prefix-499-extra done"));
+        assertEquals(1L, filter.matcherBuildCountForTest());
+    }
+
+    @Test
     public void governanceBlockIsPresentEvenWhenNothingChanged() {
         PseudonymisationFilter filter = filter(new PathTokenMap(bytes(7)));
         JsonObject response = okObject();

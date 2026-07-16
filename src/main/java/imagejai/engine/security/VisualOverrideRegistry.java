@@ -7,11 +7,15 @@ import imagejai.config.PrivacyPosture;
 import imagejai.engine.PostureController;
 
 import java.time.Instant;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.SecureRandom;
+import java.util.Base64;
 import java.util.Collections;
 import java.time.Duration;
 import java.util.Optional;
-import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * One-shot visual consent tracker. Requests and grants are session-scoped and
@@ -20,39 +24,96 @@ import java.util.concurrent.ConcurrentHashMap;
 public final class VisualOverrideRegistry {
     private static final VisualOverrideRegistry INSTANCE = new VisualOverrideRegistry();
     private static final Duration TTL = Duration.ofSeconds(60);
+    public static final int MAX_PENDING_REQUESTS = 128;
+    public static final int MAX_GRANTS = 128;
+    public static final int MAX_SESSION_CHARS = 256;
+    public static final int MAX_REASON_CHARS = 1024;
+    public static final int MAX_IMAGE_TOKEN_CHARS = 512;
+    public static final int MAX_REQUEST_ID_CHARS = 64;
+    private static final String NO_IMAGE_SCOPE = "no-active-image";
+    private static final SecureRandom RNG = new SecureRandom();
 
     private final ConcurrentHashMap<String, PendingRequest> requests =
             new ConcurrentHashMap<String, PendingRequest>();
     private final ConcurrentHashMap<String, Grant> grants =
             new ConcurrentHashMap<String, Grant>();
+    private final AtomicLong rejectedEntries = new AtomicLong(0L);
 
     public static VisualOverrideRegistry getInstance() {
         return INSTANCE;
     }
 
     public PendingRequest request(String sessionId, String reason) {
+        return request(sessionId, reason, currentImageToken());
+    }
+
+    public synchronized PendingRequest request(String sessionId, String reason,
+                                               String imageToken) {
         String session = normaliseSession(sessionId);
+        purgeExpired();
+        if (!requests.containsKey(session)
+                && requests.size() >= MAX_PENDING_REQUESTS) {
+            rejectedEntries.incrementAndGet();
+            throw new IllegalStateException("Visual request capacity reached (max "
+                    + MAX_PENDING_REQUESTS + ")");
+        }
+        grants.remove(session);
         PendingRequest request = new PendingRequest(
-                UUID.randomUUID().toString(), session, safe(reason), Instant.now());
+                newRequestId(), session,
+                bounded(reason, MAX_REASON_CHARS, "reason").trim(),
+                normaliseImageToken(imageToken),
+                Instant.now());
         requests.put(session, request);
         return request;
     }
 
-    public void grant(String sessionId, String reason) {
+    /** Grant only the exact live request that was displayed to the user. */
+    public synchronized boolean grant(String sessionId, String requestId,
+                                      String reason) {
         String session = normaliseSession(sessionId);
-        requests.remove(session);
-        grants.put(session, new Grant(session, safe(reason), Instant.now()));
-        auditVisual("visual.granted", session, reason, "");
+        purgeExpired();
+        PendingRequest pending = requests.get(session);
+        if (pending == null || !constantTimeEquals(pending.requestId,
+                bounded(requestId, MAX_REQUEST_ID_CHARS, "request id"))) {
+            return false;
+        }
+        if (!constantTimeEquals(pending.reason,
+                bounded(reason, MAX_REASON_CHARS, "reason").trim())) {
+            return false;
+        }
+        if (!grants.containsKey(session) && grants.size() >= MAX_GRANTS) {
+            rejectedEntries.incrementAndGet();
+            return false;
+        }
+        requests.remove(session, pending);
+        grants.put(session, new Grant(session, pending.requestId,
+                pending.imageToken, pending.reason, Instant.now()));
+        auditVisual("visual.granted", session, pending.reason, pending.imageToken);
+        return true;
     }
 
-    public void deny(String sessionId) {
+    /**
+     * Compatibility entry point for the existing notice. It still requires a
+     * live request and an exact reason match, and grants that request atomically.
+     */
+    public synchronized boolean grant(String sessionId, String reason) {
+        String session = normaliseSession(sessionId);
+        purgeExpired();
+        PendingRequest pending = requests.get(session);
+        if (pending == null || !constantTimeEquals(pending.reason, safe(reason))) {
+            return false;
+        }
+        return grant(session, pending.requestId, reason);
+    }
+
+    public synchronized void deny(String sessionId) {
         String session = normaliseSession(sessionId);
         PendingRequest request = requests.remove(session);
         grants.remove(session);
         auditVisual("visual.denied", session, request == null ? "" : request.reason, "");
     }
 
-    public Optional<PendingRequest> pending(String sessionId) {
+    public synchronized Optional<PendingRequest> pending(String sessionId) {
         PendingRequest request = requests.get(normaliseSession(sessionId));
         if (request == null || expired(request.createdAt)) {
             if (request != null) {
@@ -64,6 +125,10 @@ public final class VisualOverrideRegistry {
     }
 
     public boolean hasGrant(String sessionId) {
+        return hasGrant(sessionId, currentImageToken());
+    }
+
+    public synchronized boolean hasGrant(String sessionId, String imageToken) {
         Grant grant = grants.get(normaliseSession(sessionId));
         if (grant == null) {
             return false;
@@ -72,22 +137,74 @@ public final class VisualOverrideRegistry {
             grants.remove(grant.sessionId, grant);
             return false;
         }
-        return true;
+        return constantTimeEquals(grant.imageToken, normaliseImageToken(imageToken));
     }
 
     public boolean consumeIfPresent(String sessionId) {
+        return consumeIfPresent(sessionId, currentImageToken());
+    }
+
+    public synchronized boolean consumeIfPresent(String sessionId, String imageToken) {
         String session = normaliseSession(sessionId);
-        Grant grant = grants.remove(session);
-        boolean consumed = grant != null && !expired(grant.createdAt);
+        Grant grant = grants.get(session);
+        boolean consumed = grant != null && !expired(grant.createdAt)
+                && constantTimeEquals(grant.imageToken,
+                        normaliseImageToken(imageToken));
         if (consumed) {
-            auditVisual("visual.consumed", session, grant.reason, currentImageToken());
+            grants.remove(session, grant);
+            auditVisual("visual.consumed", session, grant.reason, grant.imageToken);
+        } else if (grant != null && expired(grant.createdAt)) {
+            grants.remove(session, grant);
         }
         return consumed;
     }
 
-    public void clear() {
+    public synchronized void clear() {
         requests.clear();
         grants.clear();
+    }
+
+    public synchronized int pendingCount() {
+        purgeExpired();
+        return requests.size();
+    }
+
+    public synchronized int grantCount() {
+        purgeExpired();
+        return grants.size();
+    }
+
+    public long rejectedEntryCount() {
+        return rejectedEntries.get();
+    }
+
+    private void purgeExpired() {
+        for (PendingRequest request : requests.values()) {
+            if (expired(request.createdAt)) {
+                requests.remove(request.sessionId, request);
+            }
+        }
+        for (Grant grant : grants.values()) {
+            if (expired(grant.createdAt)) {
+                grants.remove(grant.sessionId, grant);
+            }
+        }
+    }
+
+    private static String newRequestId() {
+        byte[] bytes = new byte[32];
+        RNG.nextBytes(bytes);
+        return Base64.getUrlEncoder().withoutPadding().encodeToString(bytes);
+    }
+
+    private static boolean constantTimeEquals(String left, String right) {
+        return MessageDigest.isEqual(safe(left).getBytes(StandardCharsets.UTF_8),
+                safe(right).getBytes(StandardCharsets.UTF_8));
+    }
+
+    private static String normaliseImageToken(String imageToken) {
+        String clean = bounded(imageToken, MAX_IMAGE_TOKEN_CHARS, "image token").trim();
+        return clean.isEmpty() ? NO_IMAGE_SCOPE : clean;
     }
 
     private static boolean expired(Instant createdAt) {
@@ -95,11 +212,21 @@ public final class VisualOverrideRegistry {
     }
 
     private static String normaliseSession(String sessionId) {
-        return sessionId == null || sessionId.trim().isEmpty() ? "default" : sessionId.trim();
+        String clean = bounded(sessionId, MAX_SESSION_CHARS, "session").trim();
+        return clean.isEmpty() ? "default" : clean;
     }
 
     private static String safe(String reason) {
         return reason == null ? "" : reason;
+    }
+
+    private static String bounded(String value, int maxChars, String label) {
+        String clean = safe(value);
+        if (clean.length() > maxChars) {
+            throw new IllegalArgumentException(label + " exceeds "
+                    + maxChars + " characters");
+        }
+        return clean;
     }
 
     private static void auditVisual(String command, String sessionId,
@@ -141,8 +268,9 @@ public final class VisualOverrideRegistry {
     }
 
     private static String currentImageToken() {
+        ImagePlus image = null;
         try {
-            ImagePlus image = WindowManager.getCurrentImage();
+            image = WindowManager.getCurrentImage();
             if (image == null) {
                 return "";
             }
@@ -152,10 +280,17 @@ public final class VisualOverrideRegistry {
                 return PathTokenMap.getInstance().tokenForPathString(
                         fileInfo.directory + fileInfo.fileName);
             }
-            return PathTokenMap.getInstance().tokenForSensitiveText(
-                    image.getTitle() == null ? "" : image.getTitle(), "image");
+            String title = image.getTitle() == null ? "" : image.getTitle();
+            if (title.isEmpty()) {
+                return "image-instance-"
+                        + Integer.toHexString(System.identityHashCode(image));
+            }
+            return PathTokenMap.getInstance().tokenForSensitiveText(title, "image");
         } catch (Throwable t) {
-            return "";
+            return image == null
+                    ? "image-scope-unavailable-" + newRequestId()
+                    : "image-instance-"
+                    + Integer.toHexString(System.identityHashCode(image));
         }
     }
 
@@ -163,24 +298,31 @@ public final class VisualOverrideRegistry {
         public final String requestId;
         public final String sessionId;
         public final String reason;
+        public final String imageToken;
         public final Instant createdAt;
 
         private PendingRequest(String requestId, String sessionId, String reason,
-                               Instant createdAt) {
+                               String imageToken, Instant createdAt) {
             this.requestId = requestId;
             this.sessionId = sessionId;
             this.reason = reason;
+            this.imageToken = imageToken;
             this.createdAt = createdAt;
         }
     }
 
     private static final class Grant {
         final String sessionId;
+        final String requestId;
+        final String imageToken;
         final String reason;
         final Instant createdAt;
 
-        Grant(String sessionId, String reason, Instant createdAt) {
+        Grant(String sessionId, String requestId, String imageToken,
+              String reason, Instant createdAt) {
             this.sessionId = sessionId;
+            this.requestId = requestId;
+            this.imageToken = imageToken;
             this.reason = reason;
             this.createdAt = createdAt;
         }
