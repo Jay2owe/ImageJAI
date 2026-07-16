@@ -174,7 +174,11 @@ public class TCPCommandServer {
      * loopback).
      */
     private static String loadOrGenerateToken() {
-        java.nio.file.Path p = tokenFilePath();
+        return loadOrGenerateToken(tokenFilePath());
+    }
+
+    /** Package-private seam for persistence failure and atomic-write tests. */
+    static String loadOrGenerateToken(java.nio.file.Path p) {
         if (java.nio.file.Files.exists(p)) {
             try {
                 if (!java.nio.file.Files.isRegularFile(p)) {
@@ -200,24 +204,46 @@ public class TCPCommandServer {
         new java.security.SecureRandom().nextBytes(raw);
         String token = java.util.Base64.getUrlEncoder()
                 .withoutPadding().encodeToString(raw);
+        java.nio.file.Path pending = null;
         try {
             java.nio.file.Files.createDirectories(p.getParent());
-            java.nio.file.Files.write(p,
-                    token.getBytes(StandardCharsets.UTF_8));
+            pending = java.nio.file.Files.createTempFile(
+                    p.getParent(), ".server-token-", ".tmp");
+            java.nio.file.Files.write(pending,
+                    token.getBytes(StandardCharsets.UTF_8),
+                    java.nio.file.StandardOpenOption.TRUNCATE_EXISTING);
             try {
                 java.util.Set<java.nio.file.attribute.PosixFilePermission> perms =
                         java.util.EnumSet.of(
                                 java.nio.file.attribute.PosixFilePermission.OWNER_READ,
                                 java.nio.file.attribute.PosixFilePermission.OWNER_WRITE);
-                java.nio.file.Files.setPosixFilePermissions(p, perms);
-            } catch (UnsupportedOperationException | java.io.IOException ignored) {
-                // Windows + non-POSIX file systems silently no-op here. The
+                java.nio.file.Files.setPosixFilePermissions(pending, perms);
+            } catch (UnsupportedOperationException ignored) {
+                // Windows + non-POSIX file systems do not expose POSIX modes. The
                 // loopback bind plus default user-private home directory
                 // ACL is the actual protection on those platforms.
             }
+            java.nio.file.Files.move(pending, p,
+                    java.nio.file.StandardCopyOption.ATOMIC_MOVE);
+            pending = null;
+
+            // Do not advertise a server whose credential exists only in memory.
+            // Verify the durable bytes before returning the token used by hello.
+            String persisted = new String(java.nio.file.Files.readAllBytes(p),
+                    StandardCharsets.UTF_8).trim();
+            if (!token.equals(persisted)) {
+                throw new java.io.IOException("persisted token verification failed");
+            }
         } catch (java.io.IOException e) {
-            System.err.println("[ImageJAI-TCP] Failed to persist server token: "
-                    + e.getMessage());
+            if (pending != null) {
+                try {
+                    java.nio.file.Files.deleteIfExists(pending);
+                } catch (java.io.IOException ignored) {
+                    // Preserve the original persistence failure.
+                }
+            }
+            throw new IllegalStateException("Failed to persist server token: "
+                    + e.getMessage(), e);
         }
         return token;
     }
