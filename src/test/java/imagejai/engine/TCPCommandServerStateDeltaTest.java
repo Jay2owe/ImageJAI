@@ -3,7 +3,21 @@ package imagejai.engine;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
+import ij.ImagePlus;
+import ij.ImageStack;
+import ij.process.ByteProcessor;
+import ij.process.ImageProcessor;
 import org.junit.Test;
+
+import javax.swing.SwingUtilities;
+
+import java.util.Arrays;
+import java.util.List;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.nio.file.Path;
+import java.nio.file.Paths;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
@@ -167,6 +181,165 @@ public class TCPCommandServerStateDeltaTest {
         }
     }
 
+    @Test
+    public void failedOpenDoesNotAcceptOrAlterPreExistingActiveImage() {
+        TCPCommandServer server = newServer();
+        final ImagePlus existing = new ImagePlus("already-open",
+                new ByteProcessor(2, 2));
+        final List<ImageGraph.ImageRef> unchanged =
+                ImageGraph.refsForImages(Arrays.asList(existing));
+        final AtomicInteger attempts = new AtomicInteger();
+        server.currentImageForTest = () -> existing;
+        server.openImagesForTest = () -> unchanged;
+        server.openImageOperationForTest = (path, series) -> attempts.incrementAndGet();
+        try {
+            JsonObject response = server.dispatch(parse(
+                    "{\"command\":\"open_image\",\"path\":\"missing.tif\","
+                            + "\"timeout_ms\":40}"), new TCPCommandServer.AgentCaps());
+
+            assertFalse(response.toString(), response.get("ok").getAsBoolean());
+            assertEquals(1, attempts.get());
+            assertEquals("already-open", existing.getTitle());
+            assertEquals(existing, server.currentImageForTest.get());
+        } finally {
+            server.stop();
+        }
+    }
+
+    @Test
+    public void requestedOpenEvidenceRequiresNewIdentityForRequestedPath() {
+        Path requested = Paths.get("requested.tif").toAbsolutePath().normalize();
+        ImagePlus existing = new ImagePlus("requested.tif", new ByteProcessor(1, 1));
+        ImagePlus opened = new ImagePlus("requested.tif", new ByteProcessor(1, 1));
+        ImageGraph.ImageRef before = new ImageGraph.ImageRef(existing,
+                ImageGraph.stableIdentity(existing), 1, existing.getTitle(),
+                requested.toString());
+        ImageGraph.ImageRef after = new ImageGraph.ImageRef(opened,
+                ImageGraph.stableIdentity(opened), 2, opened.getTitle(),
+                requested.toString());
+
+        assertEquals(null, TCPCommandServer.findRequestedOpenedImage(
+                Arrays.asList(before), Arrays.asList(before), requested));
+        assertEquals(after, TCPCommandServer.findRequestedOpenedImage(
+                Arrays.asList(before), Arrays.asList(before, after), requested));
+        assertEquals(Arrays.asList(after), TCPCommandServer.newImageRefs(
+                Arrays.asList(before), Arrays.asList(before, after)));
+    }
+
+    @Test
+    public void timedOutQueuedOpenCannotExecuteLater() throws Exception {
+        TCPCommandServer server = newServer();
+        ImagePlus existing = new ImagePlus("existing", new ByteProcessor(1, 1));
+        List<ImageGraph.ImageRef> unchanged =
+                ImageGraph.refsForImages(Arrays.asList(existing));
+        AtomicInteger attempts = new AtomicInteger();
+        server.currentImageForTest = () -> existing;
+        server.openImagesForTest = () -> unchanged;
+        server.openImageOperationForTest = (path, series) -> attempts.incrementAndGet();
+        CountDownLatch edtBlocked = new CountDownLatch(1);
+        CountDownLatch releaseEdt = new CountDownLatch(1);
+        SwingUtilities.invokeLater(() -> {
+            edtBlocked.countDown();
+            try {
+                releaseEdt.await(5, TimeUnit.SECONDS);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+        });
+        assertTrue(edtBlocked.await(2, TimeUnit.SECONDS));
+        try {
+            JsonObject response = server.dispatch(parse(
+                    "{\"command\":\"open_image\",\"path\":\"late.tif\","
+                            + "\"timeout_ms\":25}"), new TCPCommandServer.AgentCaps());
+            assertFalse(response.toString(), response.get("ok").getAsBoolean());
+        } finally {
+            releaseEdt.countDown();
+            SwingUtilities.invokeAndWait(() -> { });
+            server.stop();
+        }
+        assertEquals(0, attempts.get());
+    }
+
+    @Test
+    public void getPixelsRestoresHyperstackPositionOnSuccess() {
+        TCPCommandServer server = newServer();
+        ImagePlus imp = hyperstack();
+        imp.setPosition(2, 2, 2);
+        server.currentImageForTest = () -> imp;
+        try {
+            JsonObject response = server.dispatch(parse(
+                    "{\"command\":\"get_pixels\",\"allSlices\":true}"),
+                    new TCPCommandServer.AgentCaps());
+
+            assertTrue(response.toString(), response.get("ok").getAsBoolean());
+            assertEquals(2, imp.getC());
+            assertEquals(2, imp.getZ());
+            assertEquals(2, imp.getT());
+        } finally {
+            server.stop();
+        }
+    }
+
+    @Test
+    public void getPixelsRejectsOversizedAllocationBeforeReadingPixels() {
+        TCPCommandServer server = newServer();
+        final AtomicInteger reads = new AtomicInteger();
+        ByteProcessor processor = new ByteProcessor(2001, 2001) {
+            @Override public float getPixelValue(int x, int y) {
+                reads.incrementAndGet();
+                return super.getPixelValue(x, y);
+            }
+        };
+        ImagePlus imp = new ImagePlus("large", processor);
+        server.currentImageForTest = () -> imp;
+        try {
+            JsonObject response = server.dispatch(parse(
+                    "{\"command\":\"get_pixels\"}"),
+                    new TCPCommandServer.AgentCaps());
+
+            assertFalse(response.toString(), response.get("ok").getAsBoolean());
+            assertEquals(0, reads.get());
+            assertTrue(response.toString().contains("Region too large"));
+        } finally {
+            server.stop();
+        }
+    }
+
+    @Test
+    public void getPixelsRestoresHyperstackPositionWhenPixelReadFails() {
+        TCPCommandServer server = newServer();
+        ImageStack stack = new ImageStack(2, 2) {
+            @Override public ImageProcessor getProcessor(int n) {
+                if (n == 1) {
+                    return new ByteProcessor(2, 2) {
+                        @Override public float getPixelValue(int x, int y) {
+                            throw new IllegalStateException("synthetic pixel failure");
+                        }
+                    };
+                }
+                return super.getProcessor(n);
+            }
+        };
+        for (int i = 0; i < 8; i++) stack.addSlice(new ByteProcessor(2, 2));
+        ImagePlus imp = new ImagePlus("failing-hyper", stack);
+        imp.setDimensions(2, 2, 2);
+        imp.setOpenAsHyperStack(true);
+        imp.setPosition(2, 2, 2);
+        server.currentImageForTest = () -> imp;
+        try {
+            JsonObject response = server.dispatch(parse(
+                    "{\"command\":\"get_pixels\",\"allSlices\":true}"),
+                    new TCPCommandServer.AgentCaps());
+
+            assertFalse(response.toString(), response.get("ok").getAsBoolean());
+            assertEquals(2, imp.getC());
+            assertEquals(2, imp.getZ());
+            assertEquals(2, imp.getT());
+        } finally {
+            server.stop();
+        }
+    }
+
     private static JsonObject parse(String s) {
         return new JsonParser().parse(s).getAsJsonObject();
     }
@@ -176,5 +349,17 @@ public class TCPCommandServerStateDeltaTest {
             if (name.equals(arr.get(i).getAsString())) return true;
         }
         return false;
+    }
+
+    private static ImagePlus hyperstack() {
+        ImageStack stack = new ImageStack(2, 2);
+        for (int i = 0; i < 8; i++) {
+            byte[] pixels = new byte[] {(byte) i, 1, 2, 3};
+            stack.addSlice(new ByteProcessor(2, 2, pixels, null));
+        }
+        ImagePlus imp = new ImagePlus("hyper", stack);
+        imp.setDimensions(2, 2, 2);
+        imp.setOpenAsHyperStack(true);
+        return imp;
     }
 }

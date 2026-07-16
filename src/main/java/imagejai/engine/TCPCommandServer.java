@@ -585,6 +585,12 @@ public class TCPCommandServer {
     static java.util.function.BiFunction<JsonObject, AgentCaps, JsonObject>
             executeMacroForTest = null;
     java.util.function.Function<String, ScriptEngine> scriptEngineResolverForTest = null;
+    interface OpenImageOperation {
+        void open(String path, int series) throws Exception;
+    }
+    OpenImageOperation openImageOperationForTest = null;
+    java.util.function.Supplier<List<ImageGraph.ImageRef>> openImagesForTest = null;
+    java.util.function.Supplier<ImagePlus> currentImageForTest = null;
 
     /**
      * Step 13: session-scoped image provenance DAG shared across all
@@ -4074,7 +4080,8 @@ public class TCPCommandServer {
         final JsonObject result = new JsonObject();
         final CountDownLatch latch = new CountDownLatch(1);
 
-        SwingUtilities.invokeLater(new Runnable() {
+        GuiActionDispatcher.ActionToken actionToken =
+                GuiActionDispatcher.queueSwingAction(new Runnable() {
             public void run() {
                 try {
                     ij.ImageJ ijInstance = IJ.getInstance();
@@ -4140,9 +4147,14 @@ public class TCPCommandServer {
         });
 
         try {
-            latch.await(5, TimeUnit.SECONDS);
+            if (!latch.await(5, TimeUnit.SECONDS)) {
+                actionToken.invalidate();
+                return errorResponse("Progress check timed out");
+            }
         } catch (InterruptedException e) {
-            return errorResponse("Progress check timed out");
+            actionToken.invalidate();
+            Thread.currentThread().interrupt();
+            return errorResponse("Interrupted");
         }
 
         return successResponse(result);
@@ -4283,17 +4295,14 @@ public class TCPCommandServer {
         String priorInterpError = readInterpreterErrorMessage();
         String priorIjError = readIjErrorMessage();
 
-        // Snapshot active title + results-CSV length BEFORE IJ.runMacro so the
+        // Snapshot open identities + results-CSV length BEFORE IJ.runMacro so the
         // failure branch can tell "plugin actually produced output before the
         // dialog-pause" apart from "dialog-pause on the very first line,
         // nothing happened". Without this, mirroring the success-path snapshot
         // on failure would always report stale state as a side effect.
-        String preActiveTitle = null;
         int preResultsLen = 0;
-        try {
-            ImageInfo preActive = stateInspector.getActiveImageInfo();
-            preActiveTitle = preActive != null ? preActive.getTitle() : null;
-        } catch (Throwable ignore) {}
+        final List<ImageGraph.ImageRef> preOpenImages =
+                ImageGraph.captureOpenImages();
         try {
             String preCsv = stateInspector.getResultsTableCSV();
             preResultsLen = preCsv != null ? preCsv.length() : 0;
@@ -4481,11 +4490,10 @@ public class TCPCommandServer {
             }
 
             try {
-                ImageInfo active = stateInspector.getActiveImageInfo();
-                if (active != null) {
-                    JsonArray newImages = new JsonArray();
-                    newImages.add(active.getTitle());
-                    delta.newImages = newImages;
+                List<ImageGraph.ImageRef> opened = newImageRefs(
+                        preOpenImages, ImageGraph.captureOpenImages());
+                if (!opened.isEmpty()) {
+                    delta.newImages = imageTitles(opened);
                 }
                 String csv = stateInspector.getResultsTableCSV();
                 if (csv != null && !csv.isEmpty()) {
@@ -4513,21 +4521,17 @@ public class TCPCommandServer {
             // is only attached when caps.structuredErrors is on.
             JsonObject sideEffectsObj = new JsonObject();
             try {
-                ImageInfo postActive = stateInspector.getActiveImageInfo();
-                String postTitle = postActive != null ? postActive.getTitle() : null;
-                if (postTitle != null && !postTitle.isEmpty()
-                        && !postTitle.equals(preActiveTitle)) {
-                    JsonArray newImages = new JsonArray();
-                    newImages.add(postTitle);
+                List<ImageGraph.ImageRef> opened = newImageRefs(
+                        preOpenImages, ImageGraph.captureOpenImages());
+                if (!opened.isEmpty()) {
+                    JsonArray newImages = imageTitles(opened);
                     // Step 05: failure-path newImages routes through the delta
                     // struct so the grouped shape stays consistent with the
                     // success path. sideEffectsObj keeps its own copy — that
                     // lives inside the structured error payload (step 02) and
                     // is a separate contract from the top-level diff shape.
                     delta.newImages = newImages;
-                    JsonArray newImagesCopy = new JsonArray();
-                    newImagesCopy.add(postTitle);
-                    sideEffectsObj.add("newImages", newImagesCopy);
+                    sideEffectsObj.add("newImages", imageTitles(opened));
                     sideEffectsLanded = true;
                 }
                 String csv = stateInspector.getResultsTableCSV();
@@ -4836,8 +4840,8 @@ public class TCPCommandServer {
                 new java.util.concurrent.atomic.AtomicReference<ImageGraph.Delta>();
         MutationCoordinator.Lifecycle<String> lifecycle =
                 new MutationCoordinator.Lifecycle<String>() {
-            private Set<String> graphTitlesBefore;
-            private String graphActiveTitleBefore;
+            private List<ImageGraph.ImageRef> graphImagesBefore;
+            private ImageGraph.ImageRef graphActiveBefore;
             private SourceImageTagger sourceTagger;
 
             @Override public void checkSafety() throws Exception {
@@ -4846,8 +4850,8 @@ public class TCPCommandServer {
 
             @Override public void beforeMutation() {
                 dismissOpenDialogs("Macro Error");
-                graphTitlesBefore = ImageGraph.captureOpenTitles();
-                graphActiveTitleBefore = ImageGraph.captureActiveTitle();
+                graphImagesBefore = ImageGraph.captureOpenImages();
+                graphActiveBefore = ImageGraph.captureActiveImage();
                 if (caps != null && caps.undo) {
                     captureUndoFrameIfEnabled(nextCallId(), submittedCode, caps);
                 }
@@ -4862,9 +4866,9 @@ public class TCPCommandServer {
                 if (sourceTagger != null) {
                     sourceTagger.postExec(WindowManager.getCurrentImage());
                 }
-                if (graphTitlesBefore != null) {
-                    imageGraph.trackMacroChange(graphTitlesBefore, graphActiveTitleBefore,
-                            ImageGraph.captureOpenTitles(), submittedCode, "macro");
+                if (graphImagesBefore != null) {
+                    imageGraph.trackImageChange(graphImagesBefore, graphActiveBefore,
+                            ImageGraph.captureOpenImages(), submittedCode, "macro");
                     graphDelta.set(imageGraph.deltaSince(graphMarkerBefore));
                 }
             }
@@ -4905,8 +4909,8 @@ public class TCPCommandServer {
                 new java.util.concurrent.atomic.AtomicReference<ImageGraph.Delta>();
         MutationCoordinator.Lifecycle<Object> lifecycle =
                 new MutationCoordinator.Lifecycle<Object>() {
-            private Set<String> graphTitlesBefore;
-            private String graphActiveTitleBefore;
+            private List<ImageGraph.ImageRef> graphImagesBefore;
+            private ImageGraph.ImageRef graphActiveBefore;
             private SourceImageTagger sourceTagger;
 
             @Override public void checkSafety() throws Exception {
@@ -4914,8 +4918,8 @@ public class TCPCommandServer {
             }
 
             @Override public void beforeMutation() {
-                graphTitlesBefore = ImageGraph.captureOpenTitles();
-                graphActiveTitleBefore = ImageGraph.captureActiveTitle();
+                graphImagesBefore = ImageGraph.captureOpenImages();
+                graphActiveBefore = ImageGraph.captureActiveImage();
                 if (caps != null && caps.undo) {
                     ImagePlus active = WindowManager.getCurrentImage();
                     if (active != null) {
@@ -4933,9 +4937,9 @@ public class TCPCommandServer {
                 if (sourceTagger != null) {
                     sourceTagger.postExec(WindowManager.getCurrentImage());
                 }
-                if (graphTitlesBefore != null) {
-                    imageGraph.trackMacroChange(graphTitlesBefore, graphActiveTitleBefore,
-                            ImageGraph.captureOpenTitles(), code, "script");
+                if (graphImagesBefore != null) {
+                    imageGraph.trackImageChange(graphImagesBefore, graphActiveBefore,
+                            ImageGraph.captureOpenImages(), code, "script");
                     graphDelta.set(imageGraph.deltaSince(graphMarkerBefore));
                 }
             }
@@ -4977,8 +4981,8 @@ public class TCPCommandServer {
                 new java.util.concurrent.atomic.AtomicReference<ImageGraph.Delta>();
         MutationCoordinator.Lifecycle<PipelineBuilder.Pipeline> lifecycle =
                 new MutationCoordinator.Lifecycle<PipelineBuilder.Pipeline>() {
-            private Set<String> graphTitlesBefore;
-            private String graphActiveTitleBefore;
+            private List<ImageGraph.ImageRef> graphImagesBefore;
+            private ImageGraph.ImageRef graphActiveBefore;
             private SourceImageTagger sourceTagger;
 
             @Override public void checkSafety() throws Exception {
@@ -4986,8 +4990,8 @@ public class TCPCommandServer {
             }
 
             @Override public void beforeMutation() {
-                graphTitlesBefore = ImageGraph.captureOpenTitles();
-                graphActiveTitleBefore = ImageGraph.captureActiveTitle();
+                graphImagesBefore = ImageGraph.captureOpenImages();
+                graphActiveBefore = ImageGraph.captureActiveImage();
                 if (caps != null && caps.undo) {
                     ImagePlus active = WindowManager.getCurrentImage();
                     if (active != null) {
@@ -5006,9 +5010,9 @@ public class TCPCommandServer {
                 if (sourceTagger != null) {
                     sourceTagger.postExec(WindowManager.getCurrentImage());
                 }
-                if (graphTitlesBefore != null) {
-                    imageGraph.trackMacroChange(graphTitlesBefore, graphActiveTitleBefore,
-                            ImageGraph.captureOpenTitles(), code, "pipeline");
+                if (graphImagesBefore != null) {
+                    imageGraph.trackImageChange(graphImagesBefore, graphActiveBefore,
+                            ImageGraph.captureOpenImages(), code, "pipeline");
                     graphDelta.set(imageGraph.deltaSince(graphMarkerBefore));
                 }
             }
@@ -5803,7 +5807,8 @@ public class TCPCommandServer {
         final Object[] holder = new Object[1];
         final CountDownLatch latch = new CountDownLatch(1);
 
-        SwingUtilities.invokeLater(new Runnable() {
+        GuiActionDispatcher.ActionToken actionToken =
+                GuiActionDispatcher.queueSwingAction(new Runnable() {
             @Override
             public void run() {
                 try {
@@ -5848,9 +5853,11 @@ public class TCPCommandServer {
 
         try {
             if (!latch.await(10000, TimeUnit.MILLISECONDS)) {
+                actionToken.invalidate();
                 return errorResponse("Timed out getting state");
             }
         } catch (InterruptedException e) {
+            actionToken.invalidate();
             Thread.currentThread().interrupt();
             return errorResponse("Interrupted");
         }
@@ -5865,7 +5872,8 @@ public class TCPCommandServer {
         final Object[] holder = new Object[1];
         final CountDownLatch latch = new CountDownLatch(1);
 
-        SwingUtilities.invokeLater(new Runnable() {
+        GuiActionDispatcher.ActionToken actionToken =
+                GuiActionDispatcher.queueSwingAction(new Runnable() {
             @Override
             public void run() {
                 try {
@@ -5885,9 +5893,11 @@ public class TCPCommandServer {
 
         try {
             if (!latch.await(5000, TimeUnit.MILLISECONDS)) {
+                actionToken.invalidate();
                 return errorResponse("Timed out getting image info");
             }
         } catch (InterruptedException e) {
+            actionToken.invalidate();
             Thread.currentThread().interrupt();
             return errorResponse("Interrupted");
         }
@@ -5905,7 +5915,8 @@ public class TCPCommandServer {
         final Object[] holder = new Object[1];
         final CountDownLatch latch = new CountDownLatch(1);
 
-        SwingUtilities.invokeLater(new Runnable() {
+        GuiActionDispatcher.ActionToken actionToken =
+                GuiActionDispatcher.queueSwingAction(new Runnable() {
             @Override
             public void run() {
                 try {
@@ -5920,9 +5931,11 @@ public class TCPCommandServer {
 
         try {
             if (!latch.await(5000, TimeUnit.MILLISECONDS)) {
+                actionToken.invalidate();
                 return errorResponse("Timed out getting results table");
             }
         } catch (InterruptedException e) {
+            actionToken.invalidate();
             Thread.currentThread().interrupt();
             return errorResponse("Interrupted");
         }
@@ -5955,7 +5968,8 @@ public class TCPCommandServer {
         final Object[] holder = new Object[1];
         final CountDownLatch latch = new CountDownLatch(1);
 
-        SwingUtilities.invokeLater(new Runnable() {
+        GuiActionDispatcher.ActionToken actionToken =
+                GuiActionDispatcher.queueSwingAction(new Runnable() {
             @Override
             public void run() {
                 try {
@@ -5987,9 +6001,11 @@ public class TCPCommandServer {
 
         try {
             if (!latch.await(10000, TimeUnit.MILLISECONDS)) {
+                actionToken.invalidate();
                 return errorResponse("Timed out capturing image");
             }
         } catch (InterruptedException e) {
+            actionToken.invalidate();
             Thread.currentThread().interrupt();
             return errorResponse("Interrupted");
         }
@@ -6057,7 +6073,11 @@ public class TCPCommandServer {
             realPath = resolved.realPath();
             series = resolved.series();
         } else {
-            realPath = Paths.get(target);
+            try {
+                realPath = Paths.get(target);
+            } catch (RuntimeException e) {
+                return errorResponse("open_image_failed: invalid path");
+            }
             if (request.has("series") && request.get("series").isJsonPrimitive()) {
                 try {
                     series = request.get("series").getAsInt();
@@ -6067,25 +6087,39 @@ public class TCPCommandServer {
             }
         }
 
-        final String realPathString = realPath.toString();
+        final Path normalizedPath;
+        try {
+            normalizedPath = realPath.toAbsolutePath().normalize();
+        } catch (RuntimeException e) {
+            return errorResponse("open_image_failed: invalid path");
+        }
+        final String realPathString = normalizedPath.toString();
         final int requestedSeries = series;
+        final List<ImageGraph.ImageRef> before = currentOpenImageRefs();
+        final ImagePlus activeBefore = currentImage();
         final Object[] holder = new Object[1];
         final CountDownLatch latch = new CountDownLatch(1);
-        SwingUtilities.invokeLater(new Runnable() {
+        long requestedTimeout = resolveTimeoutMs(request, 30000L);
+        final long timeoutMs = Math.max(1L, Math.min(120000L, requestedTimeout));
+        final long deadline = System.currentTimeMillis() + timeoutMs;
+        GuiActionDispatcher.ActionToken actionToken =
+                GuiActionDispatcher.queueSwingAction(new Runnable() {
             @Override
             public void run() {
                 try {
-                    if (requestedSeries >= 0) {
-                        String options = "open=[" + realPathString.replace("]", "\\]") + "] "
-                                + "autoscale color_mode=Default view=Hyperstack "
-                                + "stack_order=XYCZT series_" + requestedSeries;
-                        IJ.run("Bio-Formats Importer", options);
+                    if (openImageOperationForTest != null) {
+                        openImageOperationForTest.open(realPathString, requestedSeries);
                     } else {
-                        IJ.open(realPathString);
+                        if (requestedSeries >= 0) {
+                            String options = "open=[" + realPathString.replace("]", "\\]") + "] "
+                                    + "autoscale color_mode=Default view=Hyperstack "
+                                    + "stack_order=XYCZT series_" + requestedSeries;
+                            IJ.run("Bio-Formats Importer", options);
+                        } else {
+                            IJ.open(realPathString);
+                        }
                     }
-                    ImagePlus imp = WindowManager.getCurrentImage();
-                    holder[0] = imp == null ? "OPEN_FAILED" : imp.getTitle();
-                } catch (Exception e) {
+                } catch (Throwable e) {
                     holder[0] = e;
                 } finally {
                     latch.countDown();
@@ -6094,30 +6128,137 @@ public class TCPCommandServer {
         });
 
         try {
-            if (!latch.await(30000, TimeUnit.MILLISECONDS)) {
+            long remaining = Math.max(1L, deadline - System.currentTimeMillis());
+            if (!latch.await(remaining, TimeUnit.MILLISECONDS)) {
+                actionToken.invalidate();
+                restoreActiveImage(activeBefore);
                 return errorResponse("Timed out opening image");
             }
         } catch (InterruptedException e) {
+            actionToken.invalidate();
+            restoreActiveImage(activeBefore);
             Thread.currentThread().interrupt();
             return errorResponse("Interrupted");
         }
-        if (holder[0] instanceof Exception) {
-            return errorResponse("open_image_failed");
-        }
-        if ("OPEN_FAILED".equals(holder[0])) {
+        if (holder[0] instanceof Throwable) {
+            restoreActiveImage(activeBefore);
             return errorResponse("open_image_failed");
         }
 
-        String baseToken = pseudonymisationFilter.pathTokenMap().tokenForPath(realPath);
+        ImageGraph.ImageRef opened = null;
+        while (System.currentTimeMillis() <= deadline) {
+            opened = findRequestedOpenedImage(before, currentOpenImageRefs(), normalizedPath);
+            if (opened != null) break;
+            try {
+                Thread.sleep(Math.min(25L,
+                        Math.max(1L, deadline - System.currentTimeMillis())));
+            } catch (InterruptedException e) {
+                restoreActiveImage(activeBefore);
+                Thread.currentThread().interrupt();
+                return errorResponse("Interrupted");
+            }
+        }
+        if (opened == null) {
+            restoreActiveImage(activeBefore);
+            return errorResponse("open_image_failed: requested image did not open");
+        }
+        imageGraph.addOpenedImage(opened);
+
+        String baseToken = pseudonymisationFilter.pathTokenMap().tokenForPath(normalizedPath);
         JsonObject result = new JsonObject();
         result.addProperty("opened", true);
         result.addProperty("path_token", requestedSeries >= 0
-                ? pseudonymisationFilter.pathTokenMap().tokenForSeries(realPath, requestedSeries)
+                ? pseudonymisationFilter.pathTokenMap().tokenForSeries(normalizedPath, requestedSeries)
                 : baseToken);
         result.addProperty("series", requestedSeries);
         result.addProperty("resolved_from_token", tokenResolved);
-        result.addProperty("title", String.valueOf(holder[0]));
+        result.addProperty("title", opened.title);
+        result.addProperty("image_id", opened.identity);
         return successResponse(result);
+    }
+
+    private List<ImageGraph.ImageRef> currentOpenImageRefs() {
+        return openImagesForTest != null
+                ? openImagesForTest.get() : ImageGraph.captureOpenImages();
+    }
+
+    private ImagePlus currentImage() {
+        return currentImageForTest != null
+                ? currentImageForTest.get() : WindowManager.getCurrentImage();
+    }
+
+    static ImageGraph.ImageRef findRequestedOpenedImage(
+            List<ImageGraph.ImageRef> before, List<ImageGraph.ImageRef> after,
+            Path requestedPath) {
+        Set<String> prior = new HashSet<String>();
+        if (before != null) {
+            for (ImageGraph.ImageRef ref : before) prior.add(ref.identity);
+        }
+        List<ImageGraph.ImageRef> added = new ArrayList<ImageGraph.ImageRef>();
+        if (after != null) {
+            for (ImageGraph.ImageRef ref : after) {
+                if (!prior.contains(ref.identity)) added.add(ref);
+            }
+        }
+        for (ImageGraph.ImageRef ref : added) {
+            if (ref.sourcePath != null && requestedPath != null) {
+                try {
+                    if (Paths.get(ref.sourcePath).toAbsolutePath().normalize()
+                            .equals(requestedPath.toAbsolutePath().normalize())) {
+                        return ref;
+                    }
+                } catch (RuntimeException ignore) {}
+            }
+        }
+        // Some readers do not retain OriginalFileInfo. A single new identity
+        // created by this completed open call is still causal evidence; never
+        // accept a pre-existing active image or choose among ambiguous opens.
+        return added.size() == 1 && added.get(0).sourcePath == null
+                ? added.get(0) : null;
+    }
+
+    static List<ImageGraph.ImageRef> newImageRefs(
+            List<ImageGraph.ImageRef> before, List<ImageGraph.ImageRef> after) {
+        Set<String> prior = new HashSet<String>();
+        if (before != null) {
+            for (ImageGraph.ImageRef ref : before) prior.add(ref.identity);
+        }
+        List<ImageGraph.ImageRef> added = new ArrayList<ImageGraph.ImageRef>();
+        if (after != null) {
+            for (ImageGraph.ImageRef ref : after) {
+                if (!prior.contains(ref.identity)) added.add(ref);
+            }
+        }
+        return added;
+    }
+
+    private static JsonArray imageTitles(List<ImageGraph.ImageRef> images) {
+        JsonArray titles = new JsonArray();
+        for (ImageGraph.ImageRef ref : images) titles.add(ref.title);
+        return titles;
+    }
+
+    private void restoreActiveImage(final ImagePlus activeBefore) {
+        if (activeBefore == null || currentImage() == activeBefore) return;
+        final ImageWindow window = activeBefore.getWindow();
+        if (window == null) return;
+        final CountDownLatch restored = new CountDownLatch(1);
+        GuiActionDispatcher.ActionToken token =
+                GuiActionDispatcher.queueSwingAction(new Runnable() {
+            @Override public void run() {
+                try {
+                    WindowManager.setCurrentWindow(window);
+                } finally {
+                    restored.countDown();
+                }
+            }
+        });
+        try {
+            if (!restored.await(2000L, TimeUnit.MILLISECONDS)) token.invalidate();
+        } catch (InterruptedException e) {
+            token.invalidate();
+            Thread.currentThread().interrupt();
+        }
     }
 
     private JsonObject handleBrowsePendingBrief(JsonObject request, AgentCaps caps, Socket sock) {
@@ -6365,7 +6506,14 @@ public class TCPCommandServer {
             rJson.addProperty("objectCount", r.objectCount);
             rJson.addProperty("meanArea", r.meanArea);
             rJson.addProperty("meanCircularity", r.meanCircularity);
-            rJson.addProperty("coverage", r.coverage);
+            rJson.addProperty("binaryMask", r.binaryMask);
+            rJson.addProperty("metricLabel", r.metricLabel);
+            if (!Double.isNaN(r.coverage)) {
+                rJson.addProperty("coverage", r.coverage);
+            }
+            if (!Double.isNaN(r.metricValue)) {
+                rJson.addProperty("metricValue", r.metricValue);
+            }
             rJson.addProperty("summary", r.summary);
             if (r.thumbnail != null && r.thumbnail.length > 0) {
                 rJson.addProperty("thumbnail", base64Encode(r.thumbnail));
@@ -6380,7 +6528,8 @@ public class TCPCommandServer {
         final Object[] holder = new Object[1];
         final CountDownLatch latch = new CountDownLatch(1);
 
-        SwingUtilities.invokeLater(new Runnable() {
+        GuiActionDispatcher.ActionToken actionToken =
+                GuiActionDispatcher.queueSwingAction(new Runnable() {
             @Override
             public void run() {
                 try {
@@ -6395,9 +6544,11 @@ public class TCPCommandServer {
 
         try {
             if (!latch.await(5000, TimeUnit.MILLISECONDS)) {
+                actionToken.invalidate();
                 return errorResponse("Timed out getting state context");
             }
         } catch (InterruptedException e) {
+            actionToken.invalidate();
             Thread.currentThread().interrupt();
             return errorResponse("Interrupted");
         }
@@ -6417,7 +6568,8 @@ public class TCPCommandServer {
         final Object[] holder = new Object[1];
         final CountDownLatch latch = new CountDownLatch(1);
 
-        SwingUtilities.invokeLater(new Runnable() {
+        GuiActionDispatcher.ActionToken actionToken =
+                GuiActionDispatcher.queueSwingAction(new Runnable() {
             @Override
             public void run() {
                 try {
@@ -6452,9 +6604,11 @@ public class TCPCommandServer {
 
         try {
             if (!latch.await(5000, TimeUnit.MILLISECONDS)) {
+                actionToken.invalidate();
                 return errorResponse("Timed out getting histogram");
             }
         } catch (InterruptedException e) {
+            actionToken.invalidate();
             Thread.currentThread().interrupt();
             return errorResponse("Interrupted");
         }
@@ -6472,7 +6626,8 @@ public class TCPCommandServer {
         final Object[] holder = new Object[1];
         final CountDownLatch latch = new CountDownLatch(1);
 
-        SwingUtilities.invokeLater(new Runnable() {
+        GuiActionDispatcher.ActionToken actionToken =
+                GuiActionDispatcher.queueSwingAction(new Runnable() {
             @Override
             public void run() {
                 try {
@@ -6515,9 +6670,11 @@ public class TCPCommandServer {
 
         try {
             if (!latch.await(5000, TimeUnit.MILLISECONDS)) {
+                actionToken.invalidate();
                 return errorResponse("Timed out getting open windows");
             }
         } catch (InterruptedException e) {
+            actionToken.invalidate();
             Thread.currentThread().interrupt();
             return errorResponse("Interrupted");
         }
@@ -6532,7 +6689,8 @@ public class TCPCommandServer {
         final Object[] holder = new Object[1];
         final CountDownLatch latch = new CountDownLatch(1);
 
-        SwingUtilities.invokeLater(new Runnable() {
+        GuiActionDispatcher.ActionToken actionToken =
+                GuiActionDispatcher.queueSwingAction(new Runnable() {
             @Override
             public void run() {
                 try {
@@ -6590,9 +6748,11 @@ public class TCPCommandServer {
 
         try {
             if (!latch.await(5000, TimeUnit.MILLISECONDS)) {
+                actionToken.invalidate();
                 return errorResponse("Timed out getting metadata");
             }
         } catch (InterruptedException e) {
+            actionToken.invalidate();
             Thread.currentThread().interrupt();
             return errorResponse("Interrupted");
         }
@@ -6677,7 +6837,16 @@ public class TCPCommandServer {
             JsonElement elem = commands.get(i);
             JsonObject subResult;
             if (elem.isJsonObject()) {
-                subResult = dispatch(elem.getAsJsonObject(), caps);
+                try {
+                    subResult = dispatch(elem.getAsJsonObject(), caps);
+                } catch (Throwable failure) {
+                    String detail = failure.getMessage();
+                    if (detail == null || detail.trim().isEmpty()) {
+                        detail = failure.getClass().getSimpleName();
+                    }
+                    subResult = errorResponse("Batch command at index " + i
+                            + " threw: " + detail);
+                }
             } else {
                 subResult = errorResponse("Invalid batch command at index " + i);
             }
@@ -6910,8 +7079,8 @@ public class TCPCommandServer {
 
         MutationCoordinator.Lifecycle<ExecutionResult> lifecycle =
                 new MutationCoordinator.Lifecycle<ExecutionResult>() {
-            private Set<String> graphTitlesBefore;
-            private String graphActiveTitleBefore;
+            private List<ImageGraph.ImageRef> graphImagesBefore;
+            private ImageGraph.ImageRef graphActiveBefore;
             private long graphMarkerBefore;
             private SourceImageTagger sourceTagger;
             private boolean prepared;
@@ -6921,8 +7090,8 @@ public class TCPCommandServer {
             }
 
             @Override public void beforeMutation() {
-                graphTitlesBefore = ImageGraph.captureOpenTitles();
-                graphActiveTitleBefore = ImageGraph.captureActiveTitle();
+                graphImagesBefore = ImageGraph.captureOpenImages();
+                graphActiveBefore = ImageGraph.captureActiveImage();
                 graphMarkerBefore = imageGraph.currentMarker();
                 prepared = true;
                 if (undoEnabled) {
@@ -6941,8 +7110,8 @@ public class TCPCommandServer {
                 if (sourceTagger != null) {
                     sourceTagger.postExec(WindowManager.getCurrentImage());
                 }
-                Set<String> after = ImageGraph.captureOpenTitles();
-                imageGraph.trackMacroChange(graphTitlesBefore, graphActiveTitleBefore,
+                List<ImageGraph.ImageRef> after = ImageGraph.captureOpenImages();
+                imageGraph.trackImageChange(graphImagesBefore, graphActiveBefore,
                         after, codeToRun, "macro");
                 if (caps != null && caps.graphDelta) {
                     // Materialise the delta while still serialized so later
@@ -7251,30 +7420,50 @@ public class TCPCommandServer {
      *   {"command": "get_pixels", "allSlices": true}           — entire stack
      */
     private JsonObject handleGetPixels(JsonObject request) {
-        // Parse optional parameters
-        final int reqX = request.has("x") ? request.get("x").getAsInt() : -1;
-        final int reqY = request.has("y") ? request.get("y").getAsInt() : -1;
-        final int reqW = request.has("width") ? request.get("width").getAsInt() : -1;
-        final int reqH = request.has("height") ? request.get("height").getAsInt() : -1;
-        final int reqSlice = request.has("slice") ? request.get("slice").getAsInt() : -1;
-        final boolean allSlices = request.has("allSlices") && request.get("allSlices").getAsBoolean();
+        final int reqX;
+        final int reqY;
+        final int reqW;
+        final int reqH;
+        final int reqSlice;
+        final boolean allSlices;
+        try {
+            reqX = request.has("x") ? request.get("x").getAsInt() : -1;
+            reqY = request.has("y") ? request.get("y").getAsInt() : -1;
+            reqW = request.has("width") ? request.get("width").getAsInt() : -1;
+            reqH = request.has("height") ? request.get("height").getAsInt() : -1;
+            reqSlice = request.has("slice") ? request.get("slice").getAsInt() : -1;
+            allSlices = request.has("allSlices")
+                    && request.get("allSlices").getAsBoolean();
+        } catch (RuntimeException e) {
+            return errorResponse("Invalid get_pixels parameters");
+        }
 
         final Object[] holder = new Object[1];
         final CountDownLatch latch = new CountDownLatch(1);
 
-        SwingUtilities.invokeLater(new Runnable() {
+        GuiActionDispatcher.ActionToken actionToken =
+                GuiActionDispatcher.queueSwingAction(new Runnable() {
             @Override
             public void run() {
+                ImagePlus imp = null;
+                int originalC = 1, originalZ = 1, originalT = 1;
                 try {
-                    ImagePlus imp = WindowManager.getCurrentImage();
+                    imp = currentImage();
                     if (imp == null) {
                         holder[0] = "NO_IMAGE";
                         return;
                     }
+                    originalC = imp.getC();
+                    originalZ = imp.getZ();
+                    originalT = imp.getT();
 
                     int imgW = imp.getWidth();
                     int imgH = imp.getHeight();
                     int nSlices = imp.getStackSize();
+                    if (imgW <= 0 || imgH <= 0 || nSlices <= 0) {
+                        holder[0] = new Exception("Image has invalid dimensions");
+                        return;
+                    }
 
                     // Determine region
                     int x = reqX >= 0 ? Math.min(reqX, imgW - 1) : 0;
@@ -7297,33 +7486,38 @@ public class TCPCommandServer {
                     int sliceCount = endSlice - startSlice + 1;
 
                     // Safety: limit total pixels to avoid OOM
-                    long totalPixels = (long) w * h * sliceCount;
-                    if (totalPixels > 4000000) { // ~16MB as floats
+                    long totalPixels;
+                    long rawByteCount;
+                    try {
+                        totalPixels = Math.multiplyExact(
+                                Math.multiplyExact((long) w, (long) h),
+                                (long) sliceCount);
+                        rawByteCount = Math.multiplyExact(totalPixels, 4L);
+                    } catch (ArithmeticException overflow) {
+                        holder[0] = new Exception("Requested pixel allocation overflows");
+                        return;
+                    }
+                    if (totalPixels > 4000000L || rawByteCount > Integer.MAX_VALUE) {
                         holder[0] = new Exception("Region too large: " + totalPixels
                                 + " pixels. Max 4M. Use x/y/width/height to crop.");
                         return;
                     }
 
-                    // Extract pixel values as floats
-                    float[] allPixels = new float[w * h * sliceCount];
-                    int offset = 0;
+                    // Allocate only after all dimensions and byte arithmetic
+                    // have been bounded. Read processors directly from the
+                    // stack so extraction does not navigate the live image.
+                    byte[] rawBytes = new byte[(int) rawByteCount];
+                    java.nio.ByteBuffer buf = java.nio.ByteBuffer.wrap(rawBytes);
+                    buf.order(java.nio.ByteOrder.LITTLE_ENDIAN);
                     for (int s = startSlice; s <= endSlice; s++) {
-                        imp.setSliceWithoutUpdate(s);
-                        ij.process.ImageProcessor ip = imp.getProcessor();
+                        ij.process.ImageProcessor ip = imp.getStack().getProcessor(s);
                         for (int py = y; py < y + h; py++) {
                             for (int px = x; px < x + w; px++) {
-                                allPixels[offset++] = ip.getPixelValue(px, py);
+                                buf.putFloat(ip.getPixelValue(px, py));
                             }
                         }
                     }
 
-                    // Convert float array to bytes then base64
-                    byte[] rawBytes = new byte[allPixels.length * 4];
-                    java.nio.ByteBuffer buf = java.nio.ByteBuffer.wrap(rawBytes);
-                    buf.order(java.nio.ByteOrder.LITTLE_ENDIAN);
-                    for (float v : allPixels) {
-                        buf.putFloat(v);
-                    }
                     String b64 = base64Encode(rawBytes);
 
                     JsonObject result = new JsonObject();
@@ -7334,31 +7528,42 @@ public class TCPCommandServer {
                     result.addProperty("sliceStart", startSlice);
                     result.addProperty("sliceEnd", endSlice);
                     result.addProperty("sliceCount", sliceCount);
-                    result.addProperty("nPixels", allPixels.length);
+                    result.addProperty("nPixels", totalPixels);
                     result.addProperty("type", imp.getBitDepth() + "-bit");
                     result.addProperty("encoding", "base64_float32_le");
                     result.addProperty("data", b64);
 
                     holder[0] = result;
-                } catch (Exception e) {
+                } catch (Throwable e) {
                     holder[0] = e;
                 } finally {
+                    if (imp != null) {
+                        try {
+                            imp.setPositionWithoutUpdate(originalC, originalZ, originalT);
+                        } catch (Throwable ignored) {}
+                    }
                     latch.countDown();
                 }
             }
         });
 
         try {
-            if (!latch.await(30000, TimeUnit.MILLISECONDS)) {
+            long timeoutMs = Math.max(1L, Math.min(120000L,
+                    resolveTimeoutMs(request, 30000L)));
+            if (!latch.await(timeoutMs, TimeUnit.MILLISECONDS)) {
+                actionToken.invalidate();
                 return errorResponse("Timed out getting pixels");
             }
         } catch (InterruptedException e) {
+            actionToken.invalidate();
             Thread.currentThread().interrupt();
             return errorResponse("Interrupted");
         }
 
-        if (holder[0] instanceof Exception) {
-            return errorResponse("Error: " + ((Exception) holder[0]).getMessage());
+        if (holder[0] instanceof Throwable) {
+            Throwable failure = (Throwable) holder[0];
+            return errorResponse("Error: " + (failure.getMessage() == null
+                    ? failure.getClass().getSimpleName() : failure.getMessage()));
         }
         if ("NO_IMAGE".equals(holder[0])) {
             return errorResponse("No active image");
@@ -7774,7 +7979,8 @@ public class TCPCommandServer {
         final Object[] holder = new Object[1];
         final CountDownLatch latch = new CountDownLatch(1);
 
-        SwingUtilities.invokeLater(new Runnable() {
+        GuiActionDispatcher.ActionToken actionToken =
+                GuiActionDispatcher.queueSwingAction(new Runnable() {
             @Override
             public void run() {
                 try {
@@ -7789,9 +7995,11 @@ public class TCPCommandServer {
 
         try {
             if (!latch.await(5000, TimeUnit.MILLISECONDS)) {
+                actionToken.invalidate();
                 return errorResponse("Timed out detecting dialogs");
             }
         } catch (InterruptedException e) {
+            actionToken.invalidate();
             Thread.currentThread().interrupt();
             return errorResponse("Interrupted");
         }
@@ -8090,7 +8298,8 @@ public class TCPCommandServer {
      * its action. Used by {@link #handleProbeCommand} so probing does
      * not accidentally execute the plugin.
      */
-    private void clickCancelButton(Container root) {
+    static boolean clickCancelButton(Container root) {
+        if (root == null) return false;
         for (Component c : root.getComponents()) {
             if (c instanceof java.awt.Button) {
                 String lbl = ((java.awt.Button) c).getLabel();
@@ -8099,22 +8308,69 @@ public class TCPCommandServer {
                             new java.awt.event.ActionEvent(c,
                                     java.awt.event.ActionEvent.ACTION_PERFORMED,
                                     lbl));
-                    return;
+                    return true;
                 }
             } else if (c instanceof javax.swing.JButton) {
                 String lbl = ((javax.swing.JButton) c).getText();
                 if (isCancelLabel(lbl)) {
                     ((javax.swing.JButton) c).doClick();
-                    return;
+                    return true;
                 }
             }
             if (c instanceof Container) {
-                clickCancelButton((Container) c);
+                if (clickCancelButton((Container) c)) return true;
             }
         }
+        return false;
     }
 
-    private boolean isCancelLabel(String lbl) {
+    static boolean hasCancelButton(Container root) {
+        if (root == null) return false;
+        for (Component c : root.getComponents()) {
+            if (c instanceof java.awt.Button
+                    && isCancelLabel(((java.awt.Button) c).getLabel())) return true;
+            if (c instanceof javax.swing.JButton
+                    && isCancelLabel(((javax.swing.JButton) c).getText())) return true;
+            if (c instanceof Container && hasCancelButton((Container) c)) return true;
+        }
+        return false;
+    }
+
+    private static boolean markGenericDialogCancelled(Dialog dialog) {
+        if (dialog == null) return false;
+        Class<?> c = dialog.getClass();
+        while (c != null && c != Object.class) {
+            try {
+                java.lang.reflect.Field f = c.getDeclaredField("wasCanceled");
+                f.setAccessible(true);
+                f.setBoolean(dialog, true);
+                return true;
+            } catch (NoSuchFieldException e) {
+                c = c.getSuperclass();
+            } catch (Exception e) {
+                return false;
+            }
+        }
+        return false;
+    }
+
+    private static boolean hasGenericCancelFlag(Dialog dialog) {
+        if (dialog == null) return false;
+        Class<?> c = dialog.getClass();
+        while (c != null && c != Object.class) {
+            try {
+                c.getDeclaredField("wasCanceled");
+                return true;
+            } catch (NoSuchFieldException e) {
+                c = c.getSuperclass();
+            } catch (Exception e) {
+                return false;
+            }
+        }
+        return false;
+    }
+
+    private static boolean isCancelLabel(String lbl) {
         if (lbl == null) return false;
         String l = lbl.trim().toLowerCase();
         return l.equals("cancel") || l.equals("close") || l.equals("no");
@@ -8156,7 +8412,8 @@ public class TCPCommandServer {
         final int[] closedCount = new int[1];
         final CountDownLatch latch = new CountDownLatch(1);
 
-        SwingUtilities.invokeLater(new Runnable() {
+        GuiActionDispatcher.ActionToken actionToken =
+                GuiActionDispatcher.queueSwingAction(new Runnable() {
             @Override
             public void run() {
                 try {
@@ -8239,9 +8496,14 @@ public class TCPCommandServer {
         });
 
         try {
-            latch.await(2000, TimeUnit.MILLISECONDS);
+            if (!latch.await(2000, TimeUnit.MILLISECONDS)) {
+                actionToken.invalidate();
+                return 0;
+            }
         } catch (InterruptedException e) {
+            actionToken.invalidate();
             Thread.currentThread().interrupt();
+            return 0;
         }
 
         return closedCount[0];
@@ -8364,11 +8626,12 @@ public class TCPCommandServer {
         result.addProperty("plugin", pluginName);
 
         if (newDialog == null) {
-            result.addProperty("hasDialog", false);
-            result.addProperty("note", "No dialog appeared within 5 seconds. "
-                    + "Plugin may have no parameters, may have already executed, "
-                    + "or may require an open image.");
-            return successResponse(result);
+            JsonObject response = errorResponse("probe_unsupported: no cancellable dialog appeared");
+            response.addProperty("plugin", pluginName);
+            response.addProperty("hasDialog", false);
+            response.addProperty("side_effect_risk", true);
+            response.addProperty("plugin_action_may_have_executed", true);
+            return response;
         }
 
         // Small delay to let dialog fully render its components
@@ -8383,7 +8646,31 @@ public class TCPCommandServer {
             isGD = Class.forName("ij.gui.GenericDialog").isInstance(newDialog);
         } catch (Exception e) {}
 
-        if (isGD) {
+        final boolean genericDialog = isGD;
+        final boolean verifiedCancelRoute = genericDialog
+                ? hasGenericCancelFlag(newDialog)
+                : hasCancelButton(newDialog);
+        if (!verifiedCancelRoute) {
+            JsonObject response = errorResponse(
+                    "probe_unsupported_dialog: no verified cancel/close route");
+            response.addProperty("plugin", pluginName);
+            response.addProperty("hasDialog", true);
+            response.addProperty("dialogTitle",
+                    newDialog.getTitle() == null ? "" : newDialog.getTitle());
+            response.addProperty("side_effect_risk", true);
+            response.addProperty("plugin_action_executed", false);
+            response.addProperty("dialog_left_open", true);
+            return response;
+        }
+
+        result.addProperty("side_effect_risk", true);
+        result.addProperty("side_effect_risk_detail",
+                "The plugin is launched until its dialog appears; initialization may have side effects.");
+        result.addProperty("plugin_action_executed", false);
+        result.addProperty("cancel_route", genericDialog
+                ? "GenericDialog.wasCanceled" : "cancel_button");
+
+        if (genericDialog) {
             result.addProperty("dialogType", "GenericDialog");
             JsonArray fields = probeGenericDialogFields(newDialog);
             result.add("fields", fields);
@@ -8409,33 +8696,44 @@ public class TCPCommandServer {
         // dialogs we fall back to clicking a Cancel-style button if the
         // plugin provides one.
         final Dialog dlg = newDialog;
-        SwingUtilities.invokeLater(new Runnable() {
+        final boolean[] cancelled = new boolean[1];
+        final CountDownLatch cancelLatch = new CountDownLatch(1);
+        GuiActionDispatcher.ActionToken cancelToken =
+                GuiActionDispatcher.queueSwingAction(new Runnable() {
             @Override
             public void run() {
-                boolean canceled = false;
-                Class<?> c = dlg.getClass();
-                while (c != null && c != Object.class) {
-                    try {
-                        java.lang.reflect.Field f = c.getDeclaredField("wasCanceled");
-                        f.setAccessible(true);
-                        f.setBoolean(dlg, true);
-                        canceled = true;
-                        break;
-                    } catch (NoSuchFieldException nsf) {
-                        c = c.getSuperclass();
-                    } catch (Exception ignore) {
-                        break;
-                    }
+                try {
+                    cancelled[0] = genericDialog
+                            ? markGenericDialogCancelled(dlg)
+                            : clickCancelButton(dlg);
+                    if (cancelled[0]) dlg.dispose();
+                } finally {
+                    cancelLatch.countDown();
                 }
-                if (!canceled) {
-                    clickCancelButton(dlg);
-                }
-                dlg.dispose();
             }
         });
 
-        // Brief wait for disposal to complete
-        try { Thread.sleep(200); } catch (InterruptedException e) {}
+        try {
+            if (!cancelLatch.await(2000L, TimeUnit.MILLISECONDS)) {
+                cancelToken.invalidate();
+                JsonObject response = errorResponse("probe_cancel_timed_out");
+                response.addProperty("side_effect_risk", true);
+                response.addProperty("dialog_left_open", true);
+                return response;
+            }
+        } catch (InterruptedException e) {
+            cancelToken.invalidate();
+            Thread.currentThread().interrupt();
+            JsonObject response = errorResponse("probe_interrupted");
+            response.addProperty("side_effect_risk", true);
+            return response;
+        }
+        if (!cancelled[0]) {
+            JsonObject response = errorResponse("probe_cancel_failed");
+            response.addProperty("side_effect_risk", true);
+            response.addProperty("dialog_left_open", true);
+            return response;
+        }
 
         return successResponse(result);
     }
@@ -8736,8 +9034,10 @@ public class TCPCommandServer {
         // origin="dialog" so the agent sees the new node came from a GUI
         // interaction rather than an explicit macro. Per plan:
         // docs/tcp_upgrade/13_provenance_graph.md.
-        final Set<String> graphTitlesBefore = ImageGraph.captureOpenTitles();
-        final String graphActiveTitleBefore = ImageGraph.captureActiveTitle();
+        final List<ImageGraph.ImageRef> graphImagesBefore =
+                ImageGraph.captureOpenImages();
+        final ImageGraph.ImageRef graphActiveBefore =
+                ImageGraph.captureActiveImage();
         final long graphMarkerBefore = imageGraph.currentMarker();
         final String graphInteractionLabel =
                 "interact_dialog:" + action
@@ -8765,7 +9065,8 @@ public class TCPCommandServer {
         final CountDownLatch latch = new CountDownLatch(1);
         final JsonElement valEl = valueElement;
 
-        SwingUtilities.invokeLater(new Runnable() {
+        GuiActionDispatcher.ActionToken actionToken =
+                GuiActionDispatcher.queueSwingAction(new Runnable() {
             @Override
             public void run() {
                 try {
@@ -8818,9 +9119,11 @@ public class TCPCommandServer {
 
         try {
             if (!latch.await(5000, TimeUnit.MILLISECONDS)) {
+                actionToken.invalidate();
                 return errorResponse("interact_dialog timed out");
             }
         } catch (InterruptedException e) {
+            actionToken.invalidate();
             Thread.currentThread().interrupt();
             return errorResponse("Interrupted");
         }
@@ -8850,9 +9153,10 @@ public class TCPCommandServer {
         // Runs on success and error paths — a GenericDialog that ran its
         // plugin and then reported a validation failure still left work.
         try {
-            Set<String> graphTitlesAfter = ImageGraph.captureOpenTitles();
-            imageGraph.trackMacroChange(graphTitlesBefore, graphActiveTitleBefore,
-                    graphTitlesAfter, graphInteractionLabel, "dialog");
+            List<ImageGraph.ImageRef> graphImagesAfter =
+                    ImageGraph.captureOpenImages();
+            imageGraph.trackImageChange(graphImagesBefore, graphActiveBefore,
+                    graphImagesAfter, graphInteractionLabel, "dialog");
             if (reply != null && caps != null && caps.graphDelta) {
                 ImageGraph.Delta gDelta = imageGraph.deltaSince(graphMarkerBefore);
                 if (!gDelta.isEmpty()) {

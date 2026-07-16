@@ -18,6 +18,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.function.Supplier;
 
 /**
  * Background monitor that watches ImageJ state and proactively warns about issues.
@@ -43,7 +44,9 @@ public class ImageMonitor {
     private static final String WARN_LARGE = "large";
 
     private final StateInspector stateInspector;
-    private final EventBus bus = EventBus.getInstance();
+    private final EventBus bus;
+    private final Supplier<List<ImageGraph.ImageRef>> openImagesSupplier;
+    private final Supplier<ImagePlus> activeImageSupplier;
     private MonitorListener listener;
     private Timer pollTimer;
     private boolean running;
@@ -64,7 +67,17 @@ public class ImageMonitor {
     private final Set<String> checkedImages = new HashSet<String>();
 
     public ImageMonitor(StateInspector stateInspector) {
+        this(stateInspector, EventBus.getInstance(),
+                ImageGraph::captureOpenImages, WindowManager::getCurrentImage);
+    }
+
+    ImageMonitor(StateInspector stateInspector, EventBus bus,
+                 Supplier<List<ImageGraph.ImageRef>> openImagesSupplier,
+                 Supplier<ImagePlus> activeImageSupplier) {
         this.stateInspector = stateInspector;
+        this.bus = bus;
+        this.openImagesSupplier = openImagesSupplier;
+        this.activeImageSupplier = activeImageSupplier;
         this.lastImageIdentity = "";
         this.running = false;
     }
@@ -150,7 +163,7 @@ public class ImageMonitor {
      */
     private void publishImageDiffEvents() {
         Map<String, ImageState> current = new LinkedHashMap<String, ImageState>();
-        for (ImageGraph.ImageRef ref : ImageGraph.captureOpenImages()) {
+        for (ImageGraph.ImageRef ref : openImagesSupplier.get()) {
             current.put(ref.identity, new ImageState(ref.identity, ref.windowId,
                     ref.title == null ? "" : ref.title, ref.image));
         }
@@ -199,7 +212,7 @@ public class ImageMonitor {
         }
 
         // Active image switch -> image.updated (coalesced to 200ms by the bus).
-        ImagePlus active = WindowManager.getCurrentImage();
+        ImagePlus active = activeImageSupplier.get();
         String activeTitle = active == null ? "" : active.getTitle();
         if (activeTitle == null) activeTitle = "";
         String activeIdentity = active == null ? null : ImageGraph.stableIdentity(active);
@@ -410,6 +423,10 @@ public class ImageMonitor {
         for (String key : new ArrayList<String>(warningTimestamps.keySet())) {
             if (key.startsWith(prefix)) warningTimestamps.remove(key);
         }
+    }
+
+    void publishImageDiffEventsForTest() {
+        publishImageDiffEvents();
     }
 
     private void addImagePath(JsonObject data, ImagePlus imp) {

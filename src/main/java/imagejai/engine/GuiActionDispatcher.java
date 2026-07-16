@@ -10,6 +10,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Consumer;
+import javax.swing.SwingUtilities;
 
 /**
  * Phase 7: dispatches {@code gui_action} TCP requests to the {@link ChatPanelController}.
@@ -30,6 +31,58 @@ public class GuiActionDispatcher {
 
     /** Minimum wall-clock gap between two displayed toasts, in ms. */
     public static final long TOAST_MIN_INTERVAL_MS = 500L;
+
+    /**
+     * Cancellation token for work queued on Swing's event thread. Invalidate
+     * it when the caller times out: a runnable that has not started will then
+     * be skipped instead of mutating Fiji after an error response was sent.
+     */
+    public static final class ActionToken {
+        private boolean valid = true;
+        private boolean started;
+        private boolean finished;
+
+        private synchronized boolean tryStart() {
+            if (!valid) return false;
+            started = true;
+            return true;
+        }
+
+        private synchronized void finish() {
+            finished = true;
+        }
+
+        /** Returns true only when queued work was invalidated before start. */
+        public synchronized boolean invalidate() {
+            if (finished) return false;
+            valid = false;
+            return !started;
+        }
+
+        public synchronized boolean hasStarted() { return started; }
+        public synchronized boolean isFinished() { return finished; }
+        public synchronized boolean isValid() { return valid; }
+    }
+
+    /** Queue one action with a token checked immediately before execution. */
+    public static ActionToken queueSwingAction(final Runnable action) {
+        if (action == null) throw new IllegalArgumentException("action is required");
+        final ActionToken token = new ActionToken();
+        SwingUtilities.invokeLater(new Runnable() {
+            @Override public void run() {
+                if (!token.tryStart()) {
+                    token.finish();
+                    return;
+                }
+                try {
+                    action.run();
+                } finally {
+                    token.finish();
+                }
+            }
+        });
+        return token;
+    }
 
     private final ChatPanelController controller;
     private final EventBus eventBus;

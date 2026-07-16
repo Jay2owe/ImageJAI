@@ -56,6 +56,7 @@ public class TCPCommandServerBatchCapsTest {
     @After
     public void tearDown() throws IOException {
         TCPCommandServer.executeMacroForTest = null;
+        if (server != null) server.stop();
         if (tempStore != null) {
             Files.deleteIfExists(tempStore);
             Path tmp = tempStore.resolveSibling(
@@ -309,6 +310,31 @@ public class TCPCommandServerBatchCapsTest {
         assertEquals(3, batch.get("total").getAsInt());
         assertTrue(batch.get("halted").getAsBoolean());
         assertEquals(2, batch.getAsJsonArray("results").size());
+    }
+
+    @Test
+    public void throwingSubCommandRetainsPriorIndexedResults() {
+        TCPCommandServer.executeMacroForTest = (request, caps) -> {
+            throw new IllegalStateException("synthetic batch failure");
+        };
+        JsonObject req = parse(
+                "{\"command\":\"batch\",\"halt_on_error\":true,\"commands\":["
+              + "{\"command\":\"ping\"},"
+              + "{\"command\":\"execute_macro\",\"code\":\"x\"},"
+              + "{\"command\":\"ping\"}]}");
+
+        JsonObject batch = server.dispatch(req, new TCPCommandServer.AgentCaps())
+                .getAsJsonObject("result");
+        JsonArray results = batch.getAsJsonArray("results");
+
+        assertEquals(1, batch.get("firstFailureIndex").getAsInt());
+        assertEquals(2, batch.get("executed").getAsInt());
+        assertTrue(results.get(0).getAsJsonObject()
+                .getAsJsonObject("response").get("ok").getAsBoolean());
+        JsonObject failure = results.get(1).getAsJsonObject();
+        assertEquals(1, failure.get("index").getAsInt());
+        assertTrue(failure.getAsJsonObject("response").toString()
+                .contains("synthetic batch failure"));
     }
 
     private static JsonObject parse(String s) {
