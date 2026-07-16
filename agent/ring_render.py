@@ -27,6 +27,8 @@ import sys, os, json, time, subprocess, tempfile
 AGENT_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, AGENT_DIR)
 
+import ij as _ij_client
+
 try:
     from ij_send import send_command  # direct TCP if available
 except ImportError:
@@ -53,6 +55,77 @@ def ij_macro(code, timeout=120):
         return json.loads(result.stdout)
     except:
         return {"ok": False, "raw": result.stdout}
+
+
+def resolve_output_dir(requested=None, export_root=None):
+    """Resolve an output folder strictly beneath the active AI_Exports root."""
+    if export_root is None:
+        from gemma4_31b import active_image
+        export_root = active_image.current_export_folder()
+    if not export_root:
+        raise RuntimeError(
+            "No active on-disk image is available; open an image before rendering"
+        )
+    root = os.path.realpath(os.path.abspath(export_root))
+    candidate = root if requested is None else os.path.realpath(
+        os.path.abspath(requested)
+    )
+    try:
+        inside = os.path.commonpath((root, candidate)) == root
+    except ValueError:
+        inside = False
+    if not inside:
+        raise ValueError("render output must remain beneath {}".format(root))
+    os.makedirs(candidate, exist_ok=True)
+    return candidate
+
+
+def run_batch_animation(animation_path):
+    """Run 3Dscript's host-file input through the explicit script capability."""
+    script = """
+def image = ij.WindowManager.getImage("_rbig")
+if (image == null) throw new IllegalStateException("_rbig is not open")
+ij.IJ.run(image, "Batch Animation", "animation=[" + %s + "]")
+return "started"
+""" % json.dumps(os.path.abspath(animation_path).replace("\\", "/"))
+    return _ij_client.run_groovy(script, timeout=300)
+
+
+def save_avi_output(output_path, fps, export_root=None):
+    """Save the rendered AVI through the explicit, audited script channel."""
+    output_path = os.path.join(
+        resolve_output_dir(os.path.dirname(os.path.abspath(output_path)), export_root),
+        os.path.basename(output_path),
+    )
+    options = "compression=JPEG frame={} save=[{}]".format(
+        int(fps), os.path.abspath(output_path).replace("\\", "/")
+    )
+    script = """
+def image = ij.WindowManager.getImage("_rbig.avi")
+if (image == null) throw new IllegalStateException("_rbig.avi is not open")
+ij.IJ.run(image, "AVI... ", %s)
+return "saved"
+""" % json.dumps(options)
+    return _ij_client.run_groovy(script, timeout=120)
+
+
+def save_image_output(image_title, image_format, output_path, export_root=None):
+    """Save one named Fiji image through the explicit script capability."""
+    output_path = os.path.join(
+        resolve_output_dir(os.path.dirname(os.path.abspath(output_path)), export_root),
+        os.path.basename(output_path),
+    )
+    script = """
+def image = ij.WindowManager.getImage(%s)
+if (image == null) throw new IllegalStateException("output image is not open")
+ij.IJ.saveAs(image, %s, %s)
+return "saved"
+""" % (
+        json.dumps(image_title),
+        json.dumps(image_format),
+        json.dumps(os.path.abspath(output_path).replace("\\", "/")),
+    )
+    return _ij_client.run_groovy(script, timeout=120)
 
 def find_cells_ch4():
     """Find bright objects in Ch4 of active image using pixels.py."""
@@ -197,6 +270,7 @@ RENDER_PARAMS = {
 
 def render(candidates, index, output_dir, name=None, params=None):
     """Render a candidate as 3D AVI. Returns output path."""
+    output_dir = resolve_output_dir(output_dir)
     p = {**RENDER_PARAMS, **(params or {})}
     c = candidates[index]
     x, y = int(c["x"]) - p["crop_size"] // 2, int(c["y"]) - p["crop_size"] // 2
@@ -239,17 +313,17 @@ def render(candidates, index, output_dir, name=None, params=None):
     '''
     ij_macro(macro)
 
-    # Run 3Dscript
-    anim_path_fwd = anim_path.replace("\\", "/")
-    result = ij_macro(
-        f'selectWindow("_rbig"); run("Batch Animation", "animation=[{anim_path_fwd}]");',
-        timeout=300
-    )
+    # 3Dscript reads an animation file. That host-file access is deliberately
+    # sent through run_script, never hidden inside an ImageJ macro argument.
+    result = run_batch_animation(anim_path)
+    if not result.get("ok") or not result.get("result", {}).get("success", True):
+        raise RuntimeError("3Dscript Batch Animation failed: {}".format(result))
 
     # Save AVI
-    os.makedirs(output_dir, exist_ok=True)
     avi_path = os.path.join(output_dir, f"{name}_ring_3D.avi").replace("\\", "/")
-    ij_macro(f'selectWindow("_rbig.avi"); run("AVI... ", "compression=JPEG frame={p["fps"]} save=[{avi_path}]");', timeout=60)
+    saved = save_avi_output(avi_path, p["fps"], output_dir)
+    if not saved.get("ok") or not saved.get("result", {}).get("success", True):
+        raise RuntimeError("AVI export failed: {}".format(saved))
 
     # Cleanup
     ij_macro('selectWindow("_rbig.avi"); close(); selectWindow("_rbig"); close(); selectWindow("_rmerge"); close();')
@@ -265,7 +339,11 @@ def render(candidates, index, output_dir, name=None, params=None):
 
 def save_roi_location(source_title, roi_x, roi_y, crop_size, output_path):
     """Save full image with yellow ROI rectangle."""
-    output_fwd = output_path.replace("\\", "/")
+    output_root = resolve_output_dir(os.path.dirname(os.path.abspath(output_path)))
+    output_path = os.path.join(
+        output_root,
+        os.path.basename(output_path),
+    )
     ij_macro(f'''
         selectWindow("{source_title}");
         run("Z Project...", "projection=[Max Intensity]");
@@ -282,10 +360,11 @@ def save_roi_location(source_title, roi_x, roi_y, crop_size, output_path):
         drawRect({roi_x-2}, {roi_y-2}, {crop_size+4}, {crop_size+4});
         setFont("SansSerif", 18, "bold antialiased");
         drawString("ROI", {roi_x}, {roi_y - 5});
-        saveAs("PNG", "{output_fwd}");
-        close();
-        selectWindow("_roi_ov"); close();
     ''')
+    saved = save_image_output("_roi_flat", "PNG", output_path, output_root)
+    if not saved.get("ok") or not saved.get("result", {}).get("success", True):
+        raise RuntimeError("ROI image export failed: {}".format(saved))
+    ij_macro('selectWindow("_roi_flat"); close(); selectWindow("_roi_ov"); close();')
     print(f"  ROI location: {output_path}")
 
 def main():
@@ -314,7 +393,8 @@ def main():
     elif cmd == "render":
         index = int(sys.argv[2])
         name = sys.argv[sys.argv.index("--name") + 1] if "--name" in sys.argv else None
-        output_dir = sys.argv[sys.argv.index("--output") + 1] if "--output" in sys.argv else os.path.join(AGENT_DIR, ".tmp")
+        requested = sys.argv[sys.argv.index("--output") + 1] if "--output" in sys.argv else None
+        output_dir = resolve_output_dir(requested)
 
         with open(os.path.join(AGENT_DIR, ".tmp", "candidates.json")) as f:
             candidates = json.load(f)
@@ -322,7 +402,8 @@ def main():
 
     elif cmd == "render_all":
         top_n = int(sys.argv[2]) if len(sys.argv) > 2 else 5
-        output_dir = sys.argv[sys.argv.index("--output") + 1] if "--output" in sys.argv else os.path.join(AGENT_DIR, ".tmp")
+        requested = sys.argv[sys.argv.index("--output") + 1] if "--output" in sys.argv else None
+        output_dir = resolve_output_dir(requested)
 
         with open(os.path.join(AGENT_DIR, ".tmp", "candidates.json")) as f:
             candidates = json.load(f)
