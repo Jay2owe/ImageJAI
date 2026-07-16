@@ -8,8 +8,8 @@ run rather than inferred from the headless gates.
 
 | Item | Recorded value |
 |---|---|
-| Git revision | `feeff2f425c9888e048551dde8fbc14d318a539b` |
-| Verification timestamp and timezone | 2026-07-16T09:15:52+01:00 (Europe/London) |
+| Git revision | `888137b8ea2bef02b8196fb18be66ca1fb3b4ff7` |
+| Verification timestamp and timezone | 2026-07-16T09:23:56+01:00 (Europe/London) |
 | Operating system | Microsoft Windows 11 Home, amd64, NT 10.0.26200 |
 | Java and Maven versions | Oracle JDK 25.0.2; Apache Maven 3.9.9 |
 | Python version | CPython 3.13.14 |
@@ -32,11 +32,11 @@ python --version
 | Java unit suite and main JAR | PASS | 1,095 tests in 144 suites; 0 failures/errors/skips; exact main JAR built |
 | Java integration profile | PASS | 3 tests in 2 suites; 0 failures/errors/skips |
 | Direct lifecycle suite | PASS | 31 tests; 0 failures/errors/skips |
-| Offline Python suite | PASS | 595 tests |
+| Offline Python suite | PASS | 603 tests |
 | Real `ij.py`/`imagej-use-auto` loopback tests | PASS | 28 tests |
 | Recipe contract | PASS | 8 tests |
 | Context, manifest, and generated docs | PASS | 134 tests; both generators byte-current |
-| Graphify hook tests | PASS | 10 tests |
+| Graphify hook tests and rebuild | PASS | 10 tests; post-commit rebuild exited 0 with 30,168 nodes, 51,595 edges, and 2,194 communities |
 | Build and simulated-install tests | PASS | 3 pytest build/install tests and 11 Pester bundle transaction tests |
 | Tested non-deploy build script | PASS | Git Bash `build.sh --no-deploy`; 1,095 tests; JAR hash matched the reproducibility pair; Graphify hook exited 0 |
 | Two-build JAR reproducibility | PASS | build 1: `EF497B509F1B68148B082249DCACB65FF70B27AB44A86E99205DCB1DBD7D1FE1`; build 2: same |
