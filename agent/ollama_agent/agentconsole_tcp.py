@@ -18,23 +18,33 @@ MAX_COMMAND_CHARS = 64 * 1024
 MAX_TOKEN_CHARS = 4096
 
 
-def _token_candidates(appdata=None, home=None):
+def _token_candidates(appdata=None, xdg_config_home=None, home=None):
     candidates = []
     appdata_value = os.environ.get("APPDATA") if appdata is None else appdata
     if appdata_value:
         candidates.append(
             Path(appdata_value) / "agent-console" / "config" / "tcp_auth_token.txt"
         )
-    home_value = Path.home() if home is None else Path(home)
-    candidates.append(
-        home_value / ".config" / "agent-console" / "tcp_auth_token.txt"
+    xdg_value = (
+        os.environ.get("XDG_CONFIG_HOME")
+        if xdg_config_home is None
+        else xdg_config_home
     )
-    return candidates
+    home_value = Path.home() if home is None else Path(home)
+    config_base = Path(xdg_value) if xdg_value else home_value / ".config"
+    candidates.append(
+        config_base / "agent-console" / "config" / "tcp_auth_token.txt"
+    )
+    return list(dict.fromkeys(candidates))
 
 
-def load_agentconsole_token(appdata=None, home=None):
+def load_agentconsole_token(appdata=None, xdg_config_home=None, home=None):
     """Load one non-empty, single-line token or raise before any connection."""
-    for path in _token_candidates(appdata=appdata, home=home):
+    for path in _token_candidates(
+        appdata=appdata,
+        xdg_config_home=xdg_config_home,
+        home=home,
+    ):
         try:
             raw = path.read_text(encoding="utf-8")
         except (OSError, FileNotFoundError):
@@ -78,8 +88,17 @@ def send_agentconsole(
         try:
             decoded = json.loads(raw)
         except (json.JSONDecodeError, ValueError):
-            return raw
-        return decoded.get("result", raw) if isinstance(decoded, dict) else decoded
+            return "ERROR: AgentConsole returned a non-JSON reply"
+        if not isinstance(decoded, dict):
+            return "ERROR: AgentConsole returned a non-object reply"
+        if "ok" not in decoded or type(decoded["ok"]) is not bool:
+            return "ERROR: AgentConsole reply has no valid ok field"
+        if "result" not in decoded or not isinstance(decoded["result"], str):
+            return "ERROR: AgentConsole reply has no valid result field"
+        if decoded["ok"] is not True:
+            detail = decoded["result"].strip() or "unspecified command failure"
+            return "ERROR: AgentConsole command failed: {}".format(detail)
+        return decoded["result"]
     except ValueError as exc:
         return "ERROR: AgentConsole returned an invalid reply ({})".format(exc)
     except (ConnectionRefusedError, OSError, socket.timeout) as exc:
