@@ -32,8 +32,10 @@ import ollama
 
 try:
     from .tcp_frames import recv_bounded
+    from .agentconsole_tcp import load_agentconsole_token, send_agentconsole
 except ImportError:
     from tcp_frames import recv_bounded
+    from agentconsole_tcp import load_agentconsole_token, send_agentconsole
 
 try:
     from prompt_toolkit import prompt as _pt_prompt
@@ -161,39 +163,12 @@ def _tcp(port: int, cmd: str, timeout: float = 5) -> str:
 
 def _load_ac_token() -> str:
     """Load AgentConsole TCP auth token."""
-    paths = [
-        Path(os.environ.get("APPDATA", "")) / "agent-console" / "config" / "tcp_auth_token.txt",
-        Path.home() / ".config" / "agent-console" / "tcp_auth_token.txt",
-    ]
-    for p in paths:
-        try:
-            return p.read_text().strip()
-        except (OSError, FileNotFoundError):
-            continue
-    return ""
+    return load_agentconsole_token()
 
 
 def _ac_tcp(cmd: str, timeout: float = 15) -> str:
     """Send authenticated command to AgentConsole (port 7745)."""
-    token = _load_ac_token()
-    try:
-        with socket.create_connection(("127.0.0.1", 7745), timeout=timeout) as s:
-            if token:
-                s.sendall(f"{token}\n".encode())
-            s.sendall(f"{cmd}\n".encode())
-            try:
-                reply = recv_bounded(s, newline=True)
-            except socket.timeout:
-                reply = b""
-            raw = reply.decode("utf-8", errors="replace").strip()
-            try:
-                return json.loads(raw).get("result", raw)
-            except (json.JSONDecodeError, ValueError):
-                return raw
-    except ValueError as e:
-        return f"ERROR: AgentConsole returned an invalid reply ({e})"
-    except (ConnectionRefusedError, OSError) as e:
-        return f"ERROR: AgentConsole not reachable ({e})"
+    return send_agentconsole(cmd, timeout=timeout, token_loader=_load_ac_token)
 
 # ── Tool definitions ─────────────────────────────────────────────────────
 # Each function's signature + docstring becomes the tool schema automatically.

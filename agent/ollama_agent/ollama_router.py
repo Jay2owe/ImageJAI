@@ -27,8 +27,10 @@ from pathlib import Path
 
 try:
     from .tcp_frames import recv_bounded
+    from .agentconsole_tcp import send_agentconsole
 except ImportError:
     from tcp_frames import recv_bounded
+    from agentconsole_tcp import send_agentconsole
 
 try:
     import ollama
@@ -144,7 +146,7 @@ def agent_command(command: str) -> str:
         command: e.g. list, status, cost, spawn 1 claude, kill agent-1,
                  send 'hello' to agent-1
     """
-    return _tcp(7745, command)
+    return send_agentconsole(command)
 
 
 def tv_control(command: str) -> str:

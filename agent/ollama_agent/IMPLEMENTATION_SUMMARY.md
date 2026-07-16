@@ -29,8 +29,7 @@ Both Ollama wrappers (`ollama_chat.py` and `ollama_router.py`) now support **bus
 - `agent_command(..., subscribe="")` - Updated signature
 
 #### `ollama_router.py`
-- `_load_ac_token_router()` - Load AgentConsole auth token
-- `_ac_tcp_router(cmd)` - Authenticated TCP to AgentConsole
+- `send_agentconsole(command)` - Shared authenticated, bounded TCP transport
 - `_resolve_worker_sid_router(name_or_id)` - Worker SID resolution
 - `_parse_subscribe_description_router(description)` - NLP parsing
 - `_setup_bus_subscription_router(description)` - Subscription setup
@@ -75,7 +74,7 @@ self._session_bus_registrar.subscribe_session(
 
 ### TCP Communication
 - `ollama_chat.py` uses existing `_ac_tcp(cmd)` for authenticated AgentConsole calls
-- `ollama_router.py` implements `_ac_tcp_router(cmd)` with token loading and JSON parsing
+- `ollama_router.py` uses the same fail-closed authenticated transport
 
 ### Error Handling
 Returns error messages like:

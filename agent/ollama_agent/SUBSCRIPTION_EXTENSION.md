@@ -15,7 +15,7 @@ Extended both `ollama_chat.py` and `ollama_router.py` to support **bus subscript
 # Before
 def agent_command(command: str) -> str:
     """Send a command to AgentConsole (agent orchestrator)."""
-    return _ac_tcp(command)  # or _tcp(7745, command)
+    return _ac_tcp(command)
 
 # After
 def agent_command(command: str, subscribe: str = "") -> str:
@@ -82,8 +82,7 @@ End-to-end subscription setup:
 
 2. **`ollama_router.py`** (lines 116–285)
    - Added identical logic with `_router` suffix (self-contained)
-   - Uses raw TCP + auth token helpers (`_ac_tcp_router`, etc.)
-   - Maintains compatibility with existing `_tcp(7745, ...)` fallback
+   - Uses the shared fail-closed authenticated AgentConsole transport
 
 ## Usage Examples
 
