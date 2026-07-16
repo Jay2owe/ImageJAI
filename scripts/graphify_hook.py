@@ -3,8 +3,8 @@
 
 Every trigger writes a small request file. One race-safe claim admits a single
 detached worker for the burst; that worker waits for a quiet debounce window
-and serializes ``python -m graphify update`` behind the writer lock. The caller
-always returns promptly; failures are recorded under
+and serializes full public updates or changed-path rebuilds behind the writer
+lock. The caller always returns promptly; failures are recorded under
 ``.git/graphify-hook-logs`` and their requests remain queued.
 """
 
@@ -20,7 +20,7 @@ import subprocess
 import sys
 import time
 import uuid
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Callable, Iterable, Sequence
 
 
@@ -66,7 +66,8 @@ DEFAULT_DEBOUNCE_SECONDS = 2.0
 DEFAULT_STALE_SECONDS = 30.0 * 60.0
 DEFAULT_LOCK_WAIT_SECONDS = 2.0 * 60.0 * 60.0
 DEFAULT_CLAIM_STALE_SECONDS = 30.0 * 60.0
-UpdateFunction = Callable[[Path, Sequence[str]], bool]
+MAX_PATH_FILE_BYTES = 4_000_000
+UpdateFunction = Callable[[Path, Sequence[str], Sequence[str], bool], bool]
 
 
 def _state_dir(root: Path) -> Path:
@@ -89,10 +90,28 @@ def _log_dir(root: Path) -> Path:
     return root / ".git" / "graphify-hook-logs"
 
 
+def _normalise_repository_path(path: str | Path) -> str | None:
+    """Return one safe repository-relative POSIX path, or ``None``."""
+
+    text = str(path).strip().replace("\\", "/")
+    candidate = PurePosixPath(text)
+    if (
+        not text
+        or candidate.is_absolute()
+        or any(part in ("", ".", "..") for part in candidate.parts)
+        or (candidate.parts and candidate.parts[0].endswith(":"))
+    ):
+        return None
+    return candidate.as_posix()
+
+
 def is_relevant_path(path: str | Path) -> bool:
     """Return whether *path* can affect the code/document knowledge graph."""
 
-    candidate = Path(str(path).replace("\\", "/"))
+    normalized = _normalise_repository_path(path)
+    if normalized is None:
+        return False
+    candidate = PurePosixPath(normalized)
     lowered_parts = {part.lower() for part in candidate.parts}
     if lowered_parts.intersection(IGNORED_PARTS):
         return False
@@ -102,11 +121,11 @@ def is_relevant_path(path: str | Path) -> bool:
 def filter_relevant_paths(paths: Iterable[str | Path]) -> list[str]:
     """Normalize, filter, and de-duplicate changed paths deterministically."""
 
-    relevant = {
-        str(path).strip().replace("\\", "/")
-        for path in paths
-        if str(path).strip() and is_relevant_path(path)
-    }
+    relevant = set()
+    for path in paths:
+        normalized = _normalise_repository_path(path)
+        if normalized is not None and is_relevant_path(normalized):
+            relevant.add(normalized)
     return sorted(relevant)
 
 
@@ -119,14 +138,22 @@ def _atomic_write_json(path: Path, payload: object) -> None:
     os.replace(temporary, path)
 
 
-def _queue_request(root: Path, event: str, paths: Sequence[str]) -> Path:
+def _queue_request(
+    root: Path,
+    event: str,
+    paths: Sequence[str],
+    full: bool | None = None,
+) -> Path:
     pending = _pending_dir(root)
     pending.mkdir(parents=True, exist_ok=True)
     request = pending / f"{time.time_ns()}-{os.getpid()}-{uuid.uuid4().hex}.json"
+    normalized = filter_relevant_paths(paths)
+    full_request = not normalized if full is None else bool(full)
     payload = {
         "created_at": time.time(),
         "event": event,
-        "paths": list(paths),
+        "full": full_request,
+        "paths": [] if full_request else normalized,
     }
     # Exclusive creation prevents two triggers from ever sharing a request.
     with request.open("x", encoding="utf-8", newline="\n") as stream:
@@ -438,38 +465,136 @@ def _write_version_status(root: Path) -> dict[str, object]:
     return status
 
 
-def _request_events(requests: Sequence[Path]) -> list[str]:
+def _request_batch(requests: Sequence[Path]) -> tuple[list[str], list[str], bool]:
+    """Aggregate one durable queue snapshot; any full request dominates."""
+
     events: set[str] = set()
+    paths: set[str] = set()
+    full = False
     for request in requests:
         try:
             payload = json.loads(request.read_text(encoding="utf-8"))
         except (OSError, ValueError, TypeError):
             events.add("unknown")
+            full = True
             continue
-        event = payload.get("event") if isinstance(payload, dict) else None
+        if not isinstance(payload, dict):
+            events.add("unknown")
+            full = True
+            continue
+        event = payload.get("event")
         events.add(str(event) if event else "unknown")
-    return sorted(events)
+        raw_paths = payload.get("paths")
+        if payload.get("full") is True or not isinstance(raw_paths, list):
+            full = True
+            continue
+        normalized = filter_relevant_paths(raw_paths)
+        if not normalized:
+            full = True
+        else:
+            paths.update(normalized)
+    return sorted(events), ([] if full else sorted(paths)), full
+
+
+def _request_events(requests: Sequence[Path]) -> list[str]:
+    """Compatibility helper for diagnostics and older focused tests."""
+
+    return _request_batch(requests)[0]
+
+
+def _write_changed_paths_file(root: Path, paths: Sequence[str]) -> Path:
+    """Write a bounded JSON handoff under Git state, never on the command line."""
+
+    normalized = filter_relevant_paths(paths)
+    if not normalized:
+        raise ValueError("incremental Graphify update requires changed paths")
+    payload = {"version": 1, "paths": normalized}
+    encoded = (
+        json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        + "\n"
+    ).encode("utf-8")
+    if len(encoded) > MAX_PATH_FILE_BYTES:
+        raise ValueError(
+            "changed-path payload is {} bytes; maximum is {}".format(
+                len(encoded), MAX_PATH_FILE_BYTES
+            )
+        )
+    handoffs = _state_dir(root) / "handoffs"
+    handoffs.mkdir(parents=True, exist_ok=True)
+    target = handoffs / "changed-paths-{}-{}.json".format(os.getpid(), uuid.uuid4().hex)
+    with target.open("xb") as stream:
+        stream.write(encoded)
+    return target
+
+
+def _remove_changed_paths_file(path: Path | None) -> None:
+    if path is None:
+        return
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        pass
+    try:
+        path.parent.rmdir()
+    except OSError:
+        pass
+
+
+def _prepare_graphify_command(
+    root: Path,
+    paths: Sequence[str],
+    full: bool,
+    command: Sequence[str] | None = None,
+) -> tuple[list[str], Path | None, str]:
+    if command is not None:
+        return list(command), None, "custom"
+    if full or not paths:
+        return (
+            [sys.executable, "-m", "graphify", "update", str(root), "--force"],
+            None,
+            "full-public",
+        )
+    helper = Path(__file__).resolve().with_name("graphify_incremental.py")
+    if not helper.is_file():
+        raise RuntimeError(
+            "incremental Graphify helper is missing: {}; queue retained".format(helper)
+        )
+    path_file = _write_changed_paths_file(root, paths)
+    return (
+        [
+            sys.executable,
+            str(helper),
+            "--root",
+            str(root),
+            "--paths-file",
+            str(path_file),
+        ],
+        path_file,
+        "incremental-private-api",
+    )
 
 
 def _run_graphify_update(
     root: Path,
     events: Sequence[str],
+    paths: Sequence[str] = (),
+    full: bool = False,
     command: Sequence[str] | None = None,
 ) -> bool:
     logs = _log_dir(root)
     logs.mkdir(parents=True, exist_ok=True)
     timestamp = time.strftime("%Y%m%d-%H%M%S", time.localtime())
     log_path = logs / f"update-{timestamp}-{os.getpid()}.log"
-    graphify_command = list(command or (sys.executable, "-m", "graphify", "update", str(root)))
     environment = os.environ.copy()
     environment["PYTHONIOENCODING"] = "utf-8"
     environment["PYTHONUTF8"] = "1"
     version = _write_version_status(root)
+    path_file: Path | None = None
 
     try:
         with log_path.open("w", encoding="utf-8", newline="\n") as log:
             log.write(f"[graphify hook] events: {', '.join(events)}\n")
-            log.write(f"[graphify hook] command: {graphify_command!r}\n")
+            log.write(f"[graphify hook] changed paths: {len(paths)}\n")
             log.write(
                 "[graphify hook] installed version: "
                 f"{version['installed_version']}; graph metadata version: "
@@ -477,16 +602,29 @@ def _run_graphify_update(
             )
             if version["version_drift"]:
                 log.write("[graphify hook] WARNING: graphify version drift detected\n")
+            try:
+                graphify_command, path_file, mode = _prepare_graphify_command(
+                    root, paths, full, command=command
+                )
+            except (OSError, RuntimeError, ValueError) as error:
+                log.write("[graphify hook] ERROR preparing update: {}\n".format(error))
+                return False
+            log.write(f"[graphify hook] mode: {mode}\n")
+            log.write(f"[graphify hook] command: {graphify_command!r}\n")
             log.flush()
-            completed = subprocess.run(
-                graphify_command,
-                cwd=root,
-                env=environment,
-                stdin=subprocess.DEVNULL,
-                stdout=log,
-                stderr=subprocess.STDOUT,
-                check=False,
-            )
+            try:
+                completed = subprocess.run(
+                    graphify_command,
+                    cwd=root,
+                    env=environment,
+                    stdin=subprocess.DEVNULL,
+                    stdout=log,
+                    stderr=subprocess.STDOUT,
+                    check=False,
+                )
+            finally:
+                _remove_changed_paths_file(path_file)
+                path_file = None
             log.write(f"\n[graphify hook] exit code: {completed.returncode}\n")
     except OSError as error:
         try:
@@ -496,6 +634,8 @@ def _run_graphify_update(
         except OSError:
             pass
         return False
+    finally:
+        _remove_changed_paths_file(path_file)
 
     _write_version_status(root)
     return completed.returncode == 0
@@ -541,7 +681,8 @@ def _worker(
                     time.sleep(quiet_wait)
                     continue
                 snapshot = list(requests)
-                success = run_update(root, _request_events(snapshot))
+                events, paths, full = _request_batch(snapshot)
+                success = run_update(root, events, paths, full)
                 if not success:
                     # Failed work remains durable. A later trigger can recover
                     # it after the failed worker releases its bounded claim.
@@ -632,12 +773,14 @@ def schedule_update(
     force: bool = False,
     foreground: bool = False,
 ) -> bool:
-    relevant = filter_relevant_paths(paths)
-    if not force and not relevant:
+    supplied = [str(path) for path in paths if str(path).strip()]
+    relevant = filter_relevant_paths(supplied)
+    full = bool(force or not supplied)
+    if not full and not relevant:
         return False
-    _queue_request(root, event, relevant)
+    _queue_request(root, event, relevant, full=full)
     if foreground:
-        _worker(root)
+        return _worker(root)
     else:
         claim_token = _try_acquire_worker_claim(root)
         if claim_token is not None:
@@ -675,13 +818,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.paths_from_stdin:
         paths.extend(_read_stdin_paths())
     try:
-        schedule_update(
+        scheduled = schedule_update(
             root,
             event=args.event,
             paths=paths,
             force=args.all,
             foreground=args.foreground,
         )
+        if args.foreground and not scheduled:
+            return 1
     except OSError as error:
         # Hooks must never block Git/editor operations. Best-effort logging
         # keeps setup errors actionable while preserving that contract.
