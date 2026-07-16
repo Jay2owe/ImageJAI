@@ -53,6 +53,22 @@ public class AgentLauncherPostureTest {
     }
 
     @Test
+    public void detectedGeminiAndCodexDefaultToApprovalProtectedCommands() {
+        Settings settings = new Settings();
+        settings.setPrivacyPosture(PrivacyPosture.STANDARD);
+        AgentLauncher launcher = launcherWithAllExecutables(settings);
+
+        for (AgentLauncher.AgentInfo agent : launcher.detectAgents()) {
+            if ("Gemini CLI".equals(agent.name) || "Codex CLI".equals(agent.name)) {
+                assertFalse(agent.name, AgentLauncher.containsDangerousPermissionBypass(
+                        agent.contextFlags));
+                assertFalse(agent.name, AgentLauncher.containsDangerousPermissionBypass(
+                        launcher.buildAgentCommandString(agent)));
+            }
+        }
+    }
+
+    @Test
     public void onPremisesRefusesCloudOllamaDefaultModel() {
         Settings settings = new Settings();
         settings.setPrivacyPosture(PrivacyPosture.ON_PREMISES);
@@ -119,6 +135,51 @@ public class AgentLauncherPostureTest {
 
         assertTrue(command, command.contains("-m gemma4_31b"));
         assertFalse(command, command.contains("gemma4_31b_agent"));
+    }
+
+    @Test
+    public void bundledGemmaQuotesConfiguredWindowsPythonExecutableWithSpaces()
+            throws Exception {
+        Path workspace = Files.createTempDirectory("imagejai agent workspace");
+        Path module = workspace.resolve("gemma4_31b");
+        Files.createDirectories(module);
+        Files.write(module.resolve("__main__.py"), new byte[0]);
+
+        Settings settings = new Settings();
+        settings.setPrivacyPosture(PrivacyPosture.PSEUDONYMISED);
+        PostureController controller = new PostureController(settings, null, null);
+        AgentLauncher launcher = new AgentLauncher(
+                workspace.toString(), 7746, settings, controller) {
+            @Override
+            String pythonExecutable() {
+                return "C:\\Program Files\\ImageJAI Python\\python.exe";
+            }
+
+            @Override
+            String operatingSystemName() {
+                return "Windows 11";
+            }
+        };
+        AgentLauncher.AgentInfo gemma = new AgentLauncher.AgentInfo(
+                "Gemma 4 31B",
+                AgentLauncher.GEMMA_WRAPPER_COMMAND,
+                "Ollama-backed Gemma agent",
+                null,
+                "",
+                true,
+                "gemma4:31b-cloud");
+
+        assertEquals("\"C:\\Program Files\\ImageJAI Python\\python.exe\" -m gemma4_31b",
+                launcher.buildAgentCommandString(gemma));
+    }
+
+    @Test
+    public void everySupportedPermissionBypassRequiresAndConsumesOneLaunchConsent() {
+        assertOneLaunchConsentRequired("Claude Code", "claude",
+                "--dangerously-skip-permissions");
+        assertOneLaunchConsentRequired("Gemini CLI", "gemini", "--yolo");
+        assertOneLaunchConsentRequired("Codex CLI", "codex",
+                "--dangerously-bypass-approvals-and-sandbox");
     }
 
     @Test
@@ -283,6 +344,36 @@ public class AgentLauncherPostureTest {
                 return "detected-" + command.split(" ")[0];
             }
         };
+    }
+
+    private static void assertOneLaunchConsentRequired(String name, String command,
+                                                       String bypassFlag) {
+        Settings settings = new Settings();
+        settings.setPrivacyPosture(PrivacyPosture.STANDARD);
+        AgentLauncher launcher = launcherWithAllExecutables(settings);
+        AgentLauncher.AgentInfo agent = new AgentLauncher.AgentInfo(
+                name, command, "", command, bypassFlag);
+
+        try {
+            launcher.buildAgentCommandString(agent);
+            fail("Expected one-launch consent requirement for " + name);
+        } catch (PostureViolation denied) {
+            assertEquals(AgentLauncher.DANGEROUS_PERMISSION_CONSENT_REQUIRED,
+                    denied.getMessage());
+        }
+
+        settings.claudeUseGsdFlag = true;
+        assertTrue(launcher.buildAgentCommandString(agent).contains(bypassFlag));
+        assertFalse("consent must be consumed for " + name,
+                settings.claudeUseGsdFlag);
+
+        try {
+            launcher.buildAgentCommandString(agent);
+            fail("Expected consumed consent to block another " + name + " bypass");
+        } catch (PostureViolation denied) {
+            assertEquals(AgentLauncher.DANGEROUS_PERMISSION_CONSENT_REQUIRED,
+                    denied.getMessage());
+        }
     }
 
     private static List<String> names(List<AgentLauncher.AgentInfo> agents) {

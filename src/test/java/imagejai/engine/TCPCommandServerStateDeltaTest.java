@@ -310,7 +310,7 @@ public class TCPCommandServerStateDeltaTest {
         TCPCommandServer server = newServer();
         ImageStack stack = new ImageStack(2, 2) {
             @Override public ImageProcessor getProcessor(int n) {
-                if (n == 1) {
+                if (n == 6) {
                     return new ByteProcessor(2, 2) {
                         @Override public float getPixelValue(int x, int y) {
                             throw new IllegalStateException("synthetic pixel failure");

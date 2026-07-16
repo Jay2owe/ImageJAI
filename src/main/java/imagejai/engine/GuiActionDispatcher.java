@@ -10,6 +10,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Consumer;
+import java.util.regex.Pattern;
 import javax.swing.SwingUtilities;
 
 /**
@@ -31,6 +32,9 @@ public class GuiActionDispatcher {
 
     /** Minimum wall-clock gap between two displayed toasts, in ms. */
     public static final long TOAST_MIN_INTERVAL_MS = 500L;
+    public static final int MAX_CONFIRM_ID_CHARS = 128;
+    private static final Pattern CONFIRM_ID_PATTERN =
+            Pattern.compile("[A-Za-z0-9._:-]{1," + MAX_CONFIRM_ID_CHARS + "}");
 
     /**
      * Cancellation token for work queued on Swing's event thread. Invalidate
@@ -140,6 +144,8 @@ public class GuiActionDispatcher {
                 return doFocusImage(req);
             } else if ("confirm".equals(type)) {
                 return doConfirm(req);
+            } else if ("confirm_cancel".equals(type)) {
+                return doCancelConfirm(req);
             } else {
                 return err("unknown gui_action: " + type);
             }
@@ -254,6 +260,12 @@ public class GuiActionDispatcher {
         // is always correlatable. Plain integer is enough — the bus is
         // single-process and we just need uniqueness within a session.
         String reqId = strField(req, "id");
+        if (reqId != null && !reqId.isEmpty()
+                && !CONFIRM_ID_PATTERN.matcher(reqId).matches()) {
+            return err("confirm: 'id' must contain 1-"
+                    + MAX_CONFIRM_ID_CHARS
+                    + " ASCII letters, digits, '.', '_', ':', or '-'");
+        }
         final String confirmId = (reqId == null || reqId.isEmpty())
                 ? "confirm-" + confirmCounter.incrementAndGet()
                 : reqId;
@@ -280,6 +292,29 @@ public class GuiActionDispatcher {
         return resp;
     }
 
+    /**
+     * Wake a confirmation subscriber after its client-side deadline. The
+     * client closes its stream before sending this action, so publishing the
+     * correlated cancellation makes the TCP pump observe the closed socket
+     * immediately instead of retaining one of the eight subscriber slots
+     * until the next 30-second heartbeat.
+     */
+    private JsonObject doCancelConfirm(JsonObject req) {
+        String confirmId = strField(req, "id");
+        if (!validConfirmId(confirmId)) {
+            return err("confirm_cancel: invalid or missing 'id'");
+        }
+        JsonObject data = new JsonObject();
+        data.addProperty("id", confirmId);
+        data.addProperty("cancelled", true);
+        eventBus.publish("gui_action.confirm.resolved", data);
+
+        JsonObject resp = ok("confirm_cancel");
+        resp.addProperty("id", confirmId);
+        resp.addProperty("cancelled", true);
+        return resp;
+    }
+
     // -----------------------------------------------------------------------
     // helpers
     // -----------------------------------------------------------------------
@@ -288,6 +323,10 @@ public class GuiActionDispatcher {
         JsonElement el = obj.get(key);
         if (el == null || el.isJsonNull() || !el.isJsonPrimitive()) return null;
         return el.getAsString();
+    }
+
+    private static boolean validConfirmId(String value) {
+        return value != null && CONFIRM_ID_PATTERN.matcher(value).matches();
     }
 
     private static int[] parseBounds(JsonElement el) {

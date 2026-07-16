@@ -393,8 +393,7 @@ def create_model():
                       system=_SYSTEM_PROMPT, parameters=_MODEL_PARAMS)
         print(f"Model '{MODEL_NAME}' created successfully.")
         # Invalidate cache
-        global _available_cache
-        _available_cache = None
+        _available_cache.clear()
         return True
     except Exception as e:
         print(f"ERROR creating model: {e}")

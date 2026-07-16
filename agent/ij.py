@@ -81,8 +81,10 @@ import os
 import base64
 import copy
 import math
+import struct
 import threading
 import time
+import uuid
 
 HOST = os.environ.get("IMAGEJAI_TCP_HOST", "localhost")
 try:
@@ -841,7 +843,13 @@ class ImageJSession:
                 if self._expired_locked():
                     self._clear_locked()
                 if not self._session_id:
-                    hello_resp = self.hello(timeout=min(self.timeout, 10))
+                    hello_timeout = min(self.timeout, 10)
+                    if deadline is not None:
+                        remaining = deadline - _time.monotonic()
+                        if remaining <= 0:
+                            return
+                        hello_timeout = min(hello_timeout, remaining)
+                    hello_resp = self.hello(timeout=max(0.01, hello_timeout))
                     if not hello_resp.get("ok"):
                         yield hello_resp
                         return
@@ -931,6 +939,19 @@ class ImageJSession:
             except (socket.error, OSError, ConnectionError):
                 pass
             finally:
+                try:
+                    # An abortive close makes the server's next queued write
+                    # fail immediately. gui_confirm follows a deadline close
+                    # with a correlated cancellation event specifically to
+                    # wake that writer and release its subscriber slot.
+                    linger_format = "HH" if os.name == "nt" else "ii"
+                    sock.setsockopt(
+                        socket.SOL_SOCKET,
+                        socket.SO_LINGER,
+                        struct.pack(linger_format, 1, 0),
+                    )
+                except Exception:
+                    pass
                 try:
                     sock.close()
                 except Exception:
@@ -1581,68 +1602,119 @@ def gui_highlight_roi(image_title, x, y, width, height):
 def gui_confirm(prompt, options, timeout=300):
     """Ask the user via the plugin's chat panel; block until they click.
 
-    Tries the Phase 2 subscribe channel first (push-based, low latency). If
-    the subscribe stream isn't available — e.g. the subscriber cap is hit, or
-    the server is older than Phase 2 — falls back to friction-log polling at
-    1 Hz for up to 60 s.
+    The event subscription is acknowledged before the confirmation is sent,
+    so even an immediate button callback cannot be lost. The subscription
+    socket shares this call's deadline and is closed on every exit path.
 
     Returns the dict {"id", "choice"}; on timeout returns
     {"id", "choice": None, "timed_out": True}.
     """
     if isinstance(options, str):
         options = [o.strip() for o in options.split(",") if o.strip()]
+    try:
+        timeout = float(timeout)
+    except (TypeError, ValueError):
+        raise ValueError("timeout must be a finite non-negative number")
+    if not math.isfinite(timeout) or timeout < 0:
+        raise ValueError("timeout must be a finite non-negative number")
+
+    import time as _time
+    confirm_id = "confirm-" + uuid.uuid4().hex
+    deadline = _time.monotonic() + timeout
     req = {
         "command": "gui_action",
         "type": "confirm",
+        "id": confirm_id,
         "prompt": prompt,
         "options": list(options),
     }
-    resp = imagej_command(req)
-    if not (isinstance(resp, dict) and resp.get("ok")):
-        return {"id": None, "choice": None, "error": resp}
-    confirm_id = resp.get("id")
+    stream = None
+    session = None
+    subscribed = False
+    dispatched = False
 
-    # Preferred path: subscribe to the resolved event.
-    try:
-        import threading
-        result_holder = {"choice": None, "got": False}
-        stop_flag = {"stop": False}
-
-        def listen():
+    def cancel_pending(session):
+        """Close the stream, then wake the server subscriber for prompt cleanup."""
+        if not dispatched:
+            return
+        if stream is not None:
             try:
-                for event in imagej_events(
-                        ["gui_action.confirm.resolved"], reconnect=False):
-                    if stop_flag["stop"]:
-                        return
-                    if not isinstance(event, dict):
-                        continue
-                    data = event.get("data") or {}
-                    if data.get("id") == confirm_id:
-                        result_holder["choice"] = data.get("choice")
-                        result_holder["got"] = True
-                        return
+                stream.close()
             except Exception:
                 pass
+        try:
+            session.request({
+                "command": "gui_action",
+                "type": "confirm_cancel",
+                "id": confirm_id,
+            }, timeout=0.25, _check_dialogs=False)
+        except Exception:
+            pass
 
-        t = threading.Thread(target=listen, daemon=True)
-        t.start()
-        t.join(timeout=timeout)
-        stop_flag["stop"] = True
-        if result_holder["got"]:
-            return {"id": confirm_id, "choice": result_holder["choice"]}
-    except Exception:
-        # subscribe path is best-effort — fall through to polling
-        pass
-
-    # 60s polling fallback (spec): no subscribe support? Just sleep-poll the
-    # friction log as a heartbeat ping. If the user clicks during this window
-    # we won't see the response without subscribe — surface a timed_out so the
-    # caller can decide whether to retry.
-    import time as _time
-    deadline = _time.time() + 60
-    while _time.time() < deadline:
-        _time.sleep(1)
-    return {"id": confirm_id, "choice": None, "timed_out": True}
+    try:
+        session = _session_for(HOST, PORT)
+        stream = session.events(
+            topics=["gui_action.confirm.resolved"],
+            reconnect=False,
+            read_timeout=max(0.01, timeout),
+            deadline=deadline,
+        )
+        for event in stream:
+            if _time.monotonic() >= deadline:
+                cancel_pending(session)
+                return {"id": confirm_id, "choice": None, "timed_out": True}
+            if not isinstance(event, dict):
+                continue
+            if event.get("ok") is False:
+                return {"id": confirm_id, "choice": None, "error": event}
+            event_name = event.get("event") or ""
+            if event_name == "subscribed" and not subscribed:
+                subscribed = True
+                remaining = deadline - _time.monotonic()
+                if remaining <= 0:
+                    return {"id": confirm_id, "choice": None,
+                            "timed_out": True}
+                resp = imagej_command(req, timeout=max(0.01, remaining))
+                if not (isinstance(resp, dict) and resp.get("ok")):
+                    return {"id": confirm_id, "choice": None, "error": resp}
+                if resp.get("id") != confirm_id:
+                    return {
+                        "id": confirm_id,
+                        "choice": None,
+                        "error": "confirmation id mismatch",
+                    }
+                dispatched = True
+                continue
+            if not subscribed:
+                continue
+            data = event.get("data") or {}
+            if (event_name == "gui_action.confirm.resolved"
+                    and data.get("id") == confirm_id):
+                return {"id": confirm_id, "choice": data.get("choice")}
+        if _time.monotonic() >= deadline:
+            cancel_pending(session)
+            return {"id": confirm_id, "choice": None, "timed_out": True}
+        if not subscribed:
+            return {
+                "id": confirm_id,
+                "choice": None,
+                "error": "confirmation subscription unavailable",
+            }
+        cancel_pending(session)
+        return {"id": confirm_id, "choice": None, "timed_out": True}
+    except (socket.timeout, socket.error, OSError, ConnectionError) as exc:
+        if _time.monotonic() >= deadline:
+            cancel_pending(session)
+            return {"id": confirm_id, "choice": None, "timed_out": True}
+        cancel_pending(session)
+        return {"id": confirm_id, "choice": None,
+                "error": "confirmation subscription failed: {}".format(exc)}
+    finally:
+        if stream is not None:
+            try:
+                stream.close()
+            except Exception:
+                pass
 
 
 # ---------------------------------------------------------------------------

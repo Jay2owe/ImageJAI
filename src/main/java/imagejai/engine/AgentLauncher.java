@@ -34,6 +34,8 @@ public class AgentLauncher {
     public static final String LOCAL_ASSISTANT_NAME = "Local Assistant";
     public static final String GEMMA_WRAPPER_COMMAND = "gemma4_31b_agent";
     private static final String GEMMA_BUNDLED_MODULE = "gemma4_31b";
+    static final String DANGEROUS_PERMISSION_CONSENT_REQUIRED =
+            "CLI permission bypass requires explicit consent for this launch.";
     static final long PROCESS_PROBE_TIMEOUT_MS = 3000L;
     static final long CONTEXT_SYNC_TIMEOUT_MS = 15000L;
     static final int MAX_PROCESS_OUTPUT_BYTES = 64 * 1024;
@@ -111,10 +113,10 @@ public class AgentLauncher {
         {"Claude Code", "claude", "Anthropic's Claude CLI agent", "", "false", ""},
         {"Aider", "aider", "AI pair programming in your terminal", "--read .aider.conventions.md", "false", ""},
         {"GitHub Copilot CLI", "gh copilot", "GitHub Copilot in the terminal", "", "false", ""},
-        {"Gemini CLI", "gemini", "Google's Gemini CLI agent", "--yolo", "false", ""},
+        {"Gemini CLI", "gemini", "Google's Gemini CLI agent", "", "false", ""},
         {"Open Interpreter", "interpreter", "Open-source code interpreter", "", "false", ""},
         {"Cline", "cline", "Autonomous coding agent", "", "false", ""},
-        {"Codex CLI", "codex", "OpenAI Codex CLI", "--dangerously-bypass-approvals-and-sandbox", "false", ""},
+        {"Codex CLI", "codex", "OpenAI Codex CLI", "", "false", ""},
         {"Gemma 4 31B", GEMMA_WRAPPER_COMMAND, "Ollama-backed Gemma agent", "", "true", "gemma4:31b-cloud"},
         {"Gemma 4 31B (Claude-style)", GEMMA_WRAPPER_COMMAND, "Gemma with Claude-style narrative prompt (A/B test)", "--style claude", "true", "gemma4:31b-cloud"},
     };
@@ -248,8 +250,10 @@ public class AgentLauncher {
                 ? SessionAction.NEW_SESSION
                 : sessionAction;
         try {
+            boolean requestedDangerousPermissions = dangerousPermissions
+                    || requestsDangerousPermissionBypass(agent);
             LaunchPolicy.Decision decision = evaluateLaunch(
-                    agent, extraEnv, dangerousPermissions).enforce();
+                    agent, extraEnv, requestedDangerousPermissions).enforce();
             Map<String, String> permittedEnv = decision.permittedEnvironment();
             syncContextFiles();
 
@@ -262,20 +266,20 @@ public class AgentLauncher {
                     return createEmbeddedSession(agent, spec);
                 } catch (IOException e) {
                     return fallbackToExternalAfterEmbeddedFailure(
-                            agent, permittedEnv, action, dangerousPermissions, e);
+                            agent, permittedEnv, action, requestedDangerousPermissions, e);
                 } catch (RuntimeException e) {
                     if (e instanceof PostureViolation) {
                         throw e;
                     }
                     return fallbackToExternalAfterEmbeddedFailure(
-                            agent, permittedEnv, action, dangerousPermissions, e);
+                            agent, permittedEnv, action, requestedDangerousPermissions, e);
                 } catch (LinkageError e) {
                     return fallbackToExternalAfterEmbeddedFailure(
-                            agent, permittedEnv, action, dangerousPermissions, e);
+                            agent, permittedEnv, action, requestedDangerousPermissions, e);
                 }
             }
 
-            if (dangerousPermissions) {
+            if (requestedDangerousPermissions) {
                 return launchExternalSession(
                         agent, permittedEnv, "", action, true);
             }
@@ -362,7 +366,7 @@ public class AgentLauncher {
     }
 
     AgentLaunchSpec buildExternalLaunchSpec(AgentInfo agent, SessionAction sessionAction) {
-        evaluateLaunch(agent, null).enforce();
+        evaluateLaunch(agent, null, requestsDangerousPermissionBypass(agent)).enforce();
         String fullCommand = buildAgentCommandString(agent, sessionAction);
 
         String os = System.getProperty("os.name", "").toLowerCase();
@@ -417,7 +421,7 @@ public class AgentLauncher {
     }
 
     AgentLaunchSpec buildEmbeddedLaunchSpec(AgentInfo agent, SessionAction sessionAction) {
-        evaluateLaunch(agent, null).enforce();
+        evaluateLaunch(agent, null, requestsDangerousPermissionBypass(agent)).enforce();
         String fullCommand = buildAgentCommandString(agent, sessionAction);
 
         String os = System.getProperty("os.name", "").toLowerCase();
@@ -513,20 +517,33 @@ public class AgentLauncher {
             parts.add(resolveLaunchCommand(agent));
         }
         String flags = agent == null ? "" : agent.contextFlags;
+        boolean contextRequestsDangerousPermissions =
+                containsDangerousPermissionBypass(flags);
+        boolean addClaudeDangerousPermissions = isClaudeAgent(agent)
+                && settings.claudeUseGsdFlag
+                && AgentPlannerDetector.isInstalled(settings);
+        boolean consumeOneLaunchConsent = contextRequestsDangerousPermissions
+                || addClaudeDangerousPermissions;
+        if (consumeOneLaunchConsent) {
+            if (!settings.claudeUseGsdFlag) {
+                throw new PostureViolation(DANGEROUS_PERMISSION_CONSENT_REQUIRED);
+            }
+            LaunchPolicy.Decision decision = evaluateLaunch(agent, null, true).enforce();
+            if (!decision.dangerousPermissionsAllowed()) {
+                throw new PostureViolation(DANGEROUS_PERMISSION_CONSENT_REQUIRED);
+            }
+        }
         if (flags != null && !flags.trim().isEmpty()) {
             LaunchPolicy.requireSafeCommandText(flags, "agent arguments");
             validateEmbeddedIdentifiers(flags);
             parts.add(flags.trim());
         }
-        if (isClaudeAgent(agent)
-                && settings.claudeUseGsdFlag
-                && AgentPlannerDetector.isInstalled(settings)) {
-            LaunchPolicy.Decision decision = evaluateLaunch(agent, null, true).enforce();
-            if (decision.dangerousPermissionsAllowed()) {
-                parts.add("--dangerously-skip-permissions");
-                // Consent is for this launch only, never a persistent default.
-                settings.claudeUseGsdFlag = false;
-            }
+        if (addClaudeDangerousPermissions) {
+            parts.add("--dangerously-skip-permissions");
+        }
+        if (consumeOneLaunchConsent) {
+            // Consent is for this command construction only, never a persistent default.
+            settings.claudeUseGsdFlag = false;
         }
         StringBuilder sb = new StringBuilder();
         for (String part : parts) {
@@ -562,7 +579,7 @@ public class AgentLauncher {
         }
         if (GEMMA_WRAPPER_COMMAND.equals(agent.command) && bundledGemmaModuleAvailable()) {
             return LaunchPolicy.requireSafeCommandText(
-                    pythonCommand() + " -m " + GEMMA_BUNDLED_MODULE,
+                    pythonShellCommand() + " -m " + GEMMA_BUNDLED_MODULE,
                     "agent command");
         }
         String command = LaunchPolicy.requireSafeCommandText(agent.command, "agent command");
@@ -692,7 +709,7 @@ public class AgentLauncher {
         return new File(new File(agentWorkspace, GEMMA_BUNDLED_MODULE), "__main__.py");
     }
 
-    private static String pythonCommand() {
+    String pythonExecutable() {
         String configured = System.getenv("IMAGEJAI_PYTHON");
         if (configured != null && !configured.trim().isEmpty()) {
             return configured.trim();
@@ -700,6 +717,47 @@ public class AgentLauncher {
         return System.getProperty("os.name", "").toLowerCase().contains("win")
                 ? "python"
                 : "python3";
+    }
+
+    String operatingSystemName() {
+        return System.getProperty("os.name", "");
+    }
+
+    private String pythonShellCommand() {
+        return quoteExecutableForShell(pythonExecutable(), operatingSystemName());
+    }
+
+    static String quoteExecutableForShell(String executable, String osName) {
+        String candidate = LaunchPolicy.requireSafeCommandText(
+                executable, "Python executable");
+        if (osName != null && osName.toLowerCase(Locale.ROOT).contains("win")) {
+            if (candidate.indexOf('"') >= 0 || candidate.indexOf('%') >= 0
+                    || candidate.indexOf('!') >= 0 || candidate.indexOf('^') >= 0) {
+                throw new IllegalArgumentException("Unsafe Python executable.");
+            }
+            return "\"" + candidate + "\"";
+        }
+        return shellQuote(candidate);
+    }
+
+    private boolean requestsDangerousPermissionBypass(AgentInfo agent) {
+        if (agent != null && containsDangerousPermissionBypass(agent.contextFlags)) {
+            return true;
+        }
+        return isClaudeAgent(agent)
+                && settings.claudeUseGsdFlag
+                && AgentPlannerDetector.isInstalled(settings);
+    }
+
+    static boolean containsDangerousPermissionBypass(String arguments) {
+        for (String token : shellLikeTokens(arguments)) {
+            if ("--dangerously-skip-permissions".equals(token)
+                    || "--dangerously-bypass-approvals-and-sandbox".equals(token)
+                    || "--yolo".equals(token)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private List<AgentInfo> filterAgentsForPosture(List<AgentInfo> agents) {
@@ -1024,7 +1082,7 @@ public class AgentLauncher {
         }
 
         try {
-            ProcessBuilder pb = new ProcessBuilder(pythonCommand(), syncScript.getAbsolutePath());
+            ProcessBuilder pb = new ProcessBuilder(pythonExecutable(), syncScript.getAbsolutePath());
             pb.directory(new File(agentWorkspace));
             pb.redirectErrorStream(true);
             ProcessResult result = runBoundedProcess(pb, CONTEXT_SYNC_TIMEOUT_MS,

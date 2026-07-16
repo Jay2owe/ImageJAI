@@ -8265,6 +8265,9 @@ public class TCPCommandServer {
      * Supports optional parameters: x, y, width, height, slice.
      * Returns base64-encoded raw pixel values as floats (4 bytes each),
      * plus metadata for reconstruction.
+     * On hyperstacks, {@code slice} is a strict 1-based Z coordinate and
+     * {@code allSlices} reads every Z plane at the active channel and frame.
+     * It never walks into another channel or frame.
      *
      * Request:
      *   {"command": "get_pixels"}                              — full current slice
@@ -8279,13 +8282,15 @@ public class TCPCommandServer {
         final int reqW;
         final int reqH;
         final int reqSlice;
+        final boolean hasSlice;
         final boolean allSlices;
         try {
             reqX = request.has("x") ? request.get("x").getAsInt() : -1;
             reqY = request.has("y") ? request.get("y").getAsInt() : -1;
             reqW = request.has("width") ? request.get("width").getAsInt() : -1;
             reqH = request.has("height") ? request.get("height").getAsInt() : -1;
-            reqSlice = request.has("slice") ? request.get("slice").getAsInt() : -1;
+            hasSlice = request.has("slice");
+            reqSlice = hasSlice ? request.get("slice").getAsInt() : -1;
             allSlices = request.has("allSlices")
                     && request.get("allSlices").getAsBoolean();
         } catch (RuntimeException e) {
@@ -8313,9 +8318,24 @@ public class TCPCommandServer {
 
                     int imgW = imp.getWidth();
                     int imgH = imp.getHeight();
-                    int nSlices = imp.getStackSize();
-                    if (imgW <= 0 || imgH <= 0 || nSlices <= 0) {
+                    int nChannels = imp.getNChannels();
+                    int nSlices = imp.getNSlices();
+                    int nFrames = imp.getNFrames();
+                    int stackSize = imp.getStackSize();
+                    if (imgW <= 0 || imgH <= 0 || nChannels <= 0
+                            || nSlices <= 0 || nFrames <= 0 || stackSize <= 0) {
                         holder[0] = new Exception("Image has invalid dimensions");
+                        return;
+                    }
+                    if (originalC < 1 || originalC > nChannels
+                            || originalZ < 1 || originalZ > nSlices
+                            || originalT < 1 || originalT > nFrames) {
+                        holder[0] = new Exception("Image has invalid C/Z/T position");
+                        return;
+                    }
+                    if (hasSlice && (reqSlice < 1 || reqSlice > nSlices)) {
+                        holder[0] = new Exception("slice must be between 1 and "
+                                + nSlices + " (1-based Z)");
                         return;
                     }
 
@@ -8325,16 +8345,17 @@ public class TCPCommandServer {
                     int w = reqW > 0 ? Math.min(reqW, imgW - x) : imgW - x;
                     int h = reqH > 0 ? Math.min(reqH, imgH - y) : imgH - y;
 
-                    // Determine slices to extract
+                    // Determine Z planes to extract. For a plain stack C=T=1,
+                    // so this retains the historical linear-stack behavior.
                     int startSlice, endSlice;
                     if (allSlices) {
                         startSlice = 1;
                         endSlice = nSlices;
-                    } else if (reqSlice > 0) {
-                        startSlice = Math.min(reqSlice, nSlices);
+                    } else if (hasSlice) {
+                        startSlice = reqSlice;
                         endSlice = startSlice;
                     } else {
-                        startSlice = imp.getCurrentSlice();
+                        startSlice = originalZ;
                         endSlice = startSlice;
                     }
                     int sliceCount = endSlice - startSlice + 1;
@@ -8369,8 +8390,14 @@ public class TCPCommandServer {
                     byte[] rawBytes = new byte[(int) rawByteCount];
                     java.nio.ByteBuffer buf = java.nio.ByteBuffer.wrap(rawBytes);
                     buf.order(java.nio.ByteOrder.LITTLE_ENDIAN);
-                    for (int s = startSlice; s <= endSlice; s++) {
-                        ij.process.ImageProcessor ip = imp.getStack().getProcessor(s);
+                    for (int z = startSlice; z <= endSlice; z++) {
+                        int stackIndex = imp.getStackIndex(originalC, z, originalT);
+                        if (stackIndex < 1 || stackIndex > stackSize) {
+                            throw new IllegalStateException("Invalid stack index for C="
+                                    + originalC + ", Z=" + z + ", T=" + originalT);
+                        }
+                        ij.process.ImageProcessor ip =
+                                imp.getStack().getProcessor(stackIndex);
                         for (int py = y; py < y + h; py++) {
                             for (int px = x; px < x + w; px++) {
                                 buf.putFloat(ip.getPixelValue(px, py));
@@ -8388,6 +8415,12 @@ public class TCPCommandServer {
                     result.addProperty("sliceStart", startSlice);
                     result.addProperty("sliceEnd", endSlice);
                     result.addProperty("sliceCount", sliceCount);
+                    result.addProperty("sliceAxis", "Z");
+                    result.addProperty("channel", originalC);
+                    result.addProperty("frame", originalT);
+                    result.addProperty("channels", nChannels);
+                    result.addProperty("slices", nSlices);
+                    result.addProperty("frames", nFrames);
                     result.addProperty("nPixels", totalPixels);
                     result.addProperty("type", imp.getBitDepth() + "-bit");
                     result.addProperty("encoding", "base64_float32_le");

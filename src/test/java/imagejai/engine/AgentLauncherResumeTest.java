@@ -24,13 +24,13 @@ public class AgentLauncherResumeTest {
     }
 
     @Test
-    public void geminiResumeKeepsExistingContextFlags() {
+    public void geminiResumeDoesNotBypassApprovalsByDefault() {
         AgentLauncher launcher = new AgentLauncher(".", 7746, new Settings());
         AgentLauncher.AgentInfo gemini = new AgentLauncher.AgentInfo(
-                "Gemini CLI", "gemini", "", null, "--yolo");
+                "Gemini CLI", "gemini", "", null, "");
 
         assertTrue(launcher.supportsResumeLatest(gemini));
-        assertEquals("gemini --resume latest --yolo",
+        assertEquals("gemini --resume latest",
                 launcher.buildAgentCommandString(
                         gemini, AgentLauncher.SessionAction.RESUME_LATEST));
     }
@@ -43,10 +43,10 @@ public class AgentLauncherResumeTest {
                 "codex",
                 "",
                 null,
-                "--dangerously-bypass-approvals-and-sandbox");
+                "");
 
         assertTrue(launcher.supportsResumeLatest(codex));
-        assertEquals("codex resume --last --dangerously-bypass-approvals-and-sandbox",
+        assertEquals("codex resume --last",
                 launcher.buildAgentCommandString(
                         codex, AgentLauncher.SessionAction.RESUME_LATEST));
     }

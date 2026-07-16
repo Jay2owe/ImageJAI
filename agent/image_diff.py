@@ -37,7 +37,9 @@ def _load_png_raw(path):
     """Parse a PNG file using only stdlib. Returns (width, height, pixels).
 
     Pixels are normalized RGBA tuples so colour-only changes are preserved.
-    This is a minimal parser — handles 8-bit RGB/RGBA/grayscale PNGs.
+    This is a minimal parser — handles non-interlaced 8-bit
+    RGB/RGBA/grayscale PNGs. Interlaced inputs are rejected instead of being
+    silently decoded with the wrong scanline layout.
     """
     with open(path, "rb") as f:
         data = f.read()
@@ -52,17 +54,29 @@ def _load_png_raw(path):
     idat_chunks = []
 
     while pos < len(data):
+        if len(data) - pos < 12:
+            raise ValueError("Truncated PNG chunk in: %s" % path)
         length = struct.unpack(">I", data[pos:pos + 4])[0]
+        if length > len(data) - pos - 12:
+            raise ValueError("Truncated PNG chunk data in: %s" % path)
         chunk_type = data[pos + 4:pos + 8]
         chunk_data = data[pos + 8:pos + 8 + length]
         pos += 12 + length  # 4 len + 4 type + data + 4 crc
 
         if chunk_type == b"IHDR":
+            if len(chunk_data) != 13:
+                raise ValueError("Invalid IHDR length in: %s" % path)
             width = struct.unpack(">I", chunk_data[0:4])[0]
             height = struct.unpack(">I", chunk_data[4:8])[0]
             bit_depth = chunk_data[8]
             color_type = chunk_data[9]
-            ihdr = (width, height, bit_depth, color_type)
+            compression = chunk_data[10]
+            filter_method = chunk_data[11]
+            interlace = chunk_data[12]
+            ihdr = (
+                width, height, bit_depth, color_type,
+                compression, filter_method, interlace,
+            )
         elif chunk_type == b"IDAT":
             idat_chunks.append(chunk_data)
         elif chunk_type == b"IEND":
@@ -71,12 +85,15 @@ def _load_png_raw(path):
     if ihdr is None:
         raise ValueError("No IHDR chunk found in: %s" % path)
 
-    width, height, bit_depth, color_type = ihdr
+    width, height, bit_depth, color_type, compression, filter_method, interlace = ihdr
+    if width <= 0 or height <= 0:
+        raise ValueError("PNG dimensions must be positive")
     if bit_depth != 8:
         raise ValueError("Only 8-bit PNGs supported (got %d-bit)" % bit_depth)
-
-    # Decompress pixel data
-    raw = zlib.decompress(b"".join(idat_chunks))
+    if compression != 0 or filter_method != 0:
+        raise ValueError("Unsupported PNG compression or filter method")
+    if interlace != 0:
+        raise ValueError("Interlaced (Adam7) PNGs are not supported by the raw fallback")
 
     # Determine bytes per pixel
     if color_type == 0:    # grayscale
@@ -91,6 +108,22 @@ def _load_png_raw(path):
         raise ValueError("Unsupported color type: %d" % color_type)
 
     stride = 1 + width * bpp  # 1 byte filter + pixel data per row
+    expected_raw_length = stride * height
+
+    # Bound decompression to the exact non-interlaced scanline size. This also
+    # makes truncated or trailing scanline data fail closed.
+    decompressor = zlib.decompressobj()
+    raw = decompressor.decompress(b"".join(idat_chunks), expected_raw_length + 1)
+    if (
+        len(raw) != expected_raw_length
+        or decompressor.unconsumed_tail
+        or not decompressor.eof
+        or decompressor.unused_data
+    ):
+        raise ValueError(
+            "Invalid PNG scanline length: expected %d bytes, got %d"
+            % (expected_raw_length, len(raw))
+        )
 
     # Reconstruct pixels (handle filter type 0=None, 1=Sub, 2=Up only)
     pixels = []
@@ -99,6 +132,8 @@ def _load_png_raw(path):
     for y in range(height):
         row_start = y * stride
         filter_type = raw[row_start]
+        if filter_type not in (0, 1, 2, 3, 4):
+            raise ValueError("Unsupported PNG filter type: %d" % filter_type)
         row_data = list(raw[row_start + 1:row_start + stride])
 
         # Apply PNG filters
