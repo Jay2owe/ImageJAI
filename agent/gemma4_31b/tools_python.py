@@ -677,14 +677,17 @@ def _fetch_full_downsampled(max_side: int = _MAX_LONG_EDGE):
     arr, meta = _scalarize_rgb24_measurement(arr, meta, info)
     if arr is None:
         return None, meta
-    meta["downsample_factor"] = int(factor)
+    # This branch returns the requested crop verbatim.  Its relationship to
+    # the full image is captured by x/y/width/height, not by a stride factor.
+    meta["downsample_factor"] = 1
     meta["bit_depth"] = (
         8 if meta["value_domain"].get("scalarization") is not None else int(bit_depth)
     )
     meta["source"] = "center_crop"
     meta["note"] = (
         "image {}x{} exceeds the 4M-pixel server cap; "
-        "analysed a centred {}x{} crop instead of a full-image downsample"
+        "analysed a direct centred {}x{} crop at native sampling; "
+        "no stride downsampling was applied"
     ).format(w, h, cw, ch)
     return arr, meta
 

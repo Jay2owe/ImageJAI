@@ -898,7 +898,8 @@ def _fetch_thumbnail(info: dict):
 
     Downsamples in numpy when the whole image is under the server's
     4M-pixel cap, otherwise falls back to a centred crop sized to
-    respect both the 512 px target and the cap. Returns (None, err).
+    respect both the 512 px target and the cap. Crop pixels are fetched
+    directly, so their downsample factor is one. Returns (None, err).
     """
     try:
         w = int(info.get("width", 0))
@@ -941,7 +942,7 @@ def _fetch_thumbnail(info: dict):
         return None, {"error": "active image geometry changed during pixel fetch"}
     if not _metadata_matches_info(meta, info):
         return None, {"error": "active image axis sizes changed during pixel fetch"}
-    meta["downsample_factor"] = int(factor)
+    meta["downsample_factor"] = 1
     meta["source"] = "center_crop"
     return arr, meta
 
@@ -998,38 +999,17 @@ def _li_threshold(arr: np.ndarray) -> float:
 
 
 def _triangle_threshold(arr: np.ndarray) -> float:
-    """Zack's triangle method on a 256-bin histogram of arr."""
+    """ImageJ 1.54c's generalized Triangle method on sampled pixels."""
     flat = arr.ravel()
     lo = float(flat.min())
     hi = float(flat.max())
     if hi <= lo:
         return lo
     hist, edges = np.histogram(flat, bins=256, range=(lo, hi))
-    peak = int(np.argmax(hist))
-    if peak < 128:
-        end = len(hist) - 1
-        while end > peak and hist[end] == 0:
-            end -= 1
-    else:
-        end = 0
-        while end < peak and hist[end] == 0:
-            end += 1
-    x0, y0 = float(peak), float(hist[peak])
-    x1, y1 = float(end), float(hist[end])
-    dx = x1 - x0
-    dy = y1 - y0
-    denom = math.sqrt(dx * dx + dy * dy)
-    if denom == 0:
-        return float(edges[peak])
-    lo_i, hi_i = min(peak, end), max(peak, end)
-    best = peak
-    max_d = -1.0
-    for i in range(lo_i, hi_i + 1):
-        d = abs(dy * float(i) - dx * float(hist[i]) + x1 * y0 - y1 * x0) / denom
-        if d > max_d:
-            max_d = d
-            best = i
-    return float(edges[best])
+    threshold = _triangle_threshold_from_hist(
+        {"bins": hist, "bin_values": edges[:-1]}
+    )
+    return lo if threshold is None else threshold
 
 
 def _count_4_connected(mask: np.ndarray) -> int:

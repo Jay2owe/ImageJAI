@@ -590,15 +590,19 @@ def _fetch_thumbnail_array(max_side: int):
             return None, scalar_error
         bit_depth = 8
     meta["bit_depth"] = int(bit_depth)
-    meta["downsample_factor"] = int(factor)
+    # This is a direct server crop.  Keep the crop geometry in plane_identity
+    # and do not describe its relationship to the full image as a pixel stride.
+    crop_factor = 1
+    meta["downsample_factor"] = crop_factor
     provenance_error = _attach_analysis_provenance(
-        meta, snapshot, factor, rgb_contract
+        meta, snapshot, crop_factor, rgb_contract
     )
     if provenance_error is not None:
         return None, provenance_error
     meta["note"] = (
         "image {}x{} exceeds the 4M-pixel server cap; "
-        "analysed a centred {}x{} crop instead of a full-image downsample"
+        "analysed a direct centred {}x{} crop at native sampling; "
+        "no stride downsampling was applied"
     ).format(w, h, cw, ch)
     return arr, meta
 

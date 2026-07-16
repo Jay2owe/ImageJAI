@@ -482,6 +482,43 @@ def test_get_pixels_rejects_structured_errors_and_malformed_payloads(monkeypatch
         pixels.get_pixels()
 
 
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("image_id", 7),
+        ("image_id", None),
+        ("image_id", True),
+        ("image_id", "   "),
+        ("sliceAxis", 7),
+        ("sliceAxis", None),
+        ("type", False),
+        ("type", None),
+        ("type", "\t"),
+    ],
+)
+def test_get_pixels_rejects_non_string_or_blank_provenance(monkeypatch, field, value):
+    response = pixel_response([1.0], width=1, height=1)
+    response["result"][field] = value
+    monkeypatch.setattr(pixels, "send", lambda cmd: response)
+
+    with pytest.raises(RuntimeError, match="missing or malformed C/Z/T metadata"):
+        pixels.get_pixels()
+
+
+def test_get_pixels_strips_valid_provenance_text(monkeypatch):
+    response = pixel_response(
+        [1.0], width=1, height=1,
+        image_id="  image-123  ", sliceAxis=" Z ", type=" float32 ",
+    )
+    monkeypatch.setattr(pixels, "send", lambda cmd: response)
+
+    _, meta = pixels.get_pixels()
+
+    assert meta["image_id"] == "image-123"
+    assert meta["sliceAxis"] == "Z"
+    assert meta["type"] == "float32"
+
+
 def test_compute_stats_even_median_empty_and_nonfinite_policy():
     assert pixels.compute_stats([[1.0, 2.0], [3.0, 4.0]])["median"] == 2.5
     assert pixels.compute_stats([]) == {
@@ -660,6 +697,82 @@ def test_get_stack_stats_reports_image_info_errors(monkeypatch):
 
     with pytest.raises(RuntimeError, match="No image open"):
         pixels.get_stack_stats()
+
+
+@pytest.mark.parametrize("image_id", [7, None, False, "   "])
+def test_get_stack_stats_rejects_non_string_or_blank_image_id(monkeypatch, image_id):
+    monkeypatch.setattr(
+        pixels,
+        "send",
+        lambda cmd: {"ok": True, "result": {
+            "image_id": image_id,
+            "image_revision": 4,
+            "display_revision": 9,
+            "channel": 1,
+            "frame": 1,
+            "channels": 1,
+            "slices": 1,
+            "frames": 1,
+        }},
+    )
+    monkeypatch.setattr(
+        pixels,
+        "get_pixels",
+        lambda *args, **kwargs: pytest.fail(
+            "malformed image provenance must fail before fetching pixels"
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="malformed snapshot metadata"):
+        pixels.get_stack_stats()
+
+
+def test_get_stack_stats_strips_valid_image_id_before_binding(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        pixels,
+        "send",
+        lambda cmd: {"ok": True, "result": {
+            "image_id": "  stack-image  ",
+            "image_revision": 4,
+            "display_revision": 9,
+            "channel": 1,
+            "frame": 1,
+            "channels": 1,
+            "slices": 1,
+            "frames": 1,
+        }},
+    )
+
+    def fake_get_pixels(slice_num, **kwargs):
+        calls.append((slice_num, kwargs))
+        return [[1.0]], {
+            "image_id": "stack-image",
+            "image_revision": 4,
+            "display_revision": 9,
+            "channel": 1,
+            "frame": 1,
+            "channels": 1,
+            "slices": 1,
+            "frames": 1,
+            "sliceAxis": "Z",
+            "sliceStart": 1,
+            "sliceEnd": 1,
+            "sliceCount": 1,
+        }
+
+    monkeypatch.setattr(pixels, "get_pixels", fake_get_pixels)
+
+    rows = pixels.get_stack_stats()
+
+    assert calls == [(1, {
+        "image_id": "stack-image",
+        "image_revision": 4,
+        "display_revision": 9,
+        "channel": 1,
+        "frame": 1,
+    })]
+    assert rows[0]["meta"]["image_id"] == "stack-image"
 
 
 def test_get_stack_stats_rejects_one_plane_from_another_revision(monkeypatch):

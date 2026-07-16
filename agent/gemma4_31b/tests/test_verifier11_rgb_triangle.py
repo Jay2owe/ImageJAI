@@ -398,3 +398,114 @@ def test_triangle_longer_left_0_100_120_case_and_mirror(monkeypatch):
         lambda *args, **kwargs: (hist[::-1].copy(), edges),
     )
     assert tools_python._triangle_threshold(samples) == 186.0
+
+
+def test_describe_triangle_sample_fallback_matches_asymmetric_imagej_semantics(
+    monkeypatch,
+):
+    hist = _asymmetric_triangle_histogram()
+    edges = np.arange(257, dtype=np.float64)
+    samples = np.asarray([0.0, 255.0], dtype=np.float64)
+
+    monkeypatch.setattr(
+        describe_image.np,
+        "histogram",
+        lambda *args, **kwargs: (hist.copy(), edges),
+    )
+    threshold = describe_image._triangle_threshold(samples)
+    monkeypatch.setattr(
+        describe_image.np,
+        "histogram",
+        lambda *args, **kwargs: (hist[::-1].copy(), edges),
+    )
+    mirrored = describe_image._triangle_threshold(samples)
+
+    assert threshold == 221.0
+    assert mirrored == 34.0
+    assert mirrored == 255.0 - threshold
+
+
+def test_threshold_fragment_invokes_sample_triangle_fallback(monkeypatch):
+    thumb = np.asarray([[0.0, 1.0], [2.0, 3.0]], dtype=np.float64)
+    calls = []
+
+    monkeypatch.setattr(
+        describe_image, "_threshold_thumbnail", lambda *args: thumb
+    )
+    monkeypatch.setattr(
+        describe_image, "_otsu_threshold_from_hist", lambda stats: 0.0
+    )
+    monkeypatch.setattr(
+        describe_image, "_li_threshold_from_hist", lambda stats: 0.0
+    )
+    monkeypatch.setattr(
+        describe_image, "_triangle_threshold_from_hist", lambda stats: None
+    )
+
+    def sample_triangle(samples):
+        calls.append(samples)
+        return 0.0
+
+    monkeypatch.setattr(describe_image, "_triangle_threshold", sample_triangle)
+
+    text = describe_image._fragment_thresholds(thumb, {"bins": [4]}, {})
+
+    assert "Auto-thresholds produce" in text
+    assert calls == [thumb]
+
+
+def test_describe_center_crop_reports_direct_sampling_factor(monkeypatch):
+    info = _info()
+    info.update({"width": 3000, "height": 2000})
+    requests = []
+    crop_meta = {
+        **_binding(),
+        "x": 1244,
+        "y": 744,
+        "width": 512,
+        "height": 512,
+    }
+
+    def fake_send(command, **payload):
+        requests.append((command, payload))
+        return {"ok": True}
+
+    monkeypatch.setattr(describe_image, "_safe_send", fake_send)
+    monkeypatch.setattr(
+        describe_image,
+        "_decode_pixels",
+        lambda response: (
+            np.zeros((512, 512), dtype=np.float32),
+            dict(crop_meta),
+        ),
+    )
+
+    crop, meta = describe_image._fetch_thumbnail(info)
+
+    assert crop.shape == (512, 512)
+    assert meta["source"] == "center_crop"
+    assert meta["downsample_factor"] == 1
+    assert {key: meta[key] for key in ("x", "y", "width", "height")} == {
+        "x": 1244,
+        "y": 744,
+        "width": 512,
+        "height": 512,
+    }
+    assert requests == [
+        (
+            "get_pixels",
+            {
+                "image_id": "rgb-image",
+                "image_revision": 7,
+                "display_revision": 11,
+                "channel": 1,
+                "slice": 2,
+                "frame": 3,
+                "force": True,
+                "x": 1244,
+                "y": 744,
+                "width": 512,
+                "height": 512,
+            },
+        )
+    ]

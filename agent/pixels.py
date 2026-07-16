@@ -93,6 +93,13 @@ def _exact_int(value, name, minimum=None):
     return value
 
 
+def _nonempty_string(value, name):
+    """Return stripped protocol text without coercing another JSON type."""
+    if not isinstance(value, str) or not value.strip():
+        raise TypeError("{} must be a non-empty string".format(name))
+    return value.strip()
+
+
 def _add_image_binding(
     command, *, image_id=None, image_revision=None, display_revision=None,
     channel=None, slice=None, frame=None,
@@ -159,20 +166,20 @@ def _value_domain(result):
 def _pixel_metadata(result, width, height, slice_count, pixel_count):
     """Validate and preserve the server's geometry and C/Z/T attribution."""
     try:
-        image_id = str(result["image_id"])
+        image_id = _nonempty_string(result["image_id"], "image_id")
         image_revision = _exact_int(result["image_revision"], "image_revision", 1)
         display_revision = _exact_int(result["display_revision"], "display_revision", 1)
         x = _exact_int(result["x"], "x", 0)
         y = _exact_int(result["y"], "y", 0)
         slice_start = _exact_int(result["sliceStart"], "sliceStart", 1)
         slice_end = _exact_int(result["sliceEnd"], "sliceEnd", 1)
-        slice_axis = str(result["sliceAxis"])
+        slice_axis = _nonempty_string(result["sliceAxis"], "sliceAxis")
         channel = _exact_int(result["channel"], "channel", 1)
         frame = _exact_int(result["frame"], "frame", 1)
         channels = _exact_int(result["channels"], "channels", 1)
         slices = _exact_int(result["slices"], "slices", 1)
         frames = _exact_int(result["frames"], "frames", 1)
-        image_type = str(result["type"])
+        image_type = _nonempty_string(result["type"], "type")
         value_domain = _value_domain(result)
         counts_exact = result["acquisition_limit_counts_exact"]
         if not isinstance(counts_exact, bool):
@@ -879,7 +886,7 @@ def get_stack_stats():
     if not isinstance(info, dict):
         raise RuntimeError("get_image_info failed: result is not an object")
     try:
-        image_id = str(info["image_id"])
+        image_id = _nonempty_string(info["image_id"], "image_id")
         image_revision = _exact_int(info["image_revision"], "image_revision", 1)
         display_revision = _exact_int(info["display_revision"], "display_revision", 1)
         channel = _exact_int(info["channel"], "channel", 1)
