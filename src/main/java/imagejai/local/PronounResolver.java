@@ -22,13 +22,18 @@ public class PronounResolver {
     private static final Pattern SAVE_RESULTS = Pattern.compile(
             "^save\\s+(those|the)\\s+results\\s*[.!?]?\\s*$");
 
+    public boolean isRepeatReference(String input) {
+        String value = input == null ? "" : input.toLowerCase(Locale.ROOT).trim();
+        return REPEAT.matcher(value).matches();
+    }
+
     public Optional<Rewrite> resolve(String input, ConversationContext ctx) {
         if (ctx == null || ctx.isStale()) {
             return Optional.empty();
         }
         String s = input == null ? "" : input.toLowerCase(Locale.ROOT).trim();
 
-        if (REPEAT.matcher(s).matches()) {
+        if (isRepeatReference(s)) {
             Optional<String> id = ctx.lastIntentId();
             Optional<Map<String, String>> slots = ctx.lastSlots();
             if (id.isPresent() && slots.isPresent()) {

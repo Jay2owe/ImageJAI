@@ -33,6 +33,7 @@ public class IntentMatcherBenchmarkTest {
         IntentLibrary library = IntentLibrary.load();
 
         assertEquals(library.phrasebookIntentIds(), library.canonicalHandlerIds());
+        assertEquals(398, library.phrasebookIntentIds().size());
         assertFalse(library.phrasebookIntentIds().isEmpty());
     }
 
@@ -255,6 +256,28 @@ public class IntentMatcherBenchmarkTest {
         IntentMatcher.MatchedIntent factor = matcher.match("scale by 0.5").get();
         assertEquals("image.scale_by_factor", factor.intentId());
         assertEquals("0.5", factor.slots().get("factor"));
+    }
+
+    @Test
+    public void slotlessChannelStemPromptsWithoutColourMenuAmbiguity() {
+        IntentMatcher matcher = new IntentMatcher(IntentLibrary.load());
+
+        IntentMatcher.MatchedIntent channel = matcher.match("switch to channel").get();
+        Match2Result match2 = matcher.match2("switch to channel", 0.05);
+
+        assertEquals("image.switch_channel", channel.intentId());
+        assertTrue(channel.slots().isEmpty());
+        assertTrue(match2.isConfident());
+        assertEquals("image.switch_channel", match2.best().intentId());
+    }
+
+    @Test
+    public void explicitRepeatMenuPhraseStillResolvesToCanonicalHandler() {
+        IntentMatcher matcher = new IntentMatcher(IntentLibrary.load());
+
+        IntentMatcher.MatchedIntent repeat = matcher.match("repeat command").get();
+
+        assertEquals("menu.repeat.command", repeat.intentId());
     }
 
     @Test

@@ -63,7 +63,18 @@ public class IntentLibrary {
             register(intent);
         }
         addSlashAliases();
+        addRequiredSlotAliases();
         addPhrase("help", "slash.help");
+    }
+
+    /**
+     * Preserve reviewed slot-less command stems that intentionally prompt for
+     * a required value. The expanded phrasebook contains many numbered channel
+     * variants plus nearby colour-menu phrases; without this exact stem,
+     * "switch to channel" becomes an unnecessary fuzzy disambiguation.
+     */
+    private void addRequiredSlotAliases() {
+        addPhrase("switch to channel", "image.switch_channel");
     }
 
     private void addSlashAliases() {

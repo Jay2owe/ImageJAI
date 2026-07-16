@@ -181,12 +181,19 @@ public class LocalAssistant {
         }
 
         if (!SlashCommandRegistry.isSlashInput(input)) {
+            boolean repeatReference = pronouns.isRepeatReference(input);
             Optional<PronounResolver.Rewrite> rewrite = pronouns.resolve(input, ctx);
             if (rewrite.isPresent()) {
                 Intent target = library.byId(rewrite.get().intentId());
                 if (target != null) {
                     return executeOrPrompt(target, rewrite.get().slots());
                 }
+            }
+            // Repeat pronouns are meaningful only while conversation context
+            // is live. Do not let a cleared/stale reference leak into the
+            // phrasebook's unrelated Fiji "Repeat Command" menu action.
+            if (repeatReference) {
+                return unrecognised(input);
             }
         }
 
@@ -250,9 +257,7 @@ public class LocalAssistant {
                     "Ran user-taught intent: " + resolved.mapping.patternSrc,
                     resolved.macro);
         }
-        frictionLog.record("local_assistant", input, "miss");
-        return AssistantReply.text("I don't recognise \"" + input
-                + "\". Type 'help' to see what I can do.");
+        return unrecognised(input);
     }
 
     public Optional<ImproveSession> improveSessionForTest() {
@@ -477,6 +482,12 @@ public class LocalAssistant {
         if (space >= 0) value = value.substring(0, space);
         if (value.startsWith("/")) value = value.substring(1);
         return "slash." + value;
+    }
+
+    private AssistantReply unrecognised(String input) {
+        frictionLog.record("local_assistant", input, "miss");
+        return AssistantReply.text("I don't recognise \"" + input
+                + "\". Type 'help' to see what I can do.");
     }
 
 }
