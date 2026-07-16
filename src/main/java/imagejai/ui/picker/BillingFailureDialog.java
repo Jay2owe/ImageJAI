@@ -1,5 +1,7 @@
 package imagejai.ui.picker;
 
+import imagejai.ui.ThemeColors;
+
 import javax.swing.BorderFactory;
 import javax.swing.Box;
 import javax.swing.BoxLayout;
@@ -11,7 +13,6 @@ import javax.swing.JPanel;
 import javax.swing.WindowConstants;
 import javax.swing.border.EmptyBorder;
 import java.awt.BorderLayout;
-import java.awt.Color;
 import java.awt.Desktop;
 import java.awt.Dialog;
 import java.awt.Dimension;
@@ -21,6 +22,8 @@ import java.awt.Frame;
 import java.awt.event.WindowAdapter;
 import java.awt.event.WindowEvent;
 import java.net.URI;
+import java.util.ArrayList;
+import java.util.List;
 
 /**
  * Mid-session billing-failure dialog per
@@ -63,7 +66,10 @@ public class BillingFailureDialog extends JDialog {
     private final String providerDisplay;
     private final String errorBody;
     private final URI consoleUri;
-    private final BrowserOpener browserOpener;
+    private BrowserOpener browserOpener;
+    private final List<JButton> decisionButtons = new ArrayList<JButton>();
+    private final WindowAdapter closeListener;
+    private boolean resourcesReleased;
     private Result result = Result.CLOSE;
 
     public BillingFailureDialog(Frame owner,
@@ -89,15 +95,15 @@ public class BillingFailureDialog extends JDialog {
         this.browserOpener = browserOpener == null ? defaultBrowserOpener() : browserOpener;
         setModalityType(Dialog.ModalityType.DOCUMENT_MODAL);
         setDefaultCloseOperation(WindowConstants.DO_NOTHING_ON_CLOSE);
-        addWindowListener(new WindowAdapter() {
+        closeListener = new WindowAdapter() {
             @Override
             public void windowClosing(WindowEvent e) {
                 // Same convention as FirstUseDialog — [×] never silently
                 // re-launches; treat as Close.
-                result = Result.CLOSE;
-                setVisible(false);
+                complete(Result.CLOSE);
             }
-        });
+        };
+        addWindowListener(closeListener);
         buildUi();
         pack();
         Dimension preferred = getPreferredSize();
@@ -108,10 +114,12 @@ public class BillingFailureDialog extends JDialog {
     private void buildUi() {
         JPanel content = new JPanel(new BorderLayout(8, 8));
         content.setBorder(new EmptyBorder(16, 18, 12, 18));
-        content.setBackground(Color.WHITE);
+        content.setBackground(ThemeColors.panelBackground());
+        content.setForeground(ThemeColors.textOn(content.getBackground()));
 
         JLabel headline = new JLabel(this.providerDisplay + " refused the request");
         headline.setFont(new Font(Font.SANS_SERIF, Font.BOLD, 13));
+        headline.setForeground(content.getForeground());
         content.add(headline, BorderLayout.NORTH);
 
         JPanel body = new JPanel();
@@ -120,6 +128,7 @@ public class BillingFailureDialog extends JDialog {
         body.setBorder(BorderFactory.createEmptyBorder(8, 0, 8, 0));
 
         JLabel detail = new JLabel(bodyHtml());
+        detail.setForeground(content.getForeground());
         detail.setAlignmentX(LEFT_ALIGNMENT);
         body.add(detail);
         body.add(Box.createVerticalStrut(8));
@@ -151,17 +160,16 @@ public class BillingFailureDialog extends JDialog {
 
         JButton switchModel = new JButton("Switch model");
         switchModel.addActionListener(e -> {
-            result = Result.SWITCH_MODEL;
-            setVisible(false);
+            complete(Result.SWITCH_MODEL);
         });
+        decisionButtons.add(switchModel);
         buttons.add(switchModel);
 
         JButton openConsole = new JButton(consoleButtonLabel());
         openConsole.setEnabled(consoleUri != null);
         openConsole.addActionListener(e -> {
-            result = Result.OPEN_CONSOLE;
             if (consoleUri != null) {
-                boolean opened = browserOpener.open(consoleUri);
+                boolean opened = browserOpener != null && browserOpener.open(consoleUri);
                 if (!opened) {
                     JOptionPane.showMessageDialog(this,
                             "Open this URL manually:\n" + consoleUri,
@@ -169,15 +177,16 @@ public class BillingFailureDialog extends JDialog {
                             JOptionPane.INFORMATION_MESSAGE);
                 }
             }
-            setVisible(false);
+            complete(Result.OPEN_CONSOLE);
         });
+        decisionButtons.add(openConsole);
         buttons.add(openConsole);
 
         JButton close = new JButton("Close");
         close.addActionListener(e -> {
-            result = Result.CLOSE;
-            setVisible(false);
+            complete(Result.CLOSE);
         });
+        decisionButtons.add(close);
         buttons.add(close);
 
         getRootPane().setDefaultButton(close);
@@ -189,8 +198,37 @@ public class BillingFailureDialog extends JDialog {
     }
 
     public Result showAndAwait() {
-        setVisible(true);
-        return result;
+        try {
+            setVisible(true);
+            return result;
+        } finally {
+            dispose();
+        }
+    }
+
+    private void complete(Result selected) {
+        result = selected == null ? Result.CLOSE : selected;
+        dispose();
+    }
+
+    @Override
+    public void dispose() {
+        if (!resourcesReleased) {
+            resourcesReleased = true;
+            for (java.awt.event.WindowListener listener : getWindowListeners()) {
+                removeWindowListener(listener);
+            }
+            getRootPane().setDefaultButton(null);
+            for (JButton button : decisionButtons) {
+                for (java.awt.event.ActionListener listener : button.getActionListeners()) {
+                    button.removeActionListener(listener);
+                }
+            }
+            decisionButtons.clear();
+            browserOpener = null;
+        }
+        super.dispose();
+        if (getContentPane() != null) getContentPane().removeAll();
     }
 
     /** Test-only seam — set the result directly without showing the dialog. */

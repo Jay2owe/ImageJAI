@@ -68,9 +68,12 @@ public final class PostureBanner implements PostureController.Presenter {
 
                 JPanel body = new JPanel(new BorderLayout(0, 8));
                 body.setOpaque(false);
-                body.add(new JLabel("<html><b>Folder:</b> " + escape(display(folder))
-                        + "<br>This setting is remembered for this folder.</html>"),
-                        BorderLayout.NORTH);
+                body.setForeground(root.getForeground());
+                JLabel folderLabel = new JLabel("<html><b>Folder:</b> "
+                        + escape(display(folder))
+                        + "<br>This setting is remembered for this folder.</html>");
+                folderLabel.setForeground(root.getForeground());
+                body.add(folderLabel, BorderLayout.NORTH);
 
                 final Map<PrivacyPosture, JRadioButton> buttons =
                         new LinkedHashMap<PrivacyPosture, JRadioButton>();
@@ -82,6 +85,7 @@ public final class PostureBanner implements PostureController.Presenter {
                             + escape(posture.label()) + "</b> - "
                             + escape(posture.description()) + "</html>");
                     option.setOpaque(false);
+                    option.setForeground(root.getForeground());
                     option.setSelected(posture == defaultPosture);
                     group.add(option);
                     choices.add(option);
@@ -94,11 +98,13 @@ public final class PostureBanner implements PostureController.Presenter {
                         + "or the Browse Files dialog; do not paste filenames into "
                         + "the agent chat.</html>");
                 guidance.setFont(new Font(Font.SANS_SERIF, Font.PLAIN, 11));
+                guidance.setForeground(root.getForeground());
                 body.add(guidance, BorderLayout.SOUTH);
                 root.add(body, BorderLayout.CENTER);
 
                 JPanel actions = actionsPanel();
                 JButton apply = new JButton("Apply");
+                apply.setFocusPainted(true);
                 apply.addActionListener(e -> {
                     PrivacyPosture selected = selectedPosture(buttons, defaultPosture);
                     controller.requestPosture(selected, folder,
@@ -138,10 +144,12 @@ public final class PostureBanner implements PostureController.Presenter {
                         + "<br>ImageJAI is now using the stricter "
                         + escape(to.label()) + " Privacy Posture for this session.</html>");
                 message.setBorder(BorderFactory.createEmptyBorder(6, 0, 6, 0));
+                message.setForeground(root.getForeground());
                 root.add(message, BorderLayout.CENTER);
 
                 JPanel actions = actionsPanel();
                 JButton override = new JButton("Override (logged)");
+                override.setFocusPainted(true);
                 override.addActionListener(e -> {
                     String reason = JOptionPane.showInputDialog(dialog,
                             "Reason for overriding the folder Privacy Posture:",
@@ -162,6 +170,7 @@ public final class PostureBanner implements PostureController.Presenter {
                     dialog.dispose();
                 });
                 JButton ok = new JButton("OK");
+                ok.setFocusPainted(true);
                 ok.addActionListener(e -> dialog.dispose());
                 actions.add(override);
                 actions.add(ok);
@@ -183,10 +192,12 @@ public final class PostureBanner implements PostureController.Presenter {
                 final JDialog dialog = createDialog("Data Governance warning");
                 JPanel root = rootPanel();
                 root.add(title("Privacy Posture warning"), BorderLayout.NORTH);
-                root.add(new JLabel("<html>" + escape(message) + "</html>"),
-                        BorderLayout.CENTER);
+                JLabel warning = new JLabel("<html>" + escape(message) + "</html>");
+                warning.setForeground(root.getForeground());
+                root.add(warning, BorderLayout.CENTER);
                 JPanel actions = actionsPanel();
                 JButton ok = new JButton("OK");
+                ok.setFocusPainted(true);
                 ok.addActionListener(e -> dialog.dispose());
                 actions.add(ok);
                 root.add(actions, BorderLayout.SOUTH);
@@ -204,16 +215,21 @@ public final class PostureBanner implements PostureController.Presenter {
 
     private JPanel rootPanel() {
         JPanel root = new JPanel(new BorderLayout(0, 8));
+        Color accent = new Color(70, 130, 180);
+        Color background = ThemeColors.tintedSurface(accent);
         root.setBorder(BorderFactory.createCompoundBorder(
-                BorderFactory.createLineBorder(new Color(70, 130, 180)),
+                BorderFactory.createLineBorder(ThemeColors.focusColor(background)),
                 BorderFactory.createEmptyBorder(10, 12, 10, 12)));
-        root.setBackground(new Color(246, 250, 255));
+        root.setBackground(background);
+        root.setForeground(ThemeColors.textOn(background));
         return root;
     }
 
     private JLabel title(String text) {
         JLabel label = new JLabel(text);
         label.setFont(new Font(Font.SANS_SERIF, Font.BOLD, 14));
+        Color background = ThemeColors.tintedSurface(new Color(70, 130, 180));
+        label.setForeground(ThemeColors.textOn(background));
         return label;
     }
 
@@ -278,5 +294,13 @@ public final class PostureBanner implements PostureController.Presenter {
         return value.replace("&", "&amp;")
                 .replace("<", "&lt;")
                 .replace(">", "&gt;");
+    }
+
+    JPanel rootPanelForTest() {
+        return rootPanel();
+    }
+
+    JLabel titleForTest(String text) {
+        return title(text);
     }
 }

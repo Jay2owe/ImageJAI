@@ -1,5 +1,7 @@
 package imagejai.ui.picker;
 
+import imagejai.ui.ThemeColors;
+
 import javax.swing.BorderFactory;
 import javax.swing.Box;
 import javax.swing.BoxLayout;
@@ -38,6 +40,7 @@ public class TierChangeBanner extends JPanel {
         setLayout(new BoxLayout(this, BoxLayout.Y_AXIS));
         setOpaque(false);
         setBorder(BorderFactory.createEmptyBorder(0, 0, 6, 0));
+        getAccessibleContext().setAccessibleName("Model pricing and tier changes");
     }
 
     public void setDismissListener(DismissListener listener) {
@@ -84,16 +87,23 @@ public class TierChangeBanner extends JPanel {
         JPanel row = new JPanel(new BorderLayout(8, 0));
         row.setOpaque(true);
         row.setBackground(backgroundFor(n.severity));
+        row.setForeground(ThemeColors.textOn(row.getBackground()));
         row.setBorder(BorderFactory.createCompoundBorder(
                 BorderFactory.createMatteBorder(0, 3, 0, 0, accentFor(n.severity)),
                 BorderFactory.createEmptyBorder(4, 8, 4, 8)));
-        JLabel text = new JLabel("<html>" + escape(n.title) + "<br>"
-                + "<font color='#444444'>" + escape(n.body) + "</font></html>");
+        JLabel text = new JLabel("<html><b>" + escape(n.title) + "</b><br>"
+                + escape(n.body) + "</html>");
+        text.setForeground(row.getForeground());
         text.setFont(new Font(Font.SANS_SERIF, Font.PLAIN, 11));
         row.add(text, BorderLayout.CENTER);
 
         JButton dismiss = new JButton("Dismiss");
-        dismiss.setFocusable(false);
+        dismiss.setFocusable(true);
+        dismiss.setFocusPainted(true);
+        dismiss.setMnemonic(java.awt.event.KeyEvent.VK_D);
+        dismiss.getAccessibleContext().setAccessibleName(
+                "Dismiss notification: " + n.title);
+        dismiss.getAccessibleContext().setAccessibleDescription(n.body);
         dismiss.setMargin(new java.awt.Insets(2, 8, 2, 8));
         dismiss.addActionListener(e -> {
             notifications.remove(n);
@@ -108,13 +118,7 @@ public class TierChangeBanner extends JPanel {
     }
 
     private Color backgroundFor(MainNotificationCheck.Severity severity) {
-        if (severity == MainNotificationCheck.Severity.HIGH) {
-            return new Color(255, 240, 232);
-        }
-        if (severity == MainNotificationCheck.Severity.MEDIUM) {
-            return new Color(255, 250, 220);
-        }
-        return new Color(232, 240, 255);
+        return ThemeColors.tintedSurface(accentFor(severity));
     }
 
     private Color accentFor(MainNotificationCheck.Severity severity) {

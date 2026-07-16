@@ -1,5 +1,7 @@
 package imagejai.ui.installer;
 
+import imagejai.ui.ThemeColors;
+
 import javax.swing.BorderFactory;
 import javax.swing.JButton;
 import javax.swing.JLabel;
@@ -7,7 +9,6 @@ import javax.swing.JPanel;
 import javax.swing.border.EmptyBorder;
 import java.awt.BorderLayout;
 import java.awt.Color;
-import java.awt.Component;
 import java.awt.Dimension;
 import java.awt.FlowLayout;
 import java.awt.Font;
@@ -15,8 +16,6 @@ import java.awt.GridBagConstraints;
 import java.awt.GridBagLayout;
 import java.awt.Insets;
 import java.awt.Cursor;
-import java.awt.event.MouseAdapter;
-import java.awt.event.MouseEvent;
 
 /**
  * Single provider card in {@link MultiProviderPanel}. Renders the provider's
@@ -37,7 +36,9 @@ public class ProviderCard extends JPanel {
     }
 
     private final String providerKey;
-    private final JLabel statusLabel;
+    private final String displayName;
+    private final String description;
+    private final JButton statusButton;
     private final JLabel tierLabel;
     private final JButton actionButton;
     private final JLabel detailLabel;
@@ -55,9 +56,16 @@ public class ProviderCard extends JPanel {
                         CostTier tier) {
         super(new BorderLayout(6, 4));
         this.providerKey = providerKey;
+        this.displayName = displayName == null ? providerKey : displayName;
+        this.description = description == null ? "" : description;
         this.status = status == null ? Status.NEEDS_SETUP : status;
+        setOpaque(true);
+        setBackground(ThemeColors.panelBackground());
+        setForeground(ThemeColors.textOn(getBackground()));
+        getAccessibleContext().setAccessibleName(this.displayName + " provider settings");
         setBorder(BorderFactory.createCompoundBorder(
-                BorderFactory.createLineBorder(new Color(200, 200, 210)),
+                BorderFactory.createLineBorder(ThemeColors.mix(
+                        getBackground(), getForeground(), 0.30)),
                 new EmptyBorder(8, 10, 8, 10)));
 
         JPanel header = new JPanel(new GridBagLayout());
@@ -67,28 +75,32 @@ public class ProviderCard extends JPanel {
         c.anchor = GridBagConstraints.WEST;
 
         c.gridx = 0; c.gridy = 0;
-        statusLabel = new JLabel(symbolFor(this.status));
-        statusLabel.setFont(statusLabel.getFont().deriveFont(Font.BOLD, 14f));
-        statusLabel.setForeground(colorFor(this.status));
-        statusLabel.setCursor(Cursor.getPredefinedCursor(Cursor.HAND_CURSOR));
-        statusLabel.addMouseListener(new MouseAdapter() {
-            @Override
-            public void mouseClicked(MouseEvent e) {
-                if (statusClickListener != null) {
-                    statusClickListener.onStatusClicked(ProviderCard.this, ProviderCard.this.status);
-                }
+        statusButton = new JButton(symbolFor(this.status));
+        statusButton.setFont(statusButton.getFont().deriveFont(Font.BOLD, 14f));
+        statusButton.setForeground(statusColorFor(this.status));
+        statusButton.setContentAreaFilled(false);
+        statusButton.setFocusPainted(true);
+        statusButton.setFocusable(true);
+        statusButton.setMargin(new Insets(1, 5, 1, 5));
+        statusButton.setCursor(Cursor.getPredefinedCursor(Cursor.HAND_CURSOR));
+        statusButton.addActionListener(e -> {
+            if (statusClickListener != null) {
+                statusClickListener.onStatusClicked(ProviderCard.this, ProviderCard.this.status);
             }
         });
-        header.add(statusLabel, c);
+        updateStatusAccessibility();
+        header.add(statusButton, c);
 
         c.gridx = 1;
-        JLabel name = new JLabel(displayName);
+        JLabel name = new JLabel(this.displayName);
         name.setFont(name.getFont().deriveFont(Font.BOLD, 13f));
+        name.setForeground(getForeground());
         header.add(name, c);
 
         c.gridx = 2; c.weightx = 1.0; c.fill = GridBagConstraints.HORIZONTAL;
         tierLabel = new JLabel(tierHint(tier));
-        tierLabel.setForeground(new Color(120, 120, 130));
+        tierLabel.setForeground(ThemeColors.ensureContrast(getBackground(),
+                new Color(105, 105, 115), 4.5));
         tierLabel.setHorizontalAlignment(JLabel.RIGHT);
         header.add(tierLabel, c);
 
@@ -96,14 +108,18 @@ public class ProviderCard extends JPanel {
 
         JPanel body = new JPanel(new BorderLayout());
         body.setOpaque(false);
-        detailLabel = new JLabel(htmlDescription(description, this.status));
+        detailLabel = new JLabel(htmlDescription(this.description, this.status));
         detailLabel.setFont(detailLabel.getFont().deriveFont(Font.PLAIN, 12f));
+        detailLabel.setForeground(getForeground());
         body.add(detailLabel, BorderLayout.CENTER);
         add(body, BorderLayout.CENTER);
 
         JPanel actions = new JPanel(new FlowLayout(FlowLayout.RIGHT, 4, 0));
         actions.setOpaque(false);
         actionButton = new JButton(actionLabelFor(this.status));
+        actionButton.setFocusPainted(true);
+        actionButton.setFocusable(true);
+        updateActionAccessibility();
         actions.add(actionButton);
         add(actions, BorderLayout.SOUTH);
 
@@ -131,18 +147,20 @@ public class ProviderCard extends JPanel {
     /** Update status after a save or refresh. */
     public void updateStatus(Status status) {
         this.status = status == null ? Status.NEEDS_SETUP : status;
-        statusLabel.setText(symbolFor(this.status));
-        statusLabel.setForeground(colorFor(this.status));
+        statusButton.setText(symbolFor(this.status));
+        statusButton.setForeground(statusColorFor(this.status));
         actionButton.setText(actionLabelFor(this.status));
-        // Detail line keeps the user oriented after a status change.
-        Component[] components = getComponents();
-        if (components.length >= 2) {
-            detailLabel.setText(htmlDescription(detailLabel.getText(), this.status));
-        }
+        detailLabel.setText(htmlDescription(description, this.status));
+        updateStatusAccessibility();
+        updateActionAccessibility();
     }
 
     public JButton actionButton() {
         return actionButton;
+    }
+
+    public JButton statusButton() {
+        return statusButton;
     }
 
     private static String htmlDescription(String description, Status status) {
@@ -167,13 +185,36 @@ public class ProviderCard extends JPanel {
         }
     }
 
-    private static Color colorFor(Status status) {
+    private Color statusColorFor(Status status) {
+        Color preferred;
         switch (status) {
-            case READY: return new Color(50, 140, 80);
-            case UNAVAILABLE: return new Color(180, 50, 50);
+            case READY: preferred = new Color(35, 125, 65); break;
+            case UNAVAILABLE: preferred = new Color(180, 50, 50); break;
             case NEEDS_SETUP:
-            default: return new Color(180, 130, 30);
+            default: preferred = new Color(150, 105, 15); break;
         }
+        return ThemeColors.semanticText(getBackground(), preferred);
+    }
+
+    private void updateStatusAccessibility() {
+        statusButton.getAccessibleContext().setAccessibleName(
+                displayName + " status: " + statusText(status));
+        statusButton.getAccessibleContext().setAccessibleDescription(
+                "Open status details for " + displayName + ".");
+        statusButton.setToolTipText("Status: " + statusText(status));
+    }
+
+    private void updateActionAccessibility() {
+        actionButton.getAccessibleContext().setAccessibleName(
+                actionLabelFor(status).replace("…", "") + " for " + displayName);
+        actionButton.getAccessibleContext().setAccessibleDescription(
+                "Configure the " + displayName + " provider.");
+    }
+
+    private static String statusText(Status status) {
+        if (status == Status.READY) return "ready";
+        if (status == Status.UNAVAILABLE) return "unavailable";
+        return "needs setup";
     }
 
     private static String actionLabelFor(Status status) {

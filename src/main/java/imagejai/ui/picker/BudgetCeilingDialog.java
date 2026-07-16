@@ -1,5 +1,7 @@
 package imagejai.ui.picker;
 
+import imagejai.ui.ThemeColors;
+
 import javax.swing.BorderFactory;
 import javax.swing.Box;
 import javax.swing.BoxLayout;
@@ -12,7 +14,6 @@ import javax.swing.SpinnerNumberModel;
 import javax.swing.WindowConstants;
 import javax.swing.border.EmptyBorder;
 import java.awt.BorderLayout;
-import java.awt.Color;
 import java.awt.Dialog;
 import java.awt.Dimension;
 import java.awt.FlowLayout;
@@ -20,6 +21,8 @@ import java.awt.Font;
 import java.awt.Frame;
 import java.awt.event.WindowAdapter;
 import java.awt.event.WindowEvent;
+import java.util.ArrayList;
+import java.util.List;
 
 /**
  * Modal shown when {@link imagejai.engine.budget.BudgetCeilingTracker}
@@ -54,6 +57,9 @@ public class BudgetCeilingDialog extends JDialog {
     private final double currentCeilingUsd;
     private final boolean fallbackEstimate;
     private JSpinner ceilingSpinner;
+    private final List<JButton> decisionButtons = new ArrayList<JButton>();
+    private final WindowAdapter closeListener;
+    private boolean resourcesReleased;
     private Result result = Result.CLOSE;
     private double newCeilingUsd;
 
@@ -72,14 +78,14 @@ public class BudgetCeilingDialog extends JDialog {
         this.newCeilingUsd = this.currentCeilingUsd * 2.0;
         setModalityType(Dialog.ModalityType.DOCUMENT_MODAL);
         setDefaultCloseOperation(WindowConstants.DO_NOTHING_ON_CLOSE);
-        addWindowListener(new WindowAdapter() {
+        closeListener = new WindowAdapter() {
             @Override
             public void windowClosing(WindowEvent e) {
                 // Match FirstUseDialog: [×] never silently resumes the loop.
-                result = Result.CLOSE;
-                setVisible(false);
+                complete(Result.CLOSE);
             }
-        });
+        };
+        addWindowListener(closeListener);
         buildUi();
         pack();
         Dimension preferred = getPreferredSize();
@@ -90,12 +96,14 @@ public class BudgetCeilingDialog extends JDialog {
     private void buildUi() {
         JPanel content = new JPanel(new BorderLayout(8, 8));
         content.setBorder(new EmptyBorder(16, 18, 12, 18));
-        content.setBackground(Color.WHITE);
+        content.setBackground(ThemeColors.panelBackground());
+        content.setForeground(ThemeColors.textOn(content.getBackground()));
 
         JLabel headline = new JLabel(String.format(
                 "Budget ceiling reached: $%.2f of $%.2f.",
                 sessionCostUsd, currentCeilingUsd));
         headline.setFont(new Font(Font.SANS_SERIF, Font.BOLD, 13));
+        headline.setForeground(content.getForeground());
         content.add(headline, BorderLayout.NORTH);
 
         JPanel body = new JPanel();
@@ -104,6 +112,7 @@ public class BudgetCeilingDialog extends JDialog {
         body.setBorder(BorderFactory.createEmptyBorder(8, 0, 8, 0));
 
         JLabel detail = new JLabel(bodyHtml());
+        detail.setForeground(content.getForeground());
         detail.setAlignmentX(LEFT_ALIGNMENT);
         body.add(detail);
         body.add(Box.createVerticalStrut(10));
@@ -111,7 +120,9 @@ public class BudgetCeilingDialog extends JDialog {
         JPanel ceilingRow = new JPanel(new FlowLayout(FlowLayout.LEFT, 6, 0));
         ceilingRow.setOpaque(false);
         ceilingRow.setAlignmentX(LEFT_ALIGNMENT);
-        ceilingRow.add(new JLabel("New ceiling on resume:  $"));
+        JLabel ceilingLabel = new JLabel("New ceiling on resume:  $");
+        ceilingLabel.setForeground(content.getForeground());
+        ceilingRow.add(ceilingLabel);
         ceilingSpinner = new JSpinner(new SpinnerNumberModel(
                 this.newCeilingUsd, 0.01, 100.00, 0.25));
         ceilingSpinner.setPreferredSize(new Dimension(80, 22));
@@ -148,21 +159,20 @@ public class BudgetCeilingDialog extends JDialog {
 
         JButton switchFree = new JButton("Switch to a free model");
         switchFree.addActionListener(e -> {
-            result = Result.SWITCH_FREE;
-            setVisible(false);
+            complete(Result.SWITCH_FREE);
         });
+        decisionButtons.add(switchFree);
         buttons.add(switchFree);
 
         JButton close = new JButton("Close");
         close.addActionListener(e -> {
-            result = Result.CLOSE;
-            setVisible(false);
+            complete(Result.CLOSE);
         });
+        decisionButtons.add(close);
         buttons.add(close);
 
         JButton resume = new JButton("Resume");
         resume.addActionListener(e -> {
-            result = Result.RESUME;
             Object value = ceilingSpinner.getValue();
             if (value instanceof Number) {
                 double asked = ((Number) value).doubleValue();
@@ -175,8 +185,9 @@ public class BudgetCeilingDialog extends JDialog {
                     newCeilingUsd = currentCeilingUsd * 2.0;
                 }
             }
-            setVisible(false);
+            complete(Result.RESUME);
         });
+        decisionButtons.add(resume);
         buttons.add(resume);
 
         getRootPane().setDefaultButton(resume);
@@ -184,8 +195,37 @@ public class BudgetCeilingDialog extends JDialog {
     }
 
     public Result showAndAwait() {
-        setVisible(true);
-        return result;
+        try {
+            setVisible(true);
+            return result;
+        } finally {
+            dispose();
+        }
+    }
+
+    private void complete(Result selected) {
+        result = selected == null ? Result.CLOSE : selected;
+        dispose();
+    }
+
+    @Override
+    public void dispose() {
+        if (!resourcesReleased) {
+            resourcesReleased = true;
+            for (java.awt.event.WindowListener listener : getWindowListeners()) {
+                removeWindowListener(listener);
+            }
+            getRootPane().setDefaultButton(null);
+            for (JButton button : decisionButtons) {
+                for (java.awt.event.ActionListener listener : button.getActionListeners()) {
+                    button.removeActionListener(listener);
+                }
+            }
+            decisionButtons.clear();
+            ceilingSpinner = null;
+        }
+        super.dispose();
+        if (getContentPane() != null) getContentPane().removeAll();
     }
 
     /** Ceiling the user picked on the Resume path. Undefined if {@link #showAndAwait()} returned anything else. */

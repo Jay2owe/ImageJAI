@@ -1,6 +1,7 @@
 package imagejai.ui.picker;
 
 import imagejai.engine.picker.ModelEntry;
+import imagejai.ui.ThemeColors;
 
 import javax.swing.BorderFactory;
 import javax.swing.Box;
@@ -13,7 +14,6 @@ import javax.swing.JPanel;
 import javax.swing.WindowConstants;
 import javax.swing.border.EmptyBorder;
 import java.awt.BorderLayout;
-import java.awt.Color;
 import java.awt.Dialog;
 import java.awt.Dimension;
 import java.awt.FlowLayout;
@@ -21,6 +21,8 @@ import java.awt.Font;
 import java.awt.Frame;
 import java.awt.event.WindowAdapter;
 import java.awt.event.WindowEvent;
+import java.util.ArrayList;
+import java.util.List;
 
 /**
  * First-use-of-paid-or-uncurated-model dialog.
@@ -55,6 +57,10 @@ public class FirstUseDialog extends JDialog {
     private final String providerDisplay;
     private Result result = Result.CANCEL;
     private JCheckBox dontAskAgain;
+    private boolean dontAskAgainSelected;
+    private final List<JButton> decisionButtons = new ArrayList<JButton>();
+    private final WindowAdapter closeListener;
+    private boolean resourcesReleased;
 
     public FirstUseDialog(Frame owner, ModelEntry entry, Variant variant) {
         this(owner, entry, variant, providerDisplayName(entry));
@@ -69,15 +75,15 @@ public class FirstUseDialog extends JDialog {
                 : providerDisplay;
         setModalityType(Dialog.ModalityType.DOCUMENT_MODAL);
         setDefaultCloseOperation(WindowConstants.DO_NOTHING_ON_CLOSE);
-        addWindowListener(new WindowAdapter() {
+        closeListener = new WindowAdapter() {
             @Override
             public void windowClosing(WindowEvent e) {
                 // [×] is equivalent to "Use a free/curated model instead" — never
                 // silently launches per 06 §3.2.
-                result = Result.PICK_FREE;
-                setVisible(false);
+                complete(Result.PICK_FREE);
             }
-        });
+        };
+        addWindowListener(closeListener);
         buildUi();
         pack();
         Dimension preferred = getPreferredSize();
@@ -88,10 +94,12 @@ public class FirstUseDialog extends JDialog {
     private void buildUi() {
         JPanel content = new JPanel(new BorderLayout(8, 8));
         content.setBorder(new EmptyBorder(16, 18, 12, 18));
-        content.setBackground(Color.WHITE);
+        content.setBackground(ThemeColors.panelBackground());
+        content.setForeground(ThemeColors.textOn(content.getBackground()));
 
         JLabel headline = new JLabel(headlineFor(variant));
         headline.setFont(new Font(Font.SANS_SERIF, Font.BOLD, 13));
+        headline.setForeground(content.getForeground());
         content.add(headline, BorderLayout.NORTH);
 
         JPanel body = new JPanel();
@@ -100,12 +108,14 @@ public class FirstUseDialog extends JDialog {
         body.setBorder(BorderFactory.createEmptyBorder(8, 0, 8, 0));
 
         JLabel detail = new JLabel(bodyHtml());
+        detail.setForeground(content.getForeground());
         detail.setAlignmentX(LEFT_ALIGNMENT);
         body.add(detail);
         body.add(Box.createVerticalStrut(8));
 
         dontAskAgain = new JCheckBox(checkboxLabel());
         dontAskAgain.setOpaque(false);
+        dontAskAgain.setForeground(content.getForeground());
         dontAskAgain.setAlignmentX(LEFT_ALIGNMENT);
         body.add(dontAskAgain);
 
@@ -119,14 +129,14 @@ public class FirstUseDialog extends JDialog {
         buttons.setOpaque(false);
         JButton pickFree = new JButton(cancelButtonLabel());
         pickFree.addActionListener(e -> {
-            result = Result.PICK_FREE;
-            setVisible(false);
+            complete(Result.PICK_FREE);
         });
+        decisionButtons.add(pickFree);
         JButton cont = new JButton("Continue");
         cont.addActionListener(e -> {
-            result = Result.CONTINUE;
-            setVisible(false);
+            complete(Result.CONTINUE);
         });
+        decisionButtons.add(cont);
         buttons.add(pickFree);
         buttons.add(cont);
         getRootPane().setDefaultButton(cont);
@@ -240,13 +250,43 @@ public class FirstUseDialog extends JDialog {
     }
 
     public Result showAndAwait() {
-        setVisible(true);
-        return result;
+        try {
+            setVisible(true);
+            return result;
+        } finally {
+            dispose();
+        }
     }
 
     /** Whether the user ticked the "don't ask again" box on close. */
     public boolean dontAskAgainChecked() {
-        return dontAskAgain != null && dontAskAgain.isSelected();
+        return dontAskAgain != null ? dontAskAgain.isSelected() : dontAskAgainSelected;
+    }
+
+    private void complete(Result selected) {
+        result = selected == null ? Result.CANCEL : selected;
+        dispose();
+    }
+
+    @Override
+    public void dispose() {
+        if (!resourcesReleased) {
+            resourcesReleased = true;
+            dontAskAgainSelected = dontAskAgain != null && dontAskAgain.isSelected();
+            for (java.awt.event.WindowListener listener : getWindowListeners()) {
+                removeWindowListener(listener);
+            }
+            getRootPane().setDefaultButton(null);
+            for (JButton button : decisionButtons) {
+                for (java.awt.event.ActionListener listener : button.getActionListeners()) {
+                    button.removeActionListener(listener);
+                }
+            }
+            decisionButtons.clear();
+            dontAskAgain = null;
+        }
+        super.dispose();
+        if (getContentPane() != null) getContentPane().removeAll();
     }
 
     /** Test-only seam — set the result directly without showing the dialog. */
@@ -258,6 +298,8 @@ public class FirstUseDialog extends JDialog {
     void setDontAskAgainForTest(boolean checked) {
         if (dontAskAgain != null) {
             dontAskAgain.setSelected(checked);
+        } else {
+            dontAskAgainSelected = checked;
         }
     }
 
