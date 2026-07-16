@@ -393,8 +393,16 @@ state.
 - `histogram_summary` — mean, median, skew, percentiles, shape hint.
 - `quick_object_count(threshold)` — connected-component count.
 - `count_bright_regions` — auto-threshold + count.
-- `get_pixels_array(x, y, w, h)` — raw float32 numpy, capped at
-  4 Mpx.
+- `get_pixels_array(slice, region)` — up to 1,024 raw float32 values;
+  `slice` is 1-based Z (or `0` for the current Z) and `region` is
+  `[x, y, width, height]` (or `[]` for the whole image). Values are
+  returned under `pixels` beside their plane metadata.
+
+Every pixel-analysis result identifies its source `channel`, Z
+`sliceStart`/`sliceAxis`, and `frame`, together with total
+`channels`, `slices`, and `frames`. Keep those coordinates with any
+reported measurement; if the tool rejects missing or inconsistent
+axis metadata, re-read image state instead of guessing the plane.
 
 ## Emitting labelled numbers from a macro
 
@@ -423,7 +431,9 @@ Instead, after every step that changes the image, call:
 
 The numbers replace the visual sanity check. Trust the numbers;
 do not narrate what the image "would look like" — describe what
-the stats say.
+the stats say. Pixel results also name the source channel, Z slice,
+and frame; include that attribution when the image has more than one
+channel, slice, or frame.
 
 ---
 

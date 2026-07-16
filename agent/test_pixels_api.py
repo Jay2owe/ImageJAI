@@ -26,6 +26,12 @@ def pixel_response(values, width, height, slice_count=1, **overrides):
         "sliceStart": 1,
         "sliceEnd": slice_count,
         "sliceCount": slice_count,
+        "sliceAxis": "Z",
+        "channel": 2,
+        "frame": 3,
+        "channels": 4,
+        "slices": max(slice_count, 7),
+        "frames": 5,
         "nPixels": len(values),
         "type": "float32",
     }
@@ -139,6 +145,13 @@ def test_get_pixels_builds_payload_and_decodes_2d(monkeypatch):
         "sliceStart": 7,
         "sliceEnd": 7,
         "sliceCount": 1,
+        "sliceAxis": "Z",
+        "channel": 2,
+        "frame": 3,
+        "channels": 4,
+        "slices": 7,
+        "frames": 5,
+        "nPixels": 4,
         "type": "float32",
     }
 
@@ -178,6 +191,20 @@ def test_get_pixels_rejects_structured_errors_and_malformed_payloads(monkeypatch
     with pytest.raises(RuntimeError, match="inconsistent dimensions"):
         pixels.get_pixels()
 
+    monkeypatch.setattr(
+        pixels,
+        "send",
+        lambda cmd: pixel_response([1.0], width=1, height=1, sliceAxis="T"),
+    )
+    with pytest.raises(RuntimeError, match="inconsistent C/Z/T metadata"):
+        pixels.get_pixels()
+
+    missing_axis = pixel_response([1.0], width=1, height=1)
+    del missing_axis["result"]["channel"]
+    monkeypatch.setattr(pixels, "send", lambda cmd: missing_axis)
+    with pytest.raises(RuntimeError, match="missing or malformed C/Z/T metadata"):
+        pixels.get_pixels()
+
 
 def test_compute_stats_even_median_empty_and_nonfinite_policy():
     assert pixels.compute_stats([[1.0, 2.0], [3.0, 4.0]])["median"] == 2.5
@@ -209,6 +236,12 @@ def test_large_pixel_response_uses_one_compact_float32_backing_buffer(monkeypatc
             "sliceStart": 1,
             "sliceEnd": 1,
             "sliceCount": 1,
+            "sliceAxis": "Z",
+            "channel": 1,
+            "frame": 1,
+            "channels": 1,
+            "slices": 1,
+            "frames": 1,
             "nPixels": width * height,
             "type": "float32",
         },

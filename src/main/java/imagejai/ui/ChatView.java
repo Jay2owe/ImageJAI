@@ -24,10 +24,13 @@ import javax.swing.event.HyperlinkListener;
 import javax.swing.text.html.HTMLDocument;
 import java.awt.*;
 import java.awt.event.*;
+import java.lang.reflect.InvocationTargetException;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.ArrayDeque;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.function.Consumer;
 import java.util.concurrent.atomic.AtomicLong;
@@ -60,6 +63,8 @@ public class ChatView extends JPanel implements ChatPanelController, ChatSurface
     public static final int MAX_PENDING_TRANSCRIPT_APPENDS = 128;
     public static final int MAX_CONFIRM_OPTIONS = 16;
     public static final int MAX_CONFIRM_OPTION_CHARS = 256;
+    public static final int MAX_PENDING_CONFIRMATIONS = 32;
+    public static final int MAX_VISIBLE_CONFIRMATIONS = 32;
     private static final int MAX_IMAGE_TITLE_CHARS = 1024;
 
     private static final ThreadPoolExecutor AUTOCOMPLETE_EXECUTOR =
@@ -105,6 +110,10 @@ public class ChatView extends JPanel implements ChatPanelController, ChatSurface
     private final AtomicLong localConversationGeneration = new AtomicLong();
     private final AtomicLong autocompleteGeneration = new AtomicLong();
     private final AtomicBoolean localAssistantBusy = new AtomicBoolean(false);
+    private final AtomicLong localConfirmationCounter = new AtomicLong();
+    private final Object confirmationLock = new Object();
+    private final Map<String, PendingConfirmation> pendingConfirmations =
+            new LinkedHashMap<String, PendingConfirmation>();
     private final ThreadPoolExecutor localAssistantExecutor =
             new ThreadPoolExecutor(
                     1, 1, 0L, TimeUnit.MILLISECONDS,
@@ -134,6 +143,39 @@ public class ChatView extends JPanel implements ChatPanelController, ChatSurface
     private JLabel toastLabel;
     private Timer toastTimer;
     private JPanel confirmHost;
+
+    private final class PendingConfirmation {
+        final String id;
+        final Consumer<String> onChoice;
+        final AtomicBoolean terminal = new AtomicBoolean(false);
+        volatile JPanel row;
+
+        PendingConfirmation(String id, Consumer<String> onChoice) {
+            this.id = id;
+            this.onChoice = onChoice;
+        }
+
+        boolean resolve(String choice) {
+            if (!terminal.compareAndSet(false, true)) return false;
+            removePendingConfirmation(this);
+            if (row != null) disableComponentTree(row);
+            if (onChoice != null) {
+                try {
+                    onChoice.accept(choice);
+                } catch (Throwable failure) {
+                    IJ.log("[ImageJAI-GUI] confirm onChoice threw: "
+                            + failure.getMessage());
+                }
+            }
+            return true;
+        }
+
+        boolean cancel() {
+            if (!terminal.compareAndSet(false, true)) return false;
+            removePendingConfirmation(this);
+            return true;
+        }
+    }
 
     public ChatView(Settings settings) {
         this(settings, new MutationCoordinator());
@@ -199,8 +241,8 @@ public class ChatView extends JPanel implements ChatPanelController, ChatSurface
 
         JPanel inputPanel = createInputPanel();
 
-        // Phase 7: confirm host sits above the input area; holds the most
-        // recent confirm prompt's button row. Hidden until used.
+        // Phase 7: confirm host sits above the input area and holds a bounded
+        // set of ID-keyed prompt rows. Hidden until used.
         confirmHost = new JPanel();
         confirmHost.setOpaque(false);
         confirmHost.setLayout(new BoxLayout(confirmHost, BoxLayout.Y_AXIS));
@@ -332,6 +374,29 @@ public class ChatView extends JPanel implements ChatPanelController, ChatSurface
         });
     }
 
+    @Override
+    public void removeNotify() {
+        invalidateAllConfirmations();
+        Runnable clearConfirmationUi = new Runnable() {
+            @Override public void run() {
+                if (confirmHost != null) {
+                    disableComponentTree(confirmHost);
+                    confirmHost.removeAll();
+                    confirmHost.setVisible(false);
+                    confirmHost.revalidate();
+                    confirmHost.repaint();
+                }
+            }
+        };
+        // Container.removeNotify may hold AWT's tree lock even when a legacy
+        // caller invokes it off the EDT. Waiting for the EDT here would
+        // deadlock. Callback state is already invalidated above; queue only
+        // the Swing cleanup in that exceptional off-EDT lifecycle path.
+        if (SwingUtilities.isEventDispatchThread()) clearConfirmationUi.run();
+        else SwingUtilities.invokeLater(clearConfirmationUi);
+        super.removeNotify();
+    }
+
     /**
      * Append raw HTML content to the chat (for image previews, etc.).
      */
@@ -435,6 +500,7 @@ public class ChatView extends JPanel implements ChatPanelController, ChatSurface
     public void clearConversation() {
         localConversationGeneration.incrementAndGet();
         localAssistant.clearConversation();
+        invalidateAllConfirmations();
         for (Runnable listener
                 : new ArrayList<Runnable>(conversationClearListeners)) {
             try {
@@ -450,8 +516,11 @@ public class ChatView extends JPanel implements ChatPanelController, ChatSurface
                 resetTranscriptAndHtml();
                 clarificationCandidates.clear();
                 if (confirmHost != null) {
+                    disableComponentTree(confirmHost);
                     confirmHost.removeAll();
                     confirmHost.setVisible(false);
+                    confirmHost.revalidate();
+                    confirmHost.repaint();
                 }
                 if (inputArea != null) inputArea.setText("");
                 clearAutocompleteChips();
@@ -679,29 +748,44 @@ public class ChatView extends JPanel implements ChatPanelController, ChatSurface
     }
 
     /**
-     * Append a confirm prompt and a button row in the chat panel. Only the
-     * first click fires {@code onChoice}; subsequent clicks are ignored and
-     * the row is left visibly disabled with the chosen option as label.
+     * Append an ID-keyed confirm prompt. Admission is recorded before Swing
+     * rendering is queued, so a concurrent timeout can invalidate the prompt
+     * even when the event-dispatch thread is blocked.
      */
     @Override
-    public void confirm(final String prompt, final List<String> options,
-                        final Consumer<String> onChoice) {
-        if (options == null || options.isEmpty()) {
-            IJ.log("[ImageJAI-GUI] confirm: no options provided");
-            return;
+    public boolean confirm(final String confirmationId, final String prompt,
+                           final List<String> options,
+                           final Consumer<String> onChoice) {
+        if (confirmationId == null || confirmationId.trim().isEmpty()
+                || options == null || options.isEmpty()) {
+            IJ.log("[ImageJAI-GUI] confirm: id and options are required");
+            return false;
         }
         final String safePrompt = boundedDisplayText(prompt);
         final List<String> safeOptions = boundedConfirmOptions(options);
+        if (safeOptions.isEmpty()) return false;
+
+        final PendingConfirmation pending =
+                new PendingConfirmation(confirmationId, onChoice);
+        synchronized (confirmationLock) {
+            if (pendingConfirmations.containsKey(confirmationId)
+                    || pendingConfirmations.size() >= MAX_PENDING_CONFIRMATIONS) {
+                return false;
+            }
+            pendingConfirmations.put(confirmationId, pending);
+        }
+
         boolean admitted = enqueueTranscriptAppend(new Runnable() {
             @Override
             public void run() {
+                if (pending.terminal.get()) return;
                 if (!isPanelLive()) {
-                    IJ.log("[ImageJAI-GUI] confirm skipped (panel not visible): " + safePrompt);
-                    if (onChoice != null) onChoice.accept(null);
+                    IJ.log("[ImageJAI-GUI] confirm skipped (panel not visible): "
+                            + safePrompt);
+                    pending.cancel();
                     return;
                 }
 
-                // Append the prompt text as an agent-prefixed bubble.
                 try {
                     String html = "<div style='"
                             + "background:#2a2a32;"
@@ -714,22 +798,66 @@ public class ChatView extends JPanel implements ChatPanelController, ChatSurface
                             + escapeHtml(safePrompt).replace("\n", "<br>")
                             + "</div></div>";
                     appendTranscriptHtmlNow(html);
-                } catch (Exception ignore) {}
+                } catch (Exception ignore) { }
 
-                populateConfirmControls(safeOptions, onChoice);
+                if (!pending.terminal.get()) {
+                    populateConfirmControls(pending, safeOptions);
+                }
             }
         });
-        if (!admitted && onChoice != null) {
-            try { onChoice.accept(null); } catch (Throwable ignored) { }
-        }
+        if (!admitted) pending.cancel();
+        return admitted;
     }
 
-    private void populateConfirmControls(final List<String> options,
-                                         final Consumer<String> onChoice) {
-        confirmHost.removeAll();
+    /** Compatibility overload for local callers that do not cancel by ID. */
+    public void confirm(final String prompt, final List<String> options,
+                        final Consumer<String> onChoice) {
+        confirm("local-confirm-" + localConfirmationCounter.incrementAndGet(),
+                prompt, options, onChoice);
+    }
+
+    @Override
+    public boolean cancelConfirmation(String confirmationId) {
+        if (confirmationId == null) return false;
+        final PendingConfirmation pending;
+        synchronized (confirmationLock) {
+            pending = pendingConfirmations.get(confirmationId);
+        }
+        if (pending == null || !pending.cancel()) return false;
+
+        runOnEdtAndWait(new Runnable() {
+            @Override public void run() {
+                removeConfirmationRow(pending);
+            }
+        });
+        return true;
+    }
+
+    private void populateConfirmControls(final PendingConfirmation pending,
+                                         final List<String> options) {
+        if (!SwingUtilities.isEventDispatchThread()) {
+            throw new IllegalStateException("confirmation controls require the EDT");
+        }
+        if (pending.terminal.get()) return;
+
+        while (confirmHost.getComponentCount() >= MAX_VISIBLE_CONFIRMATIONS) {
+            Component oldest = oldestResolvedConfirmationRow();
+            if (oldest == null) oldest = confirmHost.getComponent(0);
+            if (oldest instanceof JComponent) {
+                Object value = ((JComponent) oldest).getClientProperty(
+                        "imagejai.confirmation");
+                if (value instanceof ChatView.PendingConfirmation) {
+                    ((PendingConfirmation) value).cancel();
+                }
+            }
+            disableComponentTree(oldest);
+            confirmHost.remove(oldest);
+        }
+
         final JPanel row = new JPanel(new FlowLayout(FlowLayout.LEFT, 6, 0));
         row.setOpaque(false);
-        final boolean[] resolved = new boolean[]{false};
+        row.putClientProperty("imagejai.confirmation", pending);
+        pending.row = row;
         final List<JButton> buttons = new ArrayList<JButton>();
         for (final String opt : options) {
             final JButton btn = new JButton(opt);
@@ -743,22 +871,19 @@ public class ChatView extends JPanel implements ChatPanelController, ChatSurface
             btn.setCursor(Cursor.getPredefinedCursor(Cursor.HAND_CURSOR));
             btn.addActionListener(new ActionListener() {
                 @Override
-                public void actionPerformed(ActionEvent e) {
-                    if (resolved[0]) return;
-                    resolved[0] = true;
-                    for (JButton b : buttons) {
-                        b.setEnabled(false);
-                    }
-                    btn.setText(opt + "  \u2713");
-                    if (onChoice != null) {
-                        try { onChoice.accept(opt); } catch (Throwable t) {
-                            IJ.log("[ImageJAI-GUI] confirm onChoice threw: " + t.getMessage());
-                        }
+                public void actionPerformed(ActionEvent event) {
+                    if (pending.resolve(opt)) {
+                        for (JButton button : buttons) button.setEnabled(false);
+                        btn.setText(opt + "  \u2713");
                     }
                 }
             });
             buttons.add(btn);
             row.add(btn);
+        }
+        if (pending.terminal.get()) {
+            disableComponentTree(row);
+            return;
         }
         confirmHost.add(row);
         confirmHost.setVisible(true);
@@ -766,9 +891,82 @@ public class ChatView extends JPanel implements ChatPanelController, ChatSurface
         confirmHost.repaint();
     }
 
+    private Component oldestResolvedConfirmationRow() {
+        for (Component component : confirmHost.getComponents()) {
+            if (!(component instanceof JComponent)) continue;
+            Object value = ((JComponent) component).getClientProperty(
+                    "imagejai.confirmation");
+            if (value instanceof ChatView.PendingConfirmation
+                    && ((PendingConfirmation) value).terminal.get()) {
+                return component;
+            }
+        }
+        return null;
+    }
+
+    private void removePendingConfirmation(PendingConfirmation pending) {
+        synchronized (confirmationLock) {
+            if (pendingConfirmations.get(pending.id) == pending) {
+                pendingConfirmations.remove(pending.id);
+            }
+        }
+    }
+
+    private void removeConfirmationRow(PendingConfirmation pending) {
+        if (!SwingUtilities.isEventDispatchThread()) {
+            throw new IllegalStateException("confirmation cleanup requires the EDT");
+        }
+        JPanel row = pending.row;
+        if (row != null && row.getParent() == confirmHost) {
+            disableComponentTree(row);
+            confirmHost.remove(row);
+        }
+        if (confirmHost.getComponentCount() == 0) confirmHost.setVisible(false);
+        confirmHost.revalidate();
+        confirmHost.repaint();
+    }
+
+    private void invalidateAllConfirmations() {
+        List<PendingConfirmation> snapshot;
+        synchronized (confirmationLock) {
+            snapshot = new ArrayList<PendingConfirmation>(pendingConfirmations.values());
+            pendingConfirmations.clear();
+        }
+        for (PendingConfirmation pending : snapshot) {
+            pending.terminal.compareAndSet(false, true);
+        }
+    }
+
+    private static void disableComponentTree(Component component) {
+        if (component == null) return;
+        component.setEnabled(false);
+        if (component instanceof Container) {
+            for (Component child : ((Container) component).getComponents()) {
+                disableComponentTree(child);
+            }
+        }
+    }
+
+    private static void runOnEdtAndWait(Runnable action) {
+        if (SwingUtilities.isEventDispatchThread()) {
+            action.run();
+            return;
+        }
+        try {
+            SwingUtilities.invokeAndWait(action);
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException("interrupted during Swing cleanup", interrupted);
+        } catch (InvocationTargetException failure) {
+            Throwable cause = failure.getCause();
+            if (cause instanceof RuntimeException) throw (RuntimeException) cause;
+            throw new IllegalStateException("Swing cleanup failed", cause);
+        }
+    }
+
     // Whether the panel can usefully render — used to fall back to IJ.log
     // when the plugin window isn't open (TCP-only mode).
-    private boolean isPanelLive() {
+    boolean isPanelLive() {
         return messageArea != null && isDisplayable();
     }
 
@@ -1319,6 +1517,12 @@ public class ChatView extends JPanel implements ChatPanelController, ChatSurface
         return confirmHost == null ? 0 : confirmHost.getComponentCount();
     }
 
+    int activeConfirmationCountForTest() {
+        synchronized (confirmationLock) {
+            return pendingConfirmations.size();
+        }
+    }
+
     LocalAssistant localAssistantForTest() {
         return localAssistant;
     }
@@ -1357,7 +1561,9 @@ public class ChatView extends JPanel implements ChatPanelController, ChatSurface
     }
 
     void populateConfirmControlsForTest(List<String> options, Consumer<String> onChoice) {
-        populateConfirmControls(options, onChoice);
+        populateConfirmControls(new PendingConfirmation(
+                "test-confirm-" + localConfirmationCounter.incrementAndGet(), onChoice),
+                boundedConfirmOptions(options));
     }
 
 }

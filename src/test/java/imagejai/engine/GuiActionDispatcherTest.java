@@ -10,7 +10,9 @@ import javax.swing.JPanel;
 import javax.swing.SwingUtilities;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -29,9 +31,35 @@ public class GuiActionDispatcherTest {
         @Override public void showMarkdown(String content) { }
         @Override public void highlightRoi(String imageTitle, int[] roiBounds) { }
         @Override public void focusImage(String imageTitle) { }
-        @Override public void confirm(String prompt, List<String> options,
-                                      Consumer<String> onChoice) {
+        @Override public boolean confirm(String id, String prompt,
+                                         List<String> options,
+                                         Consumer<String> onChoice) {
             onChoice.accept(options.get(0));
+            return true;
+        }
+        @Override public boolean cancelConfirmation(String id) { return false; }
+    }
+
+    private static final class DelayedConfirmController
+            implements ChatPanelController {
+        final Map<String, Consumer<String>> callbacks =
+                new LinkedHashMap<String, Consumer<String>>();
+        final List<String> sequence = new ArrayList<String>();
+
+        @Override public void inlineImage(Path path) { }
+        @Override public void toast(String message, String level) { }
+        @Override public void showMarkdown(String content) { }
+        @Override public void highlightRoi(String imageTitle, int[] roiBounds) { }
+        @Override public void focusImage(String imageTitle) { }
+        @Override public boolean confirm(String id, String prompt,
+                                         List<String> options,
+                                         Consumer<String> onChoice) {
+            callbacks.put(id, onChoice);
+            return true;
+        }
+        @Override public boolean cancelConfirmation(String id) {
+            sequence.add("cancel:" + id);
+            return callbacks.remove(id) != null;
         }
     }
 
@@ -87,6 +115,82 @@ public class GuiActionDispatcherTest {
         JsonObject data = frames.get(0).getAsJsonObject("data");
         assertEquals("confirm-timeout_1", data.get("id").getAsString());
         assertTrue(data.get("cancelled").getAsBoolean());
+    }
+
+    @Test
+    public void cancellationInvalidatesCallbackBeforePublishingExactlyOnce() {
+        EventBus bus = new EventBus(() -> 1L);
+        List<JsonObject> frames = new ArrayList<JsonObject>();
+        DelayedConfirmController controller = new DelayedConfirmController();
+        bus.subscribe("gui_action.confirm.resolved", frame -> {
+            controller.sequence.add("publish");
+            frames.add(frame);
+        });
+        GuiActionDispatcher dispatcher = new GuiActionDispatcher(controller, bus);
+        dispatcher.dispatch(confirmationRequest("cancel-me"));
+        Consumer<String> late = controller.callbacks.get("cancel-me");
+
+        JsonObject cancel = new JsonObject();
+        cancel.addProperty("type", "confirm_cancel");
+        cancel.addProperty("id", "cancel-me");
+        JsonObject first = dispatcher.dispatch(cancel);
+        JsonObject second = dispatcher.dispatch(cancel);
+        late.accept("Yes");
+
+        assertTrue(first.get("cancelled").getAsBoolean());
+        assertFalse(second.get("cancelled").getAsBoolean());
+        assertEquals(1, frames.size());
+        assertEquals("cancel:cancel-me", controller.sequence.get(0));
+        assertEquals("publish", controller.sequence.get(1));
+        assertFalse(frames.get(0).getAsJsonObject("data").has("choice"));
+    }
+
+    @Test
+    public void cancellingOldIdDoesNotAffectNewerPrompt() {
+        EventBus bus = new EventBus(() -> 1L);
+        List<JsonObject> frames = new ArrayList<JsonObject>();
+        DelayedConfirmController controller = new DelayedConfirmController();
+        bus.subscribe("gui_action.confirm.resolved", frames::add);
+        GuiActionDispatcher dispatcher = new GuiActionDispatcher(controller, bus);
+        dispatcher.dispatch(confirmationRequest("old-id"));
+        dispatcher.dispatch(confirmationRequest("new-id"));
+
+        JsonObject cancel = new JsonObject();
+        cancel.addProperty("type", "confirm_cancel");
+        cancel.addProperty("id", "old-id");
+        dispatcher.dispatch(cancel);
+        controller.callbacks.get("new-id").accept("No");
+
+        assertEquals(2, frames.size());
+        assertEquals("old-id", frames.get(0).getAsJsonObject("data")
+                .get("id").getAsString());
+        assertTrue(frames.get(0).getAsJsonObject("data")
+                .get("cancelled").getAsBoolean());
+        assertEquals("new-id", frames.get(1).getAsJsonObject("data")
+                .get("id").getAsString());
+        assertEquals("No", frames.get(1).getAsJsonObject("data")
+                .get("choice").getAsString());
+    }
+
+    @Test
+    public void completedIdCannotBeReusedOrCancelledTwice() {
+        EventBus bus = new EventBus(() -> 1L);
+        List<JsonObject> frames = new ArrayList<JsonObject>();
+        bus.subscribe("gui_action.confirm.resolved", frames::add);
+        GuiActionDispatcher dispatcher = new GuiActionDispatcher(
+                new ImmediateConfirmController(), bus);
+
+        JsonObject first = dispatcher.dispatch(confirmationRequest("one-shot"));
+        JsonObject reused = dispatcher.dispatch(confirmationRequest("one-shot"));
+        JsonObject cancel = new JsonObject();
+        cancel.addProperty("type", "confirm_cancel");
+        cancel.addProperty("id", "one-shot");
+        JsonObject cancelled = dispatcher.dispatch(cancel);
+
+        assertTrue(first.get("ok").getAsBoolean());
+        assertFalse(reused.get("ok").getAsBoolean());
+        assertFalse(cancelled.get("cancelled").getAsBoolean());
+        assertEquals(1, frames.size());
     }
 
     @Test

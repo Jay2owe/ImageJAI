@@ -603,11 +603,15 @@ def imagej_command(cmd, host=HOST, port=PORT, timeout=TIMEOUT):
                     "cached": True,
                 }
             # Never resolve an explicit/stale hash with unrelated local data.
-            # Re-request once without conditional framing and then store only
-            # a full response. A broken peer that again says unchanged is
-            # surfaced as-is instead of recursing forever.
+            # Re-request once without conditional framing and bypass the
+            # server's separate per-session response-dedup cache. Removing
+            # only if_none_match is insufficient: that cache can otherwise
+            # return another short-form unchanged response. A broken peer
+            # that ignores force and again says unchanged is surfaced as-is
+            # instead of recursing forever.
             retry_cmd = dict(cmd)
             retry_cmd.pop("if_none_match", None)
+            retry_cmd["force"] = True
             resp = _session_for(host, port).request(retry_cmd, timeout=timeout)
             if not (isinstance(resp, dict) and resp.get("ok")):
                 return resp
@@ -870,15 +874,19 @@ class ImageJSession:
 
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             effective_read_timeout = read_timeout
+            deadline_limited_timeout = False
             if deadline is not None:
                 remaining = deadline - _time.monotonic()
                 if remaining <= 0:
                     return
+                deadline_limited_timeout = (
+                    read_timeout is None or remaining <= read_timeout)
                 effective_read_timeout = (
                     remaining if read_timeout is None
                     else min(read_timeout, remaining))
             sock.settimeout(effective_read_timeout)
             saw_protocol_error = False
+            transport_error = None
             try:
                 sock.connect((self.host, self.port))
                 sock.sendall((json.dumps(request) + "\n").encode("utf-8"))
@@ -888,6 +896,11 @@ class ImageJSession:
                     remaining = MAX_EVENT_FRAME_BYTES - (len(buf) - frame_start)
                     chunk = sock.recv(min(8192, remaining + 1))
                     if not chunk:
+                        if (deadline is not None
+                                and _time.monotonic() >= deadline):
+                            return
+                        transport_error = ConnectionError(
+                            "ImageJAI event stream closed unexpectedly")
                         break
                     buf.extend(chunk)
                     while True:
@@ -925,6 +938,9 @@ class ImageJSession:
                             remaining = deadline - _time.monotonic()
                             if remaining <= 0:
                                 return
+                            deadline_limited_timeout = (
+                                read_timeout is None
+                                or remaining <= read_timeout)
                             sock.settimeout(
                                 remaining if read_timeout is None
                                 else min(read_timeout, remaining))
@@ -936,8 +952,23 @@ class ImageJSession:
                                     if self._session_id == session_id:
                                         self._clear_locked()
                             return
-            except (socket.error, OSError, ConnectionError):
-                pass
+            except socket.timeout as exc:
+                # A timeout imposed by the caller's absolute deadline is
+                # normal stream exhaustion. A shorter independent read
+                # timeout is a transport failure (or a reconnect trigger).
+                if (deadline is not None
+                        and (deadline_limited_timeout
+                             or _time.monotonic() >= deadline)):
+                    return
+                transport_error = ConnectionError(
+                    "ImageJAI event stream timed out unexpectedly: {}".format(
+                        exc))
+            except OSError as exc:
+                if (deadline is not None
+                        and _time.monotonic() >= deadline):
+                    return
+                transport_error = ConnectionError(
+                    "ImageJAI event stream transport failed: {}".format(exc))
             finally:
                 try:
                     # An abortive close makes the server's next queued write
@@ -957,7 +988,14 @@ class ImageJSession:
                 except Exception:
                     pass
             if saw_protocol_error or not reconnect:
+                if transport_error is not None:
+                    raise transport_error
                 return
+            if deadline is not None:
+                remaining = deadline - _time.monotonic()
+                if remaining <= 0:
+                    return
+                reconnect_delay = min(reconnect_delay, remaining)
             try:
                 _time.sleep(reconnect_delay)
             except KeyboardInterrupt:

@@ -121,7 +121,11 @@ def test_tools_and_events_share_one_strict_authenticated_session(monkeypatch):
     monkeypatch.setattr(events, "_handle_frame", seen_frames.append)
 
     state = registry.send("get_state")
-    events._stream_once(["image.*"])
+    # The scripted peer closes immediately after its frames. Early EOF is now
+    # an explicit transport-loss signal so the production subscriber loop can
+    # reconnect instead of mistaking it for a clean deadline expiry.
+    with pytest.raises(ConnectionError, match="event stream closed unexpectedly"):
+        events._stream_once(["image.*"])
     info = registry.send("get_image_info")
     server.finish()
 

@@ -84,6 +84,58 @@ def _error_message(resp):
     return str(error)
 
 
+def _pixel_metadata(result, width, height, slice_count, pixel_count):
+    """Validate and preserve the server's geometry and C/Z/T attribution."""
+    try:
+        x = int(result["x"])
+        y = int(result["y"])
+        slice_start = int(result["sliceStart"])
+        slice_end = int(result["sliceEnd"])
+        slice_axis = str(result["sliceAxis"])
+        channel = int(result["channel"])
+        frame = int(result["frame"])
+        channels = int(result["channels"])
+        slices = int(result["slices"])
+        frames = int(result["frames"])
+        image_type = str(result["type"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise RuntimeError(
+            "get_pixels failed: missing or malformed C/Z/T metadata"
+        ) from exc
+
+    if (
+        x < 0
+        or y < 0
+        or slice_axis != "Z"
+        or channels <= 0
+        or slices <= 0
+        or frames <= 0
+        or not 1 <= channel <= channels
+        or not 1 <= frame <= frames
+        or not 1 <= slice_start <= slice_end <= slices
+        or slice_count != slice_end - slice_start + 1
+    ):
+        raise RuntimeError("get_pixels failed: inconsistent C/Z/T metadata")
+
+    return {
+        "x": x,
+        "y": y,
+        "width": width,
+        "height": height,
+        "sliceStart": slice_start,
+        "sliceEnd": slice_end,
+        "sliceCount": slice_count,
+        "sliceAxis": slice_axis,
+        "channel": channel,
+        "frame": frame,
+        "channels": channels,
+        "slices": slices,
+        "frames": frames,
+        "nPixels": pixel_count,
+        "type": image_type,
+    }
+
+
 class _CompactPlane(Sequence):
     """A row-addressable float32 plane backed by one compact array."""
 
@@ -241,16 +293,7 @@ def get_pixels(x=None, y=None, width=None, height=None, slice_num=None, all_slic
     else:
         pixels = _CompactStack(floats, w, h, n_slices)
 
-    meta = {
-        "x": result["x"],
-        "y": result["y"],
-        "width": w,
-        "height": h,
-        "sliceStart": result["sliceStart"],
-        "sliceEnd": result["sliceEnd"],
-        "sliceCount": n_slices,
-        "type": result["type"],
-    }
+    meta = _pixel_metadata(result, w, h, n_slices, n_pixels)
     return pixels, meta
 
 

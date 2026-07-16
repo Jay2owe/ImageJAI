@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import socket
+import threading
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -18,6 +20,50 @@ def _fixed_confirmation_id(monkeypatch):
     monkeypatch.setattr(
         ij.uuid, "uuid4", lambda: SimpleNamespace(hex="a" * 32))
     return "confirm-" + ("a" * 32)
+
+
+class EarlyEofEventServer:
+    """One real subscription socket that acknowledges and then disappears."""
+
+    def __init__(self):
+        self.request = None
+        self.error = None
+        self._done = threading.Event()
+        self._listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self._listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self._listener.bind(("127.0.0.1", 0))
+        self._listener.listen(1)
+        self._listener.settimeout(3)
+        self.port = self._listener.getsockname()[1]
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def _run(self):
+        try:
+            conn, _ = self._listener.accept()
+            with conn:
+                raw = b""
+                while not raw.endswith(b"\n"):
+                    chunk = conn.recv(65536)
+                    if not chunk:
+                        break
+                    raw += chunk
+                self.request = json.loads(raw.decode("utf-8"))
+                frame = {
+                    "event": "subscribed",
+                    "data": {"topics": ["gui_action.confirm.resolved"]},
+                }
+                conn.sendall((json.dumps(frame) + "\n").encode("utf-8"))
+        except Exception as exc:
+            self.error = exc
+        finally:
+            self._listener.close()
+            self._done.set()
+
+    def finish(self):
+        assert self._done.wait(5), "event server did not finish"
+        self._thread.join(timeout=1)
+        assert self.error is None
 
 
 def test_gui_confirm_subscribes_before_dispatch_and_keeps_fast_response(
@@ -179,3 +225,27 @@ def test_transport_failure_after_dispatch_closes_and_cancels(monkeypatch):
     assert result["id"] == confirmation_id
     assert "stream reset" in result["error"]
     assert actions == ["confirm", "closed", "confirm_cancel"]
+
+
+def test_gui_confirm_reports_real_early_eof_as_transport_error(monkeypatch):
+    confirmation_id = _fixed_confirmation_id(monkeypatch)
+    server = EarlyEofEventServer()
+    session = ij.ImageJSession(
+        host="127.0.0.1", port=server.port, token_loader=lambda: None)
+    session._session_id = "gui-confirm-eof-session"
+
+    def dispatch(command, timeout):
+        assert command["id"] == confirmation_id
+        return {"ok": True, "id": confirmation_id, "pending": True}
+
+    monkeypatch.setattr(ij, "_session_for", lambda host, port: session)
+    monkeypatch.setattr(ij, "imagej_command", dispatch)
+
+    result = ij.gui_confirm("Proceed?", ["Yes", "No"], timeout=1)
+    server.finish()
+
+    assert result["id"] == confirmation_id
+    assert result["choice"] is None
+    assert result.get("timed_out") is not True
+    assert "closed unexpectedly" in result["error"]
+    assert server.request["command"] == "subscribe"

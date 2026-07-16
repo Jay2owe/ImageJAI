@@ -18,6 +18,7 @@ Every tool follows the same contract:
 """
 
 import base64
+import binascii
 import math
 import socket
 
@@ -33,7 +34,26 @@ _MAX_SERVER_CROP_SIDE = int(math.isqrt(_SERVER_PIXEL_CAP))
 # pixel-result budget even for long float32 spellings. Larger requests are
 # rejected before get_pixels, so they cannot expand into millions of Python
 # float objects merely to be truncated after JSON serialisation.
-_MAX_RAW_PIXEL_VALUES = 1_024
+MAX_RAW_PIXEL_VALUES = 1_024
+
+_PIXEL_METADATA_FIELDS = (
+    "x",
+    "y",
+    "width",
+    "height",
+    "sliceStart",
+    "sliceEnd",
+    "sliceCount",
+    "sliceAxis",
+    "channel",
+    "frame",
+    "channels",
+    "slices",
+    "frames",
+    "nPixels",
+    "type",
+    "encoding",
+)
 
 
 def _error(msg) -> dict:
@@ -78,7 +98,27 @@ def _get_image_info() -> dict:
     result = resp.get("result")
     if not isinstance(result, dict):
         return _error("get_image_info returned no result")
-    return result
+    try:
+        width = int(result["width"])
+        height = int(result["height"])
+        channels = int(result["channels"])
+        slices = int(result["slices"])
+        frames = int(result["frames"])
+    except (KeyError, TypeError, ValueError) as exc:
+        return _error(
+            "get_image_info returned incomplete image-axis metadata: {}".format(exc)
+        )
+    if min(width, height, channels, slices, frames) <= 0:
+        return _error("get_image_info returned invalid image-axis metadata")
+    normalized = dict(result)
+    normalized.update({
+        "width": width,
+        "height": height,
+        "channels": channels,
+        "slices": slices,
+        "frames": frames,
+    })
+    return normalized
 
 
 def _validate_region_against_info(info: dict, x: int, y: int, width: int, height: int):
@@ -119,9 +159,9 @@ def _geometry_matches(meta: dict, x: int, y: int, width: int, height: int) -> bo
 
 def _slice_matches(meta: dict, requested_slice: int) -> bool:
     """Return whether Fiji supplied exactly one requested/current plane."""
-    start = int(meta.get("slice_start", 0))
-    end = int(meta.get("slice_end", 0))
-    count = int(meta.get("slice_count", 0))
+    start = int(meta.get("sliceStart", 0))
+    end = int(meta.get("sliceEnd", 0))
+    count = int(meta.get("sliceCount", 0))
     if requested_slice > 0:
         return start == requested_slice and end == requested_slice and count == 1
     return start >= 1 and end == start and count == 1
@@ -134,18 +174,81 @@ def _raw_pixel_limit_error(requested_values: int) -> dict:
             "raw pixel request contains {} values; maximum is {}. "
             "Request a smaller region, or use region_stats, histogram_summary, "
             "or line_profile for a bounded result."
-        ).format(requested_values, _MAX_RAW_PIXEL_VALUES),
+        ).format(requested_values, MAX_RAW_PIXEL_VALUES),
         "requested_values": int(requested_values),
-        "max_values": _MAX_RAW_PIXEL_VALUES,
+        "max_values": MAX_RAW_PIXEL_VALUES,
     }
+
+
+def _decode_pixel_metadata(result: dict, width: int, height: int):
+    """Return validated server metadata, including exact C/Z/T attribution."""
+    try:
+        meta = {
+            "x": int(result["x"]),
+            "y": int(result["y"]),
+            "width": width,
+            "height": height,
+            "sliceStart": int(result["sliceStart"]),
+            "sliceEnd": int(result["sliceEnd"]),
+            "sliceCount": int(result["sliceCount"]),
+            "sliceAxis": str(result["sliceAxis"]),
+            "channel": int(result["channel"]),
+            "frame": int(result["frame"]),
+            "channels": int(result["channels"]),
+            "slices": int(result["slices"]),
+            "frames": int(result["frames"]),
+            "nPixels": int(result["nPixels"]),
+            "type": str(result["type"]),
+            "encoding": str(result["encoding"]),
+        }
+    except (KeyError, TypeError, ValueError) as exc:
+        return None, _error(
+            "get_pixels reply missing or malformed C/Z/T metadata: {}".format(exc)
+        )
+
+    if (
+        meta["x"] < 0
+        or meta["y"] < 0
+        or meta["sliceAxis"] != "Z"
+        or meta["encoding"] != "base64_float32_le"
+        or meta["channels"] <= 0
+        or meta["slices"] <= 0
+        or meta["frames"] <= 0
+        or not 1 <= meta["channel"] <= meta["channels"]
+        or not 1 <= meta["frame"] <= meta["frames"]
+        or not 1 <= meta["sliceStart"] <= meta["sliceEnd"] <= meta["slices"]
+        or meta["sliceCount"] != meta["sliceEnd"] - meta["sliceStart"] + 1
+        or meta["nPixels"] != width * height * meta["sliceCount"]
+    ):
+        return None, _error("get_pixels returned inconsistent C/Z/T metadata")
+    if meta["sliceCount"] != 1:
+        return None, _error("pixel analysis tools require exactly one Z plane")
+    return meta, None
+
+
+def _metadata_matches_info(meta: dict, info: dict) -> bool:
+    """Reject a response if the image axis sizes changed after preflight."""
+    try:
+        return all(
+            int(meta[key]) == int(info[key])
+            for key in ("channels", "slices", "frames")
+        )
+    except (KeyError, TypeError, ValueError):
+        return False
+
+
+def _measurement_result(meta: dict, **payload) -> dict:
+    """Expose pixel values/statistics together with their exact source plane."""
+    out = dict(payload)
+    out.update({key: meta[key] for key in _PIXEL_METADATA_FIELDS})
+    return out
 
 
 def _decode_pixels(resp):
     """Decode a get_pixels reply into (float32 2D ndarray, meta dict).
 
-    Returns (None, error_dict) on failure. If the reply holds a
-    stack, the first plane is returned — these tools operate on a
-    single 2D slice.
+    Returns (None, error_dict) on failure. These tools require one
+    fully attributed 2D Z plane and reject stacks or missing C/Z/T data.
     """
     if not isinstance(resp, dict) or not resp.get("ok"):
         err = resp.get("error") if isinstance(resp, dict) else "no reply from Fiji"
@@ -155,25 +258,22 @@ def _decode_pixels(resp):
     if not isinstance(b64, str) or not b64:
         return None, _error("get_pixels reply missing data field")
     try:
-        raw = base64.b64decode(b64)
-    except (ValueError, TypeError) as exc:
+        raw = base64.b64decode(b64, validate=True)
+    except (binascii.Error, ValueError, TypeError) as exc:
         return None, _error("base64 decode failed: {}".format(exc))
-    w = int(result.get("width", 0))
-    h = int(result.get("height", 0))
-    n_slices = int(result.get("sliceCount", 1))
+    try:
+        w = int(result.get("width", 0))
+        h = int(result.get("height", 0))
+    except (TypeError, ValueError):
+        return None, _error("get_pixels returned malformed dimensions")
     if w <= 0 or h <= 0:
         return None, _error("get_pixels returned zero-size region")
-    plane = np.frombuffer(raw, dtype="<f4", count=w * h).reshape((h, w))
-    meta = {
-        "x": int(result.get("x", 0)),
-        "y": int(result.get("y", 0)),
-        "width": w,
-        "height": h,
-        "slice_start": int(result.get("sliceStart", 0)),
-        "slice_end": int(result.get("sliceEnd", 0)),
-        "slice_count": n_slices,
-        "type": result.get("type", ""),
-    }
+    meta, metadata_error = _decode_pixel_metadata(result, w, h)
+    if meta is None:
+        return None, metadata_error
+    if len(raw) != meta["nPixels"] * 4:
+        return None, _error("get_pixels float32 byte length does not match metadata")
+    plane = np.frombuffer(raw, dtype="<f4").reshape((h, w))
     return plane, meta
 
 
@@ -200,6 +300,10 @@ def _fetch_full_downsampled(max_side: int = _MAX_LONG_EDGE):
         arr, meta = _decode_pixels(_safe_send("get_pixels"))
         if arr is None:
             return None, meta
+        if not _geometry_matches(meta, 0, 0, w, h):
+            return None, _error("active image geometry changed during pixel fetch")
+        if not _metadata_matches_info(meta, info):
+            return None, _error("active image axis sizes changed during pixel fetch")
         if factor > 1:
             arr = arr[::factor, ::factor]
         meta["downsample_factor"] = int(factor)
@@ -217,6 +321,10 @@ def _fetch_full_downsampled(max_side: int = _MAX_LONG_EDGE):
     arr, meta = _decode_pixels(_safe_send("get_pixels", x=cx, y=cy, width=cw, height=ch))
     if arr is None:
         return None, meta
+    if not _geometry_matches(meta, cx, cy, cw, ch):
+        return None, _error("active image geometry changed during pixel fetch")
+    if not _metadata_matches_info(meta, info):
+        return None, _error("active image axis sizes changed during pixel fetch")
     meta["downsample_factor"] = int(factor)
     meta["bit_depth"] = int(bit_depth)
     meta["source"] = "center_crop"
@@ -356,8 +464,8 @@ def _count_components_4(mask, min_size: int = 1) -> int:
 
 
 @tool
-def get_pixels_array(slice: int, region: list) -> list:
-    """Pull at most 1024 raw pixel values from the active image as a 2D list of floats.
+def get_pixels_array(slice: int, region: list) -> dict:
+    """Return at most 1,024 raw pixel values plus exact channel, Z-slice and frame metadata.
 
     Args:
         slice: Z-slice index, 1-based; use 0 for the currently displayed slice.
@@ -418,7 +526,7 @@ def get_pixels_array(slice: int, region: list) -> list:
         return _error("region must be [x, y, width, height] or an empty list")
 
     requested_values = expected_width * expected_height
-    if requested_values > _MAX_RAW_PIXEL_VALUES:
+    if requested_values > MAX_RAW_PIXEL_VALUES:
         return _raw_pixel_limit_error(requested_values)
 
     arr, meta = _decode_pixels(_safe_send("get_pixels", **kwargs))
@@ -428,14 +536,16 @@ def get_pixels_array(slice: int, region: list) -> list:
         meta, expected_x, expected_y, expected_width, expected_height
     ):
         return _error("Fiji returned clamped pixel geometry; image state changed")
+    if not _metadata_matches_info(meta, info):
+        return _error("active image axis sizes changed during pixel fetch")
     if not _slice_matches(meta, slice_val):
         return _error("Fiji returned a different pixel slice; image state changed")
-    return arr.tolist()
+    return _measurement_result(meta, pixels=arr.tolist())
 
 
 @tool
 def region_stats(x: int, y: int, width: int, height: int) -> dict:
-    """Return mean, median, min, max and standard deviation for a rectangle on the active image.
+    """Return rectangle statistics plus exact channel, Z-slice and frame metadata.
 
     Args:
         x: Left edge of the rectangle in pixels.
@@ -452,7 +562,10 @@ def region_stats(x: int, y: int, width: int, height: int) -> dict:
         return _error("x, y, width, height must all be integers")
     if w_i <= 0 or h_i <= 0:
         return _error("width and height must be positive")
-    bounds_error = _validate_region(x_i, y_i, w_i, h_i)
+    info = _get_image_info()
+    if "error" in info:
+        return info
+    bounds_error = _validate_region_against_info(info, x_i, y_i, w_i, h_i)
     if bounds_error is not None:
         return bounds_error
     arr, meta = _decode_pixels(_safe_send("get_pixels", x=x_i, y=y_i, width=w_i, height=h_i))
@@ -460,24 +573,27 @@ def region_stats(x: int, y: int, width: int, height: int) -> dict:
         return meta
     if not _geometry_matches(meta, x_i, y_i, w_i, h_i):
         return _error("Fiji returned clamped pixel geometry; image state changed")
+    if not _metadata_matches_info(meta, info):
+        return _error("active image axis sizes changed during pixel fetch")
     flat = arr.ravel()
-    return {
-        "x": x_i,
-        "y": y_i,
-        "width": w_i,
-        "height": h_i,
-        "count": int(flat.size),
-        "mean": float(flat.mean()),
-        "median": float(np.median(flat)),
-        "min": float(flat.min()),
-        "max": float(flat.max()),
-        "std": float(flat.std()),
-    }
+    return _measurement_result(
+        meta,
+        x=x_i,
+        y=y_i,
+        width=w_i,
+        height=h_i,
+        count=int(flat.size),
+        mean=float(flat.mean()),
+        median=float(np.median(flat)),
+        min=float(flat.min()),
+        max=float(flat.max()),
+        std=float(flat.std()),
+    )
 
 
 @tool
-def line_profile(x1: int, y1: int, x2: int, y2: int) -> list:
-    """Sample intensity along a straight line between two pixel coordinates using bilinear interpolation.
+def line_profile(x1: int, y1: int, x2: int, y2: int) -> dict:
+    """Return a bilinear line profile plus exact channel, Z-slice and frame metadata.
 
     Args:
         x1: Start point x in pixels.
@@ -521,11 +637,13 @@ def line_profile(x1: int, y1: int, x2: int, y2: int) -> list:
         return meta
     if not _geometry_matches(meta, bx, by, bw, bh):
         return _error("Fiji returned clamped pixel geometry; image state changed")
+    if not _metadata_matches_info(meta, info):
+        return _error("active image axis sizes changed during pixel fetch")
     dx = float(x2_i - x1_i)
     dy = float(y2_i - y1_i)
     length = math.hypot(dx, dy)
     if length == 0:
-        return [float(arr[0, 0])]
+        return _measurement_result(meta, profile=[float(arr[0, 0])])
     n = int(round(length)) + 1
     arr_h, arr_w = arr.shape
     profile: list = []
@@ -548,12 +666,12 @@ def line_profile(x1: int, y1: int, x2: int, y2: int) -> list:
         top = v00 * (1.0 - frx) + v10 * frx
         bot = v01 * (1.0 - frx) + v11 * frx
         profile.append(top * (1.0 - fry) + bot * fry)
-    return profile
+    return _measurement_result(meta, profile=profile)
 
 
 @tool
-def quick_object_count(threshold_method: str) -> int:
-    """Return a rough count of bright blobs on the active image using a numpy threshold plus 4-connected components.
+def quick_object_count(threshold_method: str) -> dict:
+    """Return a rough bright-blob count plus exact channel, Z-slice and frame metadata.
 
     Args:
         threshold_method: One of "otsu", "li", "triangle".
@@ -572,22 +690,21 @@ def quick_object_count(threshold_method: str) -> int:
     mask = arr > thr
     count = _count_components_4(mask)
     factor = int(meta.get("downsample_factor", 1))
-    if factor > 1 or meta.get("source") == "center_crop":
-        result = {
-            "count": int(count),
-            "threshold_method": key,
-            "threshold_value": float(thr),
-            "downsample_factor": factor,
-        }
-        if "note" in meta:
-            result["note"] = meta["note"]
-        return result
-    return int(count)
+    result = _measurement_result(
+        meta,
+        count=int(count),
+        threshold_method=key,
+        threshold_value=float(thr),
+        downsample_factor=factor,
+    )
+    if "note" in meta:
+        result["note"] = meta["note"]
+    return result
 
 
 @tool
 def histogram_summary() -> dict:
-    """Return 1st/50th/99th intensity percentiles, the saturated-pixel fraction and the bit depth of the active image.
+    """Return intensity percentiles and saturation plus exact channel, Z-slice and frame metadata.
 
     Args:
         None.
@@ -604,23 +721,24 @@ def histogram_summary() -> dict:
     else:
         ceiling = float(flat.max())
     saturated_fraction = float((flat >= ceiling).mean()) if flat.size else 0.0
-    out = {
-        "p01": float(np.percentile(flat, 1)),
-        "p50": float(np.percentile(flat, 50)),
-        "p99": float(np.percentile(flat, 99)),
-        "saturated_fraction": saturated_fraction,
-        "saturation_ceiling": ceiling,
-        "bit_depth": bit_depth,
-        "downsample_factor": int(meta.get("downsample_factor", 1)),
-    }
+    out = _measurement_result(
+        meta,
+        p01=float(np.percentile(flat, 1)),
+        p50=float(np.percentile(flat, 50)),
+        p99=float(np.percentile(flat, 99)),
+        saturated_fraction=saturated_fraction,
+        saturation_ceiling=ceiling,
+        bit_depth=bit_depth,
+        downsample_factor=int(meta.get("downsample_factor", 1)),
+    )
     if "note" in meta:
         out["note"] = meta["note"]
     return out
 
 
 @tool
-def count_bright_regions(min_intensity: int, min_area_pixels: int) -> int:
-    """Count 4-connected regions brighter than an absolute cutoff with at least a minimum area, on the active image.
+def count_bright_regions(min_intensity: int, min_area_pixels: int) -> dict:
+    """Return a bright-region count plus exact channel, Z-slice and frame metadata.
 
     Args:
         min_intensity: Absolute intensity cutoff; pixels strictly above this are foreground.
@@ -639,14 +757,13 @@ def count_bright_regions(min_intensity: int, min_area_pixels: int) -> int:
     mask = arr > cutoff
     count = _count_components_4(mask, min_size=min_area)
     factor = int(meta.get("downsample_factor", 1))
-    if factor > 1 or meta.get("source") == "center_crop":
-        result = {
-            "count": int(count),
-            "min_intensity": cutoff,
-            "min_area_pixels": min_area,
-            "downsample_factor": factor,
-        }
-        if "note" in meta:
-            result["note"] = meta["note"]
-        return result
-    return int(count)
+    result = _measurement_result(
+        meta,
+        count=int(count),
+        min_intensity=cutoff,
+        min_area_pixels=min_area,
+        downsample_factor=factor,
+    )
+    if "note" in meta:
+        result["note"] = meta["note"]
+    return result

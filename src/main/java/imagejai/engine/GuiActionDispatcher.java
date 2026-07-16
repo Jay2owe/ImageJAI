@@ -7,7 +7,9 @@ import imagejai.ui.ChatPanelController;
 
 import java.nio.file.Paths;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Consumer;
 import java.util.regex.Pattern;
@@ -33,6 +35,8 @@ public class GuiActionDispatcher {
     /** Minimum wall-clock gap between two displayed toasts, in ms. */
     public static final long TOAST_MIN_INTERVAL_MS = 500L;
     public static final int MAX_CONFIRM_ID_CHARS = 128;
+    public static final int MAX_PENDING_CONFIRMATIONS = 64;
+    private static final int MAX_TERMINAL_CONFIRMATIONS = 256;
     private static final Pattern CONFIRM_ID_PATTERN =
             Pattern.compile("[A-Za-z0-9._:-]{1," + MAX_CONFIRM_ID_CHARS + "}");
 
@@ -91,6 +95,24 @@ public class GuiActionDispatcher {
     private final ChatPanelController controller;
     private final EventBus eventBus;
     private final AtomicLong confirmCounter = new AtomicLong(0);
+    private final Object confirmLock = new Object();
+    private final Map<String, PendingConfirmation> pendingConfirmations =
+            new LinkedHashMap<String, PendingConfirmation>();
+    private final LinkedHashMap<String, Boolean> terminalConfirmations =
+            new LinkedHashMap<String, Boolean>();
+
+    private static final class PendingConfirmation {
+        final String id;
+        final String prompt;
+        final List<String> options;
+        boolean terminal;
+
+        PendingConfirmation(String id, String prompt, List<String> options) {
+            this.id = id;
+            this.prompt = prompt;
+            this.options = options;
+        }
+    }
 
     // Toast rate-limiter — single producer expected (TCP server), but guard
     // anyway against concurrent writers.
@@ -270,19 +292,37 @@ public class GuiActionDispatcher {
                 ? "confirm-" + confirmCounter.incrementAndGet()
                 : reqId;
 
-        controller.confirm(prompt, options, new Consumer<String>() {
+        final PendingConfirmation pending =
+                new PendingConfirmation(confirmId, prompt, options);
+        synchronized (confirmLock) {
+            if (pendingConfirmations.containsKey(confirmId)) {
+                return err("confirm: id is already pending");
+            }
+            if (terminalConfirmations.containsKey(confirmId)) {
+                return err("confirm: id was recently completed; use a new id");
+            }
+            if (pendingConfirmations.size() >= MAX_PENDING_CONFIRMATIONS) {
+                return err("confirm: too many pending confirmations");
+            }
+            pendingConfirmations.put(confirmId, pending);
+        }
+
+        final boolean admitted;
+        try {
+            admitted = controller.confirm(confirmId, prompt, options, new Consumer<String>() {
             @Override
             public void accept(String chosen) {
-                JsonObject data = new JsonObject();
-                data.addProperty("id", confirmId);
-                data.addProperty("prompt", prompt);
-                data.addProperty("choice", chosen);
-                JsonArray optsArr = new JsonArray();
-                for (String o : options) optsArr.add(o);
-                data.add("options", optsArr);
-                eventBus.publish("gui_action.confirm.resolved", data);
+                resolveConfirmation(pending, chosen);
             }
-        });
+            });
+        } catch (RuntimeException failure) {
+            abandonConfirmation(pending);
+            throw failure;
+        }
+        if (!admitted) {
+            abandonConfirmation(pending);
+            return err("confirm: chat panel could not admit confirmation");
+        }
 
         JsonObject resp = new JsonObject();
         resp.addProperty("ok", true);
@@ -304,15 +344,79 @@ public class GuiActionDispatcher {
         if (!validConfirmId(confirmId)) {
             return err("confirm_cancel: invalid or missing 'id'");
         }
-        JsonObject data = new JsonObject();
-        data.addProperty("id", confirmId);
-        data.addProperty("cancelled", true);
-        eventBus.publish("gui_action.confirm.resolved", data);
+
+        boolean publishCancellation;
+        synchronized (confirmLock) {
+            PendingConfirmation pending = pendingConfirmations.get(confirmId);
+            if (pending != null && !pending.terminal) {
+                pending.terminal = true;
+                pendingConfirmations.remove(confirmId);
+                rememberTerminalLocked(confirmId);
+                publishCancellation = true;
+            } else if (terminalConfirmations.containsKey(confirmId)) {
+                publishCancellation = false;
+            } else {
+                // Preserve cleanup for a subscriber whose confirm response was
+                // lost, while making repeated cancellation idempotent.
+                rememberTerminalLocked(confirmId);
+                publishCancellation = true;
+            }
+        }
+
+        // The controller invalidates the callback first and performs the exact
+        // ID-keyed Swing cleanup before the correlated event is visible.
+        controller.cancelConfirmation(confirmId);
+        if (publishCancellation) {
+            JsonObject data = new JsonObject();
+            data.addProperty("id", confirmId);
+            data.addProperty("cancelled", true);
+            eventBus.publish("gui_action.confirm.resolved", data);
+        }
 
         JsonObject resp = ok("confirm_cancel");
         resp.addProperty("id", confirmId);
-        resp.addProperty("cancelled", true);
+        resp.addProperty("cancelled", publishCancellation);
+        if (!publishCancellation) resp.addProperty("already_resolved", true);
         return resp;
+    }
+
+    private void resolveConfirmation(PendingConfirmation pending, String chosen) {
+        synchronized (confirmLock) {
+            if (pending.terminal
+                    || pendingConfirmations.get(pending.id) != pending) {
+                return;
+            }
+            pending.terminal = true;
+            pendingConfirmations.remove(pending.id);
+            rememberTerminalLocked(pending.id);
+        }
+
+        JsonObject data = new JsonObject();
+        data.addProperty("id", pending.id);
+        data.addProperty("prompt", pending.prompt);
+        data.addProperty("choice", chosen);
+        JsonArray optsArr = new JsonArray();
+        for (String option : pending.options) optsArr.add(option);
+        data.add("options", optsArr);
+        eventBus.publish("gui_action.confirm.resolved", data);
+    }
+
+    private void abandonConfirmation(PendingConfirmation pending) {
+        synchronized (confirmLock) {
+            if (pendingConfirmations.get(pending.id) == pending) {
+                pending.terminal = true;
+                pendingConfirmations.remove(pending.id);
+                rememberTerminalLocked(pending.id);
+            }
+        }
+    }
+
+    private void rememberTerminalLocked(String confirmationId) {
+        terminalConfirmations.put(confirmationId, Boolean.TRUE);
+        while (terminalConfirmations.size() > MAX_TERMINAL_CONFIRMATIONS) {
+            String oldest = terminalConfirmations.keySet().iterator().next();
+            terminalConfirmations.remove(oldest);
+        }
     }
 
     // -----------------------------------------------------------------------

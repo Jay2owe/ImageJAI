@@ -19,7 +19,15 @@ def _pixel_response(*, x, y, width, height, values=None):
             "sliceStart": 1,
             "sliceEnd": 1,
             "sliceCount": 1,
+            "sliceAxis": "Z",
+            "channel": 2,
+            "frame": 3,
+            "channels": 4,
+            "slices": 5,
+            "frames": 6,
+            "nPixels": len(values),
             "type": "32-bit",
+            "encoding": "base64_float32_le",
             "data": base64.b64encode(raw).decode("ascii"),
         },
     }
@@ -89,7 +97,9 @@ def test_completed_job_without_nested_execution_result_fails_closed(monkeypatch)
 
 
 def test_region_tools_reject_out_of_bounds_without_pixel_fetch(monkeypatch):
-    monkeypatch.setattr(tools_python, "_get_image_info", lambda: {"width": 10, "height": 8})
+    monkeypatch.setattr(tools_python, "_get_image_info", lambda: {
+        "width": 10, "height": 8, "channels": 4, "slices": 5, "frames": 6,
+    })
     monkeypatch.setattr(
         tools_python,
         "_safe_send",
@@ -104,7 +114,9 @@ def test_region_tools_reject_out_of_bounds_without_pixel_fetch(monkeypatch):
 
 
 def test_region_stats_rejects_server_clamping_after_image_race(monkeypatch):
-    monkeypatch.setattr(tools_python, "_get_image_info", lambda: {"width": 10, "height": 8})
+    monkeypatch.setattr(tools_python, "_get_image_info", lambda: {
+        "width": 10, "height": 8, "channels": 4, "slices": 5, "frames": 6,
+    })
     monkeypatch.setattr(
         tools_python,
         "_safe_send",
@@ -117,7 +129,9 @@ def test_region_stats_rejects_server_clamping_after_image_race(monkeypatch):
 
 
 def test_line_profile_rejects_server_clamping_after_image_race(monkeypatch):
-    monkeypatch.setattr(tools_python, "_get_image_info", lambda: {"width": 10, "height": 8})
+    monkeypatch.setattr(tools_python, "_get_image_info", lambda: {
+        "width": 10, "height": 8, "channels": 4, "slices": 5, "frames": 6,
+    })
     monkeypatch.setattr(
         tools_python,
         "_safe_send",
@@ -130,7 +144,9 @@ def test_line_profile_rejects_server_clamping_after_image_race(monkeypatch):
 
 
 def test_valid_geometry_is_reported_exactly(monkeypatch):
-    monkeypatch.setattr(tools_python, "_get_image_info", lambda: {"width": 10, "height": 8})
+    monkeypatch.setattr(tools_python, "_get_image_info", lambda: {
+        "width": 10, "height": 8, "channels": 4, "slices": 5, "frames": 6,
+    })
     monkeypatch.setattr(
         tools_python,
         "_safe_send",
@@ -147,3 +163,6 @@ def test_valid_geometry_is_reported_exactly(monkeypatch):
     assert result["height"] == 1
     assert result["count"] == 2
     assert result["mean"] == 3.0
+    assert result["channel"] == 2
+    assert result["frame"] == 3
+    assert result["sliceAxis"] == "Z"

@@ -3,7 +3,9 @@ from __future__ import annotations
 import ast
 import importlib.util
 import json
+import os
 import socket
+import struct
 import threading
 import time
 from pathlib import Path
@@ -64,9 +66,11 @@ class ScriptedLoopbackServer:
 class RawLoopbackServer:
     """One-request peer used to exercise hostile reply framing."""
 
-    def __init__(self, payload):
+    def __init__(self, payload, reset=False, hold_open=0.0):
         self.errors = []
         self._payload = payload
+        self._reset = reset
+        self._hold_open = hold_open
         self._done = threading.Event()
         self._listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self._listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -88,6 +92,15 @@ class RawLoopbackServer:
                         break
                     request += chunk
                 conn.sendall(self._payload)
+                if self._hold_open:
+                    time.sleep(self._hold_open)
+                if self._reset:
+                    linger_format = "HH" if os.name == "nt" else "ii"
+                    conn.setsockopt(
+                        socket.SOL_SOCKET,
+                        socket.SO_LINGER,
+                        struct.pack(linger_format, 1, 0),
+                    )
         except Exception as exc:
             self.errors.append(exc)
         finally:
@@ -298,7 +311,9 @@ def test_event_stream_carries_durable_session_credentials():
         model_endpoint="",
     )
 
-    frames = list(session.events(["job.*"], reconnect=False))
+    stream = session.events(["job.*"], reconnect=False)
+    frames = [next(stream)]
+    stream.close()
     server.finish()
 
     assert frames == [
@@ -331,6 +346,46 @@ def test_event_stream_rejects_oversize_frames_before_decode(
     with pytest.raises(ValueError, match="event frame exceeds 64 bytes"):
         list(session.events(["*"], reconnect=False, read_timeout=2))
     server.finish()
+
+
+@pytest.mark.parametrize("reset", [False, True])
+def test_event_stream_surfaces_early_eof_or_reset_as_transport_loss(reset):
+    subscribed = {
+        "event": "subscribed",
+        "data": {"topics": ["*"]},
+    }
+    payload = (json.dumps(subscribed) + "\n").encode("utf-8")
+    server = RawLoopbackServer(payload, reset=reset)
+    session = ij.ImageJSession(
+        host="127.0.0.1", port=server.port, token_loader=lambda: None)
+    session._session_id = "early-close-event-session"
+
+    with pytest.raises(ConnectionError, match="event stream"):
+        list(session.events(
+            ["*"], reconnect=False, read_timeout=2,
+            deadline=time.monotonic() + 2,
+        ))
+    server.finish()
+
+
+def test_event_stream_deadline_expiry_is_normal_exhaustion():
+    subscribed = {
+        "event": "subscribed",
+        "data": {"topics": ["*"]},
+    }
+    payload = (json.dumps(subscribed) + "\n").encode("utf-8")
+    server = RawLoopbackServer(payload, hold_open=0.15)
+    session = ij.ImageJSession(
+        host="127.0.0.1", port=server.port, token_loader=lambda: None)
+    session._session_id = "deadline-event-session"
+
+    frames = list(session.events(
+        ["*"], reconnect=False, read_timeout=2,
+        deadline=time.monotonic() + 0.05,
+    ))
+    server.finish()
+
+    assert frames == [subscribed]
 
 
 def test_imagej_events_has_one_public_implementation():
@@ -436,7 +491,47 @@ def test_read_cache_never_resolves_an_unrelated_explicit_hash(
 
     assert response["result"] == {"value": "fresh"}
     assert session.requests[1][0]["if_none_match"] == "foreign-hash"
-    assert session.requests[2][0] == command
+    assert session.requests[2][0] == {"command": "get_state", "force": True}
+
+
+def test_read_cache_miss_forces_one_full_retry_after_unchanged(
+        monkeypatch, isolated_read_cache):
+    session = ScriptedSession(responses=[
+        {"ok": True, "unchanged": True},
+        {"ok": True, "hash": "fresh-hash", "result": {"value": "fresh"}},
+    ])
+    monkeypatch.setattr(ij, "_session_for", lambda host, port: session)
+
+    response = ij.imagej_command(
+        {"command": "get_state", "if_none_match": "unknown-local-hash"},
+        host="server",
+        port=8001,
+    )
+
+    assert response["result"] == {"value": "fresh"}
+    assert [request for request, _timeout in session.requests] == [
+        {"command": "get_state", "if_none_match": "unknown-local-hash"},
+        {"command": "get_state", "force": True},
+    ]
+
+
+def test_read_cache_force_retry_does_not_loop_on_broken_peer(
+        monkeypatch, isolated_read_cache):
+    session = ScriptedSession(responses=[
+        {"ok": True, "unchanged": True},
+        {"ok": True, "unchanged": True},
+    ])
+    monkeypatch.setattr(ij, "_session_for", lambda host, port: session)
+
+    response = ij.imagej_command(
+        {"command": "get_state", "if_none_match": "missing-hash"},
+        host="server",
+        port=8001,
+    )
+
+    assert response == {"ok": True, "unchanged": True}
+    assert len(session.requests) == 2
+    assert session.requests[1][0] == {"command": "get_state", "force": True}
 
 
 def test_read_cache_persistence_is_versioned_and_round_trips(

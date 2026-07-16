@@ -256,9 +256,14 @@ public class AgentLauncher {
                     agent, extraEnv, requestedDangerousPermissions).enforce();
             Map<String, String> permittedEnv = decision.permittedEnvironment();
             syncContextFiles();
+            // Build exactly once. Command construction consumes any one-launch
+            // permission-bypass consent, so an embedded-terminal failure must
+            // reuse this approved command instead of trying to consume consent
+            // again while constructing the external fallback.
+            String approvedCommand = buildAgentCommandString(agent, action);
 
             if (mode == Mode.EMBEDDED) {
-                AgentLaunchSpec spec = buildEmbeddedLaunchSpec(agent, action);
+                AgentLaunchSpec spec = buildEmbeddedLaunchSpec(agent, approvedCommand);
                 if (!permittedEnv.isEmpty()) {
                     spec.env.putAll(permittedEnv);
                 }
@@ -266,24 +271,24 @@ public class AgentLauncher {
                     return createEmbeddedSession(agent, spec);
                 } catch (IOException e) {
                     return fallbackToExternalAfterEmbeddedFailure(
-                            agent, permittedEnv, action, requestedDangerousPermissions, e);
+                            agent, permittedEnv, action, requestedDangerousPermissions,
+                            approvedCommand, e);
                 } catch (RuntimeException e) {
                     if (e instanceof PostureViolation) {
                         throw e;
                     }
                     return fallbackToExternalAfterEmbeddedFailure(
-                            agent, permittedEnv, action, requestedDangerousPermissions, e);
+                            agent, permittedEnv, action, requestedDangerousPermissions,
+                            approvedCommand, e);
                 } catch (LinkageError e) {
                     return fallbackToExternalAfterEmbeddedFailure(
-                            agent, permittedEnv, action, requestedDangerousPermissions, e);
+                            agent, permittedEnv, action, requestedDangerousPermissions,
+                            approvedCommand, e);
                 }
             }
 
-            if (requestedDangerousPermissions) {
-                return launchExternalSession(
-                        agent, permittedEnv, "", action, true);
-            }
-            return launchExternalSession(agent, permittedEnv, "", action);
+            return launchExternalSessionPrepared(agent, permittedEnv, "", action,
+                    requestedDangerousPermissions, approvedCommand);
         } catch (IOException e) {
             IJ.log("[AgentLauncher] Approved agent process could not be started: "
                     + e.getClass().getSimpleName());
@@ -317,9 +322,23 @@ public class AgentLauncher {
                                                 SessionAction sessionAction,
                                                 boolean dangerousPermissions)
             throws IOException {
+        boolean requestedDangerousPermissions = dangerousPermissions
+                || requestsDangerousPermissionBypass(agent);
+        String approvedCommand = buildAgentCommandString(agent, sessionAction);
+        return launchExternalSessionPrepared(agent, extraEnv, notice, sessionAction,
+                requestedDangerousPermissions, approvedCommand);
+    }
+
+    AgentSession launchExternalSessionPrepared(AgentInfo agent,
+                                                Map<String, String> extraEnv,
+                                                String notice,
+                                                SessionAction sessionAction,
+                                                boolean dangerousPermissions,
+                                                String approvedCommand)
+            throws IOException {
         LaunchPolicy.Decision decision = evaluateLaunch(
                 agent, extraEnv, dangerousPermissions).enforce();
-        AgentLaunchSpec spec = buildExternalLaunchSpec(agent, sessionAction);
+        AgentLaunchSpec spec = buildExternalLaunchSpec(agent, approvedCommand);
         if (!decision.permittedEnvironment().isEmpty()) {
             spec.env.putAll(decision.permittedEnvironment());
         }
@@ -336,23 +355,14 @@ public class AgentLauncher {
                                                                Map<String, String> extraEnv,
                                                                SessionAction sessionAction,
                                                                boolean dangerousPermissions,
+                                                               String approvedCommand,
                                                                Throwable failure)
             throws IOException {
         String reason = "Embedded terminal failed (" + safeFailureCategory(failure) + ")";
         IJ.log("[AgentLauncher] " + reason + ". Falling back to external terminal.");
         String notice = reason + ". Launching the approved agent in an external window.";
-        if (!dangerousPermissions) {
-            if (sessionAction == SessionAction.NEW_SESSION) {
-                return launchExternalSession(agent, extraEnv, notice);
-            }
-            return launchExternalSession(agent, extraEnv, notice, sessionAction);
-        }
-        if (sessionAction == SessionAction.NEW_SESSION) {
-            return launchExternalSession(agent, extraEnv, notice,
-                    SessionAction.NEW_SESSION, dangerousPermissions);
-        }
-        return launchExternalSession(agent, extraEnv, notice, sessionAction,
-                dangerousPermissions);
+        return launchExternalSessionPrepared(agent, extraEnv, notice, sessionAction,
+                dangerousPermissions, approvedCommand);
     }
 
     /**
@@ -368,6 +378,11 @@ public class AgentLauncher {
     AgentLaunchSpec buildExternalLaunchSpec(AgentInfo agent, SessionAction sessionAction) {
         evaluateLaunch(agent, null, requestsDangerousPermissionBypass(agent)).enforce();
         String fullCommand = buildAgentCommandString(agent, sessionAction);
+        return buildExternalLaunchSpec(agent, fullCommand);
+    }
+
+    private AgentLaunchSpec buildExternalLaunchSpec(AgentInfo agent, String fullCommand) {
+        LaunchPolicy.requireSafeCommandText(fullCommand, "agent command");
 
         String os = System.getProperty("os.name", "").toLowerCase();
         List<String> cmd = new ArrayList<String>();
@@ -423,6 +438,11 @@ public class AgentLauncher {
     AgentLaunchSpec buildEmbeddedLaunchSpec(AgentInfo agent, SessionAction sessionAction) {
         evaluateLaunch(agent, null, requestsDangerousPermissionBypass(agent)).enforce();
         String fullCommand = buildAgentCommandString(agent, sessionAction);
+        return buildEmbeddedLaunchSpec(agent, fullCommand);
+    }
+
+    private AgentLaunchSpec buildEmbeddedLaunchSpec(AgentInfo agent, String fullCommand) {
+        LaunchPolicy.requireSafeCommandText(fullCommand, "agent command");
 
         String os = System.getProperty("os.name", "").toLowerCase();
         List<String> cmd = new ArrayList<String>();

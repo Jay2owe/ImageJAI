@@ -11,9 +11,9 @@ notes about your specific model family. Everything in this file is
 true for all agents.
 
 The Fiji TCP command server listens on `localhost:7746`. JSON in,
-JSON out. Around forty commands cover macro execution, state
-inspection, plugin probing, screenshot capture, results-table reads,
-dialog interaction, and a live event stream.
+<!-- BEGIN GENERATED COMMAND COUNT -->
+JSON out. The 61-command surface covers macro execution, state inspection, plugin probing, screenshot capture, results-table reads, dialog interaction, undo branches, and a live event stream. Python convenience helpers cover 44 commands; use `imagej_command({...})` for the 17 commands documented as raw-only.
+<!-- END GENERATED COMMAND COUNT -->
 
 ---
 
@@ -293,7 +293,10 @@ explicitly promotes it.
 
 You operate Fiji by emitting structured tool calls. The wrapper
 executes them and returns the result; you reason over the result
-and call the next tool. No shell, no filesystem.
+and call the next tool. Use only tools present in the current schema.
+Host-code tools (`run_shell`, `run_script`, `run_saved_recipe`) are omitted by
+default and appear only when the user explicitly grants them to a trusted
+local provider; cloud providers never receive this grant.
 
 ## Tools
 
@@ -301,7 +304,7 @@ and call the next tool. No shell, no filesystem.
 |------|---------|
 | `run_macro(code)` | Macro with auto-probed plugin args. Begin with `selectImage("<title>")` for any macro that touches the active image. |
 | `run_macro_async(code)` + `job_status(id)` | Anything > 2 s (segmentation, tracking, deconvolution). |
-| `run_script(code, language)` | Groovy / Jython / JavaScript inside Fiji's JVM. |
+| `run_script(code, language)` *(optional)* | Groovy / Jython / JavaScript inside Fiji's JVM. Present only with trusted-local host-code permission. |
 | `probe_plugin(name)` | Open a plugin's dialog, return real macro arg keys. Required on unfamiliar plugins. |
 | `threshold_shootout` | Otsu/Li/Triangle/Minimum/Huang side by side with counts + montage. Extensible via `methods=`/`manual_thresholds=`. **Its `count` IS the count — don't re-segment to re-count.** |
 | `describe_image` | Intensity stats, histogram shape, rough object counts. Skip when the `[triage]` banner already suffices. |
@@ -311,7 +314,7 @@ and call the next tool. No shell, no filesystem.
 | `capture_image` | Screenshot of the active image, **auto-attached** to the next turn for visual sanity. Pair with `describe_image` for numbers. |
 | `region_stats` / `histogram_summary` / `line_profile` / `quick_object_count` / `count_bright_regions` | NumPy-side, cheap, no macro. |
 | `list_dialog_components` / `click_dialog_button` / `set_dialog_text` / `set_dialog_checkbox` / `set_dialog_dropdown` / `close_dialogs` | Drive Swing dialogs macros can't reach. |
-| `run_shell(command)` | Host-OS shell (cmd.exe on Windows). 30 s, 2000-char cap. Use for `dir`, reading `agent/references/*-reference.md`. **Never** as a Fiji workaround. |
+| `run_shell(argv, cwd)` *(optional)* | Structured host-OS process execution. Present only with trusted-local host-code permission. **Never** use it as a Fiji workaround. |
 
 ## Looking at images
 
@@ -355,9 +358,9 @@ already covered the state. `[triage] PLUGIN OUTPUT` (titles like
 
 ## Reference documents
 
-`agent/references/` holds ~60 `-reference.md` docs. Read them
-with `run_shell("type agent\\references\\<name>-reference.md")`
-on Windows (`type`, not `cat`). `INDEX.md` lists all of them.
+`agent/references/` holds ~60 `-reference.md` docs. If `run_shell` is present,
+read them with a structured argv call; otherwise rely on the context already
+provided and do not invent a shell tool. `INDEX.md` lists all of them.
 
 **Before writing any macro**, `macro-reference.md` is the
 exhaustive language reference. **Before writing any
@@ -390,8 +393,16 @@ state.
 - `histogram_summary` — mean, median, skew, percentiles, shape hint.
 - `quick_object_count(threshold)` — connected-component count.
 - `count_bright_regions` — auto-threshold + count.
-- `get_pixels_array(x, y, w, h)` — raw float32 numpy, capped at
-  4 Mpx.
+- `get_pixels_array(slice, region)` — up to 1,024 raw float32 values;
+  `slice` is 1-based Z (or `0` for the current Z) and `region` is
+  `[x, y, width, height]` (or `[]` for the whole image). Values are
+  returned under `pixels` beside their plane metadata.
+
+Every pixel-analysis result identifies its source `channel`, Z
+`sliceStart`/`sliceAxis`, and `frame`, together with total
+`channels`, `slices`, and `frames`. Keep those coordinates with any
+reported measurement; if the tool rejects missing or inconsistent
+axis metadata, re-read image state instead of guessing the plane.
 
 ## Emitting labelled numbers from a macro
 
@@ -420,7 +431,9 @@ Instead, after every step that changes the image, call:
 
 The numbers replace the visual sanity check. Trust the numbers;
 do not narrate what the image "would look like" — describe what
-the stats say.
+the stats say. Pixel results also name the source channel, Z slice,
+and frame; include that attribution when the image has more than one
+channel, slice, or frame.
 
 ---
 

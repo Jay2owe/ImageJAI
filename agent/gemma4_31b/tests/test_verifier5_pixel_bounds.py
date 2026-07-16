@@ -19,7 +19,7 @@ def _pixel_response(
     values=None,
 ):
     if values is None:
-        values = [1.0] * (width * height)
+        values = [1.0] * (width * height * slice_count)
     raw = struct.pack("<{}f".format(len(values)), *values)
     return {
         "ok": True,
@@ -31,14 +31,28 @@ def _pixel_response(
             "sliceStart": slice_start,
             "sliceEnd": slice_start if slice_end is None else slice_end,
             "sliceCount": slice_count,
+            "sliceAxis": "Z",
+            "channel": 2,
+            "frame": 3,
+            "channels": 4,
+            "slices": 5,
+            "frames": 6,
+            "nPixels": len(values),
             "type": "32-bit",
+            "encoding": "base64_float32_le",
             "data": base64.b64encode(raw).decode("ascii"),
         },
     }
 
 
 def _info(width: int, height: int, slices: int = 5) -> dict:
-    return {"width": width, "height": height, "slices": slices}
+    return {
+        "width": width,
+        "height": height,
+        "channels": 4,
+        "slices": slices,
+        "frames": 6,
+    }
 
 
 def test_explicit_slice_is_preflighted_before_pixel_fetch(monkeypatch):
@@ -110,8 +124,11 @@ def test_explicit_slice_requires_exact_start_end_and_count(monkeypatch):
     rejected = tools_python.get_pixels_array(3, [])
     accepted = tools_python.get_pixels_array(3, [])
 
-    assert "different pixel slice" in rejected["error"]
-    assert accepted == [[7.0]]
+    assert "exactly one Z plane" in rejected["error"]
+    assert accepted["pixels"] == [[7.0]]
+    assert accepted["channel"] == 2
+    assert accepted["frame"] == 3
+    assert accepted["sliceAxis"] == "Z"
     assert calls == [("get_pixels", {"slice": 3}), ("get_pixels", {"slice": 3})]
 
 
@@ -142,8 +159,10 @@ def test_current_slice_still_requires_one_self_consistent_plane(monkeypatch):
         tools_python, "_safe_send", lambda command, **kwargs: next(replies)
     )
 
-    assert "different pixel slice" in tools_python.get_pixels_array(0, [])["error"]
-    assert tools_python.get_pixels_array(0, []) == [[9.0]]
+    assert "exactly one Z plane" in tools_python.get_pixels_array(0, [])["error"]
+    accepted = tools_python.get_pixels_array(0, [])
+    assert accepted["pixels"] == [[9.0]]
+    assert accepted["sliceStart"] == 4
 
 
 def test_oversized_raw_request_is_rejected_without_fetch_or_large_objects(monkeypatch):
@@ -159,7 +178,7 @@ def test_oversized_raw_request_is_rejected_without_fetch_or_large_objects(monkey
     result = tools_python.get_pixels_array(1, [])
 
     assert result["requested_values"] == 4_000_000
-    assert result["max_values"] == tools_python._MAX_RAW_PIXEL_VALUES
+    assert result["max_values"] == tools_python.MAX_RAW_PIXEL_VALUES
     assert len(json.dumps(result)) < 1_000
 
 
@@ -176,12 +195,15 @@ def test_largest_allowed_raw_result_fits_pixel_history_budget(monkeypatch):
             width=side,
             height=side,
             slice_start=1,
-            values=[longest_float32] * tools_python._MAX_RAW_PIXEL_VALUES,
+            values=[longest_float32] * tools_python.MAX_RAW_PIXEL_VALUES,
         ),
     )
 
     result = tools_python.get_pixels_array(1, [])
 
-    assert isinstance(result, list)
-    assert sum(len(row) for row in result) == tools_python._MAX_RAW_PIXEL_VALUES
+    assert isinstance(result, dict)
+    assert sum(len(row) for row in result["pixels"]) == tools_python.MAX_RAW_PIXEL_VALUES
+    assert result["channels"] == 4
+    assert result["slices"] == 5
+    assert result["frames"] == 6
     assert len(json.dumps(result)) <= 32_000

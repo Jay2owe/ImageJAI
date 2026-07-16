@@ -111,6 +111,17 @@ public class ChatPanel extends JPanel implements ChatPanelController, ChatSurfac
     }
 
     @Override
+    public boolean confirm(String confirmationId, String prompt, List<String> options,
+                           Consumer<String> onChoice) {
+        return chatView.confirm(confirmationId, prompt, options, onChoice);
+    }
+
+    @Override
+    public boolean cancelConfirmation(String confirmationId) {
+        return chatView.cancelConfirmation(confirmationId);
+    }
+
+    /** Compatibility overload for callers that do not need cancellation. */
     public void confirm(String prompt, List<String> options, Consumer<String> onChoice) {
         chatView.confirm(prompt, options, onChoice);
     }

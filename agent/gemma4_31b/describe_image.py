@@ -23,6 +23,7 @@ modules, so each is reimplemented here.
 from __future__ import annotations
 
 import base64
+import binascii
 import json
 import math
 import re
@@ -101,6 +102,23 @@ def _format_axes(info: dict) -> str:
         "single channel" if channels == 1 else "{} channels".format(channels),
         "single z" if slices == 1 else "{} z-slices".format(slices),
         "single frame" if frames == 1 else "{} frames".format(frames),
+    )
+
+
+def _fragment_plane_attribution(meta: dict) -> str:
+    """Identify the exact C/Z/T plane used for numeric pixel measurements."""
+    return (
+        "Pixel measurements are from channel {channel} of {channels}, "
+        "Z slice {slice} of {slices}, frame {frame} of {frames} "
+        "(slice axis {axis})."
+    ).format(
+        channel=meta["channel"],
+        channels=meta["channels"],
+        slice=meta["sliceStart"],
+        slices=meta["slices"],
+        frame=meta["frame"],
+        frames=meta["frames"],
+        axis=meta["sliceAxis"],
     )
 
 
@@ -425,20 +443,82 @@ def _decode_pixels(resp):
     if not isinstance(b64, str) or not b64:
         return None, {"error": "get_pixels reply missing data field"}
     try:
-        raw = base64.b64decode(b64)
-    except (ValueError, TypeError) as exc:
+        raw = base64.b64decode(b64, validate=True)
+    except (binascii.Error, ValueError, TypeError) as exc:
         return None, {"error": "base64 decode failed: {}".format(exc)}
-    w = int(result.get("width", 0))
-    h = int(result.get("height", 0))
+    try:
+        w = int(result.get("width", 0))
+        h = int(result.get("height", 0))
+        meta = {
+            "x": int(result["x"]),
+            "y": int(result["y"]),
+            "width": w,
+            "height": h,
+            "sliceStart": int(result["sliceStart"]),
+            "sliceEnd": int(result["sliceEnd"]),
+            "sliceCount": int(result["sliceCount"]),
+            "sliceAxis": str(result["sliceAxis"]),
+            "channel": int(result["channel"]),
+            "frame": int(result["frame"]),
+            "channels": int(result["channels"]),
+            "slices": int(result["slices"]),
+            "frames": int(result["frames"]),
+            "nPixels": int(result["nPixels"]),
+            "type": str(result["type"]),
+            "encoding": str(result["encoding"]),
+        }
+    except (KeyError, TypeError, ValueError) as exc:
+        return None, {
+            "error": "get_pixels reply missing or malformed C/Z/T metadata: {}".format(exc)
+        }
     if w <= 0 or h <= 0:
         return None, {"error": "get_pixels returned zero-size region"}
-    plane = np.frombuffer(raw, dtype="<f4", count=w * h).reshape((h, w))
-    return plane, {
-        "x": int(result.get("x", 0)),
-        "y": int(result.get("y", 0)),
-        "width": w,
-        "height": h,
-    }
+    if (
+        meta["x"] < 0
+        or meta["y"] < 0
+        or meta["sliceAxis"] != "Z"
+        or meta["encoding"] != "base64_float32_le"
+        or meta["channels"] <= 0
+        or meta["slices"] <= 0
+        or meta["frames"] <= 0
+        or not 1 <= meta["channel"] <= meta["channels"]
+        or not 1 <= meta["frame"] <= meta["frames"]
+        or not 1 <= meta["sliceStart"] <= meta["sliceEnd"] <= meta["slices"]
+        or meta["sliceCount"] != 1
+        or meta["sliceEnd"] != meta["sliceStart"]
+        or meta["nPixels"] != w * h
+        or len(raw) != meta["nPixels"] * 4
+    ):
+        return None, {"error": "get_pixels returned inconsistent C/Z/T metadata"}
+    plane = np.frombuffer(raw, dtype="<f4").reshape((h, w))
+    return plane, meta
+
+
+def _metadata_matches_info(meta: dict, info: dict) -> bool:
+    """Return whether a pixel reply still belongs to the info snapshot."""
+    try:
+        return all(
+            int(meta[key]) == int(info[key])
+            for key in ("channels", "slices", "frames")
+        )
+    except (KeyError, TypeError, ValueError):
+        return False
+
+
+def _geometry_matches(meta: dict, x: int, y: int, width: int, height: int) -> bool:
+    """Return whether Fiji supplied the exact requested image rectangle."""
+    try:
+        return all(
+            int(meta[key]) == expected
+            for key, expected in (
+                ("x", x),
+                ("y", y),
+                ("width", width),
+                ("height", height),
+            )
+        )
+    except (KeyError, TypeError, ValueError):
+        return False
 
 
 def _fetch_thumbnail(info: dict):
@@ -463,6 +543,10 @@ def _fetch_thumbnail(info: dict):
         arr, meta = _decode_pixels(_safe_send("get_pixels"))
         if arr is None:
             return None, meta
+        if not _geometry_matches(meta, 0, 0, w, h):
+            return None, {"error": "active image geometry changed during pixel fetch"}
+        if not _metadata_matches_info(meta, info):
+            return None, {"error": "active image axis sizes changed during pixel fetch"}
         if factor > 1:
             arr = arr[::factor, ::factor]
         meta["downsample_factor"] = int(factor)
@@ -477,6 +561,10 @@ def _fetch_thumbnail(info: dict):
     arr, meta = _decode_pixels(_safe_send("get_pixels", x=cx, y=cy, width=cw, height=ch))
     if arr is None:
         return None, meta
+    if not _geometry_matches(meta, cx, cy, cw, ch):
+        return None, {"error": "active image geometry changed during pixel fetch"}
+    if not _metadata_matches_info(meta, info):
+        return None, {"error": "active image axis sizes changed during pixel fetch"}
     meta["downsample_factor"] = int(factor)
     meta["source"] = "center_crop"
     return arr, meta
@@ -778,21 +866,50 @@ def describe_image() -> str:
     info = info_resp.get("result") or {}
     if not isinstance(info, dict) or not info:
         return "describe_image: no active image."
+    try:
+        channels = int(info["channels"])
+        slices = int(info["slices"])
+        frames = int(info["frames"])
+    except (KeyError, TypeError, ValueError) as exc:
+        return "describe_image: cannot attribute image axes ({}).".format(exc)
+    if min(channels, slices, frames) <= 0:
+        return "describe_image: cannot attribute image axes (invalid axis sizes)."
 
     bit_depth = _bit_depth_from_type(info.get("type", ""))
 
+    thumb_arr, thumb_meta = _fetch_thumbnail(info)
+    plane_meta = thumb_meta if thumb_arr is not None else None
+    if plane_meta is None and channels == slices == frames == 1:
+        # Explicit compatibility for a singleton image: its only possible
+        # source plane is C=Z=T=1 even if the thumbnail fetch itself failed.
+        plane_meta = {
+            "sliceAxis": "Z",
+            "sliceStart": 1,
+            "channel": 1,
+            "frame": 1,
+            "channels": 1,
+            "slices": 1,
+            "frames": 1,
+        }
+
     hist_stats = None
     hist_error = None
-    hist_resp = _safe_send("get_histogram")
-    if isinstance(hist_resp, dict) and hist_resp.get("ok"):
-        hist_stats = _hist_stats(hist_resp.get("result") or {})
-    elif isinstance(hist_resp, dict):
-        hist_error = hist_resp.get("error") or "unknown histogram error"
-
-    thumb_arr, _thumb_meta = _fetch_thumbnail(info)
+    if plane_meta is not None:
+        hist_resp = _safe_send("get_histogram")
+        if isinstance(hist_resp, dict) and hist_resp.get("ok"):
+            hist_stats = _hist_stats(hist_resp.get("result") or {})
+        elif isinstance(hist_resp, dict):
+            hist_error = hist_resp.get("error") or "unknown histogram error"
+    else:
+        hist_error = (
+            "pixel-plane C/Z/T metadata was unavailable or inconsistent, "
+            "so hyperstack measurements were not attributed"
+        )
     roi_data = _fetch_roi_overlay()
 
     fragments = [_fragment_header(info), _fragment_calibration(info)]
+    if plane_meta is not None:
+        fragments.append(_fragment_plane_attribution(plane_meta))
     if hist_stats is not None:
         fragments.append(_fragment_intensity(hist_stats, bit_depth))
         fragments.append(_fragment_saturation(hist_stats, bit_depth))

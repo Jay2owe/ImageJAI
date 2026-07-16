@@ -165,7 +165,15 @@ measurement/verification without perturbing Fiji state.
 - `histogram_summary` — mean, median, skew, percentiles, shape hint.
 - `quick_object_count(threshold)` — connected-component count at a fixed cutoff.
 - `count_bright_regions` — auto-threshold + count; faster than a shootout when you just need a number.
-- `get_pixels_array(x, y, w, h)` — raw float32 numpy, capped at 4 Mpx.
+- `get_pixels_array(slice, region)` — up to 1,024 raw float32 values;
+  `slice` is 1-based Z (or `0` for current Z), and `region` is
+  `[x, y, width, height]` or `[]` for the whole image. Read the values
+  from `pixels`; the remaining fields identify their source plane.
+
+Every pixel-analysis result includes its source channel, Z slice and
+frame plus the total channel/slice/frame counts. Keep those coordinates
+with any measurement; never guess when axis metadata is rejected as
+missing or inconsistent.
 
 These are the right tool when you want a number and not a macro side-effect.
 

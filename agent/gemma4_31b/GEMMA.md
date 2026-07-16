@@ -113,6 +113,15 @@ Use these to understand an image:
   on pixel data without a macro. Cheap and fast. Prefer these for
   simple questions ("how bright is this corner?", "roughly how
   many cells?").
+- `get_pixels_array(slice, region)` — up to 1,024 raw float32
+  values from one 1-based Z slice (`0` means current Z); `region`
+  is `[x, y, width, height]` or `[]` for the whole image. Raw values
+  are under `pixels` beside their source-plane fields.
+
+Pixel-analysis results include the measured channel, Z slice and
+frame plus total channel/slice/frame counts. Preserve that attribution
+when reporting numbers. If the tool rejects incomplete or inconsistent
+axis metadata, re-read state rather than guessing the plane.
 
 ---
 
