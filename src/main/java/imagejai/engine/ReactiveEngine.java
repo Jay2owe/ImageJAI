@@ -6,7 +6,12 @@ import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 
 import ij.IJ;
+import ij.ImagePlus;
 import ij.WindowManager;
+import ij.io.FileInfo;
+import ij.measure.Calibration;
+import ij.plugin.frame.RoiManager;
+import imagejai.engine.safeMode.DestructiveScanner;
 
 import javax.swing.SwingUtilities;
 import java.awt.Window;
@@ -20,6 +25,7 @@ import java.nio.file.FileSystems;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.nio.file.StandardOpenOption;
 import java.nio.file.StandardWatchEventKinds;
 import java.nio.file.WatchEvent;
 import java.nio.file.WatchKey;
@@ -27,18 +33,27 @@ import java.nio.file.WatchService;
 import java.io.File;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.Deque;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.Semaphore;
 import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.LongSupplier;
 import java.util.regex.Pattern;
 import java.util.regex.PatternSyntaxException;
 
@@ -78,14 +93,55 @@ import java.util.regex.PatternSyntaxException;
 public class ReactiveEngine {
 
     private static final Path HOME = Paths.get(System.getProperty("user.home"));
-    private static final Path RULES_DIR = HOME.resolve(".imagej-ai").resolve("reactive");
-    private static final Path LOCK_FILE = RULES_DIR.resolve("reactive.lock");
-    private static final Path CAPTURE_DIR = HOME.resolve(".imagej-ai").resolve("captures");
+    private static final Path DEFAULT_RULES_DIR =
+            HOME.resolve(".imagej-ai").resolve("reactive");
 
     private static final long RELOAD_DEBOUNCE_MS = 500L;
     private static final long CYCLE_WARN_WINDOW_MS = 1000L;
+    static final int DEFAULT_ACTION_CAPACITY = 32;
+    static final long DEFAULT_ACTION_TTL_MS = 10_000L;
+    static final int DEFAULT_FAILURE_QUARANTINE_THRESHOLD = 3;
+    static final int MAX_CAPTURE_BYTES = 8 * 1024 * 1024;
+    private static final int MAX_CAPTURE_BASE_CHARS = 80;
+    private static final Set<String> ACTION_KEYS = Collections.unmodifiableSet(
+            new HashSet<String>(Arrays.asList("execute_macro", "publish_event",
+                    "gui_action", "run_intent", "close_dialog", "capture", "wait")));
+
+    interface MutationPolicy {
+        void checkSafety(String ruleName, String sourceKind, String code) throws Exception;
+        void beforeMutation(String ruleName, String sourceKind, String code) throws Exception;
+        void afterMutation(String ruleName, String sourceKind, String code,
+                           MutationCoordinator.Outcome<?> outcome) throws Exception;
+        void onCompletion(String ruleName, String sourceKind, String code,
+                          MutationCoordinator.Completion<?> completion);
+    }
+
+    interface CaptureBackend {
+        CaptureData capture() throws Exception;
+    }
+
+    static final class CaptureData {
+        final byte[] png;
+        final Path exportDir;
+        CaptureData(byte[] png, Path exportDir) {
+            this.png = png;
+            this.exportDir = exportDir;
+        }
+    }
+
     private final EventBus bus;
     private final CommandEngine cmdEngine;
+    private final MutationCoordinator mutationCoordinator;
+    private final boolean ownsMutationCoordinator;
+    private final Path rulesDir;
+    private final Path lockFile;
+    private final LongSupplier clock;
+    private final int actionCapacity;
+    private final long actionTtlMs;
+    private final int failureQuarantineThreshold;
+    private final MutationPolicy mutationPolicy;
+    private final CaptureBackend captureBackend;
+    private final AtomicLong captureSequence = new AtomicLong();
     // Phase 5/7 dependencies — volatile so the TCP server can swap the GUI
     // dispatcher when the chat panel controller (re)attaches. Typed as Object
     // so the engine compiles even before those classes are merged, and so the
@@ -95,6 +151,8 @@ public class ReactiveEngine {
 
     private final CopyOnWriteArrayList<Rule> rules = new CopyOnWriteArrayList<Rule>();
     private final CopyOnWriteArrayList<Quarantined> quarantined = new CopyOnWriteArrayList<Quarantined>();
+    private final ConcurrentHashMap<String, Boolean> enabledOverrides =
+            new ConcurrentHashMap<String, Boolean>();
 
     // Cycle detector: rule.name -> (topic -> last publish ms by this rule).
     private final ConcurrentHashMap<String, ConcurrentHashMap<String, Long>> lastPublishByRule =
@@ -105,6 +163,7 @@ public class ReactiveEngine {
     private Thread watchThread;
     private WatchService watchService;
     private ExecutorService actionExecutor;
+    private volatile Semaphore actionPermits;
     private EventBus.Listener listener;
 
     /** Construct an engine that can dispatch macros + bus events only. */
@@ -119,10 +178,67 @@ public class ReactiveEngine {
      *               to disable {@code gui_action} actions.
      */
     public ReactiveEngine(EventBus bus, CommandEngine cmd, Object intent, Object gui) {
+        this(bus, cmd, intent, gui, new MutationCoordinator(), true);
+    }
+
+    /**
+     * Construct an engine on the application-owned mutation boundary.
+     * Reactive mutations must share this coordinator with every other ImageJ
+     * producer so a rule can never overlap a TCP or assistant mutation.
+     */
+    public ReactiveEngine(EventBus bus, CommandEngine cmd, Object intent, Object gui,
+                          MutationCoordinator coordinator) {
+        this(bus, cmd, intent, gui, coordinator, false);
+    }
+
+    private ReactiveEngine(EventBus bus, CommandEngine cmd, Object intent, Object gui,
+                           MutationCoordinator coordinator, boolean ownsCoordinator) {
+        this(bus, cmd, intent, gui, coordinator, ownsCoordinator,
+                DEFAULT_RULES_DIR, systemClock(), DEFAULT_ACTION_CAPACITY,
+                DEFAULT_ACTION_TTL_MS, DEFAULT_FAILURE_QUARANTINE_THRESHOLD,
+                new DefaultMutationPolicy(), new DefaultCaptureBackend());
+    }
+
+    ReactiveEngine(EventBus bus, CommandEngine cmd, Object intent, Object gui,
+                   MutationCoordinator coordinator, Path rulesDirectory,
+                   LongSupplier clock, int actionCapacity, long actionTtlMs,
+                   int failureThreshold, MutationPolicy policy,
+                   CaptureBackend captureBackend) {
+        this(bus, cmd, intent, gui, coordinator, false, rulesDirectory, clock,
+                actionCapacity, actionTtlMs, failureThreshold, policy, captureBackend);
+    }
+
+    private ReactiveEngine(EventBus bus, CommandEngine cmd, Object intent, Object gui,
+                           MutationCoordinator coordinator, boolean ownsCoordinator,
+                           Path rulesDirectory, LongSupplier suppliedClock,
+                           int suppliedCapacity, long suppliedTtlMs,
+                           int suppliedFailureThreshold, MutationPolicy policy,
+                           CaptureBackend suppliedCaptureBackend) {
         this.bus = bus;
         this.cmdEngine = cmd;
         this.intentRouter = intent;
         this.guiDispatcher = gui;
+        if (coordinator == null) {
+            throw new IllegalArgumentException("mutation coordinator is required");
+        }
+        this.mutationCoordinator = coordinator;
+        this.ownsMutationCoordinator = ownsCoordinator;
+        this.rulesDir = (rulesDirectory == null ? DEFAULT_RULES_DIR : rulesDirectory)
+                .toAbsolutePath().normalize();
+        this.lockFile = this.rulesDir.resolve("reactive.lock");
+        this.clock = suppliedClock == null ? systemClock() : suppliedClock;
+        this.actionCapacity = Math.max(1, suppliedCapacity);
+        this.actionTtlMs = Math.max(1L, suppliedTtlMs);
+        this.failureQuarantineThreshold = Math.max(1, suppliedFailureThreshold);
+        this.mutationPolicy = policy == null ? new DefaultMutationPolicy() : policy;
+        this.captureBackend = suppliedCaptureBackend == null
+                ? new DefaultCaptureBackend() : suppliedCaptureBackend;
+    }
+
+    private static LongSupplier systemClock() {
+        return new LongSupplier() {
+            @Override public long getAsLong() { return System.currentTimeMillis(); }
+        };
     }
 
     // ------------------------------------------------------------------
@@ -133,6 +249,7 @@ public class ReactiveEngine {
         if (started) return;
         started = true;
         stopping = false;
+        actionPermits = new Semaphore(actionCapacity, true);
 
         actionExecutor = Executors.newSingleThreadExecutor(new ThreadFactory() {
             @Override
@@ -144,9 +261,9 @@ public class ReactiveEngine {
         });
 
         try {
-            Files.createDirectories(RULES_DIR);
+            Files.createDirectories(rulesDir);
         } catch (IOException e) {
-            logWarn("Failed to create rules dir " + RULES_DIR + ": " + e.getMessage());
+            logWarn("Failed to create rules dir " + rulesDir + ": " + e.getMessage());
         }
 
         reload();
@@ -186,7 +303,12 @@ public class ReactiveEngine {
             watchThread = null;
         }
         if (actionExecutor != null) {
-            actionExecutor.shutdownNow();
+            List<Runnable> abandoned = actionExecutor.shutdownNow();
+            for (Runnable pending : abandoned) {
+                if (pending instanceof QueuedRule) {
+                    ((QueuedRule) pending).releasePermit();
+                }
+            }
             actionExecutor = null;
         }
         logInfo("Reactive engine stopped");
@@ -205,13 +327,14 @@ public class ReactiveEngine {
     }
 
     public boolean isLocked() {
-        return Files.exists(LOCK_FILE);
+        return Files.exists(lockFile);
     }
 
     public synchronized boolean setEnabled(String name, boolean enabled) {
         for (Rule r : rules) {
             if (r.name.equals(name)) {
                 r.enabled = enabled;
+                enabledOverrides.put(name, Boolean.valueOf(enabled));
                 return true;
             }
         }
@@ -235,8 +358,9 @@ public class ReactiveEngine {
     public synchronized void reload() {
         List<Rule> loaded = new ArrayList<Rule>();
         List<Quarantined> qu = new ArrayList<Quarantined>();
+        Set<String> loadedNames = new HashSet<String>();
 
-        File dir = RULES_DIR.toFile();
+        File dir = rulesDir.toFile();
         if (dir.isDirectory()) {
             File[] files = dir.listFiles();
             if (files != null) {
@@ -253,6 +377,10 @@ public class ReactiveEngine {
                     if ("reactive.lock".equals(name)) continue;
                     try {
                         Rule rule = parseRule(f);
+                        if (!loadedNames.add(rule.name)) {
+                            throw new IllegalArgumentException(
+                                    "Duplicate rule name '" + rule.name + "'");
+                        }
                         loaded.add(rule);
                     } catch (Exception e) {
                         qu.add(new Quarantined(f.getAbsolutePath(), e.getMessage() != null
@@ -272,21 +400,36 @@ public class ReactiveEngine {
             }
         });
 
-        // Preserve enabled-state / hits / lastFired across reloads when name matches.
+        // File configuration is authoritative unless the user explicitly set
+        // a runtime override through reactive_enable/reactive_disable. Runtime
+        // quarantine survives an unchanged reload but a file edit rehabilitates
+        // the rule so a corrected action can run immediately.
         Map<String, Rule> existing = new HashMap<String, Rule>();
         for (Rule r : rules) existing.put(r.name, r);
         for (Rule r : loaded) {
+            Boolean override = enabledOverrides.get(r.name);
+            if (override != null) r.enabled = override.booleanValue();
             Rule prev = existing.get(r.name);
             if (prev != null) {
-                r.enabled = prev.enabled;
                 r.hits = prev.hits;
                 r.lastFired = prev.lastFired;
+                if (prev.sourceModified == r.sourceModified && prev.runtimeQuarantined) {
+                    r.runtimeQuarantined = true;
+                    r.quarantineReason = prev.quarantineReason;
+                    r.consecutiveFailures.set(prev.consecutiveFailures.get());
+                    qu.add(new Quarantined(r.sourceFile, r.quarantineReason));
+                }
             }
         }
         rules.clear();
         rules.addAll(loaded);
         quarantined.clear();
         quarantined.addAll(qu);
+        lastPublishByRule.keySet().retainAll(loadedNames);
+
+        for (Quarantined entry : qu) {
+            publishDiagnostic("reactive.reload_error", null, entry.error);
+        }
     }
 
     private Rule parseRule(File f) throws IOException {
@@ -311,6 +454,10 @@ public class ReactiveEngine {
         }
         String desc = getString(obj, "description", "");
         boolean enabled = getBool(obj, "enabled", true);
+        if (obj.has("enabled") && (!obj.get("enabled").isJsonPrimitive()
+                || !obj.getAsJsonPrimitive("enabled").isBoolean())) {
+            throw new IllegalArgumentException("Field 'enabled' must be boolean");
+        }
         int priority = getInt(obj, "priority", 100);
 
         JsonElement whenEl = obj.get("when");
@@ -332,13 +479,18 @@ public class ReactiveEngine {
             throw new IllegalArgumentException("Missing required array 'do'");
         }
         JsonArray doArr = doEl.getAsJsonArray();
+        if (doArr.size() == 0) {
+            throw new IllegalArgumentException("Array 'do' must not be empty");
+        }
         List<JsonObject> actions = new ArrayList<JsonObject>();
         for (int i = 0; i < doArr.size(); i++) {
             JsonElement ae = doArr.get(i);
             if (ae == null || !ae.isJsonObject()) {
                 throw new IllegalArgumentException("Action #" + i + " must be an object");
             }
-            actions.add(ae.getAsJsonObject());
+            JsonObject action = ae.getAsJsonObject();
+            validateAction(action, i);
+            actions.add(action.deepCopy());
         }
 
         String rateLimit = getString(obj, "rate_limit", null);
@@ -356,6 +508,9 @@ public class ReactiveEngine {
                 try { waitBefore = wbe.getAsLong(); } catch (Exception ignore) {}
             }
         }
+        if (waitBefore < 0L || waitBefore >= actionTtlMs) {
+            throw new IllegalArgumentException("wait_before must be >= 0 and below action TTL");
+        }
 
         Rule r = new Rule();
         r.name = name;
@@ -369,7 +524,50 @@ public class ReactiveEngine {
         r.rateLimiter = rl;
         r.waitBefore = waitBefore;
         r.sourceFile = f.getAbsolutePath();
+        r.sourceModified = f.lastModified();
         return r;
+    }
+
+    private void validateAction(JsonObject action, int index) {
+        if (action == null || action.entrySet().size() != 1) {
+            throw new IllegalArgumentException(
+                    "Action #" + index + " must contain exactly one action key");
+        }
+        String key = action.entrySet().iterator().next().getKey();
+        JsonElement value = action.get(key);
+        if (!ACTION_KEYS.contains(key)) {
+            throw new IllegalArgumentException("Action #" + index
+                    + " has unknown key '" + key + "'");
+        }
+        if ("execute_macro".equals(key) || "run_intent".equals(key)) {
+            if (value == null || !value.isJsonPrimitive()
+                    || value.getAsString().trim().isEmpty()) {
+                throw new IllegalArgumentException("Action #" + index + " '"
+                        + key + "' must be a non-empty string");
+            }
+        } else if ("publish_event".equals(key)) {
+            if (value == null || !value.isJsonObject()
+                    || getString(value.getAsJsonObject(), "topic", "").trim().isEmpty()) {
+                throw new IllegalArgumentException("Action #" + index
+                        + " publish_event requires a non-empty topic");
+            }
+        } else if ("gui_action".equals(key) || "close_dialog".equals(key)) {
+            if (value == null || !value.isJsonObject()) {
+                throw new IllegalArgumentException("Action #" + index + " '"
+                        + key + "' must be an object");
+            }
+        } else if ("capture".equals(key)) {
+            if (value != null && !value.isJsonNull() && !value.isJsonPrimitive()) {
+                throw new IllegalArgumentException("Action #" + index
+                        + " capture must be a string or null");
+            }
+        } else if ("wait".equals(key)) {
+            long waitMs = parseWaitMs(value);
+            if (waitMs < 0L || waitMs >= actionTtlMs) {
+                throw new IllegalArgumentException("Action #" + index
+                        + " wait must be non-negative and below action TTL");
+            }
+        }
     }
 
     // ------------------------------------------------------------------
@@ -378,7 +576,7 @@ public class ReactiveEngine {
 
     private void onBusEvent(JsonObject frame) {
         if (frame == null) return;
-        if (Files.exists(LOCK_FILE)) return;
+        if (!started || stopping || Files.exists(lockFile)) return;
 
         JsonElement tEl = frame.get("event");
         if (tEl == null || !tEl.isJsonPrimitive()) return;
@@ -388,67 +586,224 @@ public class ReactiveEngine {
         final JsonObject data = (frame.has("data") && frame.get("data").isJsonObject())
                 ? frame.getAsJsonObject("data")
                 : new JsonObject();
+        if (getBool(data, "_reactive_internal", false)) return;
 
         for (final Rule r : rules) {
-            if (!r.enabled) continue;
             if (!topicMatches(r.event, topic)) continue;
             if (!whereMatches(r.where, data)) continue;
+            if (!r.enabled) {
+                publishDiagnostic("reactive.rejected", r, "disabled");
+                continue;
+            }
+            if (r.runtimeQuarantined) {
+                publishDiagnostic("reactive.rejected", r, "quarantined");
+                continue;
+            }
 
             // Cycle detection — did this rule publish this topic within 1s?
+            long now = clock.getAsLong();
             ConcurrentHashMap<String, Long> pubMap = lastPublishByRule.get(r.name);
             if (pubMap != null) {
                 Long ts = pubMap.get(topic);
-                if (ts != null && (System.currentTimeMillis() - ts.longValue()) < CYCLE_WARN_WINDOW_MS) {
+                if (ts != null && (now - ts.longValue()) >= 0L
+                        && (now - ts.longValue()) < CYCLE_WARN_WINDOW_MS) {
+                    quarantineRuntime(r, "cycle detected on topic '" + topic + "'");
                     logWarn("Rule '" + r.name + "' matched on '" + topic
-                            + "' it published " + (System.currentTimeMillis() - ts.longValue())
+                            + "' it published " + (now - ts.longValue())
                             + "ms ago — possible feedback loop (rate_limit still enforced)");
                 }
             }
+            if (r.runtimeQuarantined) continue;
 
             if (r.rateLimiter != null && !r.rateLimiter.tryAcquire()) {
                 continue;
             }
-            r.hits++;
-            r.lastFired = System.currentTimeMillis();
-
-            final JsonObject capturedFrame = frame;
+            Semaphore permits = actionPermits;
+            if (permits == null || !permits.tryAcquire()) {
+                publishDiagnostic("reactive.rejected", r, "queue_saturated");
+                continue;
+            }
             final ExecutorService ex = actionExecutor;
-            if (ex == null) continue;
-            ex.submit(new Runnable() {
-                @Override
-                public void run() {
-                    try {
-                        fireRule(r, capturedFrame);
-                    } catch (Throwable t) {
-                        logWarn("Rule '" + r.name + "' firing failed: " + t.getMessage());
-                    }
-                }
-            });
+            if (ex == null || stopping || !started) {
+                permits.release();
+                publishDiagnostic("reactive.rejected", r, "engine_stopped");
+                continue;
+            }
+            QueuedRule queued = new QueuedRule(r, frame.deepCopy(), now,
+                    safeDeadline(now, actionTtlMs), permits);
+            try {
+                ex.execute(queued);
+                r.hits++;
+                r.lastFired = now;
+            } catch (RejectedExecutionException rejected) {
+                queued.releasePermit();
+                publishDiagnostic("reactive.rejected", r, "executor_rejected");
+            }
         }
     }
 
-    private void fireRule(Rule r, JsonObject frame) {
+    private void fireRule(Rule r, JsonObject frame, long deadline) {
+        String rejection = executionRejectionReason(r, deadline);
+        if (rejection != null) {
+            publishDiagnostic("reactive.rejected", r, rejection);
+            return;
+        }
         if (r.waitBefore > 0) {
             try { Thread.sleep(r.waitBefore); }
             catch (InterruptedException ie) { Thread.currentThread().interrupt(); return; }
         }
+        rejection = executionRejectionReason(r, deadline);
+        if (rejection != null) {
+            publishDiagnostic("reactive.rejected", r, rejection);
+            return;
+        }
         for (JsonObject action : r.actions) {
+            rejection = executionRejectionReason(r, deadline);
+            if (rejection != null) {
+                publishDiagnostic("reactive.rejected", r, rejection);
+                return;
+            }
             try {
                 executeAction(r, action, frame);
             } catch (Throwable t) {
+                if (t instanceof InterruptedException) {
+                    Thread.currentThread().interrupt();
+                    return;
+                }
                 logWarn("Rule '" + r.name + "' action failed: " + t.getMessage());
-                // Continue to next action rather than aborting the chain.
+                recordRuleFailure(r, t);
+                return;
             }
         }
+        r.consecutiveFailures.set(0);
+    }
+
+    private String executionRejectionReason(Rule r, long deadline) {
+        if (!started || stopping) return "engine_stopped";
+        if (Files.exists(lockFile)) return "locked";
+        if (!r.enabled) return "disabled";
+        if (r.runtimeQuarantined) return "quarantined";
+        if (clock.getAsLong() > deadline) return "expired";
+        return null;
+    }
+
+    private void recordRuleFailure(Rule rule, Throwable failure) {
+        int failures = rule.consecutiveFailures.incrementAndGet();
+        String detail = failure == null || failure.getMessage() == null
+                ? "unknown failure" : failure.getMessage();
+        publishDiagnostic("reactive.action_failed", rule,
+                "failure " + failures + "/" + failureQuarantineThreshold + ": " + detail);
+        if (failures >= failureQuarantineThreshold) {
+            quarantineRuntime(rule, "repeated action failures: " + detail);
+        }
+    }
+
+    private void quarantineRuntime(Rule rule, String reason) {
+        if (rule == null) return;
+        synchronized (rule) {
+            if (rule.runtimeQuarantined) return;
+            rule.runtimeQuarantined = true;
+            rule.quarantineReason = boundedReason(reason);
+        }
+        quarantined.add(new Quarantined(rule.sourceFile, rule.quarantineReason));
+        lastPublishByRule.remove(rule.name);
+        logWarn("Quarantined rule '" + rule.name + "': " + rule.quarantineReason);
+        publishDiagnostic("reactive.quarantined", rule, rule.quarantineReason);
+    }
+
+    private static String boundedReason(String reason) {
+        String value = reason == null ? "" : reason;
+        return value.length() <= 512 ? value : value.substring(0, 512);
+    }
+
+    private static long safeDeadline(long now, long ttl) {
+        if (Long.MAX_VALUE - now < ttl) return Long.MAX_VALUE;
+        return now + ttl;
+    }
+
+    int availableActionPermitsForTest() {
+        Semaphore permits = actionPermits;
+        return permits == null ? 0 : permits.availablePermits();
+    }
+
+    private <T> T runGovernedMutation(final Rule rule, final String sourceKind,
+                                      final String code, final boolean undoEnabled,
+                                      MutationCoordinator.Operation<T> operation)
+            throws Exception {
+        MutationCoordinator.Lifecycle<T> lifecycle =
+                new MutationCoordinator.Lifecycle<T>() {
+            @Override public void checkSafety() throws Exception {
+                mutationPolicy.checkSafety(rule.name, sourceKind, code);
+            }
+
+            @Override public void beforeMutation() throws Exception {
+                mutationPolicy.beforeMutation(rule.name, sourceKind, code);
+            }
+
+            @Override public void afterMutation(MutationCoordinator.Outcome<T> outcome)
+                    throws Exception {
+                mutationPolicy.afterMutation(rule.name, sourceKind, code, outcome);
+            }
+
+            @Override public void onCompletion(
+                    MutationCoordinator.Completion<T> completion) {
+                mutationPolicy.onCompletion(rule.name, sourceKind, code, completion);
+            }
+        };
+        MutationCoordinator.Request.Builder<T> requestBuilder =
+                MutationCoordinator.Request.<T>builder()
+                        .ownerSession("__imagejai_reactive__")
+                        .sourceKind(sourceKind)
+                        .code(code == null ? "" : code)
+                        .timeoutMs(actionTtlMs)
+                        .safetyEnabled(true)
+                        .undoEnabled(undoEnabled)
+                        .provenanceEnabled(true)
+                        .operation(operation)
+                        .lifecycle(lifecycle);
+        if (undoEnabled) {
+            requestBuilder.cancellationAction(new MutationCoordinator.CancellationAction() {
+                @Override public void cancel() {
+                    CommandEngine.requestOwnedMacroAbort();
+                }
+            });
+        }
+        MutationCoordinator.Request<T> request = requestBuilder.build();
+        MutationCoordinator.Handle<T> handle = mutationCoordinator.submit(request);
+        MutationCoordinator.Completion<T> completion;
+        try {
+            completion = handle.awaitCompletion();
+        } catch (InterruptedException interrupted) {
+            handle.cancel();
+            Thread.currentThread().interrupt();
+            throw interrupted;
+        }
+        if (completion.state() == MutationCoordinator.State.SUCCEEDED) {
+            return completion.result();
+        }
+        Throwable error = completion.error();
+        String detail = error == null || error.getMessage() == null
+                ? completion.state().name() : error.getMessage();
+        throw new IllegalStateException(sourceKind + " failed: " + detail, error);
     }
 
     private void executeAction(Rule r, JsonObject action, JsonObject frame) throws Exception {
         if (action.has("execute_macro")) {
             JsonElement ce = action.get("execute_macro");
             if (ce != null && ce.isJsonPrimitive()) {
-                String code = ce.getAsString();
+                final String code = ce.getAsString();
                 if (code != null && !code.isEmpty() && cmdEngine != null) {
-                    cmdEngine.executeMacro(code);
+                    ExecutionResult result = runGovernedMutation(r, "reactive-macro",
+                            code, true,
+                            new MutationCoordinator.Operation<ExecutionResult>() {
+                                @Override public ExecutionResult run() {
+                                    return cmdEngine.executeMacroOnCurrentThread(code, null);
+                                }
+                            });
+                    if (result == null || !result.isSuccess()) {
+                        throw new IllegalStateException(result == null
+                                ? "macro returned no result" : result.getError());
+                    }
                 }
             }
             return;
@@ -470,7 +825,7 @@ public class ReactiveEngine {
                                 lastPublishByRule.putIfAbsent(r.name, fresh);
                         map = existing != null ? existing : fresh;
                     }
-                    map.put(topic, Long.valueOf(System.currentTimeMillis()));
+                    map.put(topic, Long.valueOf(clock.getAsLong()));
                     bus.publish(topic, dataObj);
                 }
             }
@@ -485,7 +840,14 @@ public class ReactiveEngine {
             }
             JsonElement ge = action.get("gui_action");
             if (ge != null && ge.isJsonObject()) {
-                invokeReflective(gui, "dispatch", ge.getAsJsonObject());
+                final Object target = gui;
+                final JsonObject request = ge.getAsJsonObject().deepCopy();
+                runGovernedMutation(r, "reactive-gui", "gui_action", false,
+                        new MutationCoordinator.Operation<Object>() {
+                            @Override public Object run() throws Exception {
+                                return invokeReflectiveOrThrow(target, "dispatch", request);
+                            }
+                        });
             }
             return;
         }
@@ -507,13 +869,19 @@ public class ReactiveEngine {
                         resolved = opt.isPresent() ? opt.get() : null;
                     }
                     if (resolved == null) return;
-                    // Prefer an explicit execute(resolved) method if present;
-                    // otherwise extract the .macro field and run it ourselves.
-                    Object executed = invokeReflective(intent, "execute", resolved);
-                    if (executed != null) return;
-                    String macro = extractPublicField(resolved, "macro");
+                    final String macro = extractPublicField(resolved, "macro");
                     if (macro != null && !macro.isEmpty() && cmdEngine != null) {
-                        cmdEngine.executeMacro(macro);
+                        ExecutionResult result = runGovernedMutation(r,
+                                "reactive-intent", macro, true,
+                                new MutationCoordinator.Operation<ExecutionResult>() {
+                                    @Override public ExecutionResult run() {
+                                        return cmdEngine.executeMacroOnCurrentThread(macro, null);
+                                    }
+                                });
+                        if (result == null || !result.isSuccess()) {
+                            throw new IllegalStateException(result == null
+                                    ? "intent returned no result" : result.getError());
+                        }
                     }
                 }
             }
@@ -526,21 +894,37 @@ public class ReactiveEngine {
                 String titleMatches = getString(ce.getAsJsonObject(), "title_matches", null);
                 if (titleMatches != null && !titleMatches.isEmpty()) regex = titleMatches;
             }
-            closeDialogsMatching(regex);
+            final String titlePattern = regex;
+            runGovernedMutation(r, "reactive-dialog", titlePattern, false,
+                    new MutationCoordinator.Operation<Object>() {
+                        @Override public Object run() throws Exception {
+                            closeDialogsMatching(titlePattern);
+                            return null;
+                        }
+                    });
             return;
         }
         if (action.has("capture")) {
             JsonElement cv = action.get("capture");
             String name = null;
             if (cv != null && cv.isJsonPrimitive()) name = cv.getAsString();
-            doCapture(name, r.name);
+            final String captureName = name;
+            runGovernedMutation(r, "reactive-capture", captureName, false,
+                    new MutationCoordinator.Operation<Path>() {
+                        @Override public Path run() throws Exception {
+                            return doCapture(captureName, r.name);
+                        }
+                    });
             return;
         }
         if (action.has("wait")) {
             long ms = parseWaitMs(action.get("wait"));
             if (ms > 0) {
                 try { Thread.sleep(ms); }
-                catch (InterruptedException ie) { Thread.currentThread().interrupt(); }
+                catch (InterruptedException ie) {
+                    Thread.currentThread().interrupt();
+                    throw ie;
+                }
             }
             return;
         }
@@ -558,15 +942,15 @@ public class ReactiveEngine {
     // Action helpers
     // ------------------------------------------------------------------
 
-    private void closeDialogsMatching(final String regex) {
+    private void closeDialogsMatching(final String regex) throws Exception {
         final Pattern pat;
         try {
             pat = Pattern.compile(regex);
         } catch (PatternSyntaxException e) {
-            logWarn("Invalid title_matches regex '" + regex + "': " + e.getMessage());
-            return;
+            throw new IllegalArgumentException(
+                    "Invalid title_matches regex '" + regex + "': " + e.getMessage(), e);
         }
-        SwingUtilities.invokeLater(new Runnable() {
+        Runnable closer = new Runnable() {
             @Override
             public void run() {
                 // Prefer WindowManager.getNonImageTitles() per the spec, but
@@ -610,7 +994,12 @@ public class ReactiveEngine {
                     } catch (Throwable ignore) {}
                 }
             }
-        });
+        };
+        if (SwingUtilities.isEventDispatchThread()) {
+            closer.run();
+        } else {
+            SwingUtilities.invokeAndWait(closer);
+        }
     }
 
     private static boolean isProtectedTitle(String title) {
@@ -649,25 +1038,41 @@ public class ReactiveEngine {
         return null;
     }
 
-    private void doCapture(String baseName, String ruleName) {
-        byte[] png = ImageCapture.captureActiveImage();
-        if (png == null) return;
-        try {
-            Files.createDirectories(CAPTURE_DIR);
-        } catch (IOException e) {
-            logWarn("Failed to create capture dir " + CAPTURE_DIR + ": " + e.getMessage());
-            return;
+    private Path doCapture(String baseName, String ruleName) throws Exception {
+        CaptureData capture = captureBackend.capture();
+        if (capture == null || capture.png == null || capture.png.length == 0) {
+            throw new IllegalStateException("No active image was available for capture");
         }
+        if (capture.png.length > MAX_CAPTURE_BYTES) {
+            throw new IllegalArgumentException("Capture exceeded " + MAX_CAPTURE_BYTES
+                    + " byte limit");
+        }
+        if (capture.exportDir == null) {
+            throw new IOException("Could not resolve AI_Exports capture directory");
+        }
+        Path captureDir = capture.exportDir.toAbsolutePath().normalize();
+        Path leaf = captureDir.getFileName();
+        if (leaf == null || !"AI_Exports".equalsIgnoreCase(leaf.toString())) {
+            throw new IOException("Reactive captures must target AI_Exports/");
+        }
+        Files.createDirectories(captureDir);
         String safeBase = (baseName != null && !baseName.isEmpty())
                 ? baseName.replaceAll("[^A-Za-z0-9_.-]", "_")
                 : ("reactive_" + ruleName.replaceAll("[^A-Za-z0-9_.-]", "_"));
-        String fname = safeBase + "_" + System.currentTimeMillis() + ".png";
-        Path out = CAPTURE_DIR.resolve(fname);
-        try {
-            Files.write(out, png);
-        } catch (IOException e) {
-            logWarn("Failed to write capture " + out + ": " + e.getMessage());
+        if (safeBase.length() > MAX_CAPTURE_BASE_CHARS) {
+            safeBase = safeBase.substring(0, MAX_CAPTURE_BASE_CHARS);
         }
+        String fname = safeBase + "_" + clock.getAsLong() + "_"
+                + Long.toUnsignedString(captureSequence.incrementAndGet(), 36) + ".png";
+        Path out = captureDir.resolve(fname).normalize();
+        if (!out.getParent().equals(captureDir)) {
+            throw new IOException("Capture path escaped AI_Exports/");
+        }
+        Files.write(out, capture.png, StandardOpenOption.CREATE_NEW,
+                StandardOpenOption.WRITE);
+        publishDiagnostic("reactive.capture_written", null,
+                "capture=" + fname + " bytes=" + capture.png.length);
+        return out;
     }
 
     private static String extractPublicField(Object obj, String fieldName) {
@@ -775,9 +1180,9 @@ public class ReactiveEngine {
 
     private void startWatcher() {
         try {
-            Files.createDirectories(RULES_DIR);
+            Files.createDirectories(rulesDir);
             watchService = FileSystems.getDefault().newWatchService();
-            RULES_DIR.register(watchService,
+            rulesDir.register(watchService,
                     StandardWatchEventKinds.ENTRY_CREATE,
                     StandardWatchEventKinds.ENTRY_MODIFY,
                     StandardWatchEventKinds.ENTRY_DELETE);
@@ -865,6 +1270,186 @@ public class ReactiveEngine {
         System.err.println("[ImageJAI-Reactive] " + msg);
     }
 
+    private static Object invokeReflectiveOrThrow(Object target, String methodName,
+                                                   Object... args) throws Exception {
+        if (target == null) throw new IllegalArgumentException("target is required");
+        Method best = null;
+        for (Method method : target.getClass().getMethods()) {
+            if (method.getName().equals(methodName)
+                    && method.getParameterCount() == args.length) {
+                best = method;
+                break;
+            }
+        }
+        if (best == null) {
+            throw new NoSuchMethodException(methodName + "(" + args.length + " args) on "
+                    + target.getClass().getName());
+        }
+        try {
+            best.setAccessible(true);
+            return best.invoke(target, args);
+        } catch (java.lang.reflect.InvocationTargetException wrapped) {
+            Throwable cause = wrapped.getCause();
+            if (cause instanceof Exception) throw (Exception) cause;
+            if (cause instanceof Error) throw (Error) cause;
+            throw new RuntimeException(cause);
+        }
+    }
+
+    private void publishDiagnostic(String topic, Rule rule, String reason) {
+        if (bus == null) return;
+        JsonObject data = new JsonObject();
+        data.addProperty("_reactive_internal", true);
+        if (rule != null) data.addProperty("rule", rule.name);
+        String bounded = reason == null ? "" : reason;
+        if (bounded.length() > 512) bounded = bounded.substring(0, 512);
+        data.addProperty("reason", bounded);
+        try { bus.publish(topic, data); } catch (Throwable ignore) {}
+    }
+
+    private final class QueuedRule implements Runnable {
+        private final Rule rule;
+        private final JsonObject frame;
+        private final long enqueuedAt;
+        private final long deadline;
+        private final Semaphore permit;
+        private final AtomicBoolean released = new AtomicBoolean(false);
+
+        QueuedRule(Rule rule, JsonObject frame, long enqueuedAt,
+                   long deadline, Semaphore permit) {
+            this.rule = rule;
+            this.frame = frame;
+            this.enqueuedAt = enqueuedAt;
+            this.deadline = deadline;
+            this.permit = permit;
+        }
+
+        @Override public void run() {
+            try {
+                fireRule(rule, frame, deadline);
+            } catch (Throwable t) {
+                recordRuleFailure(rule, t);
+            } finally {
+                releasePermit();
+            }
+        }
+
+        void releasePermit() {
+            if (permit != null && released.compareAndSet(false, true)) permit.release();
+        }
+    }
+
+    private static final class DefaultMutationPolicy implements MutationPolicy {
+        private final SessionUndo undo = new SessionUndo();
+        private final AtomicLong callSequence = new AtomicLong();
+        private final StateInspector inspector = new StateInspector();
+
+        @Override public void checkSafety(String ruleName, String sourceKind, String code)
+                throws Exception {
+            if (!isImageMutation(sourceKind) || code == null || code.isEmpty()) return;
+            List<DestructiveScanner.DestructiveOp> findings =
+                    DestructiveScanner.scan(code, scannerContext());
+            for (DestructiveScanner.DestructiveOp finding : findings) {
+                if (finding.severity == DestructiveScanner.Severity.REJECT) {
+                    throw new MutationCoordinator.SafetyException(
+                            finding.ruleId + ": " + finding.message);
+                }
+            }
+        }
+
+        @Override public void beforeMutation(String ruleName, String sourceKind, String code)
+                throws Exception {
+            if (!isImageMutation(sourceKind)) return;
+            ImagePlus imp = WindowManager.getCurrentImage();
+            if (imp == null) return;
+            String csv = null;
+            try { csv = inspector.getResultsTableCSV(); } catch (Throwable ignore) {}
+            UndoFrame frame = UndoFrame.capture(
+                    "reactive-" + callSequence.incrementAndGet(), imp,
+                    RoiManager.getInstance(), csv, UndoFrame.macroHasDiskWrites(code));
+            if (frame != null) undo.pushFrame(frame);
+        }
+
+        @Override public void afterMutation(String ruleName, String sourceKind, String code,
+                                            MutationCoordinator.Outcome<?> outcome) {}
+        @Override public void onCompletion(String ruleName, String sourceKind, String code,
+                                           MutationCoordinator.Completion<?> completion) {
+            if (!isImageMutation(sourceKind)) return;
+            boolean success = completion.state() == MutationCoordinator.State.SUCCEEDED;
+            Throwable error = completion.error();
+            SessionCodeJournal.INSTANCE.record("ijm", code == null ? "" : code,
+                    "reactive:" + ruleName, 0L, completion.startedAtMs(),
+                    completion.elapsedMs(), success,
+                    error == null ? null : error.getMessage());
+        }
+
+        private static boolean isImageMutation(String sourceKind) {
+            return "reactive-macro".equals(sourceKind)
+                    || "reactive-intent".equals(sourceKind);
+        }
+
+        private static DestructiveScanner.Context scannerContext() {
+            final ImagePlus imp = WindowManager.getCurrentImage();
+            String activePath = null;
+            String exportsRoot = Paths.get(System.getProperty("user.dir", "."))
+                    .resolve("AI_Exports").toAbsolutePath().normalize().toString();
+            int bitDepth = 0;
+            boolean calibrationActive = false;
+            if (imp != null) {
+                bitDepth = imp.getBitDepth();
+                Calibration calibration = imp.getCalibration();
+                if (calibration != null) {
+                    String unit = calibration.getUnit();
+                    calibrationActive = calibration.pixelWidth != 1.0
+                            || (unit != null && !unit.isEmpty()
+                            && !"pixel".equalsIgnoreCase(unit)
+                            && !"pixels".equalsIgnoreCase(unit));
+                }
+                try {
+                    FileInfo info = imp.getOriginalFileInfo();
+                    if (info != null && info.directory != null
+                            && info.fileName != null) {
+                        Path parent = Paths.get(info.directory).toAbsolutePath().normalize();
+                        activePath = parent.resolve(info.fileName).normalize().toString();
+                        exportsRoot = parent.resolve("AI_Exports").toString();
+                    }
+                } catch (Throwable ignore) {}
+            }
+            RoiManager manager = RoiManager.getInstance();
+            int roiCount = manager == null ? 0 : manager.getCount();
+            int resultRows = 0;
+            try {
+                ij.measure.ResultsTable table = ij.measure.ResultsTable.getResultsTable();
+                resultRows = table == null ? 0 : table.getCounter();
+            } catch (Throwable ignore) {}
+            return new DestructiveScanner.Context(activePath, exportsRoot, bitDepth,
+                    calibrationActive, roiCount, resultRows, true, true,
+                    new DestructiveScanner.FileExistsCheck() {
+                        @Override public boolean exists(String path) {
+                            if (path == null || path.trim().isEmpty()) return false;
+                            try { return Files.exists(Paths.get(path)); }
+                            catch (RuntimeException invalid) { return false; }
+                        }
+                    });
+        }
+    }
+
+    private static final class DefaultCaptureBackend implements CaptureBackend {
+        @Override public CaptureData capture() {
+            ImagePlus imp = WindowManager.getCurrentImage();
+            if (imp == null) return new CaptureData(null, null);
+            byte[] png = ImageCapture.captureActiveImage();
+            Path root = Paths.get(System.getProperty("user.dir", "."));
+            try {
+                FileInfo info = imp.getOriginalFileInfo();
+                if (info != null && info.directory != null && !info.directory.trim().isEmpty()) {
+                    root = Paths.get(info.directory);
+                }
+            } catch (Throwable ignore) {}
+            return new CaptureData(png, root.resolve("AI_Exports"));
+        }
+    }
+
     // ------------------------------------------------------------------
     // Types
     // ------------------------------------------------------------------
@@ -881,8 +1466,12 @@ public class ReactiveEngine {
         public RateLimiter rateLimiter;
         public long waitBefore;
         public String sourceFile;
+        public long sourceModified;
         public volatile long hits;
         public volatile long lastFired;
+        public volatile boolean runtimeQuarantined;
+        public volatile String quarantineReason = "";
+        public final AtomicInteger consecutiveFailures = new AtomicInteger();
     }
 
     public static class Quarantined {

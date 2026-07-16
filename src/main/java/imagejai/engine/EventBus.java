@@ -2,6 +2,7 @@ package imagejai.engine;
 
 import com.google.gson.JsonObject;
 
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
@@ -35,8 +36,32 @@ public class EventBus {
         void onEvent(JsonObject frame);
     }
 
+    /** Bounded, payload-free diagnostic for a listener that threw. */
+    public static final class ListenerFailure {
+        private final long timestampMillis;
+        private final String topic;
+        private final String listenerType;
+        private final String errorType;
+
+        ListenerFailure(long timestampMillis, String topic, Listener listener,
+                        Throwable failure) {
+            this.timestampMillis = timestampMillis;
+            this.topic = safeDiagnosticTopic(topic);
+            this.listenerType = listener == null ? "unknown"
+                    : listener.getClass().getName();
+            this.errorType = failure == null ? "unknown"
+                    : failure.getClass().getName();
+        }
+
+        public long timestampMillis() { return timestampMillis; }
+        public String topic() { return topic; }
+        public String listenerType() { return listenerType; }
+        public String errorType() { return errorType; }
+    }
+
     private static final long COALESCE_MS = 200L;
     private static final int MAX_COALESCE_KEYS = 1024;
+    private static final int MAX_LISTENER_FAILURES = 64;
     private static final Set<String> COALESCIBLE_TOPICS =
             Collections.unmodifiableSet(new HashSet<String>(Arrays.asList(
                     "image.updated",
@@ -62,6 +87,9 @@ public class EventBus {
     private final CopyOnWriteArrayList<Subscription> subs = new CopyOnWriteArrayList<Subscription>();
     private final ConcurrentHashMap<String, Long> lastPublish = new ConcurrentHashMap<String, Long>();
     private final AtomicLong seqCounter = new AtomicLong(0);
+    private final AtomicLong listenerFailureCounter = new AtomicLong(0);
+    private final ArrayDeque<ListenerFailure> listenerFailures =
+            new ArrayDeque<ListenerFailure>();
     private final LongSupplier clock;
     // Nestable per-pattern suppression. Publishers check isSuppressed(topic)
     // before dispatching. Used by handleExecuteMacro to drop image.* events
@@ -142,8 +170,8 @@ public class EventBus {
             if (!matches(s.pattern, topic)) continue;
             try {
                 s.listener.onEvent(frame);
-            } catch (Throwable ignore) {
-                // Listener faults must never break the publisher thread.
+            } catch (Throwable failure) {
+                recordListenerFailure(topic, s.listener, failure, now);
             }
         }
     }
@@ -156,6 +184,17 @@ public class EventBus {
     /** Current subscriber count — used by TCPCommandServer to enforce the 8-subscriber cap. */
     public int subscriberCount() {
         return subs.size();
+    }
+
+    public long listenerFailureCount() {
+        return listenerFailureCounter.get();
+    }
+
+    public List<ListenerFailure> recentListenerFailures() {
+        synchronized (listenerFailures) {
+            return Collections.unmodifiableList(
+                    new ArrayList<ListenerFailure>(listenerFailures));
+        }
     }
 
     /** True only for state-like frames whose replacement is lossless. */
@@ -185,7 +224,7 @@ public class EventBus {
             return topic + "|singleton";
         }
         String identity = firstString(data,
-                "job_id", "image_id", "dialog_id", "macro_id", "id", "title");
+                "job_id", "image_id", "dialog_id", "macro_id", "id");
         if (identity == null || identity.isEmpty()) {
             // An identity-bearing topic without an identity is unsafe to
             // collapse: retain every frame until its publisher is repaired.
@@ -226,6 +265,36 @@ public class EventBus {
         }
     }
 
+    private void recordListenerFailure(String topic, Listener listener,
+                                       Throwable failure, long now) {
+        long failureCount = listenerFailureCounter.incrementAndGet();
+        ListenerFailure diagnostic = new ListenerFailure(now, topic, listener, failure);
+        synchronized (listenerFailures) {
+            while (listenerFailures.size() >= MAX_LISTENER_FAILURES) {
+                listenerFailures.removeFirst();
+            }
+            listenerFailures.addLast(diagnostic);
+        }
+        if (failureCount <= 3L || failureCount % 100L == 0L) {
+            System.err.println("[ImageJAI-EventBus] listener failure #"
+                    + failureCount + " on " + diagnostic.topic() + ": "
+                    + diagnostic.errorType());
+        }
+    }
+
+    private static String safeDiagnosticTopic(String topic) {
+        String value = topic == null ? "" : topic;
+        return value.matches("[a-z0-9_.-]{1,128}") ? value : "custom";
+    }
+
+    int coalescingStateSizeForTest() {
+        return lastPublish.size();
+    }
+
+    int suppressionStateSizeForTest() {
+        return suppressCounts.size();
+    }
+
     /**
      * Push a suppression scope for all topics matching {@code pattern} (same
      * wildcard semantics as {@link #subscribe}). Every {@code pushSuppress}
@@ -234,22 +303,18 @@ public class EventBus {
      */
     public void pushSuppress(String pattern) {
         if (pattern == null) return;
-        AtomicInteger count = suppressCounts.get(pattern);
-        if (count == null) {
-            AtomicInteger created = new AtomicInteger(0);
-            count = suppressCounts.putIfAbsent(pattern, created);
-            if (count == null) count = created;
-        }
-        count.incrementAndGet();
+        suppressCounts.compute(pattern, (key, count) -> {
+            AtomicInteger next = count == null ? new AtomicInteger() : count;
+            next.incrementAndGet();
+            return next;
+        });
     }
 
     /** Balance a prior {@link #pushSuppress} for the same pattern. */
     public void popSuppress(String pattern) {
         if (pattern == null) return;
-        AtomicInteger count = suppressCounts.get(pattern);
-        if (count == null) return;
-        int n = count.decrementAndGet();
-        if (n < 0) count.set(0);
+        suppressCounts.computeIfPresent(pattern, (key, count) ->
+                count.decrementAndGet() <= 0 ? null : count);
     }
 
     private boolean isSuppressed(String topic) {

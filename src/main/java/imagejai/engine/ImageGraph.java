@@ -11,11 +11,14 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.IdentityHashMap;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.Comparator;
+import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * Step 13 (docs/tcp_upgrade/13_provenance_graph.md): session-scoped image
@@ -48,6 +51,34 @@ public final class ImageGraph {
     /** Hard cap on nodes retained in the graph. Older nodes LRU-evict. */
     public static final int MAX_NODES = 500;
 
+    /**
+     * Stable, process-local identity for an open {@link ImagePlus}. Titles are
+     * mutable and non-unique, while WindowManager IDs can be recycled after a
+     * close. The object reference is therefore the source of truth and this
+     * opaque identifier is only its deterministic wire representation.
+     */
+    public static final class ImageRef {
+        public final ImagePlus image;
+        public final String identity;
+        public final int windowId;
+        public final String title;
+        public final String sourcePath;
+
+        ImageRef(ImagePlus image, String identity, int windowId,
+                 String title, String sourcePath) {
+            this.image = image;
+            this.identity = identity;
+            this.windowId = windowId;
+            this.title = title == null ? "" : title;
+            this.sourcePath = sourcePath;
+        }
+    }
+
+    private static final Object IDENTITY_LOCK = new Object();
+    private static final IdentityHashMap<ImagePlus, String> IMAGE_IDENTITIES =
+            new IdentityHashMap<ImagePlus, String>();
+    private static final AtomicLong NEXT_IMAGE_ID = new AtomicLong(0L);
+
     /** Immutable node snapshot. {@link #closed} is mutable state set via
      *  {@link ImageGraph#markClosedByTitle(String)}; all other fields are
      *  fixed at insertion time. */
@@ -59,10 +90,13 @@ public final class ImageGraph {
         public final List<String> parents;
         public final long seq;
         public final long timestampMs;
+        public final String imageIdentity;
+        public final boolean inPlace;
         boolean closed;
 
         Node(String id, String title, String origin, String macro,
-             List<String> parents, long seq, long timestampMs) {
+             List<String> parents, long seq, long timestampMs,
+             String imageIdentity, boolean inPlace) {
             this.id = id;
             this.title = title;
             this.origin = origin;
@@ -70,6 +104,8 @@ public final class ImageGraph {
             this.parents = Collections.unmodifiableList(new ArrayList<String>(parents));
             this.seq = seq;
             this.timestampMs = timestampMs;
+            this.imageIdentity = imageIdentity;
+            this.inPlace = inPlace;
         }
 
         public boolean isClosed() {
@@ -87,6 +123,8 @@ public final class ImageGraph {
             obj.add("parents", parr);
             obj.addProperty("seq", seq);
             obj.addProperty("ts", timestampMs);
+            if (imageIdentity != null) obj.addProperty("imageIdentity", imageIdentity);
+            if (inPlace) obj.addProperty("inPlace", true);
             if (closed) obj.addProperty("closed", true);
             return obj;
         }
@@ -156,6 +194,8 @@ public final class ImageGraph {
     /** Title -> most recently inserted still-open node id. Used for v1
      *  parent inference. Evicted/closed entries are removed lazily. */
     private final Map<String, String> titleToId = new HashMap<String, String>();
+    /** Stable image identity -> latest version node id. */
+    private final Map<String, String> identityToId = new HashMap<String, String>();
     private long seqCounter = 0L;
     private int idCounter = 0;
 
@@ -176,6 +216,7 @@ public final class ImageGraph {
         nodes.clear();
         edges.clear();
         titleToId.clear();
+        identityToId.clear();
         seqCounter = 0L;
         idCounter = 0;
     }
@@ -189,7 +230,17 @@ public final class ImageGraph {
 
     /** Add a top-level opened image with no parent. Returns the new node. */
     public synchronized Node addOpenedImage(String title) {
-        return createNode(title, "opened", null, Collections.<String>emptyList());
+        return createNode(title, "opened", null, Collections.<String>emptyList(),
+                null, false);
+    }
+
+    /** Add one concrete opened image while retaining its stable identity. */
+    public synchronized Node addOpenedImage(ImageRef ref) {
+        if (ref == null) throw new IllegalArgumentException("image ref is required");
+        String existing = identityToId.get(ref.identity);
+        if (existing != null) return nodes.get(existing);
+        return createNode(ref.title, "opened", null,
+                Collections.<String>emptyList(), ref.identity, false);
     }
 
     /** Add a derived image pointing at known parent ids. Unknown parent
@@ -204,7 +255,7 @@ public final class ImageGraph {
             }
         }
         String effOrigin = origin != null ? origin : "macro";
-        Node n = createNode(title, effOrigin, macro, validParents);
+        Node n = createNode(title, effOrigin, macro, validParents, null, false);
         String opLabel = macroOp(macro);
         for (String pid : validParents) {
             seqCounter++;
@@ -222,6 +273,18 @@ public final class ImageGraph {
         if (id == null) return;
         Node n = nodes.get(id);
         if (n != null) n.closed = true;
+    }
+
+    /** Mark the latest graph version for one concrete image object closed. */
+    public synchronized void markClosedByIdentity(String imageIdentity) {
+        if (imageIdentity == null) return;
+        String id = identityToId.remove(imageIdentity);
+        if (id == null) return;
+        Node n = nodes.get(id);
+        if (n == null) return;
+        n.closed = true;
+        String mapped = titleToId.get(n.title);
+        if (id.equals(mapped)) titleToId.remove(n.title);
     }
 
     /** Nodes and edges whose seq is strictly greater than {@code markerSeq}. */
@@ -291,6 +354,7 @@ public final class ImageGraph {
         for (String title : after) {
             if (title != null && !before.contains(title)) newTitles.add(title);
         }
+        Collections.sort(newTitles);
 
         // Resolve the parent id only if there is derived work to attribute.
         // Avoids dropping a phantom "opened" node on every read-only macro.
@@ -302,7 +366,7 @@ public final class ImageGraph {
             String existing = titleToId.get(activeTitleBefore);
             if (existing == null) {
                 Node parent = createNode(activeTitleBefore, "opened", null,
-                        Collections.<String>emptyList());
+                        Collections.<String>emptyList(), null, false);
                 parentId = parent.id;
             } else {
                 parentId = existing;
@@ -318,13 +382,16 @@ public final class ImageGraph {
             // node (open("path"), user drop-in, etc.). Only attribute to
             // {@code effOrigin} when a real parent was resolved.
             if (parents.isEmpty()) {
-                createNode(title, "opened", macro, Collections.<String>emptyList());
+                createNode(title, "opened", macro, Collections.<String>emptyList(),
+                        null, false);
             } else {
                 addDerivedImage(title, effOrigin, macro, parents);
             }
         }
 
-        for (String title : before) {
+        List<String> closedTitles = new ArrayList<String>(before);
+        Collections.sort(closedTitles);
+        for (String title : closedTitles) {
             if (title != null && !after.contains(title)) {
                 markClosedByTitle(title);
             }
@@ -333,18 +400,92 @@ public final class ImageGraph {
         return deltaSince(marker);
     }
 
+    /**
+     * Identity-safe mutation tracking used by production handlers. Open and
+     * close detection compares concrete {@link ImagePlus} objects, results are
+     * emitted in WindowManager-ID order, and a mutation with no new image
+     * creates a new version node for the retained active image.
+     */
+    public synchronized Delta trackImageChange(
+            List<ImageRef> imagesBefore, ImageRef activeBefore,
+            List<ImageRef> imagesAfter, String macro, String origin) {
+        List<ImageRef> before = sortedRefs(imagesBefore);
+        List<ImageRef> after = sortedRefs(imagesAfter);
+        Map<String, ImageRef> beforeById = refsByIdentity(before);
+        Map<String, ImageRef> afterById = refsByIdentity(after);
+        long marker = seqCounter;
+
+        List<ImageRef> added = new ArrayList<ImageRef>();
+        for (ImageRef ref : after) {
+            if (!beforeById.containsKey(ref.identity)) added.add(ref);
+        }
+
+        String parentId = null;
+        if (activeBefore != null && beforeById.containsKey(activeBefore.identity)) {
+            parentId = identityToId.get(activeBefore.identity);
+            if (parentId == null && (!added.isEmpty()
+                    || afterById.containsKey(activeBefore.identity))) {
+                parentId = createNode(activeBefore.title, "opened", null,
+                        Collections.<String>emptyList(), activeBefore.identity,
+                        false).id;
+            }
+        }
+        List<String> parents = parentId == null
+                ? Collections.<String>emptyList()
+                : Collections.singletonList(parentId);
+        String effectiveOrigin = origin == null ? "macro" : origin;
+
+        if (!added.isEmpty()) {
+            for (ImageRef ref : added) {
+                if (parents.isEmpty()) {
+                    createNode(ref.title, "opened", macro,
+                            Collections.<String>emptyList(), ref.identity, false);
+                } else {
+                    createIdentityNode(ref, effectiveOrigin, macro, parents, false);
+                }
+            }
+        } else if (activeBefore != null
+                && afterById.containsKey(activeBefore.identity)
+                && parentId != null) {
+            ImageRef current = afterById.get(activeBefore.identity);
+            createIdentityNode(current, effectiveOrigin, macro, parents, true);
+        }
+
+        for (ImageRef ref : before) {
+            if (!afterById.containsKey(ref.identity)) {
+                markClosedByIdentity(ref.identity);
+            }
+        }
+        return deltaSince(marker);
+    }
+
     // -------------------------------------------------------------------
     // Internals
     // -------------------------------------------------------------------
 
-    private Node createNode(String title, String origin, String macro, List<String> parents) {
+    private Node createIdentityNode(ImageRef ref, String origin, String macro,
+                                    List<String> parents, boolean inPlace) {
+        Node n = createNode(ref.title, origin, macro, parents,
+                ref.identity, inPlace);
+        String opLabel = macroOp(macro);
+        for (String parent : parents) {
+            seqCounter++;
+            edges.add(new Edge(parent, n.id, opLabel, seqCounter, n.timestampMs));
+        }
+        return n;
+    }
+
+    private Node createNode(String title, String origin, String macro,
+                            List<String> parents, String imageIdentity,
+                            boolean inPlace) {
         seqCounter++;
         idCounter++;
         String id = "n" + idCounter;
         Node n = new Node(id, title, origin, macro, parents, seqCounter,
-                System.currentTimeMillis());
+                System.currentTimeMillis(), imageIdentity, inPlace);
         nodes.put(id, n);
         if (title != null && !title.isEmpty()) titleToId.put(title, id);
+        if (imageIdentity != null) identityToId.put(imageIdentity, id);
         enforceCap();
         return n;
     }
@@ -361,6 +502,10 @@ public final class ImageGraph {
                 // evicted id — a newer node can have overwritten the entry.
                 String mapped = titleToId.get(evicted.title);
                 if (evictedId.equals(mapped)) titleToId.remove(evicted.title);
+            }
+            if (evicted != null && evicted.imageIdentity != null) {
+                String mapped = identityToId.get(evicted.imageIdentity);
+                if (evictedId.equals(mapped)) identityToId.remove(evicted.imageIdentity);
             }
             Iterator<Edge> eit = edges.iterator();
             while (eit.hasNext()) {
@@ -408,6 +553,97 @@ public final class ImageGraph {
         } catch (Throwable ignore) {
             // Headless / classloader mishap — return what we have.
         }
+        return out;
+    }
+
+    /** Capture all open images in deterministic WindowManager-ID order. */
+    public static List<ImageRef> captureOpenImages() {
+        List<ImageRef> out = new ArrayList<ImageRef>();
+        try {
+            int[] ids = WindowManager.getIDList();
+            if (ids != null) {
+                Arrays.sort(ids);
+                for (int id : ids) {
+                    ImagePlus imp = WindowManager.getImage(id);
+                    if (imp != null) out.add(refFor(imp, id));
+                }
+            }
+        } catch (Throwable ignore) {
+            // Headless / classloader mishap - return what we have.
+        }
+        return out;
+    }
+
+    /** Build a deterministic snapshot from synthetic images (test seam). */
+    static List<ImageRef> refsForImages(List<ImagePlus> images) {
+        List<ImageRef> out = new ArrayList<ImageRef>();
+        if (images != null) {
+            int fallbackId = 1;
+            for (ImagePlus imp : images) {
+                if (imp != null) {
+                    int id = imp.getID();
+                    out.add(refFor(imp, id > 0 ? id : fallbackId));
+                    fallbackId++;
+                }
+            }
+        }
+        return sortedRefs(out);
+    }
+
+    public static ImageRef captureActiveImage() {
+        try {
+            ImagePlus imp = WindowManager.getCurrentImage();
+            return imp == null ? null : refFor(imp, imp.getID());
+        } catch (Throwable ignore) {
+            return null;
+        }
+    }
+
+    public static String stableIdentity(ImagePlus imp) {
+        if (imp == null) return null;
+        synchronized (IDENTITY_LOCK) {
+            String identity = IMAGE_IDENTITIES.get(imp);
+            if (identity == null) {
+                identity = "img-" + NEXT_IMAGE_ID.incrementAndGet();
+                IMAGE_IDENTITIES.put(imp, identity);
+            }
+            return identity;
+        }
+    }
+
+    private static ImageRef refFor(ImagePlus imp, int windowId) {
+        return new ImageRef(imp, stableIdentity(imp), windowId,
+                imp.getTitle(), sourcePath(imp));
+    }
+
+    private static String sourcePath(ImagePlus imp) {
+        try {
+            ij.io.FileInfo info = imp.getOriginalFileInfo();
+            if (info == null || info.directory == null || info.fileName == null) return null;
+            return java.nio.file.Paths.get(info.directory, info.fileName)
+                    .toAbsolutePath().normalize().toString();
+        } catch (Throwable ignore) {
+            return null;
+        }
+    }
+
+    private static List<ImageRef> sortedRefs(List<ImageRef> refs) {
+        List<ImageRef> out = refs == null
+                ? new ArrayList<ImageRef>()
+                : new ArrayList<ImageRef>(refs);
+        Collections.sort(out, new Comparator<ImageRef>() {
+            @Override public int compare(ImageRef a, ImageRef b) {
+                int byWindow = Integer.compare(a.windowId, b.windowId);
+                if (byWindow != 0) return byWindow;
+                return a.identity.compareTo(b.identity);
+            }
+        });
+        return out;
+    }
+
+    private static Map<String, ImageRef> refsByIdentity(List<ImageRef> refs) {
+        Map<String, ImageRef> out = new LinkedHashMap<String, ImageRef>();
+        for (ImageRef ref : refs) out.put(ref.identity, ref);
         return out;
     }
 

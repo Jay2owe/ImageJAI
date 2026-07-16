@@ -726,7 +726,8 @@ public class TCPCommandServer {
         }
         this.jobRegistry = new JobRegistry(commandEngine, mutationCoordinator);
         this.reactiveEngine = new ReactiveEngine(
-                eventBus, commandEngine, intentRouter, guiActionDispatcher);
+                eventBus, commandEngine, intentRouter, guiActionDispatcher,
+                mutationCoordinator);
         // Step 15: surface global LRU evictions to FrictionLog so an
         // over-tight session cap shows up in the same place as other
         // recurring failures. Plan §Memory management.

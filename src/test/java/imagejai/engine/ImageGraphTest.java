@@ -2,6 +2,8 @@ package imagejai.engine;
 
 import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
+import ij.ImagePlus;
+import ij.process.ByteProcessor;
 import org.junit.Test;
 
 import java.util.Arrays;
@@ -245,6 +247,76 @@ public class ImageGraphTest {
         assertEquals("closed nodes preserved in graph", 2, g.size());
     }
 
+    @Test
+    public void objectIdentityDistinguishesImagesWithTheSameTitleDeterministically() {
+        ImagePlus first = image("same.tif");
+        ImagePlus second = image("same.tif");
+        ImageGraph.ImageRef later = ref(second, 20);
+        ImageGraph.ImageRef earlier = ref(first, 10);
+        ImageGraph g = new ImageGraph();
+
+        ImageGraph.Delta delta = g.trackImageChange(
+                Collections.<ImageGraph.ImageRef>emptyList(), null,
+                Arrays.asList(later, earlier), "open", "opened");
+
+        assertEquals(2, delta.nodes.size());
+        assertEquals(earlier.identity, delta.nodes.get(0).imageIdentity);
+        assertEquals(later.identity, delta.nodes.get(1).imageIdentity);
+        assertFalse(delta.nodes.get(0).imageIdentity
+                .equals(delta.nodes.get(1).imageIdentity));
+    }
+
+    @Test
+    public void inPlaceMutationCreatesVersionNodeWithStableIdentityAndParent() {
+        ImagePlus image = image("before.tif");
+        ImageGraph.ImageRef before = ref(image, 7);
+        image.setTitle("after.tif");
+        ImageGraph.ImageRef after = ref(image, 7);
+        ImageGraph g = new ImageGraph();
+
+        ImageGraph.Delta delta = g.trackImageChange(
+                Arrays.asList(before), before, Arrays.asList(after),
+                "run(\"Invert\");", "macro");
+
+        assertEquals(2, delta.nodes.size());
+        ImageGraph.Node version = delta.nodes.get(1);
+        assertTrue(version.inPlace);
+        assertEquals(before.identity, version.imageIdentity);
+        assertEquals("after.tif", version.title);
+        assertEquals(1, version.parents.size());
+        assertEquals(1, delta.edges.size());
+    }
+
+    @Test
+    public void stableIdentityUsesObjectReferenceNotMutableTitle() {
+        ImagePlus one = image("same");
+        ImagePlus two = image("same");
+        String first = ImageGraph.stableIdentity(one);
+        one.setTitle("renamed");
+
+        assertEquals(first, ImageGraph.stableIdentity(one));
+        assertFalse(first.equals(ImageGraph.stableIdentity(two)));
+    }
+
+    @Test
+    public void duplicateTitlesKeepDistinctStableIdsInDeterministicOrder() {
+        ImagePlus first = image("duplicate.tif");
+        ImagePlus second = image("duplicate.tif");
+
+        java.util.List<ImageGraph.ImageRef> firstPass =
+                ImageGraph.refsForImages(Arrays.asList(second, first));
+        java.util.List<ImageGraph.ImageRef> secondPass =
+                ImageGraph.refsForImages(Arrays.asList(second, first));
+
+        assertEquals(2, firstPass.size());
+        assertEquals("duplicate.tif", firstPass.get(0).title);
+        assertEquals("duplicate.tif", firstPass.get(1).title);
+        assertFalse(firstPass.get(0).identity.equals(firstPass.get(1).identity));
+        assertTrue(firstPass.get(0).windowId < firstPass.get(1).windowId);
+        assertEquals(firstPass.get(0).identity, secondPass.get(0).identity);
+        assertEquals(firstPass.get(1).identity, secondPass.get(1).identity);
+    }
+
     // ------------------------------------------------------------------
     // LRU eviction
     // ------------------------------------------------------------------
@@ -340,5 +412,14 @@ public class ImageGraphTest {
         assertNull(ImageGraph.macroOp(null));
         assertNull(ImageGraph.macroOp(""));
         assertNull(ImageGraph.macroOp("   \n  "));
+    }
+
+    private static ImagePlus image(String title) {
+        return new ImagePlus(title, new ByteProcessor(2, 2));
+    }
+
+    private static ImageGraph.ImageRef ref(ImagePlus image, int windowId) {
+        return new ImageGraph.ImageRef(image, ImageGraph.stableIdentity(image),
+                windowId, image.getTitle(), null);
     }
 }

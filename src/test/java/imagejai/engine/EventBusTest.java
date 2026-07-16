@@ -10,6 +10,7 @@ import java.util.function.LongSupplier;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertTrue;
 
 public class EventBusTest {
 
@@ -62,6 +63,59 @@ public class EventBusTest {
         bus.publish("image.updated", new JsonObject());
 
         assertEquals(2, frames.size());
+    }
+
+    @Test
+    public void displayTitleIsNeverUsedAsStableCoalescingIdentity() {
+        EventBus bus = new EventBus(fixedClock(1000L));
+        final List<JsonObject> frames = new ArrayList<JsonObject>();
+        bus.subscribe("image.updated", collecting(frames));
+
+        bus.publish("image.updated", data("title", "Results"));
+        bus.publish("image.updated", data("title", "Results"));
+
+        assertEquals("same-title images must retain distinct frames", 2, frames.size());
+    }
+
+    @Test
+    public void coalescingAndSuppressionMetadataRemainBounded() {
+        EventBus bus = new EventBus(fixedClock(1000L));
+        for (int i = 0; i < 2000; i++) {
+            bus.publish("image.updated", data("image_id", "img-" + i));
+        }
+        assertTrue(bus.coalescingStateSizeForTest() <= 1024);
+
+        for (int i = 0; i < 2000; i++) {
+            String pattern = "custom." + i;
+            bus.pushSuppress(pattern);
+            bus.popSuppress(pattern);
+        }
+        assertEquals(0, bus.suppressionStateSizeForTest());
+    }
+
+    @Test
+    public void listenerFailuresAreBoundedObservableAndDoNotStopPeers() {
+        EventBus bus = new EventBus(fixedClock(1234L));
+        final List<JsonObject> delivered = new ArrayList<JsonObject>();
+        bus.subscribe("job.completed", new EventBus.Listener() {
+            @Override public void onEvent(JsonObject frame) {
+                throw new IllegalStateException("synthetic listener failure");
+            }
+        });
+        bus.subscribe("job.completed", collecting(delivered));
+
+        for (int i = 0; i < 70; i++) {
+            bus.publish("job.completed", data("job_id", "job-" + i));
+        }
+
+        assertEquals(70, delivered.size());
+        assertEquals(70L, bus.listenerFailureCount());
+        assertEquals("diagnostic retention must be bounded", 64,
+                bus.recentListenerFailures().size());
+        EventBus.ListenerFailure latest = bus.recentListenerFailures().get(63);
+        assertEquals(1234L, latest.timestampMillis());
+        assertEquals("job.completed", latest.topic());
+        assertTrue(latest.errorType().contains("IllegalStateException"));
     }
 
     @Test
