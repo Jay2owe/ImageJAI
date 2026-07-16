@@ -8,8 +8,8 @@ run rather than inferred from the headless gates.
 
 | Item | Recorded value |
 |---|---|
-| Git revision | `e61ec9d0778c677c8e09f2d35d78eccfee5c1c4d` |
-| Verification timestamp and timezone | 2026-07-16T06:58:55+01:00 (Europe/London) |
+| Git revision | `81725558ac17ff802dfdc5ceb9750d82b487ebfe` |
+| Verification timestamp and timezone | 2026-07-16T07:47:43+01:00 (Europe/London) |
 | Operating system | Microsoft Windows 11 Home, amd64, NT 10.0.26200 |
 | Java and Maven versions | Oracle JDK 25.0.2; Apache Maven 3.9.9 |
 | Python version | CPython 3.13.14 |
@@ -29,17 +29,17 @@ python --version
 
 | Gate | Result | Count, hash, or evidence |
 |---|---|---|
-| Java unit suite and main JAR | PASS | 1,078 tests; 0 failures/errors/skips; exact main JAR built |
+| Java unit suite and main JAR | PASS | 1,083 tests; 0 failures/errors/skips; exact main JAR built |
 | Java integration profile | PASS | 3 tests in 2 suites; 0 failures/errors/skips |
 | Direct lifecycle suite | PASS | 31 tests; 0 failures/errors/skips |
-| Offline Python suite | PASS | 520 tests |
+| Offline Python suite | PASS | 531 tests |
 | Real `ij.py`/`imagej-use-auto` loopback tests | PASS | 24 tests |
 | Recipe contract | PASS | 8 tests |
 | Context, manifest, and generated docs | PASS | 134 tests; both generators byte-current |
 | Graphify hook tests | PASS | 10 tests |
 | Build and simulated-install tests | PASS | 3 pytest build/install tests and 11 Pester bundle transaction tests |
-| Two-build JAR reproducibility | PASS | build 1: `3898CD1B97BCBCEB205BB56593BF300AE7511B40661BED6840D9204395C65D35`; build 2: same |
-| JAR content/policy inspection | PASS | 14,781,069 bytes; 0 `META-INF/maven/**`; exactly 1 packaged command manifest; source/package manifest SHA-256 `58B7A7ACD747AC79859A1209B46F90CF5D1BA70383A06325EE2221E0D684D426` |
+| Two-build JAR reproducibility | PASS | build 1: `8FD4F465FE99D96D2C61E39451F5EDB8A9353BD9BC03013AD22624F430A63631`; build 2: same |
+| JAR content/policy inspection | PASS | 14,781,499 bytes; 0 `META-INF/maven/**`; exactly 1 packaged command manifest; source/package manifest SHA-256 `58B7A7ACD747AC79859A1209B46F90CF5D1BA70383A06325EE2221E0D684D426` |
 | Temporary-root lab-bundle inspection | PASS | 186 allowlisted agent files; ZIP reopened/exact-member checked; source/shared/local JAR hashes matched; 5 shared files and 1 local JAR published only under the disposable root |
 | Live Fiji doctor/smoke test | NOT RUN | Run only when explicitly authorized |
 
@@ -169,4 +169,4 @@ the result `NOT RUN`; do not write `PASS`.
 - Release gate decision: PASS for offline/private lab-distribution gates
 - Blocking failures: none
 - Explicitly unrun optional checks: live Fiji doctor/smoke test
-- Verifier: root coordinator plus sequential verifier iteration 1; iteration 2 follows this record
+- Verifier: root coordinator plus sequential verifier iterations 1 and 2; iteration 3 follows this record
