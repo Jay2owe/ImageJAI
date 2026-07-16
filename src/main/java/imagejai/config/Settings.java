@@ -193,9 +193,73 @@ public class Settings {
     // Transient
     private transient Path configPath;
     private transient imagejai.ui.installer.ProviderCredentials providerCredentials;
+    /** Detached dialog copies must never write the live config file. */
+    private transient boolean persistenceEnabled = true;
 
     public Settings() {
         configPath = getConfigDir().resolve("config.json");
+    }
+
+    /**
+     * Deep, non-persisting working copy for transactional editors.
+     * API keys are restored explicitly because production JSON intentionally
+     * excludes them.
+     */
+    public synchronized Settings detachedCopy() {
+        Settings copy = GSON.fromJson(GSON.toJson(this), Settings.class);
+        if (copy == null) copy = new Settings();
+        copy.configPath = configPath;
+        copy.providerCredentials = providerCredentials;
+        copy.persistenceEnabled = false;
+        copy.claudeUseGsdFlag = claudeUseGsdFlag;
+        copy.provider = provider;
+        copy.apiKey = apiKey;
+        copy.model = model;
+        copy.ollamaUrl = ollamaUrl;
+        copy.openaiUrl = openaiUrl;
+        if (configs != null && copy.configs != null) {
+            for (int i = 0; i < configs.size() && i < copy.configs.size(); i++) {
+                ModelConfig original = configs.get(i);
+                ModelConfig target = copy.configs.get(i);
+                if (original != null && target != null) {
+                    target.apiKey = original.apiKey == null ? "" : original.apiKey;
+                }
+            }
+        }
+        return copy;
+    }
+
+    /** Atomically replace live in-memory state with a detached snapshot. */
+    public synchronized void applyFrom(Settings source) {
+        if (source == null || source == this) return;
+        Settings copy = source.detachedCopy();
+        try {
+            for (java.lang.reflect.Field field : Settings.class.getDeclaredFields()) {
+                int modifiers = field.getModifiers();
+                if (java.lang.reflect.Modifier.isStatic(modifiers)
+                        || "configPath".equals(field.getName())
+                        || "providerCredentials".equals(field.getName())
+                        || "persistenceEnabled".equals(field.getName())) {
+                    continue;
+                }
+                field.setAccessible(true);
+                field.set(this, field.get(copy));
+            }
+        } catch (IllegalAccessException e) {
+            throw new IllegalStateException("Could not apply settings snapshot", e);
+        }
+    }
+
+    /** Values whose change requires rebuilding the live legacy chat backend. */
+    public synchronized String backendFingerprint() {
+        ModelConfig active = getActiveConfig();
+        if (active == null) return "<none>";
+        return String.valueOf(active.id) + '\u0000'
+                + String.valueOf(active.provider) + '\u0000'
+                + String.valueOf(active.model) + '\u0000'
+                + String.valueOf(active.url) + '\u0000'
+                + resolveApiKey(active) + '\u0000'
+                + getPrivacyPosture().name();
     }
 
     /**
@@ -466,6 +530,9 @@ public class Settings {
      * truncate-and-rewrite path.
      */
     public synchronized void save() {
+        if (!persistenceEnabled) {
+            return;
+        }
         try {
             Files.createDirectories(configPath.getParent());
             Path tmp = configPath.resolveSibling(configPath.getFileName() + ".tmp");

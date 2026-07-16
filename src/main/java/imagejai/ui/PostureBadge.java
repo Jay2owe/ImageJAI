@@ -30,7 +30,7 @@ public final class PostureBadge extends JLabel implements PostureController.List
         setOpaque(true);
         setBorder(new EmptyBorder(2, 8, 2, 8));
         setFont(new Font(Font.SANS_SERIF, Font.BOLD, 11));
-        this.controller.addListener(this);
+        attach();
         apply(this.controller.current());
     }
 
@@ -71,5 +71,14 @@ public final class PostureBadge extends JLabel implements PostureController.List
                 setForeground(STANDARD_FG);
                 break;
         }
+    }
+
+    public void dispose() {
+        controller.removeListener(this);
+    }
+
+    public void attach() {
+        controller.addListener(this);
+        apply(controller.current());
     }
 }

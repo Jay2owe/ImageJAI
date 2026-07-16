@@ -44,7 +44,7 @@ Conflict watchlist:
 | 06 | completed | `0e51e0f` | 15 policy + 207 Gemma/provider tests passed; bundled import passed; Maven package 789 tests passed |
 | 07 | completed | `8002adb` | 114 provider tests, 104 Gemma tests, 43 audit-focused Python tests, 9 Java proxy lifecycle tests, Maven compile, and authenticated real-proxy smoke/cleanup passed |
 | 08 | completed | `0120743` | 48 focused privacy/launch tests passed; integrated Maven clean package passed 802 tests; credential-bearing metadata and unsafe launches rejected |
-| 09 | pending | - | - |
+| 09 | completed | `0f3f10f` | 863 Maven tests and focused coordinator/lifecycle/pipeline/batch/subprocess/source-tag regressions passed; no duplicate TCP mutation lock or per-handler executor remains |
 | 10 | pending | - | - |
 | 11 | pending | - | - |
 | 12 | pending | - | - |

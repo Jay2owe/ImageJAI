@@ -8,6 +8,7 @@ import imagejai.engine.ExecutionResult;
 import imagejai.engine.ExplorationEngine;
 import imagejai.engine.ImageCapture;
 import imagejai.engine.LaunchPolicy;
+import imagejai.engine.MutationCoordinator;
 import imagejai.engine.PipelineBuilder;
 import imagejai.engine.StateInspector;
 import imagejai.knowledge.PromptTemplates;
@@ -17,12 +18,14 @@ import imagejai.llm.LLMResponse;
 import imagejai.llm.Message;
 import imagejai.ui.ChatPanel;
 import imagejai.ui.ChatSurface;
+import imagejai.local.AssistantMutationExecutor;
 
 import javax.swing.SwingUtilities;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
 import java.util.regex.Pattern;
+import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * Main orchestrator: wires ChatPanel, LLM backend, and CommandEngine together.
@@ -49,16 +52,24 @@ public class ConversationLoop implements ChatPanel.ChatListener {
     // a nested interface on ChatPanel — that's a separate, tolerable coupling.
     private final ChatSurface chatPanel;
     private final Settings settings;
-    private LLMBackend backend;
+    private volatile LLMBackend backend;
     private final CommandEngine commandEngine;
     private final ExplorationEngine explorationEngine;
     private final PipelineBuilder pipelineBuilder;
     private final StateInspector stateInspector;
     private final AgentOrchestrator orchestrator;
     private final List<Message> history;
+    private final AssistantMutationExecutor mutationExecutor;
+    private final AtomicLong conversationGeneration = new AtomicLong();
+    private final ThreadLocal<Long> workerGeneration = new ThreadLocal<Long>();
     private PipelineBuilder.Pipeline lastPipeline;
 
     public ConversationLoop(ChatSurface chatPanel, Settings settings) {
+        this(chatPanel, settings, null);
+    }
+
+    public ConversationLoop(ChatSurface chatPanel, Settings settings,
+                            MutationCoordinator sharedCoordinator) {
         this.chatPanel = chatPanel;
         this.settings = settings;
         this.commandEngine = new CommandEngine();
@@ -66,10 +77,15 @@ public class ConversationLoop implements ChatPanel.ChatListener {
         this.pipelineBuilder = new PipelineBuilder(commandEngine);
         this.stateInspector = new StateInspector();
         this.history = new ArrayList<Message>();
+        this.mutationExecutor = sharedCoordinator == null
+                ? new AssistantMutationExecutor(
+                        settings, "legacy-conversation", "legacy-conversation")
+                : new AssistantMutationExecutor(settings, "legacy-conversation",
+                        "legacy-conversation", sharedCoordinator);
         this.lastPipeline = null;
-        refreshBackend();
-        this.orchestrator = new AgentOrchestrator(backend, commandEngine,
+        this.orchestrator = new AgentOrchestrator(null, commandEngine,
                 explorationEngine, settings);
+        refreshBackend();
     }
 
     /**
@@ -77,6 +93,21 @@ public class ConversationLoop implements ChatPanel.ChatListener {
      * Call this after settings have been changed.
      */
     public void refreshBackend() {
+        if (SwingUtilities.isEventDispatchThread()) {
+            Thread refresh = new Thread(new Runnable() {
+                @Override
+                public void run() {
+                    refreshBackendNow();
+                }
+            }, "ImageJAI-BackendRefresh");
+            refresh.setDaemon(true);
+            refresh.start();
+            return;
+        }
+        refreshBackendNow();
+    }
+
+    private synchronized void refreshBackendNow() {
         try {
             backendPolicy().enforce();
             this.backend = BackendFactory.create(settings);
@@ -102,9 +133,11 @@ public class ConversationLoop implements ChatPanel.ChatListener {
         chatPanel.setThinking(true);
 
         // Run LLM call on a background thread
+        final long generation = conversationGeneration.get();
         Thread worker = new Thread(new Runnable() {
             @Override
             public void run() {
+                workerGeneration.set(generation);
                 try {
                     processUserMessage(text);
                 } catch (Exception e) {
@@ -114,14 +147,17 @@ public class ConversationLoop implements ChatPanel.ChatListener {
                     showAssistantMessage("The conversation could not be completed. "
                             + "No credential or provider payload was written to the log.");
                 } finally {
+                    workerGeneration.remove();
                     // Re-enable input on EDT
-                    SwingUtilities.invokeLater(new Runnable() {
+                    if (generation == conversationGeneration.get()) {
+                        SwingUtilities.invokeLater(new Runnable() {
                         @Override
                         public void run() {
                             chatPanel.setThinking(false);
                             chatPanel.setEnabled(true);
                         }
-                    });
+                        });
+                    }
                 }
             }
         }, "ImageJAI-ConversationLoop");
@@ -133,6 +169,7 @@ public class ConversationLoop implements ChatPanel.ChatListener {
      * Core processing logic. Runs on a background thread.
      */
     private void processUserMessage(String userText) {
+        if (!isCurrentConversation()) return;
         LaunchPolicy.Decision policy = backendPolicy();
         if (!policy.allowed()) {
             showAssistantMessage("This provider is blocked by the current Privacy Posture: "
@@ -159,11 +196,10 @@ public class ConversationLoop implements ChatPanel.ChatListener {
 
         // Add user message to history (with or without image)
         if (useVision && imageBytes != null) {
-            history.add(Message.userWithImage(userText, imageBytes));
+            addHistory(Message.userWithImage(userText, imageBytes));
         } else {
-            history.add(Message.user(userText));
+            addHistory(Message.user(userText));
         }
-        trimHistory();
 
         // Build state context
         String stateContext = stateInspector.buildStateContext();
@@ -177,7 +213,7 @@ public class ConversationLoop implements ChatPanel.ChatListener {
             String modeMsg = nowActive
                     ? "Adviser mode ON — I'll answer questions and recommend approaches without executing anything. Type /adviser again to switch back to execution mode."
                     : "Adviser mode OFF — back to normal execution mode. I'll run macros and process images again.";
-            history.add(Message.assistant(modeMsg));
+            addHistory(Message.assistant(modeMsg));
             showAssistantMessage(modeMsg);
             return;
         }
@@ -196,14 +232,14 @@ public class ConversationLoop implements ChatPanel.ChatListener {
                         + "\n\n" + contextBlock;
                 LLMResponse adviserResponse;
                 if (useVision && imageBytes != null) {
-                    adviserResponse = backend.chatWithVision(history, adviserPrompt, imageBytes);
+                    adviserResponse = backend.chatWithVision(historySnapshot(), adviserPrompt, imageBytes);
                 } else {
-                    adviserResponse = backend.chat(history, adviserPrompt);
+                    adviserResponse = backend.chat(historySnapshot(), adviserPrompt);
                 }
+                if (!isCurrentConversation()) return;
                 if (adviserResponse.isSuccess()) {
                     String content = adviserResponse.getContent();
-                    history.add(Message.assistant(content));
-                    trimHistory();
+                    addHistory(Message.assistant(content));
                     showAssistantMessage((agentLabel != null ? agentLabel + "\n" : "") + content);
                 } else {
                     showAssistantMessage("Adviser error: " + adviserResponse.getError());
@@ -212,7 +248,8 @@ public class ConversationLoop implements ChatPanel.ChatListener {
             }
 
             String specialistResponse = orchestrator.processWithSpecialist(
-                    agentType, userText, stateContext, history);
+                    agentType, userText, stateContext, historySnapshot());
+            if (!isCurrentConversation()) return;
             if (specialistResponse != null) {
                 handleSpecialistResponse(specialistResponse, agentLabel, stateContext);
                 return;
@@ -234,10 +271,12 @@ public class ConversationLoop implements ChatPanel.ChatListener {
         // Call LLM — use vision endpoint when we have an image
         LLMResponse response;
         if (useVision && imageBytes != null) {
-            response = backend.chatWithVision(history, systemPrompt, imageBytes);
+            response = backend.chatWithVision(historySnapshot(), systemPrompt, imageBytes);
         } else {
-            response = backend.chat(history, systemPrompt);
+            response = backend.chat(historySnapshot(), systemPrompt);
         }
+
+        if (!isCurrentConversation()) return;
 
         if (!response.isSuccess()) {
             showAssistantMessage("LLM error: " + response.getError());
@@ -252,8 +291,7 @@ public class ConversationLoop implements ChatPanel.ChatListener {
 
         if (!hasPipeline && macros.isEmpty()) {
             // Pure conversational response
-            history.add(Message.assistant(fullResponse));
-            trimHistory();
+            addHistory(Message.assistant(fullResponse));
             showAssistantMessage(fullResponse);
             return;
         }
@@ -265,8 +303,7 @@ public class ConversationLoop implements ChatPanel.ChatListener {
         }
 
         // Add full response to history
-        history.add(Message.assistant(fullResponse));
-        trimHistory();
+        addHistory(Message.assistant(fullResponse));
 
         if (hasPipeline) {
             // Parse and execute the pipeline
@@ -317,8 +354,7 @@ public class ConversationLoop implements ChatPanel.ChatListener {
     private void handleSpecialistResponse(String response, String agentLabel,
                                            String stateContext) {
         // Add response to history
-        history.add(Message.assistant(response));
-        trimHistory();
+        addHistory(Message.assistant(response));
 
         // Check for pipeline or macros
         boolean hasPipeline = PromptTemplates.hasPipeline(response);
@@ -372,7 +408,15 @@ public class ConversationLoop implements ChatPanel.ChatListener {
     private void executeMacroWithRetry(String macroCode, String systemPrompt, int attempt) {
         showStatus("Executing macro" + (attempt > 0 ? " (retry " + attempt + ")" : "") + "...");
 
-        ExecutionResult result = commandEngine.executeMacro(macroCode);
+        if (!isCurrentConversation()) return;
+        ExecutionResult result = mutationExecutor.executeMacro(macroCode,
+                new MutationCoordinator.Operation<ExecutionResult>() {
+                    @Override
+                    public ExecutionResult run() {
+                        return commandEngine.executeMacro(macroCode);
+                    }
+                });
+        if (!isCurrentConversation()) return;
 
         if (result.isSuccess()) {
             // Build a summary of what happened
@@ -425,15 +469,16 @@ public class ConversationLoop implements ChatPanel.ChatListener {
                 + "```\n" + macroCode + "\n```\n"
                 + "Please fix the macro and provide corrected code in <macro> tags.";
 
-        history.add(Message.user(errorFeedback));
-        trimHistory();
+        addHistory(Message.user(errorFeedback));
 
         // Refresh state in case the failed macro changed something
         String stateContext = stateInspector.buildStateContext();
         String contextBlock = PromptTemplates.buildContextBlock(stateContext);
         String updatedSystemPrompt = PromptTemplates.getSystemPrompt() + "\n\n" + contextBlock;
 
-        LLMResponse retryResponse = backend.chat(history, updatedSystemPrompt);
+        LLMResponse retryResponse = backend.chat(historySnapshot(), updatedSystemPrompt);
+
+        if (!isCurrentConversation()) return;
 
         if (!retryResponse.isSuccess()) {
             showAssistantMessage("Failed to get fix from LLM: " + retryResponse.getError());
@@ -441,8 +486,7 @@ public class ConversationLoop implements ChatPanel.ChatListener {
         }
 
         String retryContent = retryResponse.getContent();
-        history.add(Message.assistant(retryContent));
-        trimHistory();
+        addHistory(Message.assistant(retryContent));
 
         // Show the conversational part of the retry
         String retryConversation = PromptTemplates.extractConversation(retryContent);
@@ -466,12 +510,15 @@ public class ConversationLoop implements ChatPanel.ChatListener {
      * Shows numbered steps with status icons. On completion, offers save/batch options.
      */
     private void executePipelineWithProgress(final PipelineBuilder.Pipeline pipeline) {
+        Long worker = workerGeneration.get();
+        final long pipelineGeneration = worker == null
+                ? conversationGeneration.get() : worker.longValue();
         // Show the pipeline plan before execution
         showPipelinePlan(pipeline);
 
         lastPipeline = pipeline;
 
-        pipelineBuilder.executePipeline(pipeline, new PipelineBuilder.PipelineCallback() {
+        final PipelineBuilder.PipelineCallback callback = new PipelineBuilder.PipelineCallback() {
             @Override
             public void onStepStarted(PipelineBuilder.PipelineStep step) {
                 showStatus("Pipeline step " + step.index + "/" + pipeline.steps.size()
@@ -508,13 +555,35 @@ public class ConversationLoop implements ChatPanel.ChatListener {
             public void onPipelineFailed(PipelineBuilder.Pipeline p, PipelineBuilder.PipelineStep failedStep) {
                 // Already handled in onStepFailed
             }
-        });
+        };
+        MutationCoordinator.Completion<Void> completion = mutationExecutor.execute(
+                pipeline.exportAsMacro(), new MutationCoordinator.Operation<Void>() {
+                    @Override
+                    public Void run() {
+                        Long previous = workerGeneration.get();
+                        workerGeneration.set(pipelineGeneration);
+                        try {
+                            pipelineBuilder.executePipeline(pipeline, callback);
+                            return null;
+                        } finally {
+                            if (previous == null) workerGeneration.remove();
+                            else workerGeneration.set(previous);
+                        }
+                    }
+                }, 300_000L);
+        if (completion.state() != MutationCoordinator.State.SUCCEEDED
+                && isCurrentConversation()) {
+            String message = completion.error() == null
+                    ? completion.state().name() : completion.error().getMessage();
+            showAssistantMessage("Pipeline was not executed: " + message);
+        }
     }
 
     /**
      * Show the pipeline plan (before execution) with all steps listed.
      */
     private void showPipelinePlan(PipelineBuilder.Pipeline pipeline) {
+        if (!isCurrentConversation()) return;
         StringBuilder html = new StringBuilder();
         html.append("<div style='background:#2a2a32; border-left:3px solid #00c8ff; ");
         html.append("padding:8px 12px; margin:4px 0;'>");
@@ -530,7 +599,7 @@ public class ConversationLoop implements ChatPanel.ChatListener {
             html.append("</div>");
         }
         html.append("</div>");
-        chatPanel.appendHtml(html.toString());
+        showHtml(html.toString());
     }
 
     /**
@@ -538,6 +607,7 @@ public class ConversationLoop implements ChatPanel.ChatListener {
      * Replaces the previous progress display by appending a new one.
      */
     private void showPipelineProgress(PipelineBuilder.Pipeline pipeline) {
+        if (!isCurrentConversation()) return;
         StringBuilder html = new StringBuilder();
         html.append("<div style='background:#1e1e24; border-left:3px solid #666670; ");
         html.append("padding:6px 10px; margin:2px 0;'>");
@@ -582,7 +652,7 @@ public class ConversationLoop implements ChatPanel.ChatListener {
         }
 
         html.append("</div>");
-        chatPanel.appendHtml(html.toString());
+        showHtml(html.toString());
     }
 
     /**
@@ -607,14 +677,47 @@ public class ConversationLoop implements ChatPanel.ChatListener {
      * Show an assistant message in the chat panel (EDT-safe).
      */
     private void showAssistantMessage(final String text) {
-        chatPanel.appendMessage("assistant", text);
+        runOnCurrentConversationEdt(new Runnable() {
+            @Override
+            public void run() {
+                chatPanel.appendMessage("assistant", text);
+            }
+        });
     }
 
     /**
      * Show a status message in the chat panel status bar.
      */
     private void showStatus(final String text) {
-        chatPanel.setStatus(text);
+        runOnCurrentConversationEdt(new Runnable() {
+            @Override
+            public void run() {
+                chatPanel.setStatus(text);
+            }
+        });
+    }
+
+    private void showHtml(final String html) {
+        runOnCurrentConversationEdt(new Runnable() {
+            @Override
+            public void run() {
+                chatPanel.appendHtml(html);
+            }
+        });
+    }
+
+    private void runOnCurrentConversationEdt(final Runnable action) {
+        Long worker = workerGeneration.get();
+        final long expectedGeneration = worker == null
+                ? conversationGeneration.get() : worker.longValue();
+        Runnable guarded = new Runnable() {
+            @Override
+            public void run() {
+                if (expectedGeneration == conversationGeneration.get()) action.run();
+            }
+        };
+        if (SwingUtilities.isEventDispatchThread()) guarded.run();
+        else SwingUtilities.invokeLater(guarded);
     }
 
     /**
@@ -622,13 +725,34 @@ public class ConversationLoop implements ChatPanel.ChatListener {
      * Always preserves the most recent messages.
      */
     private void trimHistory() {
-        int max = settings.maxHistory;
-        if (max <= 0) {
-            max = Constants.MAX_CONVERSATION_HISTORY;
+        synchronized (history) {
+            int max = settings.maxHistory;
+            if (max <= 0) {
+                max = Constants.MAX_CONVERSATION_HISTORY;
+            }
+            while (history.size() > max) {
+                history.remove(0);
+            }
         }
-        while (history.size() > max) {
-            history.remove(0);
+    }
+
+    private void addHistory(Message message) {
+        if (message == null || !isCurrentConversation()) return;
+        synchronized (history) {
+            history.add(message);
         }
+        trimHistory();
+    }
+
+    private List<Message> historySnapshot() {
+        synchronized (history) {
+            return new ArrayList<Message>(history);
+        }
+    }
+
+    private boolean isCurrentConversation() {
+        Long generation = workerGeneration.get();
+        return generation == null || generation.longValue() == conversationGeneration.get();
     }
 
     /**
@@ -654,7 +778,32 @@ public class ConversationLoop implements ChatPanel.ChatListener {
      * Clear conversation history (e.g., when user clicks clear).
      */
     public void clearHistory() {
-        history.clear();
+        conversationGeneration.incrementAndGet();
+        mutationExecutor.cancelActive();
+        synchronized (history) {
+            history.clear();
+        }
+        lastPipeline = null;
+    }
+
+    int historySizeForTest() {
+        synchronized (history) {
+            return history.size();
+        }
+    }
+
+    boolean historyHasAttachmentsForTest() {
+        synchronized (history) {
+            for (Message message : history) {
+                if (message != null && message.hasImage()) return true;
+            }
+            return false;
+        }
+    }
+
+    void setBackendForTest(LLMBackend backend) {
+        this.backend = backend;
+        orchestrator.setBackend(backend);
     }
 
     /**
@@ -682,7 +831,7 @@ public class ConversationLoop implements ChatPanel.ChatListener {
      * @param caption  a caption to display below the image
      */
     private void showImagePreview(byte[] pngBytes, String caption) {
-        if (pngBytes == null || pngBytes.length == 0) {
+        if (!isCurrentConversation() || pngBytes == null || pngBytes.length == 0) {
             return;
         }
         String base64 = base64Encode(pngBytes);
@@ -692,7 +841,7 @@ public class ConversationLoop implements ChatPanel.ChatListener {
                 + "<div style='color:#a0a0aa; font-size:11px; font-style:italic; margin-top:2px;'>"
                 + escapeHtml(caption)
                 + "</div></div>";
-        chatPanel.appendHtml(html);
+        showHtml(html);
     }
 
     /**
@@ -713,18 +862,19 @@ public class ConversationLoop implements ChatPanel.ChatListener {
         String verificationPrompt = "I just executed this ImageJ macro:\n```\n" + macroCode
                 + "\n```\nHere is the resulting image. Does it look correct? Any issues?";
 
-        history.add(Message.userWithImage(verificationPrompt, postImage));
-        trimHistory();
+        addHistory(Message.userWithImage(verificationPrompt, postImage));
 
         String visionPrompt = PromptTemplates.getSystemPromptWithVision() + "\n\n"
                 + PromptTemplates.buildContextBlock(stateInspector.buildStateContext());
 
-        LLMResponse verifyResponse = backend.chatWithVision(history, visionPrompt, postImage);
+        LLMResponse verifyResponse = backend.chatWithVision(
+                historySnapshot(), visionPrompt, postImage);
+
+        if (!isCurrentConversation()) return;
 
         if (verifyResponse.isSuccess()) {
             String assessment = verifyResponse.getContent();
-            history.add(Message.assistant(assessment));
-            trimHistory();
+            addHistory(Message.assistant(assessment));
             showAssistantMessage(assessment);
         } else {
             System.err.println("[ImageJAI] Post-execution verification failed: "

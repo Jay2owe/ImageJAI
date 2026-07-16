@@ -43,6 +43,19 @@ public class ConversationMemoryTest {
     }
 
     @Test
+    public void clearDropsPendingClarificationAndParameterTurns() {
+        LocalAssistant assistant = assistantWith(new ConversationContext());
+        assistant.parkPendingForTest(PendingTurn.parameter(
+                "image.pixel_size", Collections.<String, String>emptyMap(),
+                "value", "What value?", null));
+
+        assistant.clearConversation();
+
+        assertFalse(assistant.pendingTurnForTest().isPresent());
+        assertFalse(assistant.improveSessionForTest().isPresent());
+    }
+
+    @Test
     public void staleContextDoesNotRepeatIntent() {
         AtomicLong now = new AtomicLong(1_000L);
         RecordingIntent pixelSize = new RecordingIntent("image.pixel_size");

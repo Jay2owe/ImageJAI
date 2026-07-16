@@ -124,6 +124,7 @@ public class DisambiguationTest {
                                                             RecordingIntent... intents) {
         Settings settings = new Settings();
         settings.localAssistantDisambiguationMargin = margin;
+        settings.safeModeEnabled = false;
         IntentLibrary library = IntentLibrary.load(settings);
         for (RecordingIntent intent : intents) {
             library.register(intent);

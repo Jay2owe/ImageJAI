@@ -14,6 +14,7 @@ import imagejai.engine.EmbeddedAgentSession;
 import imagejai.engine.ExternalAgentSession;
 import imagejai.engine.PostureController;
 import imagejai.engine.PostureViolation;
+import imagejai.engine.MutationCoordinator;
 import imagejai.engine.picker.AgentLaunchOrchestrator;
 import imagejai.engine.picker.MergeFunction;
 import imagejai.engine.picker.ModelEntry;
@@ -125,14 +126,21 @@ public class AiRootPanel extends JPanel implements ChatSurface {
     private String currentCard = CARD_CHAT;
     private boolean applyingFrameSize;
     private List<AgentLauncher.AgentInfo> detectedAgents = new ArrayList<AgentLauncher.AgentInfo>();
+    private PostureController.Listener postureRefreshListener;
+    private Runnable backendRefreshListener;
+    private PostureBadge postureBadge;
 
     public AiRootPanel(Settings settings) {
+        this(settings, new MutationCoordinator());
+    }
+
+    public AiRootPanel(Settings settings, MutationCoordinator mutationCoordinator) {
         super(new BorderLayout(0, 6));
         this.settings = settings;
         setBorder(new EmptyBorder(8, 8, 8, 8));
         setBackground(BG_MAIN);
 
-        chatView = new ChatView(settings);
+        chatView = new ChatView(settings, mutationCoordinator);
         terminalView = new TerminalView(settings, new File(System.getProperty("user.dir", ".")),
                 new LeftRail.SessionRelauncher() {
                     @Override
@@ -232,6 +240,14 @@ public class AiRootPanel extends JPanel implements ChatSurface {
         chatView.addChatListener(listener);
     }
 
+    public void addConversationClearListener(Runnable listener) {
+        chatView.addConversationClearListener(listener);
+    }
+
+    public void setBackendRefreshListener(Runnable listener) {
+        backendRefreshListener = listener;
+    }
+
     public void setAgentLauncher(AgentLauncher launcher) {
         agentLauncher = launcher;
         if (launcher != null) {
@@ -321,17 +337,20 @@ public class AiRootPanel extends JPanel implements ChatSurface {
     }
 
     private void installPostureRefreshListener() {
-        PostureController.getInstance().addListener(new PostureController.Listener() {
-            @Override
-            public void postureChanged(PrivacyPosture from, PrivacyPosture to, Path folder) {
-                SwingUtilities.invokeLater(new Runnable() {
-                    @Override
-                    public void run() {
-                        refreshAgentSelectorAsync();
-                    }
-                });
-            }
-        });
+        if (postureRefreshListener == null) {
+            postureRefreshListener = new PostureController.Listener() {
+                @Override
+                public void postureChanged(PrivacyPosture from, PrivacyPosture to, Path folder) {
+                    SwingUtilities.invokeLater(new Runnable() {
+                        @Override
+                        public void run() {
+                            refreshAgentSelectorAsync();
+                        }
+                    });
+                }
+            };
+        }
+        PostureController.getInstance().addListener(postureRefreshListener);
     }
 
     /**
@@ -378,12 +397,25 @@ public class AiRootPanel extends JPanel implements ChatSurface {
     }
 
     @Override
+    public void addNotify() {
+        super.addNotify();
+        installPostureRefreshListener();
+        if (postureBadge != null) postureBadge.attach();
+    }
+
+    @Override
     public void removeNotify() {
         disposeGovernanceUi();
         super.removeNotify();
     }
 
     private void disposeGovernanceUi() {
+        if (postureRefreshListener != null) {
+            PostureController.getInstance().removeListener(postureRefreshListener);
+        }
+        if (postureBadge != null) {
+            postureBadge.dispose();
+        }
         if (configurationPane != null) {
             configurationPane.dispose();
         }
@@ -534,7 +566,8 @@ public class AiRootPanel extends JPanel implements ChatSurface {
 
         JPanel workRight = new JPanel(new FlowLayout(FlowLayout.RIGHT, 2, 0));
         workRight.setOpaque(false);
-        workRight.add(new PostureBadge(PostureController.getInstance()));
+        postureBadge = new PostureBadge(PostureController.getInstance());
+        workRight.add(postureBadge);
         egressIndicator = new EgressIndicator();
         workRight.add(egressIndicator);
         JButton overflowBtn = createHeaderButton("\u22EF",
@@ -650,6 +683,7 @@ public class AiRootPanel extends JPanel implements ChatSurface {
                     public void actionPerformed(ActionEvent e) {
                         settings.activeConfigId = config.id;
                         settings.save();
+                        notifyBackendRefresh();
                         chatView.refreshInputState();
                         chatView.appendMessage("assistant",
                                 "Switched to profile: " + config.name);
@@ -1404,8 +1438,7 @@ public class AiRootPanel extends JPanel implements ChatSurface {
         SettingsDialog dialog = new SettingsDialog(parent, settings);
         dialog.setVisible(true);
         if (dialog.wasConfirmed()) {
-            settings.save();
-            refreshProfileSwitcher();
+            applyConfirmedSettings(dialog.backendSettingsChanged());
         }
     }
 
@@ -1415,9 +1448,19 @@ public class AiRootPanel extends JPanel implements ChatSurface {
         SettingsDialog dialog = new SettingsDialog(parent, settings);
         dialog.openWithProvider(providerId);
         if (dialog.wasConfirmed()) {
-            settings.save();
-            refreshProfileSwitcher();
+            applyConfirmedSettings(dialog.backendSettingsChanged());
         }
+    }
+
+    void applyConfirmedSettings(boolean backendChanged) {
+        settings.save();
+        if (backendChanged) notifyBackendRefresh();
+        refreshProfileSwitcher();
+    }
+
+    private void notifyBackendRefresh() {
+        Runnable listener = backendRefreshListener;
+        if (listener != null) listener.run();
     }
 
     private void runFirstRunFlipNoticeIfNeeded() {

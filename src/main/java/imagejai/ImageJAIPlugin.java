@@ -13,6 +13,7 @@ import imagejai.engine.EventBus;
 import imagejai.engine.ExplorationEngine;
 import imagejai.engine.ImageMonitor;
 import imagejai.engine.LiteLlmProxyService;
+import imagejai.engine.MutationCoordinator;
 import imagejai.engine.PipelineBuilder;
 import imagejai.engine.PostureController;
 import imagejai.engine.StateInspector;
@@ -57,6 +58,7 @@ public class ImageJAIPlugin implements Command {
     private static volatile Settings budgetSettings;
     private static volatile boolean budgetDialogOpen;
     private static volatile boolean billingDialogOpen;
+    private static MutationCoordinator mutationCoordinator;
     private static boolean terminalFontsRegistered;
     private static boolean shutdownHookRegistered;
 
@@ -118,14 +120,21 @@ public class ImageJAIPlugin implements Command {
             settings.save();
         }
 
+        // One mutation owner spans TCP, legacy chat, and Local Assistant.
+        mutationCoordinator = new MutationCoordinator();
+
         // Create root panel and wire conversation loop
-        rootPanel = new AiRootPanel(settings);
+        rootPanel = new AiRootPanel(settings, mutationCoordinator);
         chatPanel = new ChatPanel(rootPanel.chatView());
         
-        if (settings.hasApiKey()) {
-            conversationLoop = new ConversationLoop(rootPanel, settings);
-            rootPanel.addChatListener(conversationLoop);
-        } else if (!localAssistantSelected) {
+        // Keep one live loop even when chat starts unconfigured: a later
+        // transactional Settings save can rebuild that same backend exactly
+        // once instead of requiring the plugin window to be reopened.
+        conversationLoop = new ConversationLoop(rootPanel, settings, mutationCoordinator);
+        rootPanel.addChatListener(conversationLoop);
+        rootPanel.addConversationClearListener(conversationLoop::clearHistory);
+        rootPanel.setBackendRefreshListener(conversationLoop::refreshBackend);
+        if (!settings.hasApiKey() && !localAssistantSelected) {
             rootPanel.appendMessage("assistant", "AI Assistant is running in TCP-only mode. " +
                     "To use chat features, please configure an API key in Settings.");
         }
@@ -154,7 +163,8 @@ public class ImageJAIPlugin implements Command {
                         + " busy; falling back to :" + chosen);
                 settings.tcpPort = chosen;
             }
-            startTcpServer(settings, rootPanel, rootPanel.chatController());
+            startTcpServer(settings, rootPanel, rootPanel.chatController(),
+                    mutationCoordinator);
         }
 
         // Phase 2: start the event-bus publishers so dialog / image / memory
@@ -195,6 +205,10 @@ public class ImageJAIPlugin implements Command {
                 if (tcpServer != null) {
                     tcpServer.stop();
                     tcpServer = null;
+                }
+                if (mutationCoordinator != null) {
+                    mutationCoordinator.shutdown();
+                    mutationCoordinator = null;
                 }
                 // Stop event publishers
                 if (imageMonitor != null) {
@@ -657,13 +671,15 @@ public class ImageJAIPlugin implements Command {
      * reports status and activity to the chat panel.
      */
     private static void startTcpServer(Settings settings, final ChatSurface panel,
-                                       ChatPanelController controller) {
+                                       ChatPanelController controller,
+                                       MutationCoordinator coordinator) {
         CommandEngine engine = new CommandEngine();
         StateInspector inspector = new StateInspector();
         PipelineBuilder pipeline = new PipelineBuilder(engine);
         ExplorationEngine exploration = new ExplorationEngine(engine);
 
-        tcpServer = new TCPCommandServer(settings.tcpPort, engine, inspector, pipeline, exploration);
+        tcpServer = new TCPCommandServer(settings.tcpPort, engine, inspector,
+                pipeline, exploration, coordinator);
         // Phase 7: wire the chat panel as a ChatPanelController so external
         // gui_action commands can drive inline previews, toasts, ROI flashes,
         // markdown, and confirms. Safe even if the panel isn't visible â€” the
@@ -705,5 +721,3 @@ public class ImageJAIPlugin implements Command {
         });
     }
 }
-
-

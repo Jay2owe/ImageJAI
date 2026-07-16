@@ -22,8 +22,11 @@ import java.util.List;
  */
 public class SettingsDialog extends JDialog {
 
+    private final Settings liveSettings;
     private final Settings settings;
+    private final String initialBackendFingerprint;
     private boolean confirmed = false;
+    private boolean backendSettingsChanged;
     private Settings.ModelConfig editingConfig;
 
     // Profile selector
@@ -69,8 +72,10 @@ public class SettingsDialog extends JDialog {
 
     public SettingsDialog(Frame parent, Settings settings) {
         super(parent, Constants.PLUGIN_NAME + " Settings", true);
-        this.settings = settings;
-        this.editingConfig = settings.getActiveConfig();
+        this.liveSettings = settings == null ? new Settings() : settings;
+        this.initialBackendFingerprint = this.liveSettings.backendFingerprint();
+        this.settings = this.liveSettings.detachedCopy();
+        this.editingConfig = this.settings.getActiveConfig();
         buildUI();
         loadFromSettings();
         pack();
@@ -80,6 +85,10 @@ public class SettingsDialog extends JDialog {
 
     public boolean wasConfirmed() {
         return confirmed;
+    }
+
+    public boolean backendSettingsChanged() {
+        return confirmed && backendSettingsChanged;
     }
 
     private void buildUI() {
@@ -580,6 +589,13 @@ public class SettingsDialog extends JDialog {
             settings.activeConfigId = editingConfig.id;
         }
 
+        // Privacy posture is session-owned and can change while this modal
+        // dialog is open; the settings UI does not edit it, so never roll it
+        // back to the opening snapshot.
+        settings.setPrivacyPosture(liveSettings.getPrivacyPosture());
+        liveSettings.applyFrom(settings);
+        backendSettingsChanged = !initialBackendFingerprint.equals(
+                liveSettings.backendFingerprint());
         confirmed = true;
         dispose();
     }

@@ -11,6 +11,8 @@ import ij.process.ImageStatistics;
 import imagejai.engine.CommandEngine;
 import imagejai.engine.ExecutionResult;
 import imagejai.engine.ExplorationEngine;
+import imagejai.engine.MutationCoordinator;
+import imagejai.config.Settings;
 
 import java.io.IOException;
 import java.nio.file.Files;
@@ -23,9 +25,30 @@ import java.nio.file.Paths;
 public class FijiBridge {
 
     private final CommandEngine commandEngine;
+    private Settings settings;
+    private AssistantMutationExecutor mutationExecutor;
 
     public FijiBridge(CommandEngine commandEngine) {
         this.commandEngine = commandEngine;
+        configureGovernance(new Settings());
+    }
+
+    void configureGovernance(Settings settings) {
+        configureGovernance(settings, null);
+    }
+
+    void configureGovernance(Settings settings, MutationCoordinator coordinator) {
+        this.settings = settings == null ? new Settings() : settings;
+        if (mutationExecutor != null) mutationExecutor.close();
+        mutationExecutor = coordinator == null
+                ? new AssistantMutationExecutor(
+                        this.settings, "local-assistant", "local-assistant")
+                : new AssistantMutationExecutor(
+                        this.settings, "local-assistant", "local-assistant", coordinator);
+    }
+
+    void cancelActiveMutation() {
+        if (mutationExecutor != null) mutationExecutor.cancelActive();
     }
 
     public ImagePlus requireOpenImage() {
@@ -51,10 +74,40 @@ public class FijiBridge {
     }
 
     public void runMacro(String code) {
-        ExecutionResult result = commandEngine.executeMacro(code);
+        if (commandEngine == null) {
+            throw new IllegalStateException("ImageJ command engine is unavailable.");
+        }
+        ExecutionResult result = mutationExecutor.executeMacro(code,
+                new MutationCoordinator.Operation<ExecutionResult>() {
+                    @Override
+                    public ExecutionResult run() {
+                        return commandEngine.executeMacro(code);
+                    }
+                });
         if (!result.isSuccess()) {
             throw new IllegalStateException(result.getError());
         }
+    }
+
+    public AssistantReply executeIntent(final String intentId,
+                                        final MutationCoordinator.Operation<AssistantReply> operation) {
+        if (!mutationIntent(intentId)) {
+            try {
+                return operation.run();
+            } catch (Exception e) {
+                return AssistantReply.text("Action failed: " + e.getMessage());
+            }
+        }
+        String auditCode = intentAuditCode(intentId);
+        MutationCoordinator.Completion<AssistantReply> completion = mutationExecutor.execute(
+                auditCode, operation, 120_000L,
+                approvalRequired(intentId));
+        if (completion.state() != MutationCoordinator.State.SUCCEEDED) {
+            String message = completion.error() == null
+                    ? completion.state().name() : completion.error().getMessage();
+            return AssistantReply.text("Action blocked or failed: " + message);
+        }
+        return completion.result();
     }
 
     public ResultsTable currentResults() {
@@ -108,9 +161,34 @@ public class FijiBridge {
     }
 
     public ThresholdComparison runExploreThresholds(String[] methods) {
-        ExplorationEngine.ExplorationReport report =
-                new ExplorationEngine(commandEngine).exploreThresholds(methods);
-        return new ThresholdComparison(report);
+        if (commandEngine == null) {
+            throw new IllegalStateException("ImageJ command engine is unavailable.");
+        }
+        if (mutationExecutor.isInsideMutation()) {
+            return new ThresholdComparison(new ExplorationEngine(commandEngine)
+                    .exploreThresholds(methods));
+        }
+        StringBuilder provenance = new StringBuilder("// Explore thresholds\n");
+        if (methods != null) {
+            for (String method : methods) {
+                provenance.append("// method: ").append(method).append('\n');
+            }
+        }
+        MutationCoordinator.Completion<ExplorationEngine.ExplorationReport> completion =
+                mutationExecutor.execute(provenance.toString(),
+                        new MutationCoordinator.Operation<ExplorationEngine.ExplorationReport>() {
+                            @Override
+                            public ExplorationEngine.ExplorationReport run() {
+                                return new ExplorationEngine(commandEngine)
+                                        .exploreThresholds(methods);
+                            }
+                        }, 120_000L);
+        if (completion.state() != MutationCoordinator.State.SUCCEEDED) {
+            String message = completion.error() == null
+                    ? completion.state().name() : completion.error().getMessage();
+            throw new IllegalStateException(message);
+        }
+        return new ThresholdComparison(completion.result());
     }
 
     private static String macroQuote(String value) {
@@ -118,6 +196,54 @@ public class FijiBridge {
             return "";
         }
         return value.replace("\\", "\\\\").replace("\"", "\\\"");
+    }
+
+    private static boolean approvalRequired(String intentId) {
+        String id = intentId == null ? "" : intentId.toLowerCase(java.util.Locale.ROOT);
+        return id.startsWith("image.close")
+                || "image.revert".equals(id)
+                || "slash.close".equals(id);
+    }
+
+    private static boolean mutationIntent(String intentId) {
+        String id = intentId == null ? "" : intentId.toLowerCase(java.util.Locale.ROOT);
+        if (id.startsWith("preprocess.") || id.startsWith("segmentation.")
+                || id.startsWith("measurement.") || id.startsWith("display.")
+                || id.startsWith("dialog.") || id.startsWith("roi.")
+                || id.startsWith("results.")) {
+            return true;
+        }
+        if (id.startsWith("diagnostics.")) {
+            return !"diagnostics.memory".equals(id)
+                    && !"diagnostics.plugins".equals(id)
+                    && !"diagnostics.open_dialogs".equals(id);
+        }
+        if (id.startsWith("slash.")) return "slash.close".equals(id);
+        if (!id.startsWith("image.")) return false;
+        return !("image.title".equals(id)
+                || "image.dimensions".equals(id)
+                || "image.file_path".equals(id)
+                || "image.bit_depth".equals(id)
+                || "image.channel_count".equals(id)
+                || "image.slice_count".equals(id)
+                || "image.frame_count".equals(id)
+                || "image.active_channel".equals(id)
+                || "image.active_slice".equals(id)
+                || "image.active_frame".equals(id)
+                || "image.intensity_stats".equals(id)
+                || "image.saturation_check".equals(id)
+                || "image.list_open".equals(id)
+                || "image.pixel_size".equals(id));
+    }
+
+    private static String intentAuditCode(String intentId) {
+        String id = intentId == null ? "unknown" : intentId;
+        if ("roi.clear".equals(id)) return "roiManager(\"Reset\");";
+        if (id.startsWith("image.close") || "slash.close".equals(id)) return "close();";
+        if ("image.revert".equals(id)) return "run(\"Revert\");";
+        if ("image.crop".equals(id)) return "run(\"Crop\");";
+        if ("image.invert".equals(id)) return "run(\"Invert\");";
+        return "// Local Assistant intent: " + id;
     }
 
     public static class ThresholdComparison {

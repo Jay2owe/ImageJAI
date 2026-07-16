@@ -13,6 +13,7 @@ import imagejai.local.AutocompleteChipRow;
 import imagejai.local.ChatHistoryController;
 import imagejai.local.LocalAssistant;
 import imagejai.local.RankedPhrase;
+import imagejai.engine.MutationCoordinator;
 
 import javax.swing.*;
 import javax.swing.border.EmptyBorder;
@@ -27,6 +28,7 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.function.Consumer;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -56,6 +58,8 @@ public class ChatView extends JPanel implements ChatPanelController, ChatSurface
     private final Settings settings;
     private final LocalAssistant localAssistant;
     private final List<ChatPanel.ChatListener> listeners = new ArrayList<ChatPanel.ChatListener>();
+    private final List<Runnable> conversationClearListeners = new ArrayList<Runnable>();
+    private final AtomicLong localConversationGeneration = new AtomicLong();
     private volatile boolean localAssistantBusy;
 
     private JTextPane messageArea;
@@ -76,6 +80,10 @@ public class ChatView extends JPanel implements ChatPanelController, ChatSurface
     private JPanel confirmHost;
 
     public ChatView(Settings settings) {
+        this(settings, new MutationCoordinator());
+    }
+
+    public ChatView(Settings settings, MutationCoordinator mutationCoordinator) {
         this.settings = settings;
         this.localAssistant = new LocalAssistant(settings, new ChatHistoryController() {
             public boolean canClear() {
@@ -83,9 +91,9 @@ public class ChatView extends JPanel implements ChatPanelController, ChatSurface
             }
 
             public void clear() {
-                clearRenderedHistory();
+                ChatView.this.clearConversation();
             }
-        });
+        }, mutationCoordinator);
         setLayout(new BorderLayout(0, 4));
         setBorder(new EmptyBorder(0, 0, 0, 0));
         setBackground(BG_MAIN);
@@ -226,6 +234,16 @@ public class ChatView extends JPanel implements ChatPanelController, ChatSurface
         listeners.remove(listener);
     }
 
+    public void addConversationClearListener(Runnable listener) {
+        if (listener != null && !conversationClearListeners.contains(listener)) {
+            conversationClearListeners.add(listener);
+        }
+    }
+
+    public void removeConversationClearListener(Runnable listener) {
+        conversationClearListeners.remove(listener);
+    }
+
     /**
      * Append a message to the chat display.
      *
@@ -233,53 +251,61 @@ public class ChatView extends JPanel implements ChatPanelController, ChatSurface
      * @param content the message text (plain text; newlines become line breaks)
      */
     public void appendMessage(final String role, final String content) {
-        SwingUtilities.invokeLater(new Runnable() {
+        Runnable append = new Runnable() {
             @Override
             public void run() {
-                try {
-                    HTMLDocument doc = (HTMLDocument) messageArea.getDocument();
-                    boolean isUser = "user".equals(role);
-                    String bubbleBg = isUser ? "#1a3a4a" : "#2a2a32";
-                    String borderLeft = isUser ? "#00c8ff" : "#666670";
-                    String labelColor = isUser ? "#00c8ff" : "#a0e0a0";
-                    String label = isUser ? "You" : "AI";
-
-                    String html = "<div style='"
-                            + "background:" + bubbleBg + ";"
-                            + "border-left:3px solid " + borderLeft + ";"
-                            + "padding:6px 10px;"
-                            + "margin:4px 0;"
-                            + "'>"
-                            + "<div style='color:" + labelColor + ";font-weight:bold;font-size:11px;"
-                            + "margin-bottom:3px;'>" + label + "</div>"
-                            + "<div style='color:#d8d8d8;font-size:13px;'>"
-                            + escapeHtml(content).replace("\n", "<br>")
-                            + "</div></div>";
-                    doc.insertBeforeEnd(doc.getDefaultRootElement(), html);
-                    scrollToBottom();
-                } catch (Exception e) {
-                    System.err.println("[ImageJAI] Failed to append message: " + e.getMessage());
-                }
+                appendMessageNow(role, content);
             }
-        });
+        };
+        if (SwingUtilities.isEventDispatchThread()) append.run();
+        else SwingUtilities.invokeLater(append);
     }
 
     /**
      * Append raw HTML content to the chat (for image previews, etc.).
      */
     public void appendHtml(final String html) {
-        SwingUtilities.invokeLater(new Runnable() {
+        Runnable append = new Runnable() {
             @Override
             public void run() {
-                try {
-                    HTMLDocument doc = (HTMLDocument) messageArea.getDocument();
-                    doc.insertBeforeEnd(doc.getDefaultRootElement(), html);
-                    scrollToBottom();
-                } catch (Exception e) {
-                    System.err.println("[ImageJAI] Failed to append HTML: " + e.getMessage());
-                }
+                appendHtmlNow(html);
             }
-        });
+        };
+        if (SwingUtilities.isEventDispatchThread()) append.run();
+        else SwingUtilities.invokeLater(append);
+    }
+
+    private void appendMessageNow(String role, String content) {
+        try {
+            HTMLDocument doc = (HTMLDocument) messageArea.getDocument();
+            boolean isUser = "user".equals(role);
+            String bubbleBg = isUser ? "#1a3a4a" : "#2a2a32";
+            String borderLeft = isUser ? "#00c8ff" : "#666670";
+            String labelColor = isUser ? "#00c8ff" : "#a0e0a0";
+            String label = isUser ? "You" : "AI";
+            String html = "<div style='background:" + bubbleBg
+                    + ";border-left:3px solid " + borderLeft
+                    + ";padding:6px 10px;margin:4px 0;'>"
+                    + "<div style='color:" + labelColor
+                    + ";font-weight:bold;font-size:11px;margin-bottom:3px;'>"
+                    + label + "</div><div style='color:#d8d8d8;font-size:13px;'>"
+                    + escapeHtml(content).replace("\n", "<br>")
+                    + "</div></div>";
+            doc.insertBeforeEnd(doc.getDefaultRootElement(), html);
+            scrollToBottom();
+        } catch (Exception e) {
+            System.err.println("[ImageJAI] Failed to append message: " + e.getMessage());
+        }
+    }
+
+    private void appendHtmlNow(String html) {
+        try {
+            HTMLDocument doc = (HTMLDocument) messageArea.getDocument();
+            doc.insertBeforeEnd(doc.getDefaultRootElement(), html);
+            scrollToBottom();
+        } catch (Exception e) {
+            System.err.println("[ImageJAI] Failed to append HTML: " + e.getMessage());
+        }
     }
 
     /**
@@ -340,13 +366,34 @@ public class ChatView extends JPanel implements ChatPanelController, ChatSurface
      * Clear all messages and reset to welcome state.
      */
     public void clearConversation() {
-        SwingUtilities.invokeLater(new Runnable() {
+        localConversationGeneration.incrementAndGet();
+        localAssistant.clearConversation();
+        localAssistantBusy = false;
+        for (Runnable listener
+                : new ArrayList<Runnable>(conversationClearListeners)) {
+            try {
+                listener.run();
+            } catch (RuntimeException ignored) {
+                // One stale backend listener must not prevent the local reset.
+            }
+        }
+        Runnable clearUi = new Runnable() {
             @Override
             public void run() {
                 initHtmlContent();
-                appendMessage("assistant", "Conversation cleared. How can I help you?");
+                clarificationCandidates.clear();
+                if (confirmHost != null) {
+                    confirmHost.removeAll();
+                    confirmHost.setVisible(false);
+                }
+                if (inputArea != null) inputArea.setText("");
+                clearAutocompleteChips();
+                setThinking(false);
+                setEnabled(true);
             }
-        });
+        };
+        if (SwingUtilities.isEventDispatchThread()) clearUi.run();
+        else SwingUtilities.invokeLater(clearUi);
     }
 
     public void clearRenderedHistory() {
@@ -838,28 +885,39 @@ public class ChatView extends JPanel implements ChatPanelController, ChatSurface
         
         String text = inputArea.getText().trim();
         if (text.isEmpty()) return;
+        if ("/clear".equalsIgnoreCase(text)) {
+            clearConversation();
+            return;
+        }
         inputArea.setText("");
         clearAutocompleteChips();
 
         appendMessage("user", text);
 
         if (localAssistantSelected) {
-            boolean clearCommand = text.trim().toLowerCase().startsWith("/clear");
-            localAssistantBusy = !clearCommand;
-            try {
-                AssistantReply reply = localAssistant.handle(text);
-                if (reply.text() != null && reply.text().trim().length() > 0) {
-                    appendMessage("assistant", reply.text());
+            final long generation = localConversationGeneration.get();
+            final String localText = text;
+            localAssistantBusy = true;
+            setEnabled(false);
+            setThinking(true);
+            Thread worker = new Thread(new Runnable() {
+                @Override
+                public void run() {
+                    try {
+                        AssistantReply reply = localAssistant.handle(localText);
+                        if (generation != localConversationGeneration.get()) return;
+                        renderLocalReply(reply, generation);
+                    } finally {
+                        if (generation == localConversationGeneration.get()) {
+                            localAssistantBusy = false;
+                            setThinking(false);
+                            setEnabled(true);
+                        }
+                    }
                 }
-                if (reply.isClarifying() && !reply.clarificationCandidates().isEmpty()) {
-                    appendClarificationChips(reply.clarificationCandidates());
-                }
-                if (reply.macroEcho() != null && !reply.macroEcho().trim().isEmpty()) {
-                    appendMessage("assistant", "```\n" + reply.macroEcho() + "\n```");
-                }
-            } finally {
-                localAssistantBusy = false;
-            }
+            }, "ImageJAI-LocalAssistant");
+            worker.setDaemon(true);
+            worker.start();
             return;
         }
 
@@ -899,6 +957,24 @@ public class ChatView extends JPanel implements ChatPanelController, ChatSurface
         appendHtml(html.toString());
     }
 
+    private void renderLocalReply(final AssistantReply reply, final long generation) {
+        SwingUtilities.invokeLater(new Runnable() {
+            @Override
+            public void run() {
+                if (generation != localConversationGeneration.get()) return;
+                if (reply.text() != null && !reply.text().trim().isEmpty()) {
+                    appendMessageNow("assistant", reply.text());
+                }
+                if (reply.isClarifying() && !reply.clarificationCandidates().isEmpty()) {
+                    appendClarificationChips(reply.clarificationCandidates());
+                }
+                if (reply.macroEcho() != null && !reply.macroEcho().trim().isEmpty()) {
+                    appendMessageNow("assistant", "```\n" + reply.macroEcho() + "\n```");
+                }
+            }
+        });
+    }
+
     private void handleChatLink(String description) {
         if (description == null || !description.startsWith("ijai-chip:")) {
             return;
@@ -934,6 +1010,18 @@ public class ChatView extends JPanel implements ChatPanelController, ChatSurface
 
     private boolean isLocalAssistantSelected() {
         return AgentLauncher.LOCAL_ASSISTANT_NAME.equals(settings.getSelectedAgentName());
+    }
+
+    String renderedHtmlForTest() {
+        return messageArea.getText();
+    }
+
+    int pendingConfirmCountForTest() {
+        return confirmHost == null ? 0 : confirmHost.getComponentCount();
+    }
+
+    LocalAssistant localAssistantForTest() {
+        return localAssistant;
     }
 
 }

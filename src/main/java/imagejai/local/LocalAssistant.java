@@ -7,6 +7,7 @@ import imagejai.engine.FuzzyMatcher;
 import imagejai.engine.FrictionLog;
 import imagejai.engine.IntentRouter;
 import imagejai.engine.LaunchPolicy;
+import imagejai.engine.MutationCoordinator;
 
 import java.util.ArrayList;
 import java.util.Collections;
@@ -14,6 +15,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * Offline deterministic assistant entry point.
@@ -30,8 +32,10 @@ public class LocalAssistant {
     private final Settings settings;
     private final ConversationContext ctx;
     private final PronounResolver pronouns;
-    private Optional<PendingTurn> pending = Optional.empty();
-    private ImproveSession improveSession;
+    private volatile Optional<PendingTurn> pending = Optional.empty();
+    private volatile ImproveSession improveSession;
+    private final AtomicLong conversationGeneration = new AtomicLong();
+    private final Object handleLock = new Object();
 
     public LocalAssistant() {
         this(new Settings());
@@ -44,6 +48,12 @@ public class LocalAssistant {
     public LocalAssistant(Settings settings, ChatHistoryController chatHistory) {
         this(IntentLibrary.load(settings), new FijiBridge(new CommandEngine()), new FrictionLog(),
                 settings, new IntentRouter(), chatHistory);
+    }
+
+    public LocalAssistant(Settings settings, ChatHistoryController chatHistory,
+                          MutationCoordinator coordinator) {
+        this(settings, chatHistory);
+        this.fiji.configureGovernance(this.settings, coordinator);
     }
 
     public LocalAssistant(IntentLibrary library, FijiBridge fiji, FrictionLog frictionLog) {
@@ -110,17 +120,32 @@ public class LocalAssistant {
                           PronounResolver pronouns) {
         this.library = library;
         this.matcher = matcher;
+        this.settings = settings == null ? new Settings() : settings;
         this.fiji = fiji == null ? new FijiBridge(new CommandEngine()) : fiji;
+        this.fiji.configureGovernance(this.settings);
         this.frictionLog = frictionLog == null ? new FrictionLog() : frictionLog;
         this.intentRouter = intentRouter == null ? new IntentRouter() : intentRouter;
         this.chatHistory = chatHistory;
         this.slashCommands = slashCommands == null ? new SlashCommandRegistry() : slashCommands;
-        this.settings = settings == null ? new Settings() : settings;
         this.ctx = ctx == null ? new ConversationContext() : ctx;
         this.pronouns = pronouns == null ? new PronounResolver() : pronouns;
     }
 
     public AssistantReply handle(String input) {
+        synchronized (handleLock) {
+            long generation = conversationGeneration.get();
+            AssistantReply reply = handleCurrentConversation(input);
+            if (generation != conversationGeneration.get()) {
+                pending = Optional.empty();
+                improveSession = null;
+                ctx.clear();
+                return AssistantReply.text("");
+            }
+            return reply;
+        }
+    }
+
+    private AssistantReply handleCurrentConversation(String input) {
         LaunchPolicy.Decision policy = LaunchPolicy.evaluate(
                 "local-assistant", "builtin", settings.getPrivacyPosture(),
                 LaunchPolicy.RequestedCapabilities.builder(
@@ -180,19 +205,22 @@ public class LocalAssistant {
         // Slash commands are dispatched before phrasebook lookup so a literal
         // /name command always wins over any built-in phrasebook alias.
         if (SlashCommandRegistry.isSlashInput(input)) {
-            return slashCommands.dispatchSlash(input, fiji, library, intentRouter, chatHistory,
-                    matcher, frictionLog.journal(),
-                    () -> improveSession == null,
-                    session -> improveSession = session);
+            final String slashInput = input;
+            return fiji.executeIntent(slashIntentId(input),
+                    () -> slashCommands.dispatchSlash(slashInput, fiji, library,
+                            intentRouter, chatHistory, matcher, frictionLog.journal(),
+                            () -> improveSession == null,
+                            session -> improveSession = session));
         }
         Optional<IntentMatcher.MatchedIntent> matched = matcher.match(input);
         if (matched.isPresent()) {
             IntentMatcher.MatchedIntent match = matched.get();
-            AssistantReply slashAlias = slashCommands.dispatchIntent(match.intentId(), input,
-                    fiji, library, intentRouter, chatHistory,
-                    matcher, frictionLog.journal(),
-                    () -> improveSession == null,
-                    session -> improveSession = session);
+            AssistantReply slashAlias = fiji.executeIntent(match.intentId(),
+                    () -> slashCommands.dispatchIntent(match.intentId(), input,
+                            fiji, library, intentRouter, chatHistory,
+                            matcher, frictionLog.journal(),
+                            () -> improveSession == null,
+                            session -> improveSession = session));
             if (slashAlias != null) {
                 if ("slash.clear".equals(match.intentId())) {
                     clearConversation();
@@ -241,6 +269,8 @@ public class LocalAssistant {
     }
 
     public void clearConversation() {
+        conversationGeneration.incrementAndGet();
+        fiji.cancelActiveMutation();
         pending = Optional.empty();
         improveSession = null;
         ctx.clear();
@@ -368,7 +398,8 @@ public class LocalAssistant {
             return AssistantReply.text(question);
         }
 
-        AssistantReply reply = intent.execute(filled, fiji);
+        AssistantReply reply = fiji.executeIntent(intent.id(),
+                () -> intent.execute(filled, fiji));
         if (shouldRecordIntentRun(reply)) {
             ctx.recordIntentRun(intent.id(), filled);
             recordSelectedRoi();
@@ -385,6 +416,7 @@ public class LocalAssistant {
             return false;
         }
         if (text.startsWith("could not ") || text.startsWith("cannot ")
+                || text.startsWith("action blocked or failed:")
                 || text.endsWith(" is empty.") || text.contains(" cancelled.")
                 || text.startsWith("tell me ") || text.startsWith("add ")
                 || text.startsWith("draw ")) {
@@ -437,6 +469,14 @@ public class LocalAssistant {
 
     private static boolean isNumeric(String value) {
         return value.matches("^-?\\d+(?:\\.\\d+)?$");
+    }
+
+    private static String slashIntentId(String input) {
+        String value = input == null ? "" : input.trim().toLowerCase(java.util.Locale.ROOT);
+        int space = value.indexOf(' ');
+        if (space >= 0) value = value.substring(0, space);
+        if (value.startsWith("/")) value = value.substring(1);
+        return "slash." + value;
     }
 
 }
