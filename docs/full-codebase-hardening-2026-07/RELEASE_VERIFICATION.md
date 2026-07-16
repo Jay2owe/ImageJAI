@@ -8,8 +8,8 @@ run rather than inferred from the headless gates.
 
 | Item | Recorded value |
 |---|---|
-| Git revision | `af77a39d711a3f20d72adcc3024dff9e43fb0d2f` |
-| Verification timestamp and timezone | 2026-07-16T10:47:38+01:00 (Europe/London) |
+| Git revision | `de6570ca8a1a1c341978fc6fcf586514fbde7ba7` |
+| Verification timestamp and timezone | 2026-07-16T11:44:00+01:00 (Europe/London) |
 | Operating system | Microsoft Windows 11 Home, amd64, NT 10.0.26200 |
 | Java and Maven versions | Oracle JDK 25.0.2; Apache Maven 3.9.9 |
 | Python version | CPython 3.13.14 |
@@ -32,15 +32,15 @@ python --version
 | Java unit suite and main JAR | PASS | 1,108 tests in 144 suites; 0 failures/errors/skips; exact main JAR built |
 | Java integration profile | PASS | 3 tests in 2 suites; 0 failures/errors/skips |
 | Direct lifecycle suite | PASS | 31 tests; 0 failures/errors/skips |
-| Offline Python suite | PASS | 628 tests |
-| Real `ij.py`/`imagej-use-auto` loopback tests | PASS | 41 tests |
+| Offline Python suite | PASS | 650 tests |
+| Real `ij.py`/`imagej-use-auto` loopback tests | PASS | 51 tests |
 | Recipe contract | PASS | 8 tests |
 | Context, manifest, and generated docs | PASS | 134 tests; both generators byte-current |
-| Graphify hook tests and rebuild | PASS | 10 tests; post-commit processed 876 files and produced 30,388 nodes, 52,078 edges, 2,171 communities, and 15 hyperedges at the exact code commit; post-build exited 0 with no topology drift |
-| Build and simulated-install tests | PASS | 3 pytest build/install tests and 11 Pester bundle transaction tests |
+| Graphify hook tests and rebuild | PASS | 16 tests; the post-build public full-update event exited 0, drained all queue/lock/handoff state, and produced 30,425 nodes, 52,176 edges, 2,163 communities, and 15 hyperedges at the exact code commit; exactly one current `get_pixels_array()` node remains and the obsolete line-295 node is absent |
+| Build and simulated-install tests | PASS | 3 pytest build/install tests and 13 Pester bundle transaction tests |
 | Tested non-deploy build script | PASS | Git Bash `build.sh --no-deploy`; 1,108 tests; JAR hash matched the reproducibility pair; Graphify hook exited 0 |
-| Two-build JAR reproducibility | PASS | build 1: `4EF6D8D0E2BAC6F843F6155B79C0D55A17A2767C05492920AA9EFF5971AA6EA0`; build 2: same |
-| JAR content/policy inspection | PASS | 14,798,247 bytes and 5,639 entries; 0 `META-INF/maven/**`; exactly 1 packaged command manifest; source/package manifest SHA-256 `167A395696F5464BE9C7428530BDD25549B59A0823FA25261CEB7C0AEB1A388E` |
+| Two-build JAR reproducibility | PASS | build 1: `51CDC5C58E0E4044AD6DAF7E6B3141487D6AE9B21C66438938F95DFFCB71B675`; build 2: same |
+| JAR content/policy inspection | PASS | 14,798,248 bytes and 5,639 entries; 0 `META-INF/maven/**`; exactly 1 packaged command manifest; source/package manifest SHA-256 `167A395696F5464BE9C7428530BDD25549B59A0823FA25261CEB7C0AEB1A388E` |
 | Temporary-root lab-bundle inspection | PASS | 186 allowlisted agent files; exactly 190 unique ZIP members; secret scan passed; source/shared/local/ZIP-contained JAR hashes matched; 5 shared files and 1 local JAR published only under the disposable root |
 | Live Fiji doctor/smoke test | NOT RUN | Run only when explicitly authorized |
 
@@ -170,4 +170,4 @@ the result `NOT RUN`; do not write `PASS`.
 - Release gate decision: PASS for offline/private lab-distribution gates
 - Blocking failures: none
 - Explicitly unrun optional checks: live Fiji doctor/smoke test
-- Verifier: root coordinator plus sequential verifier iterations 1 through 4; fresh iteration 5 follows this record
+- Verifier: root coordinator plus sequential verifier iterations 1 through 5; fresh iteration 6 follows this record
