@@ -82,6 +82,91 @@ def test_unsigned_integer_histogram_uses_representable_ceiling(monkeypatch):
     assert result["saturated_fraction"] == 0.5
 
 
+def test_rgb_histogram_scalarization_metadata_is_strictly_validated():
+    domain = {
+        "representation": "raw",
+        "pixel_type": "uint8",
+        "signed": False,
+        "density_calibrated": False,
+        "acquisition_min_raw": 0.0,
+        "acquisition_max_raw": 255.0,
+        "acquisition_min_calibrated": None,
+        "acquisition_max_calibrated": None,
+        "scalarization": {
+            "method": "imagej_weighted_rgb_intensity",
+            "source_pixel_type": "rgb24",
+            "weights": {"red": 0.2, "green": 0.3, "blue": 0.5},
+            "rounding": "nearest_integer_half_up",
+        },
+    }
+    payload = {"value_domain": domain}
+
+    for decoder in (
+        tools_python._decode_value_domain,
+        describe_image._decode_value_domain,
+    ):
+        normalized = decoder(payload)
+        assert normalized["pixel_type"] == "uint8"
+        assert normalized["scalarization"]["source_pixel_type"] == "rgb24"
+        assert normalized["scalarization"]["weights"] == {
+            "red": 0.2, "green": 0.3, "blue": 0.5,
+        }
+
+        bad_method = {"value_domain": dict(domain)}
+        bad_method["value_domain"]["scalarization"] = dict(domain["scalarization"])
+        bad_method["value_domain"]["scalarization"]["method"] = "arbitrary"
+        try:
+            decoder(bad_method)
+            assert False, "arbitrary RGB scalarization method must be rejected"
+        except ValueError as exc:
+            assert "scalarization" in str(exc)
+
+        bad_representation = {"value_domain": dict(domain)}
+        bad_representation["value_domain"]["representation"] = "scalarized"
+        try:
+            decoder(bad_representation)
+            assert False, "non-raw representations must remain rejected"
+        except ValueError as exc:
+            assert "raw value-domain" in str(exc)
+
+        for bad_weights in (
+            {"red": 0.2, "green": 0.3, "blue": 0.4},
+            {"red": -0.1, "green": 0.6, "blue": 0.5},
+            {"red": float("nan"), "green": 0.5, "blue": 0.5},
+            {"red": float("inf"), "green": 0.0, "blue": 0.0},
+        ):
+            bad_weights_payload = {"value_domain": dict(domain)}
+            bad_scalarization = dict(domain["scalarization"])
+            bad_scalarization["weights"] = bad_weights
+            bad_weights_payload["value_domain"]["scalarization"] = bad_scalarization
+            try:
+                decoder(bad_weights_payload)
+                assert False, "unsafe RGB scalarization weights must be rejected"
+            except ValueError as exc:
+                assert "weight" in str(exc)
+
+        within_tolerance = {"value_domain": dict(domain)}
+        within_scalarization = dict(domain["scalarization"])
+        within_scalarization["weights"] = {
+            "red": 0.2, "green": 0.3, "blue": 0.5000000005,
+        }
+        within_tolerance["value_domain"]["scalarization"] = within_scalarization
+        assert decoder(within_tolerance)["scalarization"]["weights"]["blue"] \
+            == 0.5000000005
+
+        outside_tolerance = {"value_domain": dict(domain)}
+        outside_scalarization = dict(domain["scalarization"])
+        outside_scalarization["weights"] = {
+            "red": 0.2, "green": 0.3, "blue": 0.500000002,
+        }
+        outside_tolerance["value_domain"]["scalarization"] = outside_scalarization
+        try:
+            decoder(outside_tolerance)
+            assert False, "RGB weight sums outside the 1e-9 tolerance must be rejected"
+        except ValueError as exc:
+            assert "weight" in str(exc)
+
+
 def test_artifact_text_never_treats_observed_float_extrema_as_sensor_limits():
     thumb = np.asarray([[1.5, 1.5], [8.0, 8.0]], dtype=np.float32)
     text = describe_image._fragment_artifacts(

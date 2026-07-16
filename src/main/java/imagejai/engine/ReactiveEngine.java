@@ -4,6 +4,7 @@ import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
+import com.google.gson.JsonPrimitive;
 import com.google.gson.stream.JsonReader;
 import com.google.gson.stream.JsonToken;
 
@@ -22,6 +23,7 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.StringReader;
 import java.lang.reflect.Method;
+import java.math.BigDecimal;
 import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
 import java.nio.charset.StandardCharsets;
@@ -48,6 +50,7 @@ import java.util.Deque;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
@@ -570,10 +573,8 @@ public class ReactiveEngine {
 
         long waitBefore = 0L;
         if (obj.has("wait_before")) {
-            JsonElement wbe = obj.get("wait_before");
-            if (wbe != null && wbe.isJsonPrimitive()) {
-                try { waitBefore = wbe.getAsLong(); } catch (Exception ignore) {}
-            }
+            waitBefore = parseIntegerMilliseconds(obj.get("wait_before"),
+                    "wait_before");
         }
         if (waitBefore < 0L || waitBefore >= actionTtlMs) {
             throw new IllegalArgumentException("wait_before must be >= 0 and below action TTL");
@@ -1470,22 +1471,60 @@ public class ReactiveEngine {
     }
 
     static long parseWaitMs(JsonElement el) {
-        if (el == null) return 0L;
-        if (el.isJsonPrimitive() && el.getAsJsonPrimitive().isNumber()) {
-            try { return el.getAsLong(); } catch (Exception ignore) { return 0L; }
+        if (el == null || el.isJsonNull() || !el.isJsonPrimitive()) {
+            throw invalidDuration("wait",
+                    "must be an integer millisecond number or an '<integer>ms'/'<integer>s' string");
         }
-        if (!el.isJsonPrimitive()) return 0L;
-        String s = el.getAsString();
-        if (s == null) return 0L;
-        s = s.trim().toLowerCase();
-        if (s.isEmpty()) return 0L;
+        JsonPrimitive primitive = el.getAsJsonPrimitive();
+        if (primitive.isNumber()) {
+            return parseIntegerMilliseconds(el, "wait");
+        }
+        if (!primitive.isString()) {
+            throw invalidDuration("wait",
+                    "must not be null or a boolean");
+        }
+        String value = primitive.getAsString();
+        String duration = value == null ? "" : value.trim().toLowerCase(Locale.ROOT);
+        long multiplier;
+        String integer;
+        if (duration.endsWith("ms")) {
+            multiplier = 1L;
+            integer = duration.substring(0, duration.length() - 2);
+        } else if (duration.endsWith("s")) {
+            multiplier = 1000L;
+            integer = duration.substring(0, duration.length() - 1);
+        } else {
+            throw invalidDuration("wait",
+                    "string must end in 'ms' or 's'");
+        }
+        if (!integer.matches("-?[0-9]+")) {
+            throw invalidDuration("wait",
+                    "duration must contain a whole number with no whitespace or fraction");
+        }
         try {
-            if (s.endsWith("ms")) return Long.parseLong(s.substring(0, s.length() - 2).trim());
-            if (s.endsWith("s")) return (long) (Double.parseDouble(s.substring(0, s.length() - 1).trim()) * 1000.0);
-            return Long.parseLong(s);
-        } catch (NumberFormatException e) {
-            return 0L;
+            return Math.multiplyExact(Long.parseLong(integer), multiplier);
+        } catch (NumberFormatException | ArithmeticException invalid) {
+            throw invalidDuration("wait", "duration is outside the supported range");
         }
+    }
+
+    private static long parseIntegerMilliseconds(JsonElement el, String field) {
+        if (el == null || el.isJsonNull() || !el.isJsonPrimitive()
+                || !el.getAsJsonPrimitive().isNumber()) {
+            throw invalidDuration(field,
+                    "must be a finite integer number of milliseconds");
+        }
+        try {
+            return new BigDecimal(el.getAsJsonPrimitive().getAsString()).longValueExact();
+        } catch (NumberFormatException | ArithmeticException invalid) {
+            throw invalidDuration(field,
+                    "must be a finite integer within the signed 64-bit range");
+        }
+    }
+
+    private static IllegalArgumentException invalidDuration(String field,
+                                                            String requirement) {
+        return new IllegalArgumentException(field + " " + requirement);
     }
 
     // ------------------------------------------------------------------

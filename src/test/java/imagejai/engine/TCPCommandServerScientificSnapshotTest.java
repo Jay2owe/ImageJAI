@@ -1,5 +1,6 @@
 package imagejai.engine;
 
+import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import ij.ImagePlus;
@@ -8,6 +9,7 @@ import ij.gui.Overlay;
 import ij.gui.Roi;
 import ij.measure.Calibration;
 import ij.process.ByteProcessor;
+import ij.process.ColorProcessor;
 import ij.process.FloatProcessor;
 import ij.process.ShortProcessor;
 import org.junit.Test;
@@ -155,6 +157,216 @@ public class TCPCommandServerScientificSnapshotTest {
     }
 
     @Test
+    public void rgbHistogramPublishesScalarDomainAndExactPrimaryColorWeights() {
+        TCPCommandServer server = newServer();
+        ColorProcessor processor = new ColorProcessor(3, 1, new int[] {
+                0x00ff0000, 0x0000ff00, 0x000000ff
+        });
+        ImagePlus image = new ImagePlus("rgb-primaries", processor);
+        server.currentImageForTest = () -> image;
+        double[] previousWeights = ColorProcessor.getWeightingFactors();
+        ColorProcessor.setWeightingFactors(0.2, 0.3, 0.5);
+        try {
+            JsonObject pixels = result(server, "{\"command\":\"get_pixels\"}");
+            assertEquals("rgb24", pixels.getAsJsonObject("value_domain")
+                    .get("pixel_type").getAsString());
+
+            JsonObject histogram = result(server,
+                    "{\"command\":\"get_histogram\",\"scope\":\"full_plane\"}");
+            JsonObject domain = histogram.getAsJsonObject("value_domain");
+            assertEquals("raw", domain.get("representation").getAsString());
+            assertEquals("uint8", domain.get("pixel_type").getAsString());
+            assertFalse(domain.get("signed").getAsBoolean());
+            assertEquals(0.0, domain.get("acquisition_min_raw").getAsDouble(), 0.0);
+            assertEquals(255.0, domain.get("acquisition_max_raw").getAsDouble(), 0.0);
+
+            JsonObject scalarization = domain.getAsJsonObject("scalarization");
+            assertEquals("imagej_weighted_rgb_intensity",
+                    scalarization.get("method").getAsString());
+            assertEquals("rgb24",
+                    scalarization.get("source_pixel_type").getAsString());
+            assertEquals("nearest_integer_half_up",
+                    scalarization.get("rounding").getAsString());
+            JsonObject weights = scalarization.getAsJsonObject("weights");
+            assertEquals(0.2, weights.get("red").getAsDouble(), 0.0);
+            assertEquals(0.3, weights.get("green").getAsDouble(), 0.0);
+            assertEquals(0.5, weights.get("blue").getAsDouble(), 0.0);
+
+            JsonArray bins = histogram.getAsJsonArray("bins");
+            assertEquals(256, bins.size());
+            assertEquals("pure red must map to round(255 * 0.2)",
+                    1, bins.get(51).getAsInt());
+            assertEquals("pure green must map to round(255 * 0.3)",
+                    1, bins.get(77).getAsInt());
+            assertEquals("pure blue must map to round(255 * 0.5)",
+                    1, bins.get(128).getAsInt());
+            assertEquals(51.0, histogram.get("min").getAsDouble(), 0.0);
+            assertEquals(128.0, histogram.get("max").getAsDouble(), 0.0);
+            assertEquals((51.0 + 77.0 + 128.0) / 3.0,
+                    histogram.get("mean").getAsDouble(), 1e-12);
+        } finally {
+            ColorProcessor.setWeightingFactors(
+                    previousWeights[0], previousWeights[1], previousWeights[2]);
+            server.stop();
+        }
+    }
+
+    @Test
+    public void rgbHistogramPreservesSafeProcessorLocalWeights() {
+        TCPCommandServer server = newServer();
+        ColorProcessor processor = new ColorProcessor(3, 1, new int[] {
+                0x00ff0000, 0x0000ff00, 0x000000ff
+        });
+        ImagePlus image = new ImagePlus("rgb-local-weights", processor);
+        // ImageJ consumes only the first three entries of a local array.
+        ((ColorProcessor) image.getProcessor()).setRGBWeights(
+                new double[] {0.6, 0.3, 0.1, Double.NEGATIVE_INFINITY});
+        server.currentImageForTest = () -> image;
+        double[] previousWeights = ColorProcessor.getWeightingFactors();
+        // A safe processor-local override must win even if the unused global
+        // configuration would be rejected.
+        ColorProcessor.setWeightingFactors(2.0, 2.0, 2.0);
+        try {
+            JsonObject histogram = result(server,
+                    "{\"command\":\"get_histogram\",\"scope\":\"full_plane\"}");
+            JsonObject scalarization = histogram.getAsJsonObject("value_domain")
+                    .getAsJsonObject("scalarization");
+            JsonObject weights = scalarization.getAsJsonObject("weights");
+            assertEquals(0.6, weights.get("red").getAsDouble(), 0.0);
+            assertEquals(0.3, weights.get("green").getAsDouble(), 0.0);
+            assertEquals(0.1, weights.get("blue").getAsDouble(), 0.0);
+            JsonArray bins = histogram.getAsJsonArray("bins");
+            assertEquals(1, bins.get(153).getAsInt());
+            assertEquals(1, bins.get(77).getAsInt());
+            assertEquals(1, bins.get(26).getAsInt());
+        } finally {
+            ColorProcessor.setWeightingFactors(
+                    previousWeights[0], previousWeights[1], previousWeights[2]);
+            server.stop();
+        }
+    }
+
+    @Test
+    public void rgbHistogramUsesLocalWeightsOnlyForLiveCurrentPlane() {
+        TCPCommandServer server = newServer();
+        ImageStack stack = new ImageStack(3, 1);
+        stack.addSlice(new ColorProcessor(3, 1, new int[] {
+                0x00ff0000, 0x0000ff00, 0x000000ff
+        }));
+        stack.addSlice(new ColorProcessor(3, 1, new int[] {
+                0x00ff0000, 0x0000ff00, 0x000000ff
+        }));
+        ImagePlus image = new ImagePlus("rgb-plane-weights", stack);
+        image.setDimensions(1, 2, 1);
+        image.setPosition(1, 1, 1);
+        ((ColorProcessor) image.getProcessor()).setRGBWeights(
+                new double[] {0.6, 0.3, 0.1, Double.NEGATIVE_INFINITY});
+        server.currentImageForTest = () -> image;
+        double[] previousWeights = ColorProcessor.getWeightingFactors();
+        ColorProcessor.setWeightingFactors(0.2, 0.3, 0.5);
+        try {
+            JsonObject nonCurrent = result(server,
+                    "{\"command\":\"get_histogram\",\"slice\":2,"
+                            + "\"scope\":\"full_plane\"}");
+            assertRgbWeights(nonCurrent, 0.2, 0.3, 0.5);
+            JsonArray nonCurrentBins = nonCurrent.getAsJsonArray("bins");
+            assertEquals(1, nonCurrentBins.get(51).getAsInt());
+            assertEquals(1, nonCurrentBins.get(77).getAsInt());
+            assertEquals(1, nonCurrentBins.get(128).getAsInt());
+
+            JsonObject current = result(server,
+                    "{\"command\":\"get_histogram\",\"slice\":1,"
+                            + "\"scope\":\"full_plane\"}");
+            assertRgbWeights(current, 0.6, 0.3, 0.1);
+            JsonArray currentBins = current.getAsJsonArray("bins");
+            assertEquals(1, currentBins.get(153).getAsInt());
+            assertEquals(1, currentBins.get(77).getAsInt());
+            assertEquals(1, currentBins.get(26).getAsInt());
+
+            assertEquals(1, image.getC());
+            assertEquals(1, image.getZ());
+            assertEquals(1, image.getT());
+        } finally {
+            ColorProcessor.setWeightingFactors(
+                    previousWeights[0], previousWeights[1], previousWeights[2]);
+            server.stop();
+        }
+    }
+
+    @Test
+    public void rgbHistogramEnforcesWeightNormalizationTolerance() {
+        TCPCommandServer server = newServer();
+        ImagePlus image = new ImagePlus("rgb-weight-tolerance",
+                new ColorProcessor(1, 1, new int[] {0x00ffffff}));
+        server.currentImageForTest = () -> image;
+        try {
+            ((ColorProcessor) image.getProcessor()).setRGBWeights(
+                    new double[] {0.2, 0.3, 0.5000000005});
+            JsonObject accepted = result(server,
+                    "{\"command\":\"get_histogram\",\"scope\":\"full_plane\"}");
+            assertRgbWeights(accepted, 0.2, 0.3, 0.5000000005);
+
+            ((ColorProcessor) image.getProcessor()).setRGBWeights(
+                    new double[] {0.2, 0.3, 0.500000002});
+            assertUnsupportedRgbWeights(server.dispatch(
+                    parse("{\"command\":\"get_histogram\"}"),
+                    new TCPCommandServer.AgentCaps()));
+        } finally {
+            server.stop();
+        }
+    }
+
+    @Test
+    public void rgbHistogramRejectsUnsafeProcessorLocalWeightsStably() {
+        TCPCommandServer server = newServer();
+        ColorProcessor processor = new ColorProcessor(1, 1,
+                new int[] {0x00ffffff});
+        ImagePlus image = new ImagePlus("rgb-unsafe-local", processor);
+        server.currentImageForTest = () -> image;
+        double[][] unsafeWeights = new double[][] {
+                {0.5, 0.5},
+                {0.2, 0.3, 0.4},
+                {-0.1, 0.6, 0.5},
+                {Double.NaN, 0.5, 0.5},
+                {Double.POSITIVE_INFINITY, 0.0, 0.0}
+        };
+        try {
+            for (double[] weights : unsafeWeights) {
+                ((ColorProcessor) image.getProcessor()).setRGBWeights(weights);
+                assertUnsupportedRgbWeights(server.dispatch(
+                        parse("{\"command\":\"get_histogram\"}"),
+                        new TCPCommandServer.AgentCaps()));
+            }
+        } finally {
+            server.stop();
+        }
+    }
+
+    @Test
+    public void rgbHistogramRejectsUnsafeGlobalWeightsStably() {
+        TCPCommandServer server = newServer();
+        ColorProcessor processor = new ColorProcessor(1, 1,
+                new int[] {0x00ffffff});
+        ImagePlus image = new ImagePlus("rgb-unsafe-global", processor);
+        server.currentImageForTest = () -> image;
+        double[] previousWeights = ColorProcessor.getWeightingFactors();
+        try {
+            ColorProcessor.setWeightingFactors(0.6, 0.3, 0.3);
+            assertUnsupportedRgbWeights(server.dispatch(
+                    parse("{\"command\":\"get_histogram\"}"),
+                    new TCPCommandServer.AgentCaps()));
+            ColorProcessor.setWeightingFactors(Double.NEGATIVE_INFINITY, 1.0, 0.0);
+            assertUnsupportedRgbWeights(server.dispatch(
+                    parse("{\"command\":\"get_histogram\"}"),
+                    new TCPCommandServer.AgentCaps()));
+        } finally {
+            ColorProcessor.setWeightingFactors(
+                    previousWeights[0], previousWeights[1], previousWeights[2]);
+            server.stop();
+        }
+    }
+
+    @Test
     public void calibratedUint16ReportsRawRepresentationAndCalibratedLimits() {
         TCPCommandServer server = newServer();
         ImagePlus image = new ImagePlus("calibrated",
@@ -183,6 +395,59 @@ public class TCPCommandServerScientificSnapshotTest {
             assertEquals(1L, pixels.get("acquisition_min_count").getAsLong());
             assertEquals(1L, pixels.get("acquisition_max_count").getAsLong());
             assertTrue(pixels.get("acquisition_limit_counts_exact").getAsBoolean());
+        } finally {
+            server.stop();
+        }
+    }
+
+    @Test
+    public void nonlinearCalibrationReportsExactInteriorAcquisitionExtremum() {
+        TCPCommandServer server = newServer();
+        ImagePlus image = new ImagePlus("nonlinear-calibration",
+                new ByteProcessor(1, 1));
+        Calibration calibration = image.getCalibration();
+        // (raw - 127.5)^2: both raw endpoints map to 16256.25, while the
+        // exact minimum over integer acquisition codes is 0.25 at 127/128.
+        calibration.setFunction(Calibration.POLY2,
+                new double[] {16256.25, -255.0, 1.0}, "intensity");
+        server.currentImageForTest = () -> image;
+        try {
+            JsonObject histogram = result(server,
+                    "{\"command\":\"get_histogram\",\"scope\":\"full_plane\"}");
+            JsonObject domain = histogram.getAsJsonObject("value_domain");
+
+            assertEquals(0.0, domain.get("acquisition_min_raw").getAsDouble(), 0.0);
+            assertEquals(255.0, domain.get("acquisition_max_raw").getAsDouble(), 0.0);
+            assertEquals(0.25,
+                    domain.get("acquisition_min_calibrated").getAsDouble(), 0.0);
+            assertEquals(16256.25,
+                    domain.get("acquisition_max_calibrated").getAsDouble(), 0.0);
+        } finally {
+            server.stop();
+        }
+    }
+
+    @Test
+    public void nonfiniteCalibrationMakesBothAcquisitionBoundsUnavailable() {
+        TCPCommandServer server = newServer();
+        ImagePlus image = new ImagePlus("nonfinite-calibration",
+                new ByteProcessor(1, 1));
+        Calibration calibration = image.getCalibration();
+        // raw=0 is finite, but raw=1 overflows. A finite subset must not be
+        // advertised as bounds for the complete calibrated acquisition domain.
+        calibration.setFunction(Calibration.POLY2,
+                new double[] {0.0, Double.MAX_VALUE, Double.MAX_VALUE},
+                "intensity");
+        server.currentImageForTest = () -> image;
+        try {
+            JsonObject histogram = result(server,
+                    "{\"command\":\"get_histogram\",\"scope\":\"full_plane\"}");
+            JsonObject domain = histogram.getAsJsonObject("value_domain");
+
+            assertEquals(0.0, domain.get("acquisition_min_raw").getAsDouble(), 0.0);
+            assertEquals(255.0, domain.get("acquisition_max_raw").getAsDouble(), 0.0);
+            assertTrue(domain.get("acquisition_min_calibrated").isJsonNull());
+            assertTrue(domain.get("acquisition_max_calibrated").isJsonNull());
         } finally {
             server.stop();
         }
@@ -311,6 +576,27 @@ public class TCPCommandServerScientificSnapshotTest {
         assertFalse(response.toString(), response.get("ok").getAsBoolean());
         assertEquals(expected, response.getAsJsonObject("error")
                 .get("code").getAsString());
+    }
+
+    private static void assertUnsupportedRgbWeights(JsonObject response) {
+        assertErrorCode(response, "unsupported_rgb_weights");
+        JsonObject error = response.getAsJsonObject("error");
+        assertEquals("RGB histogram weights must be finite, non-negative, and sum to 1.",
+                error.get("message").getAsString());
+        assertEquals("state", error.get("category").getAsString());
+        assertFalse(error.get("retry_safe").getAsBoolean());
+        assertEquals("Restore the first three ImageJ RGB weights to finite, non-negative "
+                        + "values that sum to 1, then retry.",
+                error.get("recovery_hint").getAsString());
+    }
+
+    private static void assertRgbWeights(JsonObject histogram,
+                                         double red, double green, double blue) {
+        JsonObject weights = histogram.getAsJsonObject("value_domain")
+                .getAsJsonObject("scalarization").getAsJsonObject("weights");
+        assertEquals(red, weights.get("red").getAsDouble(), 0.0);
+        assertEquals(green, weights.get("green").getAsDouble(), 0.0);
+        assertEquals(blue, weights.get("blue").getAsDouble(), 0.0);
     }
 
     private static void assertPlane(JsonObject result, int channel,

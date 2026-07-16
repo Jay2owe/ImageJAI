@@ -51,6 +51,26 @@ def _safe_send(command: str, **payload) -> dict:
         return {"ok": False, "error": "Fiji TCP server unreachable: {}".format(exc)}
 
 
+def _response_error_text(response, fallback: str) -> str:
+    """Render legacy string and structured protocol errors without dict reprs."""
+    if not isinstance(response, dict):
+        return fallback
+    error = response.get("error")
+    if isinstance(error, dict):
+        code = error.get("code")
+        message = error.get("message")
+        if isinstance(message, str) and message.strip():
+            if isinstance(code, str) and code.strip():
+                return "{}: {}".format(code.strip(), message.strip())
+            return message.strip()
+        if isinstance(code, str) and code.strip():
+            return code.strip()
+        return fallback
+    if isinstance(error, str) and error.strip():
+        return error.strip()
+    return fallback
+
+
 def _bit_depth_from_type(type_str) -> int:
     """Parse an ImageJ type label like '8-bit' / '16-bit' / '32-bit'."""
     if not isinstance(type_str, str):
@@ -102,6 +122,30 @@ def _decode_value_domain(result: dict):
         "acquisition_min_calibrated", "acquisition_max_calibrated",
     ):
         normalized[key] = _optional_finite_number(domain.get(key), key)
+    scalarization = domain.get("scalarization")
+    if scalarization is not None:
+        if (
+            domain.get("pixel_type") != "uint8"
+            or not isinstance(scalarization, dict)
+            or scalarization.get("method") != "imagej_weighted_rgb_intensity"
+            or scalarization.get("source_pixel_type") != "rgb24"
+            or scalarization.get("rounding") != "nearest_integer_half_up"
+            or not isinstance(scalarization.get("weights"), dict)
+        ):
+            raise ValueError("invalid RGB scalarization metadata")
+        weights = scalarization["weights"]
+        normalized_weights = {}
+        for component in ("red", "green", "blue"):
+            value = _optional_finite_number(weights.get(component), component + " weight")
+            if value is None or value < 0.0:
+                raise ValueError("invalid RGB scalarization weights")
+            normalized_weights[component] = value
+        if not math.isclose(
+            sum(normalized_weights.values()), 1.0, rel_tol=0.0, abs_tol=1e-9
+        ):
+            raise ValueError("invalid RGB scalarization weights")
+        normalized["scalarization"] = dict(scalarization)
+        normalized["scalarization"]["weights"] = normalized_weights
     return normalized
 
 
@@ -219,18 +263,63 @@ def _fragment_calibration(info: dict) -> str:
 # Measurement 4-7: histogram-derived facts
 # --------------------------------------------------------------------------
 
-def _median_from_bins(bins: np.ndarray, n_pixels: int, lo: float, hi: float) -> float:
-    """Walk the cumulative bin count; return the intensity of the median bin."""
-    if n_pixels <= 0 or hi <= lo or bins.size == 0:
-        return lo
-    half = n_pixels / 2.0
-    cumulative = 0.0
-    n = int(bins.size)
-    for i in range(n):
-        cumulative += float(bins[i])
-        if cumulative >= half:
-            return lo + (hi - lo) * i / max(n - 1, 1)
-    return hi
+def _histogram_bin_values(bins: np.ndarray, value_domain: dict):
+    """Return exact values represented by histogram bins, or ``None``.
+
+    ImageJ's 256-bin byte histogram is absolute: bin ``i`` counts raw value
+    ``i``. This covers grayscale uint8, indexed8, and RGB histograms because the
+    server explicitly publishes RGB weighted scalarization as a uint8 0..255
+    value domain. Other ImageJ histograms can be display-range/adaptive bins.
+    The current TCP response does not publish their bin origin and width, so
+    observed min/max are not enough to reconstruct values without inventing
+    precision.
+    """
+    counts = np.asarray(bins, dtype=np.float64)
+    if counts.ndim != 1 or counts.size != 256 or not isinstance(value_domain, dict):
+        return None
+    if (
+        value_domain.get("pixel_type") in ("uint8", "indexed8")
+        and value_domain.get("signed") is False
+        and value_domain.get("acquisition_min_raw") == 0.0
+        and value_domain.get("acquisition_max_raw") == 255.0
+    ):
+        return np.arange(256, dtype=np.float64)
+    return None
+
+
+def _median_from_bins(bins: np.ndarray, n_pixels: int, bin_values) -> float | None:
+    """Return the exact median when the response defines every bin value."""
+    counts = np.asarray(bins, dtype=np.float64)
+    values = None if bin_values is None else np.asarray(bin_values, dtype=np.float64)
+    if (
+        n_pixels <= 0
+        or counts.ndim != 1
+        or counts.size == 0
+        or values is None
+        or values.ndim != 1
+        or values.size != counts.size
+        or not np.isfinite(counts).all()
+        or np.any(counts < 0)
+        or not np.equal(counts, np.floor(counts)).all()
+        or int(counts.sum()) != n_pixels
+    ):
+        return None
+
+    lower_rank = (n_pixels - 1) // 2
+    upper_rank = n_pixels // 2
+    cumulative = 0
+    lower = None
+    upper = None
+    for index, count in enumerate(counts):
+        cumulative += int(count)
+        if lower is None and cumulative > lower_rank:
+            lower = float(values[index])
+        if cumulative > upper_rank:
+            upper = float(values[index])
+            break
+    if lower is None or upper is None:
+        return None
+    return (lower + upper) / 2.0
 
 
 def _smooth_bins(bins: np.ndarray, window: int = 5) -> np.ndarray:
@@ -322,21 +411,52 @@ def _hist_stats(hist_result: dict):
         )
     except (TypeError, ValueError):
         return None
-    bins_raw = hist_result.get("bins") or []
-    bins = np.asarray(bins_raw, dtype=np.float64)
+    bins_raw = hist_result.get("bins")
+    try:
+        bins = np.asarray(bins_raw, dtype=np.float64)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    absolute_byte_domain = (
+        value_domain.get("pixel_type") in ("uint8", "indexed8")
+        and value_domain.get("signed") is False
+        and value_domain.get("acquisition_min_raw") == 0.0
+        and value_domain.get("acquisition_max_raw") == 255.0
+    )
+    bin_total = float(bins.sum())
     if (
         not all(math.isfinite(value) for value in (lo, hi, mean, std))
+        or bins.ndim != 1
+        or bins.size == 0
+        or (absolute_byte_domain and bins.size != 256)
         or not np.isfinite(bins).all()
         or np.any(bins < 0)
+        or not np.equal(bins, np.floor(bins)).all()
+        or not math.isfinite(bin_total)
+        or int(bin_total) != n_pixels
         or (counts_exact and (min_count is None or max_count is None))
         or (min_count is not None and min_count > n_pixels)
         or (max_count is not None and max_count > n_pixels)
+        or (
+            min_count is not None
+            and max_count is not None
+            and min_count + max_count > n_pixels
+        )
+        or (
+            counts_exact
+            and absolute_byte_domain
+            and (
+                min_count != int(bins[0])
+                or max_count != int(bins[255])
+            )
+        )
     ):
         return None
-    median = _median_from_bins(bins, n_pixels, lo, hi)
+    bin_values = _histogram_bin_values(bins, value_domain)
+    median = _median_from_bins(bins, n_pixels, bin_values)
     return {
         "min": lo, "max": hi, "mean": mean, "std": std,
         "median": median, "n_pixels": n_pixels, "bins": bins,
+        "bin_values": bin_values,
         "value_domain": value_domain,
         "acquisition_min_count": min_count,
         "acquisition_max_count": max_count,
@@ -348,11 +468,17 @@ def _hist_stats(hist_result: dict):
 def _fragment_intensity(stats: dict, bit_depth: int) -> str:
     """Sentence 3: intensity range + dynamic range used. Combined into
     one sentence (semicolon-joined) to match the Phase 4 examples."""
-    first = "Intensity ranges from {mn} to {mx} with mean {me}, median {md} and standard deviation {sd}".format(
-        mn=_fmt_int(stats["min"]), mx=_fmt_int(stats["max"]),
-        me=_fmt_int(stats["mean"]), md=_fmt_int(stats["median"]),
-        sd=_fmt_int(stats["std"]),
-    )
+    if stats.get("median") is None:
+        first = "Intensity ranges from {mn} to {mx} with mean {me} and standard deviation {sd}; the histogram contract does not define an exact median".format(
+            mn=_fmt_int(stats["min"]), mx=_fmt_int(stats["max"]),
+            me=_fmt_int(stats["mean"]), sd=_fmt_int(stats["std"]),
+        )
+    else:
+        first = "Intensity ranges from {mn} to {mx} with mean {me}, median {md} and standard deviation {sd}".format(
+            mn=_fmt_int(stats["min"]), mx=_fmt_int(stats["max"]),
+            me=_fmt_int(stats["mean"]), md=_fmt_int(stats["median"]),
+            sd=_fmt_int(stats["std"]),
+        )
     domain = stats.get("value_domain") or {}
     floor = domain.get("acquisition_min_raw")
     ceiling = domain.get("acquisition_max_raw")
@@ -391,15 +517,24 @@ def _fragment_histogram_shape(stats: dict) -> str:
     shape = classification["shape"]
     if shape == "bimodal":
         valley_bin = classification["valley_bin"]
-        n_bins = int(stats["bins"].size)
-        intensity = stats["min"] + (stats["max"] - stats["min"]) * valley_bin / max(n_bins - 1, 1)
+        bin_values = stats.get("bin_values")
+        if bin_values is None or valley_bin >= len(bin_values):
+            return (
+                "The histogram is bimodal with a valley at bin {}, but the response does not "
+                "define that bin's exact intensity."
+            ).format(valley_bin)
+        intensity = float(bin_values[valley_bin])
         return (
             "The histogram is bimodal with a valley at intensity {}, consistent with a clear "
             "separation between dim background and bright foreground."
         ).format(_fmt_int(intensity))
     mean = stats["mean"]
-    median = stats["median"]
+    median = stats.get("median")
     std = stats["std"]
+    if median is None:
+        if shape == "flat":
+            return "The histogram has no peak reaching 5% of pixels."
+        return "The histogram is unimodal; exact median-based skew is unavailable."
     diff = mean - median
     if std > 0 and abs(diff) > _SKEW_STD_RATIO * std:
         direction = "right-skewed" if diff > 0 else "left-skewed"
@@ -412,40 +547,46 @@ def _fragment_histogram_shape(stats: dict) -> str:
 
 
 def _hist_bin_centers(stats: dict) -> np.ndarray:
-    """Map histogram bins onto intensity centers across the reported min/max span."""
+    """Return exact bin values; never infer them from observed extrema."""
     bins = np.asarray(stats["bins"], dtype=np.float64)
-    if bins.size == 0:
-        return bins
-    lo = float(stats["min"])
-    hi = float(stats["max"])
-    if bins.size == 1 or hi <= lo:
-        return np.full(bins.shape, lo, dtype=np.float64)
-    return np.linspace(lo, hi, int(bins.size), dtype=np.float64)
+    values = stats.get("bin_values")
+    if values is None:
+        values = _histogram_bin_values(bins, stats.get("value_domain") or {})
+    if values is None:
+        return np.asarray([], dtype=np.float64)
+    values = np.asarray(values, dtype=np.float64)
+    if values.ndim != 1 or values.size != bins.size:
+        return np.asarray([], dtype=np.float64)
+    return values
 
 
-def _otsu_threshold_from_hist(stats: dict) -> float:
+def _otsu_threshold_from_hist(stats: dict) -> float | None:
     """Otsu threshold derived from the Fiji histogram bins."""
     counts = np.asarray(stats["bins"], dtype=np.float64)
     centers = _hist_bin_centers(stats)
     total = counts.sum()
-    if counts.size == 0 or total <= 0:
-        return float(stats["min"])
+    if counts.size == 0 or centers.size != counts.size or total <= 0:
+        return None
     omega = np.cumsum(counts)
     mu = np.cumsum(counts * centers)
     mu_t = mu[-1]
-    denom = omega * (total - omega)
-    denom = np.where(denom <= 0, 1e-12, denom)
-    sigma_b_sq = (mu_t * omega - mu) ** 2 / denom
+    valid = (omega > 0) & (omega < total)
+    if not np.any(valid):
+        return float(centers[int(np.argmax(counts))])
+    sigma_b_sq = np.full(counts.shape, -np.inf, dtype=np.float64)
+    denom = omega[valid] * (total - omega[valid])
+    numerator = mu_t * omega[valid] - mu[valid] * total
+    sigma_b_sq[valid] = numerator ** 2 / denom
     return float(centers[int(np.argmax(sigma_b_sq))])
 
 
-def _li_threshold_from_hist(stats: dict) -> float:
+def _li_threshold_from_hist(stats: dict) -> float | None:
     """Li's iterative minimum cross-entropy threshold on histogram bins."""
     counts = np.asarray(stats["bins"], dtype=np.float64)
     values = _hist_bin_centers(stats)
     total = counts.sum()
-    if counts.size == 0 or total <= 0:
-        return float(stats["min"])
+    if counts.size == 0 or values.size != counts.size or total <= 0:
+        return None
     shift = 0.0
     if float(values.min()) <= 0:
         shift = -float(values.min()) + 1.0
@@ -473,12 +614,12 @@ def _li_threshold_from_hist(stats: dict) -> float:
     return float(t - shift)
 
 
-def _triangle_threshold_from_hist(stats: dict) -> float:
+def _triangle_threshold_from_hist(stats: dict) -> float | None:
     """Zack's triangle method using the Fiji histogram bins."""
     hist = np.asarray(stats["bins"], dtype=np.float64)
     values = _hist_bin_centers(stats)
-    if hist.size == 0:
-        return float(stats["min"])
+    if hist.size == 0 or values.size != hist.size:
+        return None
     peak = int(np.argmax(hist))
     if peak < hist.size / 2:
         end = hist.size - 1
@@ -813,23 +954,125 @@ def _count_4_connected(mask: np.ndarray) -> int:
     return count
 
 
-def _fragment_thresholds(thumb: np.ndarray, stats: dict | None) -> str:
+def _threshold_thumbnail(thumb: np.ndarray, stats: dict, thumb_meta: dict | None):
+    """Align thumbnail samples to the histogram's raw numeric domain."""
+    samples = np.asarray(thumb, dtype=np.float64)
+    if samples.ndim != 2 or not np.isfinite(samples).all():
+        return None
+    histogram_domain = stats.get("value_domain")
+    thumbnail_domain = (
+        thumb_meta.get("value_domain") if isinstance(thumb_meta, dict) else None
+    )
+    if not isinstance(histogram_domain, dict) or not isinstance(thumbnail_domain, dict):
+        return None
+
+    scalarization = histogram_domain.get("scalarization")
+    if scalarization is not None:
+        if (
+            histogram_domain.get("representation") != "raw"
+            or histogram_domain.get("pixel_type") != "uint8"
+            or histogram_domain.get("signed") is not False
+            or histogram_domain.get("acquisition_min_raw") != 0.0
+            or histogram_domain.get("acquisition_max_raw") != 255.0
+            or thumbnail_domain.get("representation") != "raw"
+            or thumbnail_domain.get("pixel_type") != "rgb24"
+            or scalarization.get("method") != "imagej_weighted_rgb_intensity"
+            or scalarization.get("source_pixel_type") != "rgb24"
+            or scalarization.get("rounding") != "nearest_integer_half_up"
+        ):
+            return None
+        weights = scalarization.get("weights")
+        if not isinstance(weights, dict):
+            return None
+        try:
+            red_weight = float(weights["red"])
+            green_weight = float(weights["green"])
+            blue_weight = float(weights["blue"])
+        except (KeyError, TypeError, ValueError, OverflowError):
+            return None
+        rgb_weights = np.asarray(
+            [red_weight, green_weight, blue_weight], dtype=np.float64
+        )
+        signed_rgb = (samples >= -0x01000000) & (samples <= -1)
+        unsigned_rgb = (samples >= 0) & (samples <= 0x00ffffff)
+        if (
+            not np.isfinite(rgb_weights).all()
+            or np.any(rgb_weights < 0)
+            or not math.isclose(
+                float(rgb_weights.sum()), 1.0, rel_tol=0.0, abs_tol=1e-9
+            )
+            or not np.equal(samples, np.floor(samples)).all()
+            or not np.all(signed_rgb | unsigned_rgb)
+        ):
+            return None
+        packed = np.bitwise_and(samples.astype(np.int64), 0x00ffffff)
+        red = ((packed >> 16) & 0xff).astype(np.float64)
+        green = ((packed >> 8) & 0xff).astype(np.float64)
+        blue = (packed & 0xff).astype(np.float64)
+        # ImageJ ColorProcessor uses (int)(weighted + 0.5). The server admits
+        # only non-negative normalized weights, so floor exactly matches that
+        # Java cast and its published nearest-half-up contract.
+        scalar = np.floor(
+            red * red_weight + green * green_weight + blue * blue_weight + 0.5
+        )
+        if np.any(scalar < 0) or np.any(scalar > 255):
+            return None
+        return scalar
+
+    for key in (
+        "representation",
+        "pixel_type",
+        "signed",
+        "density_calibrated",
+        "acquisition_min_raw",
+        "acquisition_max_raw",
+        "acquisition_min_calibrated",
+        "acquisition_max_calibrated",
+    ):
+        if histogram_domain.get(key) != thumbnail_domain.get(key):
+            return None
+    return samples
+
+
+def _fragment_thresholds(
+    thumb: np.ndarray, stats: dict | None, thumb_meta: dict | None = None
+) -> str:
     """Sentence 6: Otsu / Li / Triangle object counts on the thumbnail."""
     if stats is None:
-        return "Auto-threshold counts are unavailable because Fiji did not return histogram data."
+        return "Auto-threshold counts are unavailable because no valid Fiji histogram is available."
+    threshold_thumb = _threshold_thumbnail(thumb, stats, thumb_meta)
+    if threshold_thumb is None:
+        return (
+            "Auto-threshold counts are unavailable because the histogram and thumbnail "
+            "value domains cannot be aligned."
+        )
     otsu_t = _otsu_threshold_from_hist(stats)
     li_t = _li_threshold_from_hist(stats)
     tri_t = _triangle_threshold_from_hist(stats)
-    n_otsu = _count_4_connected(thumb > otsu_t)
-    n_li = _count_4_connected(thumb > li_t)
-    n_tri = _count_4_connected(thumb > tri_t)
+    # Non-uint8 histogram responses currently omit bin origin/width. In that
+    # case derive thresholds from the actual thumbnail samples instead of
+    # pretending observed min/max define the histogram bins.
+    if otsu_t is None:
+        otsu_t = _otsu_threshold(threshold_thumb)
+    if li_t is None:
+        li_t = _li_threshold(threshold_thumb)
+    if tri_t is None:
+        tri_t = _triangle_threshold(threshold_thumb)
+    n_otsu = _count_4_connected(threshold_thumb > otsu_t)
+    n_li = _count_4_connected(threshold_thumb > li_t)
+    n_tri = _count_4_connected(threshold_thumb > tri_t)
     return (
         "Auto-thresholds produce {} connected components with Otsu, {} with Li and {} "
         "with Triangle on a 512-pixel thumbnail."
     ).format(n_otsu, n_li, n_tri)
 
 
-def _fragment_artifacts(thumb: np.ndarray, bit_depth: int, meta: dict | None = None) -> str:
+def _fragment_artifacts(
+    thumb: np.ndarray,
+    bit_depth: int,
+    meta: dict | None = None,
+    analysis_thumb: np.ndarray | None = None,
+) -> str:
     """Sentence 7: clipped blacks + quadrant saturation + stripe detection.
 
     All three sub-checks always contribute a phrase — either an issue
@@ -906,9 +1149,22 @@ def _fragment_artifacts(thumb: np.ndarray, bit_depth: int, meta: dict | None = N
             else:
                 clean.append("no quadrant saturation")
 
-    if h >= 2 and w >= 2:
-        row_means = thumb.mean(axis=1)
-        col_means = thumb.mean(axis=0)
+    stripe_thumb = None
+    if analysis_thumb is not None:
+        candidate = np.asarray(analysis_thumb, dtype=np.float64)
+        if candidate.shape == thumb.shape and np.isfinite(candidate).all():
+            stripe_thumb = candidate
+    elif domain.get("pixel_type") != "rgb24":
+        stripe_thumb = thumb
+
+    if stripe_thumb is None:
+        clean.append("stripe-pattern check unavailable for packed RGB values")
+    elif h >= 2 and w >= 2:
+        # Packed RGB integers have no meaningful scalar ordering. For RGB,
+        # callers pass the same weighted scalar thumbnail used by histogram
+        # thresholding; other image types continue to use their raw samples.
+        row_means = stripe_thumb.mean(axis=1)
+        col_means = stripe_thumb.mean(axis=0)
         row_var = float(row_means.var())
         col_var = float(col_means.var())
         if row_var > 4.0 * col_var and col_var > 0:
@@ -988,7 +1244,7 @@ def describe_image() -> str:
     """
     info_resp = _safe_send("get_image_info", force=True)
     if not isinstance(info_resp, dict) or not info_resp.get("ok"):
-        err = info_resp.get("error") if isinstance(info_resp, dict) else "no reply from Fiji"
+        err = _response_error_text(info_resp, "no reply from Fiji")
         return "describe_image: cannot read active image info ({}).".format(err or "unknown error")
     info = info_resp.get("result") or {}
     if not isinstance(info, dict) or not info:
@@ -1039,10 +1295,12 @@ def describe_image() -> str:
         and _metadata_matches_info(hist_result, info)
     ):
         hist_stats = _hist_stats(hist_result)
+        if hist_stats is None:
+            hist_error = "Fiji returned an invalid histogram payload"
     elif isinstance(hist_resp, dict) and hist_resp.get("ok"):
         hist_error = "histogram snapshot/plane did not match image info"
     elif isinstance(hist_resp, dict):
-        hist_error = hist_resp.get("error") or "unknown histogram error"
+        hist_error = _response_error_text(hist_resp, "unknown histogram error")
     else:
         hist_error = "no reply from Fiji"
     roi_data = _fetch_roi_overlay(info)
@@ -1058,8 +1316,20 @@ def describe_image() -> str:
             "Histogram-derived intensity statistics are unavailable ({}).".format(hist_error)
         )
     if thumb_arr is not None:
-        fragments.append(_fragment_thresholds(thumb_arr, hist_stats))
-        fragments.append(_fragment_artifacts(thumb_arr, bit_depth, thumb_meta))
+        aligned_thumb = (
+            _threshold_thumbnail(thumb_arr, hist_stats, thumb_meta)
+            if hist_stats is not None
+            else None
+        )
+        fragments.append(_fragment_thresholds(thumb_arr, hist_stats, thumb_meta))
+        fragments.append(
+            _fragment_artifacts(
+                thumb_arr,
+                bit_depth,
+                thumb_meta,
+                analysis_thumb=aligned_thumb,
+            )
+        )
     else:
         fragments.append("Thumbnail-based threshold and artifact checks are unavailable.")
     fragments.append(_fragment_roi_overlay(roi_data))

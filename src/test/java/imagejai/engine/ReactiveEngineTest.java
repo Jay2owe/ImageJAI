@@ -1,7 +1,10 @@
 package imagejai.engine;
 
 import com.google.gson.JsonArray;
+import com.google.gson.JsonElement;
+import com.google.gson.JsonNull;
 import com.google.gson.JsonObject;
+import com.google.gson.JsonPrimitive;
 import org.junit.After;
 import org.junit.Assume;
 import org.junit.Rule;
@@ -459,6 +462,85 @@ public class ReactiveEngineTest {
         assertEquals(1, rig.engine.getQuarantined().size());
     }
 
+    @Test
+    public void waitDurationParserAcceptsOnlyDocumentedWholeDurations() {
+        assertEquals(250L, ReactiveEngine.parseWaitMs(new JsonPrimitive(250)));
+        assertEquals(250L, ReactiveEngine.parseWaitMs(new JsonPrimitive("250ms")));
+        assertEquals(2000L, ReactiveEngine.parseWaitMs(new JsonPrimitive("2s")));
+        assertEquals(0L, ReactiveEngine.parseWaitMs(new JsonPrimitive("0ms")));
+    }
+
+    @Test
+    public void waitDurationParserRejectsNullWrongTypeFractionOverflowAndUnits() {
+        assertInvalidWait(null);
+        assertInvalidWait(JsonNull.INSTANCE);
+        assertInvalidWait(new JsonObject());
+        assertInvalidWait(new JsonPrimitive(true));
+        assertInvalidWait(new JsonPrimitive(1.5));
+        assertInvalidWait(new JsonPrimitive(Double.NaN));
+        assertInvalidWait(new JsonPrimitive(Double.POSITIVE_INFINITY));
+        assertInvalidWait(new JsonPrimitive(""));
+        assertInvalidWait(new JsonPrimitive("not-a-number"));
+        assertInvalidWait(new JsonPrimitive("1.5s"));
+        assertInvalidWait(new JsonPrimitive("2m"));
+        assertInvalidWait(new JsonPrimitive("9223372036854775808ms"));
+        assertInvalidWait(new JsonPrimitive("9223372036854776s"));
+    }
+
+    @Test
+    public void reloadQuarantinesInvalidDelaysAndKeepsValidMillisecondsAndSeconds()
+            throws Exception {
+        Path rules = temporary.newFolder("strict-delay-rules").toPath();
+        String[] invalidWaitBefore = {
+                "null", "true", "1.5", "\"250ms\"", "1e100"
+        };
+        for (int i = 0; i < invalidWaitBefore.length; i++) {
+            String name = "bad-before-" + i;
+            writeRawRule(rules, name, "{\"name\":\"" + name
+                    + "\",\"when\":{\"event\":\"trigger." + name
+                    + "\"},\"do\":[{\"capture\":\"x\"}],\"wait_before\":"
+                    + invalidWaitBefore[i] + "}");
+        }
+        String[] invalidWait = {
+                "null", "true", "1.5", "\"not-a-number\"", "\"1.5s\"",
+                "\"2m\"", "\"9223372036854775808ms\"",
+                "\"9223372036854776s\""
+        };
+        for (int i = 0; i < invalidWait.length; i++) {
+            String name = "bad-action-" + i;
+            writeRawRule(rules, name, "{\"name\":\"" + name
+                    + "\",\"when\":{\"event\":\"trigger." + name
+                    + "\"},\"do\":[{\"wait\":" + invalidWait[i] + "}]}");
+        }
+        writeRawRule(rules, "valid-before",
+                "{\"name\":\"valid-before\",\"when\":{\"event\":\"trigger.valid-before\"},"
+                        + "\"do\":[{\"capture\":\"x\"}],\"wait_before\":250}");
+        writeRawRule(rules, "valid-action",
+                "{\"name\":\"valid-action\",\"when\":{\"event\":\"trigger.valid-action\"},"
+                        + "\"do\":[{\"wait\":\"250ms\"},{\"wait\":\"2s\"}]}");
+
+        Rig rig = rig(rules, 2, 3000L, 3,
+                fixedCapture(temporary.newFolder("strict-delay-output").toPath()
+                        .resolve("AI_Exports"), new byte[] {1}, new AtomicInteger()),
+                new NoopPolicy());
+        rig.engine.reload();
+
+        assertEquals(2, rig.engine.getRules().size());
+        assertEquals(invalidWaitBefore.length + invalidWait.length,
+                rig.engine.getQuarantined().size());
+        assertQuarantinedReason(rig.engine, "wait_before must be");
+        assertQuarantinedReason(rig.engine, "wait must");
+        for (ReactiveEngine.Rule rule : rig.engine.getRules()) {
+            if ("valid-before".equals(rule.name)) assertEquals(250L, rule.waitBefore);
+            if ("valid-action".equals(rule.name)) {
+                assertEquals(250L, ReactiveEngine.parseWaitMs(
+                        rule.actions.get(0).get("wait")));
+                assertEquals(2000L, ReactiveEngine.parseWaitMs(
+                        rule.actions.get(1).get("wait")));
+            }
+        }
+    }
+
     private Rig rig(Path rules, int capacity, long ttl, int failures,
                     ReactiveEngine.CaptureBackend backend,
                     ReactiveEngine.MutationPolicy policy) {
@@ -539,6 +621,15 @@ public class ReactiveEngineTest {
             if (entry.error != null && entry.error.contains(fragment)) return;
         }
         throw new AssertionError("No quarantine reason contained '" + fragment + "'");
+    }
+
+    private static void assertInvalidWait(JsonElement value) {
+        try {
+            ReactiveEngine.parseWaitMs(value);
+            throw new AssertionError("Expected invalid reactive wait: " + value);
+        } catch (IllegalArgumentException expected) {
+            assertTrue(expected.getMessage().contains("wait"));
+        }
     }
 
     private static ReactiveEngine.CaptureBackend fixedCapture(

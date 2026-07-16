@@ -132,6 +132,15 @@ For numbers, use the dedicated stats tools (histogram, region
 stats, line profile). The visual screenshot is lossy — never
 measure from it.
 
+RGB has two deliberate numeric representations. `get_pixels` returns
+packed `rgb24` values. `get_histogram` and its statistics return ImageJ's
+0–255 weighted RGB intensity instead; read `value_domain.scalarization`
+for the exact red, green, and blue weights and rounding rule. Never compare
+those scalar histogram values directly with packed RGB pixel integers.
+If `get_histogram` returns `unsupported_rgb_weights`, restore the first
+three ImageJ RGB weights to finite, non-negative values that sum to 1,
+then retry.
+
 ---
 
 ## Error handling

@@ -17,6 +17,7 @@ import ij.gui.Roi;
 import ij.measure.Calibration;
 import ij.measure.ResultsTable;
 import ij.plugin.frame.RoiManager;
+import ij.process.ColorProcessor;
 import ij.process.ImageProcessor;
 import ij.process.ImageStatistics;
 import ij.process.LUT;
@@ -7705,8 +7706,35 @@ public class TCPCommandServer {
                             return;
                         }
                         int stackIndex = imp.getStackIndex(channel, slice, frame);
-                        ImageProcessor source = imp.getStack().getProcessor(stackIndex);
+                        // ImagePlus retains the live processor (including a
+                        // ColorProcessor's local RGB weights) only for the
+                        // current plane. ImageStack reconstructs processors
+                        // from stored pixels and therefore loses that local
+                        // override. Use the live processor when it represents
+                        // the requested plane; other planes use ImageJ's
+                        // global conversion weights, just as their reconstructed
+                        // processors do.
+                        ImageProcessor source = stackIndex == imp.getCurrentSlice()
+                                ? imp.getProcessor()
+                                : imp.getStack().getProcessor(stackIndex);
+                        double[] rgbWeights = rgbScalarizationWeights(source);
+                        if (source instanceof ColorProcessor
+                                && !supportedRgbScalarizationWeights(rgbWeights)) {
+                            holder[0] = stateConfigurationError(
+                                    "unsupported_rgb_weights",
+                                    UNSUPPORTED_RGB_WEIGHTS_MESSAGE,
+                                    UNSUPPORTED_RGB_WEIGHTS_RECOVERY_HINT);
+                            return;
+                        }
                         ImageProcessor statisticsProcessor = source.duplicate();
+                        if (rgbWeights != null
+                                && statisticsProcessor instanceof ColorProcessor) {
+                            // ColorProcessor.duplicate() drops processor-local RGB
+                            // weights. Preserve the exact conversion used by the
+                            // source so the statistics and their metadata agree.
+                            ((ColorProcessor) statisticsProcessor)
+                                    .setRGBWeights(rgbWeights.clone());
+                        }
                         statisticsProcessor.setCalibrationTable(null);
                         Roi activeRoi = "active_roi".equals(scope) ? imp.getRoi() : null;
                         if (activeRoi != null
@@ -7749,7 +7777,8 @@ public class TCPCommandServer {
                         }
                         result.add("bins", bins);
                         result.addProperty("scope", scope);
-                        result.add("value_domain", valueDomain(imp));
+                        result.add("value_domain",
+                                histogramValueDomain(imp, rgbWeights));
                         attachLimitCounts(result, limits, lowCount, highCount);
                         attachImageSnapshot(result, snapshot, channel, slice, slice, frame);
                         holder[0] = imageSnapshotStillCurrent(snapshot)
@@ -8743,6 +8772,22 @@ public class TCPCommandServer {
         return response;
     }
 
+    private JsonObject stateConfigurationError(String code, String message,
+                                               String recoveryHint) {
+        JsonObject response = new JsonObject();
+        response.addProperty("ok", false);
+        JsonObject error = new JsonObject();
+        error.addProperty("code", code);
+        error.addProperty("message", message);
+        error.addProperty("category", ErrorReply.CAT_STATE);
+        error.addProperty("retry_safe", false);
+        if (recoveryHint != null && !recoveryHint.isEmpty()) {
+            error.addProperty("recovery_hint", recoveryHint);
+        }
+        response.add("error", error);
+        return response;
+    }
+
     private JsonObject invalidRequest(String message) {
         JsonObject response = new JsonObject();
         response.addProperty("ok", false);
@@ -8929,6 +8974,29 @@ public class TCPCommandServer {
         boolean known() { return rawMin != null && rawMax != null; }
     }
 
+    /** Largest discrete acquisition domain whose calibrated extrema we enumerate. */
+    private static final int MAX_CALIBRATED_ACQUISITION_CODES = 65536;
+    private static final double RGB_WEIGHT_SUM_TOLERANCE = 1e-9;
+    private static final String UNSUPPORTED_RGB_WEIGHTS_MESSAGE =
+            "RGB histogram weights must be finite, non-negative, and sum to 1.";
+    private static final String UNSUPPORTED_RGB_WEIGHTS_RECOVERY_HINT =
+            "Restore the first three ImageJ RGB weights to finite, non-negative "
+                    + "values that sum to 1, then retry.";
+
+    private static final class CalibratedAcquisitionLimits {
+        final Double min;
+        final Double max;
+
+        CalibratedAcquisitionLimits(Double min, Double max) {
+            this.min = min;
+            this.max = max;
+        }
+
+        static CalibratedAcquisitionLimits unavailable() {
+            return new CalibratedAcquisitionLimits(null, null);
+        }
+    }
+
     private static AcquisitionLimits acquisitionLimits(ImagePlus image) {
         switch (image.getType()) {
             case ImagePlus.GRAY8:
@@ -8961,17 +9029,127 @@ public class TCPCommandServer {
         addNullableNumber(domain, "acquisition_min_raw", limits.rawMin);
         addNullableNumber(domain, "acquisition_max_raw", limits.rawMax);
         if (limits.known() && densityCalibrated) {
-            double first = calibration.getCValue(limits.rawMin.doubleValue());
-            double second = calibration.getCValue(limits.rawMax.doubleValue());
-            addNullableNumber(domain, "acquisition_min_calibrated",
-                    Double.valueOf(Math.min(first, second)));
-            addNullableNumber(domain, "acquisition_max_calibrated",
-                    Double.valueOf(Math.max(first, second)));
+            CalibratedAcquisitionLimits calibrated = calibratedAcquisitionLimits(
+                    calibration, limits);
+            addNullableNumber(domain, "acquisition_min_calibrated", calibrated.min);
+            addNullableNumber(domain, "acquisition_max_calibrated", calibrated.max);
         } else {
             domain.add("acquisition_min_calibrated", JsonNull.INSTANCE);
             domain.add("acquisition_max_calibrated", JsonNull.INSTANCE);
         }
         return domain;
+    }
+
+    /**
+     * Value domain for ImageJ's histogram/statistics read. RGB pixels are
+     * packed 24-bit values when fetched by get_pixels, but ColorStatistics
+     * first converts them to a weighted 0..255 scalar. Publish that measured
+     * domain without changing the get_pixels contract.
+     */
+    private static JsonObject histogramValueDomain(ImagePlus image,
+                                                   double[] rgbWeights) {
+        JsonObject domain = valueDomain(image);
+        if (image.getType() != ImagePlus.COLOR_RGB || rgbWeights == null) {
+            return domain;
+        }
+
+        domain.addProperty("pixel_type", "uint8");
+        domain.addProperty("signed", false);
+        domain.addProperty("acquisition_min_raw", 0.0);
+        domain.addProperty("acquisition_max_raw", 255.0);
+        // ImageJ ColorStatistics operates on the raw scalar conversion. A
+        // density-calibrated RGB acquisition does not define a safe inverse
+        // mapping for that derived value.
+        domain.add("acquisition_min_calibrated", JsonNull.INSTANCE);
+        domain.add("acquisition_max_calibrated", JsonNull.INSTANCE);
+
+        JsonObject scalarization = new JsonObject();
+        scalarization.addProperty("method", "imagej_weighted_rgb_intensity");
+        scalarization.addProperty("source_pixel_type", "rgb24");
+        JsonObject weights = new JsonObject();
+        weights.addProperty("red", rgbWeights[0]);
+        weights.addProperty("green", rgbWeights[1]);
+        weights.addProperty("blue", rgbWeights[2]);
+        scalarization.add("weights", weights);
+        scalarization.addProperty("rounding", "nearest_integer_half_up");
+        domain.add("scalarization", scalarization);
+        return domain;
+    }
+
+    /** Capture the exact ImageJ conversion weights before duplicating RGB. */
+    private static double[] rgbScalarizationWeights(ImageProcessor source) {
+        if (!(source instanceof ColorProcessor)) return null;
+        double[] local = ((ColorProcessor) source).getRGBWeights();
+        double[] weights = local != null
+                ? local : ColorProcessor.getWeightingFactors();
+        // ImageJ reads exactly indices 0..2. Extra local entries are ignored;
+        // fewer than three would fail inside ColorProcessor.getHistogram().
+        return weights == null || weights.length < 3 ? null : new double[] {
+                weights[0], weights[1], weights[2]
+        };
+    }
+
+    /**
+     * ImageJ indexes a fixed 256-bin array with
+     * {@code (int)(r*rw + g*gw + b*bw + 0.5)} and does not validate weights.
+     * Reject configurations for which that operation is unsafe or for which
+     * the published unsigned 0..255, half-up scalar contract would be false.
+     */
+    private static boolean supportedRgbScalarizationWeights(double[] weights) {
+        if (weights == null || weights.length != 3) return false;
+        double sum = 0.0;
+        for (double weight : weights) {
+            if (Double.isNaN(weight) || Double.isInfinite(weight) || weight < 0.0) {
+                return false;
+            }
+            sum += weight;
+        }
+        return !Double.isNaN(sum) && !Double.isInfinite(sum)
+                && Math.abs(sum - 1.0) <= RGB_WEIGHT_SUM_TOLERANCE;
+    }
+
+    /**
+     * Return exact extrema across every representable integer acquisition code.
+     * Density-calibration functions and custom tables need not be monotonic, so
+     * evaluating only the two raw endpoints is not a valid bound. If even one
+     * code maps to NaN/infinity, no finite pair describes the full calibrated
+     * acquisition domain and both bounds remain unavailable.
+     */
+    private static CalibratedAcquisitionLimits calibratedAcquisitionLimits(
+            Calibration calibration, AcquisitionLimits limits) {
+        if (calibration == null || limits == null || !limits.known()) {
+            return CalibratedAcquisitionLimits.unavailable();
+        }
+        double rawMin = limits.rawMin.doubleValue();
+        double rawMax = limits.rawMax.doubleValue();
+        if (Double.isNaN(rawMin) || Double.isInfinite(rawMin)
+                || Double.isNaN(rawMax) || Double.isInfinite(rawMax)
+                || rawMin != Math.rint(rawMin) || rawMax != Math.rint(rawMax)
+                || rawMin < Integer.MIN_VALUE || rawMax > Integer.MAX_VALUE
+                || rawMax < rawMin) {
+            return CalibratedAcquisitionLimits.unavailable();
+        }
+
+        int firstRaw = (int) rawMin;
+        int lastRaw = (int) rawMax;
+        long codeCount = (long) lastRaw - (long) firstRaw + 1L;
+        if (codeCount <= 0L || codeCount > MAX_CALIBRATED_ACQUISITION_CODES) {
+            return CalibratedAcquisitionLimits.unavailable();
+        }
+
+        double min = Double.POSITIVE_INFINITY;
+        double max = Double.NEGATIVE_INFINITY;
+        for (int raw = firstRaw; ; raw++) {
+            double mapped = calibration.getCValue(raw);
+            if (Double.isNaN(mapped) || Double.isInfinite(mapped)) {
+                return CalibratedAcquisitionLimits.unavailable();
+            }
+            min = Math.min(min, mapped);
+            max = Math.max(max, mapped);
+            if (raw == lastRaw) break;
+        }
+        return new CalibratedAcquisitionLimits(
+                Double.valueOf(min), Double.valueOf(max));
     }
 
     private static void addNullableNumber(JsonObject target, String key, Double value) {

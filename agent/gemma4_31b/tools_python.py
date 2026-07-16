@@ -105,6 +105,30 @@ def _decode_value_domain(result: dict):
         "acquisition_min_calibrated", "acquisition_max_calibrated",
     ):
         normalized[key] = _optional_finite_number(domain.get(key), key)
+    scalarization = domain.get("scalarization")
+    if scalarization is not None:
+        if (
+            domain.get("pixel_type") != "uint8"
+            or not isinstance(scalarization, dict)
+            or scalarization.get("method") != "imagej_weighted_rgb_intensity"
+            or scalarization.get("source_pixel_type") != "rgb24"
+            or scalarization.get("rounding") != "nearest_integer_half_up"
+            or not isinstance(scalarization.get("weights"), dict)
+        ):
+            raise ValueError("invalid RGB scalarization metadata")
+        weights = scalarization["weights"]
+        normalized_weights = {}
+        for component in ("red", "green", "blue"):
+            value = _optional_finite_number(weights.get(component), component + " weight")
+            if value is None or value < 0.0:
+                raise ValueError("invalid RGB scalarization weights")
+            normalized_weights[component] = value
+        if not math.isclose(
+            sum(normalized_weights.values()), 1.0, rel_tol=0.0, abs_tol=1e-9
+        ):
+            raise ValueError("invalid RGB scalarization weights")
+        normalized["scalarization"] = dict(scalarization)
+        normalized["scalarization"]["weights"] = normalized_weights
     return normalized
 
 
