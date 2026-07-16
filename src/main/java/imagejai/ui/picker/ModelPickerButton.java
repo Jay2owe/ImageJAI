@@ -11,9 +11,11 @@ import java.util.Map;
 import java.util.concurrent.Callable;
 
 import javax.swing.BorderFactory;
+import javax.swing.AbstractAction;
 import javax.swing.Box;
 import javax.swing.BoxLayout;
 import javax.swing.JButton;
+import javax.swing.JComponent;
 import javax.swing.JLabel;
 import javax.swing.JMenuItem;
 import javax.swing.JPanel;
@@ -22,11 +24,14 @@ import javax.swing.JSeparator;
 import javax.swing.SwingUtilities;
 import javax.swing.SwingWorker;
 import javax.swing.UIManager;
+import javax.swing.KeyStroke;
 import java.awt.BorderLayout;
 import java.awt.Color;
 import java.awt.Component;
 import java.awt.event.ActionEvent;
 import java.awt.event.ActionListener;
+import java.awt.event.InputEvent;
+import java.awt.event.KeyEvent;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -42,6 +47,9 @@ import java.util.List;
  * menu are deferred to Phase G/H.
  */
 public class ModelPickerButton extends JButton {
+
+    static final String ACTION_TOGGLE_SELECTED_PIN = "toggleSelectedModelPin";
+    static final String ACTION_ACTIVATE_SELECTED_STATUS = "activateSelectedProviderStatus";
 
     public interface SelectionListener {
         void onSelectionChanged(ModelEntry entry);
@@ -130,13 +138,20 @@ public class ModelPickerButton extends JButton {
         super(captionFor(settings, registry));
         this.registry = registry == null ? ProviderRegistry.empty() : registry;
         this.settings = settings;
+        popup.setFocusable(true);
+        popup.getAccessibleContext().setAccessibleName("Available AI models");
+        getAccessibleContext().setAccessibleDescription(
+                "Open the model picker. Use arrow keys and Enter to choose a model, "
+                        + "Control+P to pin, Alt+Enter for provider status, or F5 to refresh.");
         addActionListener(new ActionListener() {
             @Override
             public void actionPerformed(ActionEvent e) {
                 showPopup();
             }
         });
+        installKeyboardActions();
         rebuildPopup();
+        updateAccessibleName();
     }
 
     public void setSelectionListener(SelectionListener listener) {
@@ -222,6 +237,11 @@ public class ModelPickerButton extends JButton {
 
     public void refreshCaption() {
         setText(captionFor(settings, registry));
+        updateAccessibleName();
+    }
+
+    private void updateAccessibleName() {
+        getAccessibleContext().setAccessibleName("AI model: " + getText().replace("▾", "").trim());
     }
 
     private static String captionFor(Settings settings, ProviderRegistry registry) {
@@ -276,6 +296,7 @@ public class ModelPickerButton extends JButton {
 
         popup.add(new JSeparator());
         JMenuItem settingsItem = new JMenuItem("⚙  Open multi-provider settings…");
+        settingsItem.getAccessibleContext().setAccessibleName("Open multi-provider settings");
         settingsItem.addActionListener(new ActionListener() {
             @Override
             public void actionPerformed(ActionEvent e) {
@@ -537,13 +558,18 @@ public class ModelPickerButton extends JButton {
         strip.setBorder(BorderFactory.createEmptyBorder(4, 8, 4, 8));
 
         headerStatusLabel = new JLabel(headerTitle());
+        headerStatusLabel.getAccessibleContext().setAccessibleName("Model refresh status");
         headerStatusLabel.setForeground(new Color(80, 80, 90));
         strip.add(headerStatusLabel, BorderLayout.WEST);
 
         strip.add(buildSearchField(), BorderLayout.CENTER);
 
         headerRefreshButton = new JButton("↻ refresh");
-        headerRefreshButton.setFocusable(false);
+        headerRefreshButton.setFocusable(true);
+        headerRefreshButton.setMnemonic(KeyEvent.VK_R);
+        headerRefreshButton.getAccessibleContext().setAccessibleName("Refresh model list");
+        headerRefreshButton.getAccessibleContext().setAccessibleDescription(
+                "Refresh provider model lists without closing the picker.");
         headerRefreshButton.setEnabled(refreshTask != null);
         headerRefreshButton.addActionListener(new ActionListener() {
             @Override
@@ -576,6 +602,9 @@ public class ModelPickerButton extends JButton {
     private Component buildSearchField() {
         if (searchField == null) {
             searchField = new javax.swing.JTextField(12);
+            searchField.getAccessibleContext().setAccessibleName("Filter models");
+            searchField.getAccessibleContext().setAccessibleDescription(
+                    "Type part of a model or provider name and press Enter.");
             searchField.setToolTipText("Type to filter models, then press Enter");
             searchField.putClientProperty("JTextField.placeholderText", "filter…");
             searchField.addActionListener(new ActionListener() {
@@ -601,7 +630,10 @@ public class ModelPickerButton extends JButton {
     private Component buildFreeToggle() {
         boolean freeOnly = popupFilter == PopupFilter.FREE_ONLY;
         headerFreeToggle = new JButton(freeOnly ? "✓ Free only" : "Free only");
-        headerFreeToggle.setFocusable(false);
+        headerFreeToggle.setFocusable(true);
+        headerFreeToggle.setMnemonic(KeyEvent.VK_F);
+        headerFreeToggle.getAccessibleContext().setAccessibleName(
+                freeOnly ? "Show all models" : "Show free models only");
         headerFreeToggle.setToolTipText(freeOnly
                 ? "Showing free models only — click to show all"
                 : "Show only free / free-with-limits models");
@@ -620,6 +652,64 @@ public class ModelPickerButton extends JButton {
             }
         });
         return headerFreeToggle;
+    }
+
+    private void installKeyboardActions() {
+        getInputMap(JComponent.WHEN_FOCUSED).put(
+                KeyStroke.getKeyStroke(KeyEvent.VK_F5, 0), "refreshModels");
+        getActionMap().put("refreshModels", new AbstractAction() {
+            @Override public void actionPerformed(ActionEvent e) { runRefresh(); }
+        });
+        getInputMap(JComponent.WHEN_FOCUSED).put(
+                KeyStroke.getKeyStroke(KeyEvent.VK_DOWN, InputEvent.ALT_DOWN_MASK),
+                "openModelPicker");
+        getActionMap().put("openModelPicker", new AbstractAction() {
+            @Override public void actionPerformed(ActionEvent e) { showPopup(); }
+        });
+
+        popup.getInputMap(JComponent.WHEN_IN_FOCUSED_WINDOW).put(
+                KeyStroke.getKeyStroke(KeyEvent.VK_P, InputEvent.CTRL_DOWN_MASK),
+                ACTION_TOGGLE_SELECTED_PIN);
+        popup.getActionMap().put(ACTION_TOGGLE_SELECTED_PIN, new AbstractAction() {
+            @Override public void actionPerformed(ActionEvent e) {
+                Component selected = selectedPopupComponent();
+                if (selected instanceof ModelMenuItem) {
+                    ((ModelMenuItem) selected).togglePin();
+                    selected.repaint();
+                }
+            }
+        });
+        popup.getInputMap(JComponent.WHEN_IN_FOCUSED_WINDOW).put(
+                KeyStroke.getKeyStroke(KeyEvent.VK_ENTER, InputEvent.ALT_DOWN_MASK),
+                ACTION_ACTIVATE_SELECTED_STATUS);
+        popup.getActionMap().put(ACTION_ACTIVATE_SELECTED_STATUS, new AbstractAction() {
+            @Override public void actionPerformed(ActionEvent e) {
+                Component selected = selectedPopupComponent();
+                if (selected instanceof ModelMenuItem) {
+                    ((ModelMenuItem) selected).activateStatusAction();
+                } else if (selected instanceof ProviderMenu) {
+                    ((ProviderMenu) selected).activateStatusAction();
+                }
+            }
+        });
+    }
+
+    private static Component selectedPopupComponent() {
+        javax.swing.MenuElement[] path = javax.swing.MenuSelectionManager
+                .defaultManager().getSelectedPath();
+        if (path == null || path.length == 0) return null;
+        for (int i = path.length - 1; i >= 0; i--) {
+            Component component = path[i].getComponent();
+            if (component instanceof ModelMenuItem
+                    || component instanceof ProviderMenu) {
+                return component;
+            }
+        }
+        return null;
+    }
+
+    JPopupMenu popupForTest() {
+        return popup;
     }
 
     private String headerTitle() {

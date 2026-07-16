@@ -12,6 +12,7 @@ import imagejai.engine.security.AuditRow;
 import imagejai.engine.security.PseudonymisationFilter;
 
 import javax.swing.BorderFactory;
+import javax.swing.AbstractAction;
 import javax.swing.JButton;
 import javax.swing.JComponent;
 import javax.swing.JDialog;
@@ -21,6 +22,7 @@ import javax.swing.JScrollPane;
 import javax.swing.JTable;
 import javax.swing.JTextArea;
 import javax.swing.SwingUtilities;
+import javax.swing.KeyStroke;
 import javax.swing.border.EmptyBorder;
 import javax.swing.table.AbstractTableModel;
 import java.awt.BorderLayout;
@@ -32,12 +34,15 @@ import java.awt.Font;
 import java.awt.Frame;
 import java.awt.GridLayout;
 import java.awt.Window;
+import java.awt.event.ActionEvent;
+import java.awt.event.KeyEvent;
 import java.awt.event.MouseAdapter;
 import java.awt.event.MouseEvent;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.function.Consumer;
 
 /**
  * Collapsible live receipt table backed by the append-only audit log.
@@ -59,11 +64,20 @@ public final class ReceiptsPane extends JPanel implements AuditLog.Listener {
     private final JTable table;
     private final ReceiptTableModel model = new ReceiptTableModel();
     private final AutoCloseable subscription;
+    private final Consumer<JComponent> receiptPresenter;
     private boolean expanded;
 
     public ReceiptsPane(AuditLog auditLog) {
+        this(auditLog, null);
+    }
+
+    ReceiptsPane(AuditLog auditLog, Consumer<JComponent> receiptPresenter) {
         super(new BorderLayout(0, 0));
         this.auditLog = auditLog == null ? AuditLog.getInstance() : auditLog;
+        this.receiptPresenter = receiptPresenter;
+        getAccessibleContext().setAccessibleName("Outbound receipts");
+        getAccessibleContext().setAccessibleDescription(
+                "Review redacted records of data sent to an AI provider.");
         setOpaque(false);
         setAlignmentX(Component.LEFT_ALIGNMENT);
 
@@ -75,12 +89,30 @@ public final class ReceiptsPane extends JPanel implements AuditLog.Listener {
         toggle.setForeground(TEXT);
         toggle.setFont(new Font(Font.SANS_SERIF, Font.BOLD, 11));
         toggle.setHorizontalAlignment(javax.swing.SwingConstants.LEFT);
+        toggle.setMnemonic(KeyEvent.VK_R);
         toggle.addActionListener(e -> setExpanded(!expanded));
         add(toggle, BorderLayout.NORTH);
 
         table = new JTable(model);
         table.setFillsViewportHeight(true);
+        table.setSelectionMode(javax.swing.ListSelectionModel.SINGLE_SELECTION);
         table.setRowHeight(22);
+        table.getAccessibleContext().setAccessibleName("Outbound receipt list");
+        table.getAccessibleContext().setAccessibleDescription(
+                "Select a receipt and press Enter or Space to show its redacted details.");
+        table.getInputMap(JComponent.WHEN_FOCUSED).put(
+                KeyStroke.getKeyStroke(KeyEvent.VK_ENTER, 0), "showSelectedReceipt");
+        table.getInputMap(JComponent.WHEN_FOCUSED).put(
+                KeyStroke.getKeyStroke(KeyEvent.VK_SPACE, 0), "showSelectedReceipt");
+        table.getActionMap().put("showSelectedReceipt", new AbstractAction() {
+            @Override
+            public void actionPerformed(ActionEvent e) {
+                int row = table.getSelectedRow();
+                if (row >= 0) {
+                    showReceiptModal(table.convertRowIndexToModel(row));
+                }
+            }
+        });
         table.getTableHeader().setReorderingAllowed(false);
         table.addMouseListener(new MouseAdapter() {
             @Override
@@ -132,6 +164,10 @@ public final class ReceiptsPane extends JPanel implements AuditLog.Listener {
     private void setExpanded(boolean expanded) {
         this.expanded = expanded;
         toggle.setText(expanded ? "Receipts \u25BE" : "Receipts \u25B8");
+        toggle.getAccessibleContext().setAccessibleName(
+                expanded ? "Collapse receipts" : "Expand receipts");
+        toggle.getAccessibleContext().setAccessibleDescription(
+                expanded ? "Hide the outbound receipt list." : "Show the outbound receipt list.");
         content.setVisible(expanded);
         revalidate();
         repaint();
@@ -142,6 +178,10 @@ public final class ReceiptsPane extends JPanel implements AuditLog.Listener {
             return;
         }
         JComponent detail = createReceiptDetailPanel(model.receiptAt(modelRow));
+        if (receiptPresenter != null) {
+            receiptPresenter.accept(detail);
+            return;
+        }
         Window owner = SwingUtilities.getWindowAncestor(this);
         Frame frame = owner instanceof Frame ? (Frame) owner : null;
         final JDialog dialog = new JDialog(frame, "Outbound receipt", true);
@@ -164,6 +204,8 @@ public final class ReceiptsPane extends JPanel implements AuditLog.Listener {
         panel.add(areas, BorderLayout.CENTER);
 
         JButton close = new JButton("Close");
+        close.setMnemonic(KeyEvent.VK_C);
+        close.getAccessibleContext().setAccessibleName("Close receipt details");
         close.addActionListener(e -> {
             Window window = SwingUtilities.getWindowAncestor(panel);
             if (window != null) {
@@ -179,6 +221,7 @@ public final class ReceiptsPane extends JPanel implements AuditLog.Listener {
     private static JComponent wrap(String title, JTextArea area) {
         JPanel panel = new JPanel(new BorderLayout(0, 3));
         JLabel label = new JLabel(title);
+        area.getAccessibleContext().setAccessibleName(title);
         label.setFont(new Font(Font.SANS_SERIF, Font.BOLD, 11));
         panel.add(label, BorderLayout.NORTH);
         JScrollPane scroll = new JScrollPane(area);
@@ -279,6 +322,14 @@ public final class ReceiptsPane extends JPanel implements AuditLog.Listener {
 
     String redactedJsonForTest(int modelRow) {
         return model.receiptAt(modelRow).redactedJson;
+    }
+
+    JTable tableForTest() {
+        return table;
+    }
+
+    JButton toggleForTest() {
+        return toggle;
     }
 
     private static final class Receipt {

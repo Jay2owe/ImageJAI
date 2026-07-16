@@ -4,6 +4,9 @@ import imagejai.engine.picker.ModelEntry;
 import imagejai.engine.picker.SoftDeprecationPolicy;
 
 import javax.swing.JMenuItem;
+import javax.swing.AbstractAction;
+import javax.swing.JComponent;
+import javax.swing.KeyStroke;
 import javax.swing.UIManager;
 import java.awt.Color;
 import java.awt.Dimension;
@@ -15,6 +18,9 @@ import java.awt.RenderingHints;
 import java.awt.event.MouseAdapter;
 import java.awt.event.MouseEvent;
 import java.awt.event.MouseMotionAdapter;
+import java.awt.event.ActionEvent;
+import java.awt.event.InputEvent;
+import java.awt.event.KeyEvent;
 import java.awt.font.TextAttribute;
 import java.time.LocalDate;
 import java.time.format.DateTimeFormatter;
@@ -70,6 +76,7 @@ public class ModelMenuItem extends JMenuItem {
         this.statusIcon = statusIcon == null ? ProviderStatusIcon.READY : statusIcon;
         this.pinToggleListener = pinToggleListener;
         this.statusClickListener = statusClickListener;
+        setFocusable(true);
         setPreferredSize(new Dimension(380, ROW_HEIGHT));
         setOpaque(true);
         // Hover-card replaces the Swing tooltip; for soft-deprecated rows we
@@ -79,6 +86,8 @@ public class ModelMenuItem extends JMenuItem {
         // are appended so screen-reader users get the headline before the
         // hover-card opens.
         setToolTipText(composeTooltip(entry, LocalDate.now()));
+        updateAccessibleText();
+        installKeyboardActions();
         addMouseMotionListener(new MouseMotionAdapter() {
             @Override
             public void mouseMoved(MouseEvent e) {
@@ -130,14 +139,49 @@ public class ModelMenuItem extends JMenuItem {
 
     public void setStatusIcon(ProviderStatusIcon statusIcon) {
         this.statusIcon = statusIcon == null ? ProviderStatusIcon.READY : statusIcon;
+        updateAccessibleText();
         repaint();
     }
 
     void togglePin() {
         pinned = !pinned;
+        updateAccessibleText();
         if (pinToggleListener != null) {
             pinToggleListener.onPinToggled(entry, pinned);
         }
+    }
+
+    boolean activateStatusAction() {
+        return statusClickListener != null
+                && statusClickListener.onStatusIconClicked(entry, statusIcon);
+    }
+
+    private void installKeyboardActions() {
+        getInputMap(JComponent.WHEN_FOCUSED).put(
+                KeyStroke.getKeyStroke(KeyEvent.VK_P, InputEvent.CTRL_DOWN_MASK),
+                "toggleModelPin");
+        getActionMap().put("toggleModelPin", new AbstractAction() {
+            @Override public void actionPerformed(ActionEvent e) { togglePin(); }
+        });
+        getInputMap(JComponent.WHEN_FOCUSED).put(
+                KeyStroke.getKeyStroke(KeyEvent.VK_ENTER, InputEvent.ALT_DOWN_MASK),
+                "activateModelStatus");
+        getActionMap().put("activateModelStatus", new AbstractAction() {
+            @Override public void actionPerformed(ActionEvent e) { activateStatusAction(); }
+        });
+    }
+
+    private void updateAccessibleText() {
+        String status = statusIcon == ProviderStatusIcon.READY
+                ? "ready"
+                : statusIcon == ProviderStatusIcon.NEEDS_SETUP
+                ? "needs setup" : "unavailable";
+        getAccessibleContext().setAccessibleName("Model " + entry.displayName()
+                + ", provider " + entry.providerId() + ", " + status
+                + (pinned ? ", pinned" : ", not pinned"));
+        getAccessibleContext().setAccessibleDescription(
+                "Press Enter to launch. Press Control+P to pin or unpin. "
+                        + "Press Alt+Enter for provider status or setup.");
     }
 
     @Override

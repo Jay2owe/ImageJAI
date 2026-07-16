@@ -115,6 +115,9 @@ public class ChatView extends JPanel implements ChatPanelController, ChatSurface
         setLayout(new BorderLayout(0, 4));
         setBorder(new EmptyBorder(0, 0, 0, 0));
         setBackground(BG_MAIN);
+        getAccessibleContext().setAccessibleName("AI chat");
+        getAccessibleContext().setAccessibleDescription(
+                "Read the transcript, enter a message, or activate a suggested response.");
 
         // Phase 7: toast label sits above the header, hidden until used.
         toastLabel = new JLabel(" ");
@@ -133,6 +136,10 @@ public class ChatView extends JPanel implements ChatPanelController, ChatSurface
         messageArea.setForeground(Color.WHITE);
         messageArea.putClientProperty(JEditorPane.HONOR_DISPLAY_PROPERTIES, Boolean.TRUE);
         messageArea.setFont(new Font(Font.SANS_SERIF, Font.PLAIN, 13));
+        messageArea.setFocusable(true);
+        messageArea.getAccessibleContext().setAccessibleName("Chat transcript");
+        messageArea.getAccessibleContext().setAccessibleDescription(
+                "Read-only conversation transcript. Links can be opened from the keyboard.");
         messageArea.addHyperlinkListener(new HyperlinkListener() {
             @Override
             public void hyperlinkUpdate(HyperlinkEvent e) {
@@ -664,45 +671,51 @@ public class ChatView extends JPanel implements ChatPanelController, ChatSurface
                     scrollToBottom();
                 } catch (Exception ignore) {}
 
-                // Replace any prior confirm row with the new one.
-                confirmHost.removeAll();
-                final JPanel row = new JPanel(new FlowLayout(FlowLayout.LEFT, 6, 0));
-                row.setOpaque(false);
-                final boolean[] resolved = new boolean[]{false};
-                final List<JButton> buttons = new ArrayList<JButton>();
-                for (final String opt : options) {
-                    final JButton btn = new JButton(opt);
-                    btn.setFocusPainted(false);
-                    btn.setForeground(Color.WHITE);
-                    btn.setBackground(BTN_BG);
-                    btn.setBorderPainted(false);
-                    btn.setCursor(Cursor.getPredefinedCursor(Cursor.HAND_CURSOR));
-                    btn.addActionListener(new ActionListener() {
-                        @Override
-                        public void actionPerformed(ActionEvent e) {
-                            if (resolved[0]) return;
-                            resolved[0] = true;
-                            for (JButton b : buttons) {
-                                b.setEnabled(false);
-                            }
-                            // Visually mark the chosen one.
-                            btn.setText(opt + "  \u2713");
-                            if (onChoice != null) {
-                                try { onChoice.accept(opt); } catch (Throwable t) {
-                                    IJ.log("[ImageJAI-GUI] confirm onChoice threw: " + t.getMessage());
-                                }
-                            }
-                        }
-                    });
-                    buttons.add(btn);
-                    row.add(btn);
-                }
-                confirmHost.add(row);
-                confirmHost.setVisible(true);
-                confirmHost.revalidate();
-                confirmHost.repaint();
+                populateConfirmControls(options, onChoice);
             }
         });
+    }
+
+    private void populateConfirmControls(final List<String> options,
+                                         final Consumer<String> onChoice) {
+        confirmHost.removeAll();
+        final JPanel row = new JPanel(new FlowLayout(FlowLayout.LEFT, 6, 0));
+        row.setOpaque(false);
+        final boolean[] resolved = new boolean[]{false};
+        final List<JButton> buttons = new ArrayList<JButton>();
+        for (final String opt : options) {
+            final JButton btn = new JButton(opt);
+            btn.getAccessibleContext().setAccessibleName("Choose " + opt);
+            btn.getAccessibleContext().setAccessibleDescription(
+                    "Choose this response for the agent confirmation prompt.");
+            btn.setFocusPainted(false);
+            btn.setForeground(Color.WHITE);
+            btn.setBackground(BTN_BG);
+            btn.setBorderPainted(false);
+            btn.setCursor(Cursor.getPredefinedCursor(Cursor.HAND_CURSOR));
+            btn.addActionListener(new ActionListener() {
+                @Override
+                public void actionPerformed(ActionEvent e) {
+                    if (resolved[0]) return;
+                    resolved[0] = true;
+                    for (JButton b : buttons) {
+                        b.setEnabled(false);
+                    }
+                    btn.setText(opt + "  \u2713");
+                    if (onChoice != null) {
+                        try { onChoice.accept(opt); } catch (Throwable t) {
+                            IJ.log("[ImageJAI-GUI] confirm onChoice threw: " + t.getMessage());
+                        }
+                    }
+                }
+            });
+            buttons.add(btn);
+            row.add(btn);
+        }
+        confirmHost.add(row);
+        confirmHost.setVisible(true);
+        confirmHost.revalidate();
+        confirmHost.repaint();
     }
 
     // Whether the panel can usefully render — used to fall back to IJ.log
@@ -773,7 +786,10 @@ public class ChatView extends JPanel implements ChatPanelController, ChatSurface
         JPanel panel = new JPanel(new BorderLayout(4, 0));
         panel.setOpaque(false);
 
-        // JTextArea for multi-line input (Shift+Enter = newline, Enter = send)
+        // Multiline editor: Enter sends, Shift+Enter inserts a newline, and
+        // normal Tab/Shift+Tab traversal leaves the editor. Ctrl+Space accepts
+        // the first Local Assistant suggestion without taking Tab away from
+        // keyboard-only users.
         inputArea = new JTextArea(2, 20);
         inputArea.setBackground(BG_INPUT);
         inputArea.setForeground(Color.WHITE);
@@ -782,23 +798,43 @@ public class ChatView extends JPanel implements ChatPanelController, ChatSurface
         inputArea.setLineWrap(true);
         inputArea.setWrapStyleWord(true);
         inputArea.setBorder(new EmptyBorder(6, 8, 6, 8));
-        inputArea.setFocusTraversalKeysEnabled(false);
+        inputArea.setFocusTraversalKeysEnabled(true);
+        inputArea.setFocusTraversalKeys(
+                KeyboardFocusManager.FORWARD_TRAVERSAL_KEYS,
+                java.util.Collections.singleton(
+                        AWTKeyStroke.getAWTKeyStroke(KeyEvent.VK_TAB, 0)));
+        inputArea.setFocusTraversalKeys(
+                KeyboardFocusManager.BACKWARD_TRAVERSAL_KEYS,
+                java.util.Collections.singleton(AWTKeyStroke.getAWTKeyStroke(
+                        KeyEvent.VK_TAB, InputEvent.SHIFT_DOWN_MASK)));
+        inputArea.setToolTipText(
+                "Enter sends; Shift+Enter adds a new line; Tab moves to the next control; Ctrl+Space accepts the first suggestion.");
+        inputArea.getAccessibleContext().setAccessibleName("Chat message");
+        inputArea.getAccessibleContext().setAccessibleDescription(
+                "Multiline message editor. Enter sends, Shift+Enter adds a new line, Tab moves to the next control, and Control+Space accepts the first suggestion.");
 
         // Enter sends, Shift+Enter inserts newline
         inputArea.addKeyListener(new KeyAdapter() {
             @Override
             public void keyPressed(KeyEvent e) {
-                if (e.getKeyCode() == KeyEvent.VK_TAB) {
-                    if (isLocalAssistantSelected() && chipRow != null && chipRow.acceptFirst()) {
-                        e.consume();
-                    }
-                } else if (e.getKeyCode() == KeyEvent.VK_ENTER) {
+                if (e.getKeyCode() == KeyEvent.VK_ENTER) {
                     if (e.isShiftDown()) {
                         // Allow default behavior (insert newline)
                     } else {
                         e.consume();
                         sendMessage();
                     }
+                }
+            }
+        });
+        inputArea.getInputMap(JComponent.WHEN_FOCUSED).put(
+                KeyStroke.getKeyStroke(KeyEvent.VK_SPACE, InputEvent.CTRL_DOWN_MASK),
+                "acceptFirstSuggestion");
+        inputArea.getActionMap().put("acceptFirstSuggestion", new AbstractAction() {
+            @Override
+            public void actionPerformed(ActionEvent e) {
+                if (isLocalAssistantSelected() && chipRow != null) {
+                    chipRow.acceptFirst();
                 }
             }
         });
@@ -822,6 +858,10 @@ public class ChatView extends JPanel implements ChatPanelController, ChatSurface
         inputScroll.setPreferredSize(new Dimension(100, 52));
 
         sendBtn = new JButton("Send");
+        sendBtn.setMnemonic(KeyEvent.VK_S);
+        sendBtn.getAccessibleContext().setAccessibleName("Send chat message");
+        sendBtn.getAccessibleContext().setAccessibleDescription(
+                "Send the current message. You can also press Enter in the editor.");
         sendBtn.setBackground(BTN_BG);
         sendBtn.setForeground(Color.WHITE);
         sendBtn.setFont(new Font(Font.SANS_SERIF, Font.BOLD, 12));
@@ -1060,6 +1100,26 @@ public class ChatView extends JPanel implements ChatPanelController, ChatSurface
 
     LocalAssistant localAssistantForTest() {
         return localAssistant;
+    }
+
+    JTextArea inputAreaForTest() {
+        return inputArea;
+    }
+
+    JButton sendButtonForTest() {
+        return sendBtn;
+    }
+
+    JTextPane messageAreaForTest() {
+        return messageArea;
+    }
+
+    JPanel confirmHostForTest() {
+        return confirmHost;
+    }
+
+    void populateConfirmControlsForTest(List<String> options, Consumer<String> onChoice) {
+        populateConfirmControls(options, onChoice);
     }
 
 }

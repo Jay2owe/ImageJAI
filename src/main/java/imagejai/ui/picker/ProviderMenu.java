@@ -5,10 +5,15 @@ import imagejai.engine.picker.ProviderEntry;
 
 import javax.swing.JMenu;
 import javax.swing.JMenuItem;
+import javax.swing.AbstractAction;
+import javax.swing.JComponent;
+import javax.swing.KeyStroke;
 import java.awt.event.MouseAdapter;
 import java.awt.event.MouseEvent;
 import java.awt.event.ActionEvent;
 import java.awt.event.ActionListener;
+import java.awt.event.InputEvent;
+import java.awt.event.KeyEvent;
 
 /**
  * Cascading submenu for one provider. Header carries provider display name +
@@ -41,6 +46,7 @@ public class ProviderMenu extends JMenu {
     }
 
     private final ProviderEntry providerEntry;
+    private final StatusListener statusListener;
 
     public ProviderMenu(ProviderEntry providerEntry,
                         ModelLaunchListener launchListener,
@@ -56,8 +62,15 @@ public class ProviderMenu extends JMenu {
                         StatusListener statusListener) {
         super(buildHeader(providerEntry));
         this.providerEntry = providerEntry;
+        this.statusListener = statusListener;
+        setFocusable(true);
+        getAccessibleContext().setAccessibleName("Provider "
+                + providerEntry.displayName() + ", " + statusText(providerEntry.status()));
+        getAccessibleContext().setAccessibleDescription(
+                "Open this provider's models. Press Alt+Enter for provider setup or status details.");
         rebuildChildren(launchListener, pinToggleListener, installerListener, statusListener);
         installHeaderStatusClick(statusListener);
+        installKeyboardStatusAction();
     }
 
     public ProviderEntry providerEntry() {
@@ -82,6 +95,12 @@ public class ProviderMenu extends JMenu {
             case NEEDS_SETUP:
             default: return ModelMenuItem.ProviderStatusIcon.NEEDS_SETUP;
         }
+    }
+
+    private static String statusText(ProviderEntry.Status status) {
+        if (status == ProviderEntry.Status.READY) return "ready";
+        if (status == ProviderEntry.Status.UNAVAILABLE) return "unavailable";
+        return "needs setup";
     }
 
     private void rebuildChildren(final ModelLaunchListener launchListener,
@@ -125,6 +144,8 @@ public class ProviderMenu extends JMenu {
                     providerEntry.models().isEmpty()
                             ? "✎ Add credentials…"
                             : "✎ Add/edit credentials…");
+            addCreds.getAccessibleContext().setAccessibleName(
+                    "Configure credentials for " + providerEntry.displayName());
             addCreds.addActionListener(new ActionListener() {
                 @Override
                 public void actionPerformed(ActionEvent e) {
@@ -179,6 +200,21 @@ public class ProviderMenu extends JMenu {
                     e.consume();
                 }
             }
+        });
+    }
+
+    boolean activateStatusAction() {
+        return statusListener != null
+                && statusListener.onProviderStatusIconClicked(
+                        providerEntry, iconFor(providerEntry.status()));
+    }
+
+    private void installKeyboardStatusAction() {
+        getInputMap(JComponent.WHEN_FOCUSED).put(
+                KeyStroke.getKeyStroke(KeyEvent.VK_ENTER, InputEvent.ALT_DOWN_MASK),
+                "activateProviderStatus");
+        getActionMap().put("activateProviderStatus", new AbstractAction() {
+            @Override public void actionPerformed(ActionEvent e) { activateStatusAction(); }
         });
     }
 }

@@ -31,6 +31,9 @@ public class ChatPanel extends JPanel implements ChatPanelController, ChatSurfac
     public ChatPanel(ChatView chatView) {
         super(new BorderLayout());
         this.chatView = chatView;
+        getAccessibleContext().setAccessibleName("AI chat");
+        getAccessibleContext().setAccessibleDescription(
+                "Chat transcript, message editor, suggestions, and confirmation actions.");
         if (chatView.getParent() == null) {
             add(chatView, BorderLayout.CENTER);
         }

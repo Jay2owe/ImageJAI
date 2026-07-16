@@ -18,6 +18,7 @@ import java.awt.Dimension;
 import java.awt.FlowLayout;
 import java.awt.Toolkit;
 import java.awt.datatransfer.StringSelection;
+import java.awt.event.KeyEvent;
 
 /**
  * Toolbar for terminal prompt handling and session controls.
@@ -38,7 +39,16 @@ public final class TerminalToolbar extends JPanel {
     private final Runnable focusReturn;
     private final Timer urlTimer;
 
-    private EmbeddedAgentSession session;
+    interface SessionControl {
+        boolean isAlive();
+        EmbeddedAgentSession.WriteResult writeRaw(String text);
+        void interrupt();
+        void destroy();
+        String displayName();
+    }
+
+    private EmbeddedAgentSession attachedSession;
+    private SessionControl sessionControl;
     private String pendingPrompt;
     private String latestUrl;
 
@@ -64,15 +74,16 @@ public final class TerminalToolbar extends JPanel {
         styleButton(interruptButton);
         styleButton(killButton);
         styleButton(copyUrlButton);
+        configureAccessibility();
 
         confirmButton.setVisible(false);
         cancelButton.setVisible(false);
         copyUrlButton.setVisible(false);
 
         confirmButton.addActionListener(e -> {
-            EmbeddedAgentSession.WriteResult result = session == null
+            EmbeddedAgentSession.WriteResult result = !hasLiveSession()
                     ? EmbeddedAgentSession.WriteResult.failure("No terminal session is attached.")
-                    : session.writeRaw("\r");
+                    : sessionControl.writeRaw("\r");
             if (result.isSuccess()) {
                 clearPendingPrompt();
                 clearWriteFailure();
@@ -82,9 +93,9 @@ public final class TerminalToolbar extends JPanel {
             refocus();
         });
         cancelButton.addActionListener(e -> {
-            EmbeddedAgentSession.WriteResult result = session == null
+            EmbeddedAgentSession.WriteResult result = !hasLiveSession()
                     ? EmbeddedAgentSession.WriteResult.failure("No terminal session is attached.")
-                    : session.writeRaw("\u001b");
+                    : sessionControl.writeRaw("\u001b");
             if (result.isSuccess()) {
                 clearPendingPrompt();
                 clearWriteFailure();
@@ -94,14 +105,16 @@ public final class TerminalToolbar extends JPanel {
             refocus();
         });
         interruptButton.addActionListener(e -> {
-            if (session != null) {
-                session.interrupt();
+            if (hasLiveSession()) {
+                sessionControl.interrupt();
             }
+            updateControlState();
             refocus();
         });
         killButton.addActionListener(e -> {
-            EmbeddedAgentSession current = session;
-            if (current == null) {
+            SessionControl current = sessionControl;
+            if (!hasLiveSession() || current == null) {
+                updateControlState();
                 refocus();
                 return;
             }
@@ -114,43 +127,59 @@ public final class TerminalToolbar extends JPanel {
             if (result == JOptionPane.OK_OPTION) {
                 current.destroy();
                 IJ.log("[ImageJAI-Term] User killed embedded session: "
-                        + current.info().name);
+                        + current.displayName());
             }
+            updateControlState();
             refocus();
         });
         copyUrlButton.addActionListener(e -> {
-            if (latestUrl != null && !latestUrl.isEmpty()) {
+            if (hasLiveSession() && latestUrl != null && !latestUrl.isEmpty()) {
                 Toolkit.getDefaultToolkit().getSystemClipboard()
                         .setContents(new StringSelection(latestUrl), null);
             }
+            updateControlState();
             refocus();
         });
 
         urlTimer = new Timer(URL_VISIBLE_MS, e -> hideCopyUrl());
         urlTimer.setRepeats(false);
+        updateControlState();
     }
 
     public void attachSession(EmbeddedAgentSession newSession) {
-        this.session = newSession;
+        this.attachedSession = newSession;
+        this.sessionControl = newSession == null ? null : new SessionControl() {
+            @Override public boolean isAlive() { return newSession.isAlive(); }
+            @Override public EmbeddedAgentSession.WriteResult writeRaw(String text) {
+                return newSession.writeRaw(text);
+            }
+            @Override public void interrupt() { newSession.interrupt(); }
+            @Override public void destroy() { newSession.destroy(); }
+            @Override public String displayName() { return newSession.info().name; }
+        };
         clearWriteFailure();
         clearPendingPrompt();
         hideCopyUrl();
+        updateControlState();
     }
 
     public void clearSession(EmbeddedAgentSession expected) {
-        if (expected != null && session != expected) {
+        if (expected != null && attachedSession != expected) {
             return;
         }
-        session = null;
+        attachedSession = null;
+        sessionControl = null;
         clearWriteFailure();
         clearPendingPrompt();
         hideCopyUrl();
+        updateControlState();
     }
 
     public void showPendingPrompt(String promptText) {
         pendingPrompt = promptText;
         confirmButton.setVisible(true);
         cancelButton.setVisible(true);
+        updateControlState();
         revalidate();
         repaint();
     }
@@ -159,6 +188,7 @@ public final class TerminalToolbar extends JPanel {
         pendingPrompt = null;
         confirmButton.setVisible(false);
         cancelButton.setVisible(false);
+        updateControlState();
         revalidate();
         repaint();
     }
@@ -167,6 +197,7 @@ public final class TerminalToolbar extends JPanel {
         latestUrl = url;
         copyUrlButton.setToolTipText(url);
         copyUrlButton.setVisible(true);
+        updateControlState();
         urlTimer.restart();
         revalidate();
         repaint();
@@ -195,9 +226,9 @@ public final class TerminalToolbar extends JPanel {
                 null,
                 options,
                 options[1]);
-        if (session != null) {
+        if (hasLiveSession()) {
             EmbeddedAgentSession.WriteResult write =
-                    session.writeRaw(result == 0 ? "\r" : "\u001b");
+                    sessionControl.writeRaw(result == 0 ? "\r" : "\u001b");
             if (!write.isSuccess()) {
                 showPendingPrompt(promptText);
                 showWriteFailure(write);
@@ -216,6 +247,7 @@ public final class TerminalToolbar extends JPanel {
         latestUrl = null;
         copyUrlButton.setVisible(false);
         urlTimer.stop();
+        updateControlState();
         revalidate();
         repaint();
     }
@@ -247,4 +279,61 @@ public final class TerminalToolbar extends JPanel {
                 BorderFactory.createEmptyBorder(3, 8, 3, 8)));
         button.setFocusPainted(false);
     }
+
+    private void configureAccessibility() {
+        getAccessibleContext().setAccessibleName("Terminal controls");
+        getAccessibleContext().setAccessibleDescription(
+                "Confirm, cancel, interrupt, or end the current terminal session.");
+        configureButton(confirmButton, "Confirm terminal prompt",
+                "Send Enter to confirm the pending terminal prompt.", KeyEvent.VK_C);
+        configureButton(cancelButton, "Cancel terminal prompt",
+                "Send Escape to deny or cancel the pending terminal prompt.", KeyEvent.VK_A);
+        configureButton(interruptButton, "Interrupt terminal session",
+                "Send an interrupt signal to the running agent.", KeyEvent.VK_I);
+        configureButton(killButton, "Kill terminal session",
+                "End the running embedded agent after confirmation.", KeyEvent.VK_K);
+        configureButton(copyUrlButton, "Copy terminal URL",
+                "Copy the sign-in URL reported by the running agent.", KeyEvent.VK_U);
+    }
+
+    private static void configureButton(JButton button, String name,
+                                        String description, int mnemonic) {
+        button.setFocusable(true);
+        button.setMnemonic(mnemonic);
+        button.getAccessibleContext().setAccessibleName(name);
+        button.getAccessibleContext().setAccessibleDescription(description);
+    }
+
+    private boolean hasLiveSession() {
+        try {
+            return sessionControl != null && sessionControl.isAlive();
+        } catch (RuntimeException ignored) {
+            return false;
+        }
+    }
+
+    private void updateControlState() {
+        boolean live = hasLiveSession();
+        boolean hasPrompt = pendingPrompt != null;
+        confirmButton.setEnabled(live && hasPrompt);
+        cancelButton.setEnabled(live && hasPrompt);
+        interruptButton.setEnabled(live);
+        killButton.setEnabled(live);
+        copyUrlButton.setEnabled(live && latestUrl != null && !latestUrl.isEmpty());
+    }
+
+    void attachSessionForTest(SessionControl control) {
+        attachedSession = null;
+        sessionControl = control;
+        clearWriteFailure();
+        clearPendingPrompt();
+        hideCopyUrl();
+        updateControlState();
+    }
+
+    JButton confirmButtonForTest() { return confirmButton; }
+    JButton cancelButtonForTest() { return cancelButton; }
+    JButton interruptButtonForTest() { return interruptButton; }
+    JButton killButtonForTest() { return killButton; }
+    JButton copyUrlButtonForTest() { return copyUrlButton; }
 }
