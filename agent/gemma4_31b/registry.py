@@ -63,6 +63,14 @@ HOST_CODE_TOOL_NAMES = frozenset({
     "run_saved_recipe",
 })
 
+# A recipe may reference other files and resolves into a multi-step mutable
+# plan.  The current tool call carries only a recipe name, so a cloud approval
+# callback cannot approve an immutable, hash-bound execution snapshot.  Keep
+# recipe execution local-only until the public contract can carry such a
+# snapshot; cloud callers retain safe macro tools and may use the standalone
+# dry-run CLI for inspection.
+CLOUD_FORBIDDEN_TOOL_NAMES = frozenset({"run_saved_recipe"})
+
 
 def _compatibility_forbidden() -> dict:
     return {
@@ -174,7 +182,9 @@ def tools_for_policy(
         policy.is_local or cloud_elevation
     )
     if host_code_allowed:
-        return list(REGISTRY)
+        if policy.is_local:
+            return list(REGISTRY)
+        return [fn for fn in REGISTRY if fn.__name__ not in CLOUD_FORBIDDEN_TOOL_NAMES]
     return [fn for fn in REGISTRY if fn.__name__ not in HOST_CODE_TOOL_NAMES]
 
 

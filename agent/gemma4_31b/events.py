@@ -24,7 +24,74 @@ from . import active_image
 from .registry import imagej_session
 
 
-EVENT_QUEUE: "queue.Queue" = queue.Queue()
+EVENT_QUEUE_MAX = 256
+_COALESCED_EVENTS = frozenset({"image.updated", "image.activated"})
+
+
+def _event_key(frame: dict) -> tuple[str, str] | None:
+    """Return the stable coalescing key for a high-frequency image event."""
+
+    name = frame.get("event")
+    if name not in _COALESCED_EVENTS:
+        return None
+    data = frame.get("data") if isinstance(frame.get("data"), dict) else {}
+    identity = (
+        frame.get("path")
+        or frame.get("title")
+        or frame.get("imageId")
+        or data.get("path")
+        or data.get("filePath")
+        or data.get("title")
+        or data.get("imageId")
+        or "active-image"
+    )
+    return str(name), str(identity)
+
+
+class _BoundedEventQueue(queue.Queue):
+    """Bounded queue with latest-image coalescing and drop-oldest overflow."""
+
+    def __init__(self, maxsize: int):
+        super().__init__(maxsize=maxsize)
+        self._dropped = 0
+        self._coalesced = 0
+
+    def put_frame(self, frame: dict) -> None:
+        """Atomically enqueue a frame without ever blocking the subscriber."""
+
+        key = _event_key(frame)
+        with self.not_full:
+            if key is not None:
+                # Replace the newest queued event for this image. Consumers see
+                # the latest state and a stalled chat cannot accumulate updates.
+                for index in range(self._qsize() - 1, -1, -1):
+                    queued = self.queue[index]
+                    if isinstance(queued, dict) and _event_key(queued) == key:
+                        self.queue[index] = frame
+                        self._coalesced += 1
+                        self._dropped += 1
+                        return
+            if self.maxsize > 0 and self._qsize() >= self.maxsize:
+                self._get()
+                if self.unfinished_tasks > 0:
+                    self.unfinished_tasks -= 1
+                self._dropped += 1
+            self._put(frame)
+            self.unfinished_tasks += 1
+            self.not_empty.notify()
+
+    @property
+    def dropped_count(self) -> int:
+        with self.mutex:
+            return self._dropped
+
+    @property
+    def coalesced_count(self) -> int:
+        with self.mutex:
+            return self._coalesced
+
+
+EVENT_QUEUE: _BoundedEventQueue = _BoundedEventQueue(EVENT_QUEUE_MAX)
 
 _started = False
 _started_lock = threading.Lock()
@@ -164,10 +231,7 @@ def _handle_frame(frame: dict) -> None:
         _update_active_path(frame)
     elif name == "image.closed":
         active_image._mark_active_image_unknown()
-    try:
-        EVENT_QUEUE.put_nowait(frame)
-    except queue.Full:
-        pass
+    EVENT_QUEUE.put_frame(frame)
 
 
 def _update_active_path(frame: dict) -> None:

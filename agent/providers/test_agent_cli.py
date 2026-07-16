@@ -7,7 +7,14 @@ required.
 from __future__ import annotations
 
 import agent.providers.agent_cli as cli
-from agent.providers.base import ToolCall, to_anthropic_tool, to_gemini_tool, to_openai_tool
+from agent.providers.base import (
+    HOST_CODE_CAPABILITY,
+    ProviderToolPolicy,
+    ToolCall,
+    to_anthropic_tool,
+    to_gemini_tool,
+    to_openai_tool,
+)
 
 
 def _clear_provider_env(monkeypatch):
@@ -16,9 +23,10 @@ def _clear_provider_env(monkeypatch):
 
 
 def test_tool_map_has_core_fiji_tools():
-    for name in ["run_macro", "run_script", "get_state", "get_image_info",
+    for name in ["run_macro", "get_state", "get_image_info",
                  "get_results", "probe_plugin", "get_console", "close_dialogs"]:
         assert name in cli.TOOL_MAP
+    assert "run_script" not in cli.TOOL_MAP
 
 
 def test_every_tool_converts_to_all_three_schemas():
@@ -147,6 +155,36 @@ def test_dispatch_catches_tool_exception(monkeypatch):
 def test_dispatch_reports_malformed_args():
     call = ToolCall(id="1", name="run_macro", args={}, error="bad json")
     assert "malformed tool arguments" in cli._dispatch(call)
+
+
+def test_legacy_cloud_dispatch_rejects_injected_run_script(monkeypatch):
+    executed = []
+    monkeypatch.setattr(cli.ij, "run_script", lambda *args, **kwargs: executed.append(args))
+    call = ToolCall(id="1", name="run_script", args={"code": "println 1"})
+    assert cli._dispatch(call).startswith("ERROR: unknown tool")
+    assert executed == []
+
+
+def test_legacy_local_host_code_requires_explicit_capability():
+    class Client:
+        tool_policy = ProviderToolPolicy(
+            provider="ollama",
+            is_local=True,
+            capabilities=frozenset({HOST_CODE_CAPABILITY}),
+        )
+
+    assert "run_script" in {fn.__name__ for fn in cli._tools_for_client(Client())}
+
+
+def test_legacy_cloud_tools_exclude_run_script_even_with_capability():
+    class Client:
+        tool_policy = ProviderToolPolicy(
+            provider="groq",
+            is_local=False,
+            capabilities=frozenset({HOST_CODE_CAPABILITY}),
+        )
+
+    assert "run_script" not in {fn.__name__ for fn in cli._tools_for_client(Client())}
 
 
 def test_run_turn_dispatches_tool_then_returns_text(monkeypatch):

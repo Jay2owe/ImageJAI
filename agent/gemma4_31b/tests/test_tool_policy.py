@@ -61,7 +61,7 @@ def test_cloud_elevation_requires_capability_and_live_callback() -> None:
     assert "run_shell" not in _tool_names(elevated, elevated=False)
     assert "run_shell" in _tool_names(elevated, elevated=True)
     assert "run_saved_recipe" not in _tool_names(elevated, elevated=False)
-    assert "run_saved_recipe" in _tool_names(elevated, elevated=True)
+    assert "run_saved_recipe" not in _tool_names(elevated, elevated=True)
 
 
 def test_recipe_runner_is_host_code_but_safe_macro_tool_is_not() -> None:
@@ -206,38 +206,13 @@ def test_cloud_approval_is_exact_and_applies_to_one_call(monkeypatch) -> None:
     assert client.results == ["executed", "ABORTED: host-code call was denied by the one-call approval callback"]
 
 
-def test_recipe_elevation_is_exact_and_applies_to_one_call(monkeypatch) -> None:
-    executions: list[tuple[str, bool]] = []
-    requests = []
-
-    def run_saved_recipe(recipe_name, dry_run=False):
-        executions.append((recipe_name, dry_run))
-        return "executed {}".format(recipe_name)
-
-    def approve_once(request):
-        requests.append(request)
-        return len(requests) == 1
-
-    calls = [
-        _call("run_saved_recipe", {"recipe_name": "first", "dry_run": False}),
-        _call("run_saved_recipe", {"recipe_name": "second", "dry_run": False}),
-    ]
-    client, _ = _run_cloud_calls(
-        monkeypatch,
-        calls,
-        approve_once,
-        run_saved_recipe,
-        tool_name="run_saved_recipe",
+def test_recipe_runner_is_never_cloud_elevatable() -> None:
+    policy = ProviderToolPolicy(
+        provider="groq",
+        is_local=False,
+        capabilities=frozenset({HOST_CODE_CAPABILITY}),
     )
-
-    assert executions == [("first", False)]
-    assert len(requests) == 2
-    assert json.loads(requests[0].preview)["recipe_name"] == "first"
-    assert json.loads(requests[1].preview)["recipe_name"] == "second"
-    assert client.results == [
-        "executed first",
-        "ABORTED: host-code call was denied by the one-call approval callback",
-    ]
+    assert "run_saved_recipe" not in _tool_names(policy, elevated=True)
 
 
 def test_run_script_preview_contains_exact_source() -> None:

@@ -32,6 +32,7 @@ import os
 import sys
 from typing import Any, Callable
 
+from agent.providers.base import HOST_CODE_CAPABILITY, ProviderToolPolicy
 from agent.providers.router import PROVIDER_KEYS, get_client
 
 try:  # pragma: no cover - exercised when the contexts package is importable
@@ -132,7 +133,6 @@ def probe_plugin(plugin: str) -> str:
 
 FIJI_TOOLS: list[Callable[..., Any]] = [
     run_macro,
-    run_script,
     get_state,
     get_image_info,
     get_results,
@@ -146,7 +146,15 @@ FIJI_TOOLS: list[Callable[..., Any]] = [
     probe_plugin,
 ]
 
-TOOL_MAP: dict[str, Callable[..., Any]] = {fn.__name__: fn for fn in FIJI_TOOLS}
+# Host-code primitives are deliberately absent from the legacy provider
+# surface unless the router has classified the provider as local *and* the
+# caller explicitly enabled the host_code capability.  This fallback path is
+# still reachable when the rich wrapper cannot be imported, so schema omission
+# is backed by a dispatch check rather than treated as a sufficient boundary.
+_LOCAL_HOST_CODE_TOOLS: tuple[Callable[..., Any], ...] = (run_script,)
+TOOL_MAP: dict[str, Callable[..., Any]] = {
+    fn.__name__: fn for fn in FIJI_TOOLS
+}
 
 _MAX_TOOL_ROUNDS = 16
 
@@ -286,10 +294,28 @@ def _short(args: Any, limit: int = 200) -> str:
     return text if len(text) <= limit else text[: limit - 1] + "…"
 
 
-def _dispatch(call: Any) -> str:
+def _tools_for_client(client: Any) -> list[Callable[..., Any]]:
+    """Return the fail-closed legacy tool surface for one routed client."""
+
+    policy = getattr(client, "tool_policy", None)
+    if not isinstance(policy, ProviderToolPolicy):
+        policy = ProviderToolPolicy()
+    tools = list(FIJI_TOOLS)
+    if policy.is_local and policy.has_capability(HOST_CODE_CAPABILITY):
+        tools.extend(_LOCAL_HOST_CODE_TOOLS)
+    return tools
+
+
+def _dispatch(
+    call: Any,
+    allowed_tools: dict[str, Callable[..., Any]] | None = None,
+) -> str:
     """Run one tool call, returning a string result (never raising)."""
 
-    fn = TOOL_MAP.get(call.name)
+    # The default is the least-privileged surface.  Callers must pass a map
+    # derived from a trusted local policy to dispatch host code.
+    permitted = TOOL_MAP if allowed_tools is None else allowed_tools
+    fn = permitted.get(call.name)
     if fn is None:
         return f"ERROR: unknown tool '{call.name}'"
     if call.error:
@@ -386,6 +412,8 @@ def run_turn(client: Any, model: str, messages: list[dict[str, Any]],
              guard: "_BudgetGuard | None" = None) -> str:
     """Drive one user turn to completion: model → tools → … → final text."""
 
+    tools = _tools_for_client(client)
+    allowed_tools = {fn.__name__: fn for fn in tools}
     for _ in range(max_rounds):
         if guard is not None and guard.exceeded():
             emit(f"[budget] ceiling ${guard.ceiling_usd:.2f} reached "
@@ -393,7 +421,7 @@ def run_turn(client: Any, model: str, messages: list[dict[str, Any]],
                  f"call — type /resume to raise the ceiling, or /exit to stop.")
             return ""
         try:
-            response = client.chat(messages, FIJI_TOOLS, model)
+            response = client.chat(messages, tools, model)
         except Exception as exc:
             emit(f"[error] model call failed: {type(exc).__name__}: {exc}")
             return ""
@@ -406,7 +434,7 @@ def run_turn(client: Any, model: str, messages: list[dict[str, Any]],
             return text
         for call in calls:
             emit(f"[tool] {call.name}({_short(call.args)})")
-            result = _dispatch(call)
+            result = _dispatch(call, allowed_tools)
             client.append_tool_result(messages, call, result)
     emit("[note] reached the tool-round limit for this turn; ask me to continue.")
     return ""
