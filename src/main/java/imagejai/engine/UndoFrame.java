@@ -233,7 +233,7 @@ public final class UndoFrame {
                 compressed, raw.length,
                 rois,
                 resultsCsv == null ? "" : resultsCsv,
-                imp.getCalibration(), results, resultsPresent, rm != null, rm,
+                imp.getLocalCalibration(), results, resultsPresent, rm != null, rm,
                 imp, imp.getWindow() != null,
                 System.currentTimeMillis(),
                 diskSideEffect, false);

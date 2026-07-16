@@ -11,6 +11,7 @@ import ij.plugin.frame.RoiManager;
 import ij.process.ByteProcessor;
 import ij.process.ShortProcessor;
 import org.junit.After;
+import org.junit.Before;
 import org.junit.Test;
 
 import java.util.Collections;
@@ -28,6 +29,11 @@ import static org.junit.Assert.fail;
  * is exercised by the integration tests when a real Fiji session is wired up.
  */
 public class UndoFrameTest {
+
+    @Before
+    public void clearImageJGlobalsBeforeTest() {
+        WindowState.clear();
+    }
 
     @After
     public void clearImageJGlobals() {
@@ -131,7 +137,7 @@ public class UndoFrameTest {
             byte[] pixels = (byte[]) image.getStack().getPixels(plane);
             java.util.Arrays.fill(pixels, (byte) 99);
         }
-        image.getCalibration().pixelWidth = 9.0;
+        image.getLocalCalibration().pixelWidth = 9.0;
         manager.reset();
         manager.addRoi(new Roi(0, 0, 1, 1));
         ResultsTable changed = new ResultsTable();
@@ -150,16 +156,66 @@ public class UndoFrameTest {
         assertEquals(2, image.getNChannels());
         assertEquals(3, image.getNSlices());
         assertEquals(1, image.getNFrames());
-        assertEquals(0.42, image.getCalibration().pixelWidth, 0.0);
-        assertEquals(0.43, image.getCalibration().pixelHeight, 0.0);
-        assertEquals(1.7, image.getCalibration().pixelDepth, 0.0);
-        assertEquals("micron", image.getCalibration().getUnit());
+        assertEquals(0.42, image.getLocalCalibration().pixelWidth, 0.0);
+        assertEquals(0.43, image.getLocalCalibration().pixelHeight, 0.0);
+        assertEquals(1.7, image.getLocalCalibration().pixelDepth, 0.0);
+        assertEquals("micron", image.getLocalCalibration().getUnit());
         assertEquals(1, manager.getCount());
         assertTrue(manager.getRoi(0) instanceof PolygonRoi);
         assertEquals("triangle", manager.getName(0));
         assertEquals(1, Analyzer.getResultsTable().getCounter());
         assertEquals("source-row", Analyzer.getResultsTable().getLabel(0));
         assertEquals(12.5, Analyzer.getResultsTable().getValue("Area", 0), 0.0);
+    }
+
+    @Test
+    public void restoresLocalCalibrationWithoutChangingGlobalCalibration() {
+        ImagePlus image = new ImagePlus("local-calibration", new ByteProcessor(2, 2));
+        Calibration local = new Calibration();
+        local.pixelWidth = 0.42;
+        local.pixelHeight = 0.43;
+        local.pixelDepth = 1.7;
+        local.setUnit("micron");
+        image.setCalibration(local);
+
+        ImagePlus globalOwner = new ImagePlus();
+        Calibration global = new Calibration();
+        global.pixelWidth = 7.25;
+        global.pixelHeight = 8.5;
+        global.pixelDepth = 9.75;
+        global.setUnit("global-unit");
+
+        try {
+            globalOwner.setGlobalCalibration(global);
+            UndoFrame frame = UndoFrame.capture("c-local-calibration", image,
+                    null, "", false);
+
+            image.getLocalCalibration().pixelWidth = 99.0;
+            image.getLocalCalibration().pixelHeight = 98.0;
+            image.getLocalCalibration().pixelDepth = 97.0;
+            image.getLocalCalibration().setUnit("mutated-local");
+
+            assertEquals(1, frame.restorePixels(image));
+
+            Calibration restored = image.getLocalCalibration();
+            assertEquals(0.42, restored.pixelWidth, 0.0);
+            assertEquals(0.43, restored.pixelHeight, 0.0);
+            assertEquals(1.7, restored.pixelDepth, 0.0);
+            assertEquals("micron", restored.getUnit());
+
+            Calibration unchangedGlobal = ImagePlus.getStaticGlobalCalibration();
+            assertEquals(7.25, unchangedGlobal.pixelWidth, 0.0);
+            assertEquals(8.5, unchangedGlobal.pixelHeight, 0.0);
+            assertEquals(9.75, unchangedGlobal.pixelDepth, 0.0);
+            assertEquals("global-unit", unchangedGlobal.getUnit());
+            assertEquals(7.25, image.getCalibration().pixelWidth, 0.0);
+            assertEquals("global-unit", image.getCalibration().getUnit());
+        } finally {
+            globalOwner.setGlobalCalibration(null);
+            WindowState.clear();
+            image.flush();
+            globalOwner.flush();
+        }
     }
 
     @Test
@@ -234,6 +290,9 @@ public class UndoFrameTest {
     private static final class WindowState {
         static void clear() {
             ij.WindowManager.setTempCurrentImage(null);
+            // ImageJ's calibration override is static process state. Tests
+            // restoring per-image calibration must never inherit it.
+            new ImagePlus().setGlobalCalibration(null);
             Analyzer.setResultsTable(null);
             RoiManager manager = RoiManager.getRawInstance();
             if (manager != null) {
