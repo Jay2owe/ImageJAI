@@ -8,8 +8,8 @@ run rather than inferred from the headless gates.
 
 | Item | Recorded value |
 |---|---|
-| Git revision | `a231d70ded4dd2c873d2af3ac4d316fb8f680bba` |
-| Verification timestamp and timezone | 2026-07-16T13:41:14+01:00 (Europe/London) |
+| Git revision | `2535e686fd9e6f67845768f69d05f154287de568` |
+| Verification timestamp and timezone | 2026-07-16T16:14:01+01:00 (Europe/London) |
 | Operating system | Microsoft Windows 11 Home, amd64, NT 10.0.26200 |
 | Java and Maven versions | Oracle JDK 25.0.2; Apache Maven 3.9.9 |
 | Python version | CPython 3.13.14 |
@@ -29,20 +29,20 @@ python --version
 
 | Gate | Result | Count, hash, or evidence |
 |---|---|---|
-| Java unit suite and main JAR | PASS | 1,129 tests in 146 suites; 0 failures/errors/skips; exact main JAR built |
+| Java unit suite and main JAR | PASS | 1,171 tests in 150 suites; 0 failures/errors/skips; exact main JAR built; no uncaught test-thread exceptions |
 | Java integration profile | PASS | 3 tests in 2 suites; 0 failures/errors/skips |
-| Direct lifecycle suite | PASS | 31 tests; 0 failures/errors/skips |
-| Offline Python suite | PASS | 673 tests |
-| Real `ij.py`/`imagej-use-auto` loopback tests | PASS | 61 tests, including event-close, plane-metadata, and confirmation race/cleanup coverage |
+| Direct lifecycle suite | PASS | 37 tests; 0 failures/errors/skips |
+| Offline Python and build/install suite | PASS | 706 tests |
+| Real `ij.py`/`imagej-use-auto` loopback tests | PASS | 79 tests, including authenticated operation polling, snapshot binding, and confirmation race/cleanup coverage |
 | Recipe contract | PASS | 8 tests |
 | Context, manifest, and generated docs | PASS | 134 tests; both generators byte-current |
-| Pixel metadata and documentation regressions | PASS | 34 tests; strict C/Z/T identity and corrected public signatures covered |
-| Graphify hook tests and rebuild | PASS | 16 tests; the 38-path incremental event and post-build public full-update event exited 0, drained all queue/lock/handoff state, and produced 29,040 nodes, 50,640 edges, 2,056 communities, and 15 hyperedges at the exact code commit; all 17 checked changed identities occur exactly once at current locations with no stale-node resurrection |
+| Pixel and scientific regressions | PASS | 49 tests; exact C/Z/T, image/content/display revisions, value domains, geometry, finite values, and artifact limits covered |
+| Graphify hook tests and rebuild | PASS | 16 tests; the final incremental event and post-build public full-update event exited 0, drained all queue/lock/handoff state, and produced 29,171 nodes, 51,792 edges, 2,060 communities, and 15 hyperedges at the exact code commit; all 47 checked changed identities occur exactly once at current locations with no stale-node resurrection |
 | Build and simulated-install tests | PASS | 3 pytest build/install tests and 13 Pester bundle transaction tests |
-| Tested non-deploy build script | PASS | Git for Windows `build.sh --no-deploy`; 1,129 tests; JAR hash matched the reproducibility pair; Graphify hook exited 0 |
-| Two-build JAR reproducibility | PASS | build 1: `4DE609DD7919C56C0321F5CC56507B38D995A9E52A5B51BDEB4DA370071127AD`; build 2 and `build.sh`: same |
-| JAR content/policy inspection | PASS | 14,807,578 bytes and 5,643 entries; 0 `META-INF/maven/**`; exactly 1 packaged command manifest; source/package manifest SHA-256 `167A395696F5464BE9C7428530BDD25549B59A0823FA25261CEB7C0AEB1A388E` |
-| Temporary-root lab-bundle inspection | PASS | 186 allowlisted agent files; exactly 190 unique ZIP members; secret scan emitted no warning or failure; 15,195,336-byte ZIP SHA-256 `78B8D2C2B69723422321BF6DD584480B357816D2141E59CBDA7E0F33BD90D9C2`; source and ZIP-contained JAR hashes matched; 5 shared files, local Fiji publication deliberately skipped, staging residue 0; published and removed only under the disposable root |
+| Tested non-deploy build script | PASS | Git for Windows `build.sh --no-deploy`; 1,171 tests; JAR hash matched the reproducibility pair; output explicitly disabled deployment; Graphify hook exited 0 |
+| Two-build JAR reproducibility | PASS | build 1: `B0DA1775FDD4153742B24A009944E785877B1C75D366BF5F3862FEC58FFCCAC0`; build 2 and `build.sh`: same |
+| JAR content/policy inspection | PASS | 14,862,985 bytes and 5,667 entries; 0 `META-INF/maven/**`; exactly 1 packaged command manifest; source/package manifest SHA-256 `1B97C068259E89CFC2AAB081863AD96DA188B3ADDC8637E40E2942B2D6C99114` |
+| Temporary-root lab-bundle inspection | PASS | 186 allowlisted agent files; exactly 190 unique ZIP members with 0 exact/case-insensitive duplicates; 0 secret warnings; 15,256,189-byte ZIP SHA-256 `D192F599DC08234886622F78DC3B35F5334E69285E11212B6289908490175D9B`; source/shared/ZIP-contained JAR hashes matched; 5 shared files, local Fiji publication deliberately skipped, staging/transaction residue 0; temporary root removed |
 | Live Fiji doctor/smoke test | NOT RUN | Run only when explicitly authorized |
 
 ## Exact verification commands
@@ -171,4 +171,4 @@ the result `NOT RUN`; do not write `PASS`.
 - Release gate decision: PASS for offline/private lab-distribution gates
 - Blocking failures: none
 - Explicitly unrun optional checks: live Fiji doctor/smoke test
-- Verifier: root coordinator plus sequential verifier iterations 1 through 7; fresh iteration 8 follows this record
+- Verifier: root coordinator plus sequential verifier iterations 1 through 8; fresh iteration 9 follows this record
