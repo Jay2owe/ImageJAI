@@ -73,7 +73,8 @@ public final class AuditLog {
     private final ThreadPoolExecutor notifier;
     private final Object writerLifecycleLock = new Object();
     private final Object notifierLifecycleLock = new Object();
-    private final ArrayDeque<AuditRow> pendingWrites = new ArrayDeque<AuditRow>();
+    private final ArrayDeque<PendingWrite> pendingWrites =
+            new ArrayDeque<PendingWrite>();
     private final ArrayDeque<AuditRow> recentRows = new ArrayDeque<AuditRow>();
     private final CopyOnWriteArrayList<Listener> listeners =
             new CopyOnWriteArrayList<Listener>();
@@ -116,13 +117,17 @@ public final class AuditLog {
             return;
         }
         final AuditRow boundedRow = boundedRow(row);
+        // Bind provenance at admission. Resolving the active image later on
+        // the writer thread can route an already-admitted row to whichever
+        // image happens to be active when the queue drains.
+        final Path admittedPath = resolveCsvPath();
         remember(boundedRow);
         notificationVersion.incrementAndGet();
         notifyListenersAsync();
-        enqueueWrite(boundedRow);
+        enqueueWrite(new PendingWrite(admittedPath, boundedRow));
     }
 
-    private void enqueueWrite(AuditRow row) {
+    private void enqueueWrite(PendingWrite write) {
         synchronized (writerLifecycleLock) {
             if (writer.isShutdown() || pendingWrites.size() >= WRITER_QUEUE_CAPACITY) {
                 droppedWriterTasks.incrementAndGet();
@@ -130,7 +135,7 @@ public final class AuditLog {
                         + "row retained in memory only");
                 return;
             }
-            pendingWrites.addLast(row);
+            pendingWrites.addLast(write);
             if (!writerDrainScheduled) {
                 scheduleWriterDrainLocked();
             }
@@ -173,7 +178,7 @@ public final class AuditLog {
                 hook.run();
             }
             while (true) {
-                List<AuditRow> batch = new ArrayList<AuditRow>();
+                List<PendingWrite> batch = new ArrayList<PendingWrite>();
                 synchronized (writerLifecycleLock) {
                     if (pendingWrites.isEmpty()) {
                         Runnable idleHook = beforeWriterIdleHookForTest;
@@ -207,11 +212,11 @@ public final class AuditLog {
         }
     }
 
-    private void writeBatch(List<AuditRow> batch) {
+    private void writeBatch(List<PendingWrite> batch) {
         Map<Path, List<AuditRow>> rowsByPath =
                 new LinkedHashMap<Path, List<AuditRow>>();
-        for (AuditRow row : batch) {
-            Path csvPath = resolveCsvPath();
+        for (PendingWrite write : batch) {
+            Path csvPath = write.csvPath;
             if (csvPath == null) {
                 continue;
             }
@@ -220,7 +225,7 @@ public final class AuditLog {
                 rows = new ArrayList<AuditRow>();
                 rowsByPath.put(csvPath, rows);
             }
-            rows.add(row);
+            rows.add(write.row);
         }
         for (Map.Entry<Path, List<AuditRow>> entry : rowsByPath.entrySet()) {
             try {
@@ -228,6 +233,17 @@ public final class AuditLog {
             } catch (IOException e) {
                 System.err.println("[ImageJAI-Audit] append failed: " + e.getMessage());
             }
+        }
+    }
+
+    /** Immutable destination-and-row pair captured by {@link #append(AuditRow)}. */
+    private static final class PendingWrite {
+        final Path csvPath;
+        final AuditRow row;
+
+        PendingWrite(Path csvPath, AuditRow row) {
+            this.csvPath = csvPath;
+            this.row = row;
         }
     }
 

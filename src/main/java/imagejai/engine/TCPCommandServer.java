@@ -224,16 +224,24 @@ public class TCPCommandServer {
 
     /**
      * Whether to enforce token auth on every non-hello/non-ping command.
-     * Off by default to preserve compatibility with existing CLI wrappers
-     * that have not yet been updated to read {@link #tokenFilePath()}. Flip
-     * via system property {@code imagejai.tcp.requireToken=true} or env
-     * var {@code IMAGEJAI_TCP_REQUIRE_TOKEN=1}.
+     * Authentication is fail-secure by default. A local installation may
+     * explicitly opt into the restricted read-only compatibility surface via
+     * {@code imagejai.tcp.requireToken=false} or
+     * {@code IMAGEJAI_TCP_REQUIRE_TOKEN=0} while an old client is upgraded.
      */
     private static boolean tokenAuthRequired() {
         String prop = System.getProperty("imagejai.tcp.requireToken");
-        if (prop != null) return Boolean.parseBoolean(prop);
+        if (prop != null) return !isExplicitFalse(prop);
         String env = System.getenv("IMAGEJAI_TCP_REQUIRE_TOKEN");
-        return env != null && (env.equals("1") || env.equalsIgnoreCase("true"));
+        return env == null || !isExplicitFalse(env);
+    }
+
+    private static boolean isExplicitFalse(String value) {
+        String normalised = value == null ? "" : value.trim();
+        return "0".equals(normalised)
+                || "false".equalsIgnoreCase(normalised)
+                || "no".equalsIgnoreCase(normalised)
+                || "off".equalsIgnoreCase(normalised);
     }
 
     /** Constant-time string equality. */
@@ -326,8 +334,8 @@ public class TCPCommandServer {
         String modelEndpoint = "";
         // True when the connecting client presented the correct shared token
         // in its hello handshake. Read by dispatchCore to gate non-hello
-        // commands when token auth is required (system property
-        // imagejai.tcp.requireToken=true or env IMAGEJAI_TCP_REQUIRE_TOKEN=1).
+        // commands. Token auth is enabled by default and can only be disabled
+        // through an explicit local compatibility setting.
         // Defaults to false so a forgotten/wrong token cannot accidentally
         // unlock the server when the gate is later flipped on.
         boolean authenticated = false;
@@ -346,10 +354,9 @@ public class TCPCommandServer {
         // dismissedDialogs) into a single "stateDelta" sub-object. Clients
         // that set state_delta=false in hello keep the legacy flat shape.
         boolean stateDelta = true;
-        // Safe-mode master switch. The field default stays false so
-        // DEFAULT_CAPS, used for sockets that never call hello, preserves the
-        // legacy unguarded path. Clients that do say hello negotiate
-        // safe_mode=true by default in handleHello.
+        // Safe-mode master switch. The field default stays false for trusted
+        // in-process handler calls. Network compatibility caps override it to
+        // true, and handshake clients negotiate true by default.
         boolean safeMode = false;
         SafeModeOptions safeModeOptions = new SafeModeOptions();
         // Step 02: opt-in to typed error objects
@@ -806,8 +813,8 @@ public class TCPCommandServer {
         // Generate or reload the per-install shared token before opening the
         // listen socket. Always loaded — hello accepts and verifies it.
         // Enforcement (refusing non-hello commands when the token is missing)
-        // is gated on tokenAuthRequired() so existing CLI wrappers keep
-        // working until they ship the token-reading code path.
+        // is enabled by default. The explicit compatibility opt-out exposes
+        // only the read-only whitelist.
         try {
             if (this.serverToken == null) {
                 this.serverToken = loadOrGenerateToken();
@@ -980,9 +987,8 @@ public class TCPCommandServer {
         ServerSocket listenerSocket = null;
         try {
             // Loopback-only bind. Any non-loopback bind would expose the
-            // unauthenticated macro/script execution surface to the local
-            // network. Do not change without also shipping authentication
-            // and a TLS-or-equivalent transport.
+            // server to the local network. Do not change without also shipping
+            // a TLS-or-equivalent transport and reviewing the trust boundary.
             Runnable beforeBind = beforeBindHookForTest;
             if (beforeBind != null) beforeBind.run();
             listenerSocket = new ServerSocket();
@@ -2313,10 +2319,23 @@ public class TCPCommandServer {
     }
 
     private JsonObject dispatchCore(String command, JsonObject request, AgentCaps caps, Socket sock) {
-        // Token auth gate. Off by default — see tokenAuthRequired() for the
-        // env-var/system-property switches. When on, only hello and ping are
-        // allowed before authentication; every other handler refuses with a
-        // structured auth_required error so the client can see how to fix it.
+        // A deliberately enabled compatibility session is read-only. Keep
+        // this as a whitelist so new mutating or host-code commands fail
+        // closed until they are explicitly classified and authenticated.
+        if (sock != null
+                && caps != null
+                && caps.compatibility
+                && !"hello".equals(command)
+                && !"ping".equals(command)
+                && !READONLY_COMMANDS.contains(command)) {
+            return protocolError("compatibility_read_only",
+                    "This command requires an authenticated protocol session.");
+        }
+
+        // Token auth gate. The env-var/system-property switch is default-on.
+        // Only hello and ping are allowed before authentication; every other
+        // handler refuses with a structured auth_required error so the client
+        // can see how to fix it.
         if (tokenAuthRequired()
                 && sock != null
                 && !"hello".equals(command)
@@ -2985,8 +3004,8 @@ public class TCPCommandServer {
         // docs/tcp_upgrade/15_undo_stack_api.md.
         c.undo = optBool(caps, "undo", false);
         if (c.compatibility) {
-            // Compatibility sessions preserve old command reachability while
-            // refusing privileged capability opt-ins and forcing safety on.
+            // Compatibility sessions expose only the dispatcher's explicit
+            // read-only whitelist and refuse privileged capability opt-ins.
             c.vision = false;
             c.safeMode = true;
             c.autoDismissPhantoms = false;

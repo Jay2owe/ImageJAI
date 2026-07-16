@@ -137,6 +137,74 @@ public class TCPCommandServerHelloTest {
                 registry.lookup(sessionId, "expiry-secret").status());
     }
 
+    @Test
+    public void liveLoopbackRequiresAuthenticationByDefault() throws Exception {
+        String previous = System.getProperty("imagejai.tcp.requireToken");
+        System.clearProperty("imagejai.tcp.requireToken");
+        TCPCommandServer server = newServer();
+        server.setServerTokenForTest("default-secure-secret");
+        try {
+            int port = startAndAwait(server);
+
+            JsonObject ping = exchange(port, parse("{\"command\":\"ping\"}"));
+            assertTrue(ping.toString(), ping.get("ok").getAsBoolean());
+            assertEquals("pong", ping.get("result").getAsString());
+
+            assertEquals("auth_required", errorCode(exchange(port,
+                    parse("{\"command\":\"hello\"}"))));
+            assertEquals("session_required", errorCode(exchange(port,
+                    parse("{\"command\":\"get_state\"}"))));
+            assertEquals("session_required", errorCode(exchange(port,
+                    parse("{\"command\":\"run_script\",\"language\":\"groovy\"," +
+                            "\"code\":\"println(1)\"}"))));
+
+            JsonObject authenticated = exchange(port, parse(
+                    "{\"command\":\"hello\",\"token\":\"default-secure-secret\"}"));
+            assertTrue(authenticated.toString(),
+                    authenticated.get("ok").getAsBoolean());
+            assertFalse(authenticated.getAsJsonObject("result")
+                    .get("compatibility").getAsBoolean());
+        } finally {
+            server.stop();
+            restoreProperty("imagejai.tcp.requireToken", previous);
+        }
+    }
+
+    @Test
+    public void explicitCompatibilityOptOutStillDeniesHostCodeAndMutation()
+            throws Exception {
+        String previous = System.getProperty("imagejai.tcp.requireToken");
+        System.setProperty("imagejai.tcp.requireToken", "false");
+        TCPCommandServer server = newServer();
+        server.setServerTokenForTest("compatibility-secret");
+        try {
+            int port = startAndAwait(server);
+            JsonObject hello = exchange(port, parse("{\"command\":\"hello\"}"));
+            assertTrue(hello.toString(), hello.get("ok").getAsBoolean());
+            JsonObject result = hello.getAsJsonObject("result");
+            assertTrue(result.get("compatibility").getAsBoolean());
+            String session = result.get("session_id").getAsString();
+
+            JsonObject sessionlessScript = exchange(port, parse(
+                    "{\"command\":\"run_script\",\"language\":\"groovy\"," +
+                            "\"code\":\"println(1)\"}"));
+            assertEquals("compatibility_read_only", errorCode(sessionlessScript));
+
+            JsonObject sessionScript = exchange(port, parse(
+                    "{\"command\":\"run_script\",\"session_id\":\"" + session +
+                            "\",\"language\":\"groovy\",\"code\":\"println(1)\"}"));
+            assertEquals("compatibility_read_only", errorCode(sessionScript));
+
+            assertEquals("compatibility_read_only", errorCode(exchange(port, parse(
+                    "{\"command\":\"execute_macro\",\"code\":\"run(\\\"Close\\\");\"}"))));
+            assertEquals("compatibility_read_only", errorCode(exchange(port, parse(
+                    "{\"command\":\"run_pipeline\",\"steps\":[]}"))));
+        } finally {
+            server.stop();
+            restoreProperty("imagejai.tcp.requireToken", previous);
+        }
+    }
+
     /** Full hello request maps every declared field onto the response. */
     @Test
     public void helloEchoesServerVersionAndReturnsEnabledArray() {
@@ -474,12 +542,7 @@ public class TCPCommandServerHelloTest {
         assertTrue(enabledContains(enabled, "safe_mode_option:auto_backup_roi_on_reset"));
     }
 
-    /**
-     * No-handshake fallback: {@link TCPCommandServer#DEFAULT_CAPS} preserves
-     * the legacy unguarded default so wrappers that never say hello keep
-     * today's behaviour. The breaking-change scope is limited to handshake
-     * clients (documented in the stage's "Known risks" section).
-     */
+    /** Trusted in-process calls retain their explicit package-level defaults. */
     @Test
     public void noHandshakeDefaultCapsKeepSafeModeOff() {
         assertFalse("DEFAULT_CAPS.safeMode preserves legacy fast path",

@@ -55,6 +55,8 @@ public class PseudonymisationIntegrationTest {
     private static final String SENSITIVE_ID = "MOAB2_subject_017_visit3";
     private static final String OME_PHI = "Jane Donor subject_017 visit3";
     private static final String RESULT_LABEL = "Stage08LabelCellAlpha";
+    private static final String SERVER_TOKEN =
+            "stage08-integration-token-at-least-thirty-two-characters";
 
     @Test
     public void everyTcpCommandResponseCarriesGovernanceAndNoOriginalStrings()
@@ -83,6 +85,7 @@ public class PseudonymisationIntegrationTest {
         TCPCommandServer server = new TCPCommandServer(0, engine,
                 new StateInspector(), new PipelineBuilder(engine),
                 new StubExplorationEngine(engine));
+        setServerToken(server, SERVER_TOKEN);
         setTempLedger(server, root.resolve("ledger.json"));
 
         CountDownLatch started = new CountDownLatch(1);
@@ -186,6 +189,7 @@ public class PseudonymisationIntegrationTest {
         JsonObject request = new JsonObject();
         request.addProperty("command", command);
         request.addProperty("session_id", sessionId);
+        request.addProperty("token", SERVER_TOKEN);
         request.addProperty("model_endpoint", "openai.codex");
         request.addProperty("identifiable_input", SENSITIVE_ID);
         request.addProperty("path_hint", rawImagePath.toString());
@@ -324,6 +328,14 @@ public class PseudonymisationIntegrationTest {
                 ledgerStoreClass);
         setter.setAccessible(true);
         setter.invoke(server, store);
+    }
+
+    private static void setServerToken(TCPCommandServer server, String token)
+            throws Exception {
+        Method setter = TCPCommandServer.class.getDeclaredMethod(
+                "setServerTokenForTest", String.class);
+        setter.setAccessible(true);
+        setter.invoke(server, token);
     }
 
     private static List<AuditRow> auditRows(Path csv) throws Exception {

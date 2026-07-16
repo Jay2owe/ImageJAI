@@ -21,6 +21,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
@@ -135,6 +136,51 @@ public class AuditLogTest {
             releaseWriter.countDown();
             pool.shutdownNow();
             log.shutdownAndAwait(1000);
+        }
+    }
+
+    @Test
+    public void queuedRowsStayBoundToImagePathCapturedAtAppend() throws Exception {
+        Path first = tmp.newFolder("first-image").toPath()
+                .resolve("AI_Exports").resolve(AuditLog.FILE_NAME);
+        Path second = tmp.newFolder("second-image").toPath()
+                .resolve("AI_Exports").resolve(AuditLog.FILE_NAME);
+        final AtomicReference<Path> activePath = new AtomicReference<Path>(first);
+        final AuditLog log = new AuditLog(new AuditLog.PathResolver() {
+            @Override public Path csvPath() { return activePath.get(); }
+        });
+        final CountDownLatch writerBlocked = new CountDownLatch(1);
+        final CountDownLatch releaseWriter = new CountDownLatch(1);
+        log.setBeforeWriterDrainHookForTest(new Runnable() {
+            @Override public void run() {
+                writerBlocked.countDown();
+                try {
+                    releaseWriter.await(5, TimeUnit.SECONDS);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+            }
+        });
+
+        try {
+            log.append(row("s", "first-image-command", "", ""));
+            assertTrue(writerBlocked.await(5, TimeUnit.SECONDS));
+            activePath.set(second);
+            log.append(row("s", "second-image-command", "", ""));
+            releaseWriter.countDown();
+            log.flushForTest();
+
+            List<String> firstLines = Files.readAllLines(first, StandardCharsets.UTF_8);
+            List<String> secondLines = Files.readAllLines(second, StandardCharsets.UTF_8);
+            assertEquals(2, firstLines.size());
+            assertEquals(2, secondLines.size());
+            assertEquals("first-image-command",
+                    AuditRow.fromCsvLine(firstLines.get(1)).command());
+            assertEquals("second-image-command",
+                    AuditRow.fromCsvLine(secondLines.get(1)).command());
+        } finally {
+            releaseWriter.countDown();
+            log.shutdownAndAwait(1000L);
         }
     }
 
