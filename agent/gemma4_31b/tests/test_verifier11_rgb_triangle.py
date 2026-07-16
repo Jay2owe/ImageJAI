@@ -326,6 +326,135 @@ def _asymmetric_triangle_histogram() -> np.ndarray:
     return hist
 
 
+@pytest.mark.parametrize(
+    ("occupied", "expected"),
+    [
+        ({}, 2),
+        ({1: 1}, 0),
+        ({100: 1}, 98),
+        ({255: 1}, 253),
+        ({10: 1, 200: 1}, 199),
+    ],
+)
+def test_triangle_public_wrapper_matches_imagej_154c_oracle(
+    monkeypatch, occupied, expected
+):
+    hist = np.zeros(256, dtype=np.float64)
+    for index, count in occupied.items():
+        hist[index] = count
+
+    monkeypatch.setattr(
+        tools_python.np,
+        "histogram",
+        lambda *args, **kwargs: (hist.copy(), np.arange(257, dtype=np.float64)),
+    )
+    assert tools_python._triangle_threshold(
+        np.asarray([0.0, 255.0], dtype=np.float64)
+    ) == float(expected)
+    assert describe_image._triangle_threshold_from_hist(
+        {"bins": hist, "bin_values": np.arange(256, dtype=np.float64)}
+    ) == float(expected)
+
+
+@pytest.mark.parametrize(
+    ("samples", "expected"),
+    [
+        ([0.0], 2.0),
+        ([1.0], 0.0),
+        ([100.0], 98.0),
+        ([255.0], 253.0),
+        ([10.0, 200.0], 199.0),
+    ],
+)
+def test_triangle_sample_wrappers_use_absolute_uint8_bins(samples, expected):
+    array = np.asarray(samples, dtype=np.float64)
+    assert tools_python._triangle_threshold(
+        array, value_domain=RGB_SCALAR_DOMAIN
+    ) == expected
+
+
+def test_triangle_does_not_infer_byte_domain_from_integral_samples():
+    samples = np.asarray([10.0, 200.0], dtype=np.float64)
+    uint16_domain = copy.deepcopy(RGB_SCALAR_DOMAIN)
+    uint16_domain.update(
+        {
+            "pixel_type": "uint16",
+            "acquisition_max_raw": 65535.0,
+            "scalarization": None,
+        }
+    )
+
+    relative = 10.0 + 254.0 * (200.0 - 10.0) / 256.0
+    assert tools_python._triangle_threshold(
+        samples, value_domain=uint16_domain
+    ) == pytest.approx(relative)
+    assert describe_image._triangle_threshold(
+        samples, value_domain=uint16_domain
+    ) == pytest.approx(relative)
+    assert tools_python._triangle_threshold(
+        samples, value_domain=RGB_SCALAR_DOMAIN
+    ) == 199.0
+
+
+def test_single_value_one_triangle_counts_one_component_in_both_consumers(monkeypatch):
+    sample = np.asarray([[1.0]], dtype=np.float64)
+    meta = {
+        "image_id": "single-pixel",
+        "image_revision": 1,
+        "display_revision": 1,
+        "x": 0,
+        "y": 0,
+        "width": 1,
+        "height": 1,
+        "sliceStart": 1,
+        "sliceEnd": 1,
+        "sliceCount": 1,
+        "sliceAxis": "Z",
+        "channel": 1,
+        "frame": 1,
+        "channels": 1,
+        "slices": 1,
+        "frames": 1,
+        "nPixels": 1,
+        "type": "8-bit",
+        "encoding": "base64_float32_le",
+        "value_domain": {
+            "representation": "raw",
+            "pixel_type": "uint8",
+            "signed": False,
+            "density_calibrated": False,
+            "acquisition_min_raw": 0.0,
+            "acquisition_max_raw": 255.0,
+            "acquisition_min_calibrated": None,
+            "acquisition_max_calibrated": None,
+        },
+        "acquisition_min_count": 0,
+        "acquisition_max_count": 0,
+        "acquisition_limit_counts_exact": False,
+        "downsample_factor": 1,
+        "bit_depth": 8,
+    }
+    monkeypatch.setattr(
+        tools_python, "_fetch_full_downsampled", lambda: (sample, dict(meta))
+    )
+    result = tools_python.quick_object_count("triangle")
+    assert result["threshold_value"] == 0.0
+    assert result["count"] == 1
+
+    monkeypatch.setattr(describe_image, "_threshold_thumbnail", lambda *args: sample)
+    monkeypatch.setattr(
+        describe_image, "_otsu_threshold_from_hist", lambda stats: 1.0
+    )
+    monkeypatch.setattr(
+        describe_image, "_li_threshold_from_hist", lambda stats: 1.0
+    )
+    fragment = describe_image._fragment_thresholds(sample, {"bins": [1]}, {})
+    assert fragment == (
+        "Auto-thresholds produce 0 connected components with Otsu, 0 with Li and 1 "
+        "with Triangle on a 512-pixel thumbnail."
+    )
+
+
 def test_triangle_histogram_uses_farther_endpoint_and_signed_orientation():
     hist = _asymmetric_triangle_histogram()
     values = np.arange(256, dtype=np.float64)
@@ -442,16 +571,20 @@ def test_threshold_fragment_invokes_sample_triangle_fallback(monkeypatch):
         describe_image, "_triangle_threshold_from_hist", lambda stats: None
     )
 
-    def sample_triangle(samples):
-        calls.append(samples)
+    def sample_triangle(samples, **kwargs):
+        calls.append((samples, kwargs))
         return 0.0
 
     monkeypatch.setattr(describe_image, "_triangle_threshold", sample_triangle)
 
-    text = describe_image._fragment_thresholds(thumb, {"bins": [4]}, {})
+    text = describe_image._fragment_thresholds(
+        thumb, {"bins": [4], "value_domain": RGB_SCALAR_DOMAIN}, {}
+    )
 
     assert "Auto-thresholds produce" in text
-    assert calls == [thumb]
+    assert len(calls) == 1
+    assert calls[0][0] is thumb
+    assert calls[0][1] == {"value_domain": RGB_SCALAR_DOMAIN}
 
 
 def test_describe_center_crop_reports_direct_sampling_factor(monkeypatch):

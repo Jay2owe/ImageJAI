@@ -135,6 +135,31 @@ def _is_exact_rgb24_source_domain(domain) -> bool:
     )
 
 
+def _is_exact_byte_scalar_domain(domain) -> bool:
+    """Recognize an exact uncalibrated ImageJ byte-intensity domain."""
+    required = (
+        "representation", "pixel_type", "signed", "density_calibrated",
+        "acquisition_min_raw", "acquisition_max_raw",
+        "acquisition_min_calibrated", "acquisition_max_calibrated",
+    )
+    return (
+        isinstance(domain, dict)
+        and all(key in domain for key in required)
+        and domain.get("representation") == "raw"
+        and domain.get("pixel_type") in ("uint8", "indexed8")
+        and domain.get("signed") is False
+        and domain.get("density_calibrated") is False
+        and isinstance(domain.get("acquisition_min_raw"), (int, float))
+        and not isinstance(domain.get("acquisition_min_raw"), bool)
+        and float(domain["acquisition_min_raw"]) == 0.0
+        and isinstance(domain.get("acquisition_max_raw"), (int, float))
+        and not isinstance(domain.get("acquisition_max_raw"), bool)
+        and float(domain["acquisition_max_raw"]) == 255.0
+        and domain.get("acquisition_min_calibrated") is None
+        and domain.get("acquisition_max_calibrated") is None
+    )
+
+
 def _is_exact_rgb_scalar_domain(domain) -> bool:
     """Recognize the raw uint8 domain ImageJ publishes for weighted RGB intensity."""
     required = (
@@ -679,25 +704,23 @@ def _li_threshold_from_hist(stats: dict) -> float | None:
 
 
 def _triangle_threshold_from_hist(stats: dict) -> float | None:
-    """ImageJ 1.54c's generalized Triangle method using Fiji histogram bins."""
+    """ImageJ 1.54c's public Triangle method using Fiji histogram bins."""
     hist = np.asarray(stats["bins"], dtype=np.float64)
     values = _hist_bin_centers(stats)
     if (
         hist.ndim != 1
-        or hist.size == 0
+        or hist.size != 256
         or values.size != hist.size
         or not np.isfinite(hist).all()
         or np.any(hist < 0)
     ):
         return None
     occupied = np.flatnonzero(hist)
-    if occupied.size == 0:
-        return None
-    if occupied.size == 1:
-        return float(values[int(occupied[0])])
+    if occupied.size == 2:
+        return float(values[int(occupied[1]) - 1])
     peak = int(np.argmax(hist))
-    first = int(occupied[0])
-    last = int(occupied[-1])
+    first = int(occupied[0]) if occupied.size else 0
+    last = int(occupied[-1]) if occupied.size else 0
     line_end = first - 1 if first > 0 else first
     far_end = last + 1 if last < hist.size - 1 else last
     inverted = peak - line_end < far_end - peak
@@ -706,27 +729,26 @@ def _triangle_threshold_from_hist(stats: dict) -> float | None:
         line_end = hist.size - 1 - far_end
         peak = hist.size - 1 - peak
     if line_end == peak:
-        return float(values[int(occupied[0])])
-
-    nx = float(working[peak])
-    ny = float(line_end - peak)
-    denom = math.sqrt(nx * nx + ny * ny)
-    if denom == 0:
-        return float(values[peak])
-    nx /= denom
-    ny /= denom
-    line_d = nx * line_end + ny * float(working[line_end])
-    split = line_end
-    split_distance = 0.0
-    for index in range(line_end + 1, peak + 1):
-        distance = nx * index + ny * float(working[index]) - line_d
-        if distance > split_distance:
-            split = index
-            split_distance = distance
-    split -= 1
+        split = line_end
+    else:
+        nx = float(working[peak])
+        ny = float(line_end - peak)
+        denom = math.sqrt(nx * nx + ny * ny)
+        nx /= denom
+        ny /= denom
+        line_d = nx * line_end + ny * float(working[line_end])
+        split = line_end
+        split_distance = 0.0
+        for index in range(line_end + 1, peak + 1):
+            distance = nx * index + ny * float(working[index]) - line_d
+            if distance > split_distance:
+                split = index
+                split_distance = distance
+        split -= 1
     if inverted:
         split = hist.size - 1 - split
-    split = max(0, min(int(split), hist.size - 1))
+    if split == -1:
+        split = 0
     return float(values[split])
 
 
@@ -998,14 +1020,15 @@ def _li_threshold(arr: np.ndarray) -> float:
     return float(t - shift)
 
 
-def _triangle_threshold(arr: np.ndarray) -> float:
-    """ImageJ 1.54c's generalized Triangle method on sampled pixels."""
+def _triangle_threshold(arr: np.ndarray, *, value_domain=None) -> float:
+    """Approximate Triangle on samples, exact for a published byte domain."""
     flat = arr.ravel()
     lo = float(flat.min())
     hi = float(flat.max())
-    if hi <= lo:
-        return lo
-    hist, edges = np.histogram(flat, bins=256, range=(lo, hi))
+    histogram_range = (
+        (0.0, 256.0) if _is_exact_byte_scalar_domain(value_domain) else (lo, hi)
+    )
+    hist, edges = np.histogram(flat, bins=256, range=histogram_range)
     threshold = _triangle_threshold_from_hist(
         {"bins": hist, "bin_values": edges[:-1]}
     )
@@ -1152,7 +1175,9 @@ def _fragment_thresholds(
     if li_t is None:
         li_t = _li_threshold(threshold_thumb)
     if tri_t is None:
-        tri_t = _triangle_threshold(threshold_thumb)
+        tri_t = _triangle_threshold(
+            threshold_thumb, value_domain=stats.get("value_domain")
+        )
     n_otsu = _count_4_connected(threshold_thumb > otsu_t)
     n_li = _count_4_connected(threshold_thumb > li_t)
     n_tri = _count_4_connected(threshold_thumb > tri_t)
