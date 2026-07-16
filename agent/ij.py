@@ -90,6 +90,12 @@ except ValueError:
 TIMEOUT = 60
 SESSION_ID = os.environ.get("IMAGEJAI_SESSION_ID", "").strip()
 MODEL_ENDPOINT = os.environ.get("IMAGEJAI_MODEL_ENDPOINT", "").strip()
+# The largest legal payload today is a base64-wrapped 16 MiB PNG (or a
+# 4-million-float pixel plane), which is under 22 MiB.  Keep enough headroom
+# for the JSON envelope while preventing an untrusted loopback peer from
+# growing either receive buffer without bound.
+MAX_REPLY_FRAME_BYTES = 32 * 1024 * 1024
+MAX_EVENT_FRAME_BYTES = 32 * 1024 * 1024
 
 
 def _load_command_manifest():
@@ -342,11 +348,10 @@ _atexit.register(_flush_cache)
 
 def _read_server_token():
     """Read the per-install shared token written by the Java server at
-    ~/.imagejai/server-token. Returns None if the file isn't present —
-    that's fine while token enforcement is opt-in (the server still
-    accepts unauthenticated hello). When IMAGEJAI_TCP_REQUIRE_TOKEN=1 is
-    set on the server side, this function MUST return a valid token or
-    every command will be rejected."""
+    ~/.imagejai/server-token. Token enforcement is enabled by default, so a
+    missing or invalid token leaves only public ping available. An explicit
+    server-side compatibility opt-out permits a restricted read-only session,
+    but never mutation or host-code execution."""
     try:
         p = os.path.join(os.path.expanduser("~"), ".imagejai", "server-token")
         with open(p, "r", encoding="utf-8") as f:
@@ -589,8 +594,19 @@ class ImageJSession:
                     if not chunk:
                         break
                     buf += chunk
-                    while b"\n" in buf:
-                        line, buf = buf.split(b"\n", 1)
+                    while True:
+                        newline = buf.find(b"\n")
+                        if newline < 0:
+                            if len(buf) > MAX_EVENT_FRAME_BYTES:
+                                raise ValueError(
+                                    "ImageJAI event frame exceeds {} bytes".format(
+                                        MAX_EVENT_FRAME_BYTES))
+                            break
+                        if newline > MAX_EVENT_FRAME_BYTES:
+                            raise ValueError(
+                                "ImageJAI event frame exceeds {} bytes".format(
+                                    MAX_EVENT_FRAME_BYTES))
+                        line, buf = buf[:newline], buf[newline + 1:]
                         line = line.strip()
                         if not line:
                             continue
@@ -723,8 +739,18 @@ class ImageJSession:
                 if not chunk:
                     break
                 data += chunk
-                if data.endswith(b"\n"):
+                newline = data.find(b"\n")
+                if newline >= 0:
+                    if newline > MAX_REPLY_FRAME_BYTES:
+                        raise ValueError(
+                            "ImageJAI reply frame exceeds {} bytes".format(
+                                MAX_REPLY_FRAME_BYTES))
+                    data = data[:newline]
                     break
+                if len(data) > MAX_REPLY_FRAME_BYTES:
+                    raise ValueError(
+                        "ImageJAI reply frame exceeds {} bytes".format(
+                            MAX_REPLY_FRAME_BYTES))
         if not data.strip():
             raise ConnectionError("empty reply from ImageJAI")
         return json.loads(data.decode("utf-8"))

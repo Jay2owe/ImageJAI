@@ -83,7 +83,7 @@ public class ProviderDiscoveryCredentialVerifierTest {
     }
 
     @Test
-    public void curatedOnlyProvidersSkipNetwork() throws IOException {
+    public void ollamaCloudIsExplicitlyUnverifiedAndNeverHitsNetwork() throws IOException {
         Path tmp = Files.createTempDirectory("verifier-curated");
         ProviderCredentials creds = new ProviderCredentials(tmp);
         ProviderDiscovery.HttpFetcher fetcher = (endpoint, timeout) -> {
@@ -91,9 +91,15 @@ public class ProviderDiscoveryCredentialVerifierTest {
         };
         ProviderDiscoveryCredentialVerifier verifier =
                 new ProviderDiscoveryCredentialVerifier(creds, fetcher);
-        // ollama-cloud and perplexity have no live /models — verifier reports
-        // success without touching the network.
-        assertTrue(verifier.verify("ollama-cloud", 4000).ok);
+
+        CredentialVerifier.Result cloud = verifier.verifyCandidate(
+                "ollama-cloud", "arbitrary-secret", 4000);
+
+        assertFalse(cloud.ok);
+        assertTrue(cloud.message.contains("unverified"));
+        assertTrue(cloud.message.contains("not saved"));
+        assertFalse(cloud.message.contains("arbitrary-secret"));
+        // Preserve the existing non-Ollama curated catalogue behaviour.
         assertTrue(verifier.verify("perplexity", 4000).ok);
     }
 

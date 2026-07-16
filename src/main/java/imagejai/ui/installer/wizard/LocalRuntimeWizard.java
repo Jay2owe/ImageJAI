@@ -10,7 +10,6 @@ import javax.swing.JDialog;
 import javax.swing.JLabel;
 import javax.swing.JOptionPane;
 import javax.swing.JPanel;
-import javax.swing.JPasswordField;
 import javax.swing.JTextField;
 import javax.swing.SwingUtilities;
 import javax.swing.SwingWorker;
@@ -30,22 +29,20 @@ import java.io.IOException;
 import java.net.HttpURLConnection;
 import java.net.URI;
 import java.net.URL;
-import java.util.Arrays;
 import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.Map;
 
 /**
  * Install shape #3 — local runtime ± cloud account. Used by Ollama Local
- * (just needs the daemon to be reachable) and Ollama Cloud (browser sign-in
- * via {@code ollama signin} surfaces a token the user pastes back). Detects
- * the {@code ollama} binary on PATH and surfaces a download link if missing.
+ * (just needs the daemon to be reachable) and Ollama Cloud (authentication is
+ * managed by {@code ollama signin}). Detects the {@code ollama} binary on PATH
+ * and surfaces a download link if missing.
  *
  * <p>Local-flow saves the daemon URL after a {@code GET /api/tags} probe with
- * a 2-second timeout (Phase E risk: "Ollama daemon URL trust"). Cloud-flow
- * saves only the cloud token — {@code OLLAMA_CLOUD_API_BASE} for the
- * proxy entry falls back to its {@code imagejai_default_api_base}
- * ({@code https://ollama.com}) so users don't need to type the cloud URL.
+ * a 2-second timeout (Phase E risk: "Ollama daemon URL trust"). Cloud-flow is
+ * informational: ImageJAI neither receives nor stores the Ollama sign-in
+ * token because there is no authenticated candidate-token verification API.
  */
 public class LocalRuntimeWizard implements InstallerWizard {
 
@@ -53,7 +50,7 @@ public class LocalRuntimeWizard implements InstallerWizard {
     public static final String DEFAULT_LOCAL_DAEMON_URL = "http://localhost:11434";
     /** Sanity-check timeout per Phase E risks. */
     public static final int DAEMON_PROBE_TIMEOUT_MS = 2000;
-    /** Cloud credential validation budget. */
+    /** Compatibility validation budget for programmatic credential callers. */
     public static final int VERIFY_TIMEOUT_MS = 4000;
 
     /** Per-provider local-runtime facts so this one wizard serves every
@@ -122,6 +119,11 @@ public class LocalRuntimeWizard implements InstallerWizard {
         return "ollama".equals(providerKey) || "ollama-cloud".equals(providerKey);
     }
 
+    static String cloudSignInInstructions() {
+        return "Run <code>ollama signin</code> in a terminal. Sign-in is managed "
+                + "by Ollama; ImageJAI does not receive, verify, or store the cloud token.";
+    }
+
     private final String providerKey;
     private final boolean cloudFlow;
     private final ProviderCredentials credentials;
@@ -160,7 +162,11 @@ public class LocalRuntimeWizard implements InstallerWizard {
                 CredentialVerifier.noop());
     }
 
-    /** Production constructor for the Ollama Cloud validate-then-save flow. */
+    /**
+     * Constructor retaining the credential verifier for compatibility and
+     * programmatic validation. The Ollama Cloud UI itself never collects a
+     * token unless a future authenticated candidate-token API is available.
+     */
     public LocalRuntimeWizard(String providerKey,
                               ProviderCredentials credentials,
                               CredentialVerifier verifier) {
@@ -230,7 +236,7 @@ public class LocalRuntimeWizard implements InstallerWizard {
             header.append("Start the local server, then pick a loaded model.");
         }
         header.append(cloudFlow
-                ? "<br>Sign in with <code>ollama signin</code> to enable cloud models, then paste the resulting token."
+                ? "<br>" + cloudSignInInstructions()
                 : "<br>No API key needed. Server URL defaults to <code>" + meta.defaultUrl + "</code>.");
         header.append("</html>");
         content.add(new JLabel(header.toString()), BorderLayout.NORTH);
@@ -241,8 +247,8 @@ public class LocalRuntimeWizard implements InstallerWizard {
         c.anchor = GridBagConstraints.WEST;
         c.fill = GridBagConstraints.HORIZONTAL;
 
-        // Local flow: daemon URL field. Cloud flow: token only — cloud's
-        // api_base falls back to imagejai_default_api_base in litellm config.
+        // Local flow: daemon URL field. Ollama owns Cloud authentication, so
+        // the cloud flow deliberately has no token-entry or persistence UI.
         final JTextField urlField = new JTextField(meta.defaultUrl, 22);
         if (!cloudFlow) {
             c.gridx = 0; c.gridy = 0;
@@ -251,15 +257,8 @@ public class LocalRuntimeWizard implements InstallerWizard {
             body.add(urlField, c);
         }
 
-        final JPasswordField tokenField = cloudTokenField();
-        if (cloudFlow) {
-            c.gridx = 0; c.gridy = 0; c.weightx = 0.0;
-            body.add(new JLabel("Cloud token:"), c);
-            c.gridx = 1; c.weightx = 1.0;
-            body.add(tokenField, c);
-        }
-
-        final JLabel statusLine = new JLabel(" ");
+        final JLabel statusLine = new JLabel(cloudFlow
+                ? "No Ollama Cloud credential will be saved by ImageJAI." : " ");
         statusLine.setFont(statusLine.getFont().deriveFont(11f));
         c.gridx = 0; c.gridy = 1; c.gridwidth = 2; c.weightx = 1.0;
         body.add(statusLine, c);
@@ -278,40 +277,16 @@ public class LocalRuntimeWizard implements InstallerWizard {
             if (active[0] != null) active[0].cancel(true);
             dialog.dispose();
         });
-        JButton save = new JButton("Save");
+        JButton save = new JButton(cloudFlow ? "Done" : "Save");
         save.addActionListener(e -> {
             final Map<String, String> entries = new LinkedHashMap<String, String>();
             final String runtimeUrl;
             if (cloudFlow) {
-                char[] password = tokenField.getPassword();
-                final String token;
-                try {
-                    token = new String(password).trim();
-                } finally {
-                    Arrays.fill(password, '\0');
-                }
-                if (token.isEmpty()) {
-                    setError(statusLine, "Run 'ollama signin' in a terminal to obtain a "
-                            + "cloud token, then paste it here.");
-                    return;
-                }
-                runtimeUrl = null;
-                save.setEnabled(false);
-                statusLine.setText("Verifying cloud token…");
-                active[0] = cloudValidationWorker(token, result -> {
-                    active[0] = null;
-                    if (result != null && result.ok) {
-                        tokenField.setText("");
-                        saved[0] = true;
-                        dialog.dispose();
-                    } else {
-                        save.setEnabled(true);
-                        setError(statusLine, "Verification failed: "
-                                + (result == null ? "no result" : result.message));
-                        tokenField.requestFocusInWindow();
-                    }
-                });
-                active[0].execute();
+                // ollama signin persists its own authenticated state. Closing
+                // this informational flow must not imply that a pasted value
+                // was verified or write an OLLAMA_API_KEY file.
+                saved[0] = true;
+                dialog.dispose();
                 return;
             }
 
@@ -383,16 +358,9 @@ public class LocalRuntimeWizard implements InstallerWizard {
         label.setText(message);
     }
 
-    private static void setOk(JLabel label, String message) {
-        label.setForeground(new Color(0x20, 0x70, 0x30));
-        label.setText(message);
-    }
-
-    static JPasswordField cloudTokenField() {
-        return new JPasswordField(22);
-    }
-
-    /** Package-visible seam used to prove that rejection never reaches disk. */
+    /** Package-visible seam used to prove that rejection never reaches disk.
+     * The UI no longer collects cloud tokens, but keeping the transaction seam
+     * protects callers compiled against the earlier wizard implementation. */
     CredentialVerifier.ValidationWorker cloudValidationWorker(
             String candidate, CredentialVerifier.Completion completion) {
         return new CredentialVerifier.ValidationWorker(

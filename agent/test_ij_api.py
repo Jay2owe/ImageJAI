@@ -8,6 +8,8 @@ import threading
 import time
 from pathlib import Path
 
+import pytest
+
 
 IJ_PATH = Path(__file__).with_name("ij.py")
 SPEC = importlib.util.spec_from_file_location("ij_under_test", IJ_PATH)
@@ -55,6 +57,45 @@ class ScriptedLoopbackServer:
 
     def finish(self):
         assert self._done.wait(5), "loopback server did not finish"
+        self._thread.join(timeout=1)
+        assert self.errors == []
+
+
+class RawLoopbackServer:
+    """One-request peer used to exercise hostile reply framing."""
+
+    def __init__(self, payload):
+        self.errors = []
+        self._payload = payload
+        self._done = threading.Event()
+        self._listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self._listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self._listener.bind(("127.0.0.1", 0))
+        self._listener.listen(1)
+        self._listener.settimeout(3)
+        self.port = self._listener.getsockname()[1]
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def _run(self):
+        try:
+            conn, _ = self._listener.accept()
+            with conn:
+                request = b""
+                while not request.endswith(b"\n"):
+                    chunk = conn.recv(65536)
+                    if not chunk:
+                        break
+                    request += chunk
+                conn.sendall(self._payload)
+        except Exception as exc:
+            self.errors.append(exc)
+        finally:
+            self._listener.close()
+            self._done.set()
+
+    def finish(self):
+        assert self._done.wait(5), "raw loopback server did not finish"
         self._thread.join(timeout=1)
         assert self.errors == []
 
@@ -232,6 +273,33 @@ def test_event_stream_carries_durable_session_credentials():
     assert frames == [
         {"event": "subscribed", "data": {"topics": ["job.*"]}}
     ]
+
+
+@pytest.mark.parametrize("terminator", [b"", b"\n"])
+def test_one_shot_reply_rejects_oversize_frames_before_decode(
+        monkeypatch, terminator):
+    monkeypatch.setattr(ij, "MAX_REPLY_FRAME_BYTES", 64)
+    server = RawLoopbackServer(b"x" * 65 + terminator)
+    session = ij.ImageJSession(
+        host="127.0.0.1", port=server.port, token_loader=lambda: None)
+
+    with pytest.raises(ValueError, match="reply frame exceeds 64 bytes"):
+        session._exchange({"command": "ping"}, timeout=2)
+    server.finish()
+
+
+@pytest.mark.parametrize("terminator", [b"", b"\n"])
+def test_event_stream_rejects_oversize_frames_before_decode(
+        monkeypatch, terminator):
+    monkeypatch.setattr(ij, "MAX_EVENT_FRAME_BYTES", 64)
+    server = RawLoopbackServer(b"x" * 65 + terminator)
+    session = ij.ImageJSession(
+        host="127.0.0.1", port=server.port, token_loader=lambda: None)
+    session._session_id = "bounded-event-session"
+
+    with pytest.raises(ValueError, match="event frame exceeds 64 bytes"):
+        list(session.events(["*"], reconnect=False, read_timeout=2))
+    server.finish()
 
 
 def test_imagej_events_has_one_public_implementation():

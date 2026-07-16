@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import base64
 import importlib.util
+import json
+import socket
 import struct
+import threading
 from pathlib import Path
 
 import pytest
@@ -13,6 +16,44 @@ SPEC = importlib.util.spec_from_file_location("pixels_under_test", PIXELS_PATH)
 pixels = importlib.util.module_from_spec(SPEC)
 assert SPEC.loader is not None
 SPEC.loader.exec_module(pixels)
+
+
+class RawLoopbackServer:
+    def __init__(self, payload):
+        self.errors = []
+        self._payload = payload
+        self._done = threading.Event()
+        self._listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self._listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self._listener.bind(("127.0.0.1", 0))
+        self._listener.listen(1)
+        self._listener.settimeout(3)
+        self.port = self._listener.getsockname()[1]
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def _run(self):
+        try:
+            conn, _ = self._listener.accept()
+            with conn:
+                request = b""
+                while not request.endswith(b"\n"):
+                    chunk = conn.recv(65536)
+                    if not chunk:
+                        break
+                    request += chunk
+                json.loads(request.decode("utf-8"))
+                conn.sendall(self._payload)
+        except Exception as exc:
+            self.errors.append(exc)
+        finally:
+            self._listener.close()
+            self._done.set()
+
+    def finish(self):
+        assert self._done.wait(5), "raw loopback server did not finish"
+        self._thread.join(timeout=1)
+        assert self.errors == []
 
 
 def pixel_response(values, width, height, slice_count=1, **overrides):
@@ -86,6 +127,18 @@ def test_send_is_compatibility_alias(monkeypatch):
         "result": {"command": "get_image_info"},
     }
     assert calls == [{"command": "get_image_info"}]
+
+
+@pytest.mark.parametrize("terminator", [b"", b"\n"])
+def test_fallback_client_rejects_oversize_reply_before_decode(
+        monkeypatch, terminator):
+    monkeypatch.setattr(pixels, "MAX_REPLY_FRAME_BYTES", 64)
+    server = RawLoopbackServer(b"x" * 65 + terminator)
+
+    with pytest.raises(ValueError, match="reply frame exceeds 64 bytes"):
+        pixels._socket_command(
+            {"command": "ping"}, host="127.0.0.1", port=server.port, timeout=2)
+    server.finish()
 
 
 def test_get_pixels_builds_payload_and_decodes_2d(monkeypatch):

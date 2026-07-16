@@ -15,8 +15,8 @@ import static org.junit.Assert.assertTrue;
 /**
  * Phase E acceptance: Ollama daemon URL is sanity-checked via {@code GET
  * /api/tags} with a 2-second timeout before save (Phase E risk register —
- * "Ollama daemon URL trust"). Cloud-flow saves only the cloud token; it does
- * not pollute env with an irrelevant daemon URL.
+ * "Ollama daemon URL trust"). Cloud sign-in is owned by Ollama and the
+ * wizard does not collect or save its token.
  */
 public class LocalRuntimeWizardTest {
 
@@ -53,7 +53,7 @@ public class LocalRuntimeWizardTest {
     }
 
     @Test
-    public void cloudFlowSavesOnlyOllamaApiKey() throws IOException {
+    public void credentialStoreCanReadLegacyCloudKeyWithoutDaemonUrl() throws IOException {
         Path tmp = Files.createTempDirectory("ollama-cloud");
         ProviderCredentials creds = new ProviderCredentials(tmp);
         creds.saveApiKey("ollama-cloud", "cloud-token");

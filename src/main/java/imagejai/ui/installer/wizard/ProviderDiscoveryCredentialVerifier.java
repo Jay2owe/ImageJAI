@@ -19,10 +19,11 @@ import java.util.Map;
  * succeeds. {@link #verify(String, int)} remains available for re-checking an
  * already-saved credential.
  *
- * <p>Curated-only providers ({@link ProviderDiscovery#CURATED_ONLY} —
- * Ollama Cloud, Perplexity) skip the probe and report success: there is no live
- * endpoint to test against, so the wizard's "Save & test" button cannot do
- * better than trust the curated catalogue (see 02 §6).
+ * <p>Ollama Cloud has no candidate-token endpoint in the discovery client.
+ * Its authentication state is owned by {@code ollama signin}, so a pasted
+ * token is explicitly reported as unverified and can never pass the wizard's
+ * validate-before-persist gate. Other curated-only providers retain their
+ * catalogue-only result for existing non-Ollama setup flows.
  */
 public final class ProviderDiscoveryCredentialVerifier implements CredentialVerifier {
 
@@ -49,6 +50,11 @@ public final class ProviderDiscoveryCredentialVerifier implements CredentialVeri
     public Result verifyCandidate(String providerKey, String candidate, int timeoutMs) {
         if (providerKey == null || providerKey.isEmpty()) {
             return Result.failure("no provider key supplied");
+        }
+        if ("ollama-cloud".equals(providerKey)) {
+            return Result.failure("unverified: Ollama Cloud has no authenticated "
+                    + "candidate-token endpoint; token was not saved. Run 'ollama signin' "
+                    + "and let Ollama manage the sign-in state");
         }
         if (ProviderDiscovery.CURATED_ONLY.contains(providerKey)) {
             return Result.success(

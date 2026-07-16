@@ -5,7 +5,6 @@ import imagejai.ui.installer.MultiProviderPanel;
 import imagejai.ui.installer.ProviderCredentials;
 import org.junit.Test;
 
-import javax.swing.JPasswordField;
 import java.lang.reflect.Field;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -17,9 +16,10 @@ import static org.junit.Assert.assertTrue;
 public class LocalRuntimeWizardSecurityTest {
 
     @Test
-    public void cloudTokenUsesMaskedPasswordField() {
-        JPasswordField field = LocalRuntimeWizard.cloudTokenField();
-        assertTrue(field.getEchoChar() != 0);
+    public void cloudInstructionsDelegateAuthenticationAndPromiseNoStorage() {
+        String instructions = LocalRuntimeWizard.cloudSignInInstructions();
+        assertTrue(instructions.contains("ollama signin"));
+        assertTrue(instructions.contains("does not receive, verify, or store"));
     }
 
     @Test
@@ -68,6 +68,26 @@ public class LocalRuntimeWizardSecurityTest {
         assertFalse(result.ok);
         assertFalse(result.message.contains(candidate));
         assertTrue(result.message.contains("[REDACTED]"));
+        assertTrue(credentials.read("ollama-cloud").isEmpty());
+    }
+
+    @Test
+    public void productionVerifierCannotPersistArbitraryCloudCandidate() throws Exception {
+        Path root = Files.createTempDirectory("ollama-cloud-production-reject");
+        ProviderCredentials credentials = new ProviderCredentials(root);
+        LocalRuntimeWizard wizard = wizard(credentials,
+                new ProviderDiscoveryCredentialVerifier(credentials,
+                        (endpoint, timeout) -> {
+                            throw new AssertionError("cloud verification must not hit network");
+                        }));
+
+        CredentialVerifier.ValidationWorker worker =
+                wizard.cloudValidationWorker("arbitrary-token", null);
+        worker.execute();
+        CredentialVerifier.Result result = worker.get();
+
+        assertFalse(result.ok);
+        assertTrue(result.message.contains("unverified"));
         assertTrue(credentials.read("ollama-cloud").isEmpty());
     }
 

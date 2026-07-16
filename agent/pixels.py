@@ -35,6 +35,7 @@ try:
 except ValueError:
     PORT = 7746
 TIMEOUT = 60
+MAX_REPLY_FRAME_BYTES = 32 * 1024 * 1024
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 TMP_DIR = os.path.join(SCRIPT_DIR, ".tmp")
 
@@ -78,6 +79,18 @@ def _socket_command(cmd, host=HOST, port=PORT, timeout=TIMEOUT):
                 if not chunk:
                     break
                 data += chunk
+                newline = data.find(b"\n")
+                if newline >= 0:
+                    if newline > MAX_REPLY_FRAME_BYTES:
+                        raise ValueError(
+                            "ImageJAI reply frame exceeds {} bytes".format(
+                                MAX_REPLY_FRAME_BYTES))
+                    data = data[:newline]
+                    break
+                if len(data) > MAX_REPLY_FRAME_BYTES:
+                    raise ValueError(
+                        "ImageJAI reply frame exceeds {} bytes".format(
+                            MAX_REPLY_FRAME_BYTES))
             except socket.timeout:
                 break
         return json.loads(data.decode("utf-8"))
