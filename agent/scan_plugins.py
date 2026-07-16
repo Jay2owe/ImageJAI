@@ -6,17 +6,29 @@ Run this once at the start of each session:
     python scan_plugins.py
 """
 
-import socket
 import json
 import os
 import re
 import gzip
 import xml.etree.ElementTree as ET
 
-HOST = "localhost"
-PORT = 7746
+HOST = os.environ.get("IMAGEJAI_TCP_HOST", "localhost")
+try:
+    PORT = int(os.environ.get("IMAGEJAI_TCP_PORT", "7746"))
+except ValueError:
+    PORT = 7746
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 TMP_DIR = os.path.join(SCRIPT_DIR, ".tmp")
+
+try:
+    from .ij import imagej_command as _imagej_command
+except ImportError:
+    try:
+        from ij import imagej_command as _imagej_command
+    except ImportError as exc:
+        raise RuntimeError(
+            "scan_plugins.py requires the authenticated agent/ij.py client"
+        ) from exc
 
 
 def _configured_fiji_home():
@@ -33,22 +45,8 @@ DB_XML_GZ = os.path.join(FIJI_HOME, "db.xml.gz") if FIJI_HOME else ""
 
 
 def send(cmd):
-    """Send a JSON command to ImageJ TCP server."""
-    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    s.settimeout(45)
-    s.connect((HOST, PORT))
-    s.sendall((json.dumps(cmd) + "\n").encode("utf-8"))
-    data = b""
-    while True:
-        try:
-            chunk = s.recv(65536)
-            if not chunk:
-                break
-            data += chunk
-        except socket.timeout:
-            break
-    s.close()
-    return json.loads(data.decode("utf-8"))
+    """Send through ij.py's bounded, authenticated durable session."""
+    return _imagej_command(cmd, host=HOST, port=PORT, timeout=45)
 
 
 def scan_commands():
@@ -60,14 +58,19 @@ def scan_commands():
     machine-generated source — write_commands_md regenerates the .md from it.
     """
     os.makedirs(TMP_DIR, exist_ok=True)
-    tmpfile = os.path.join(TMP_DIR, "commands.raw.txt").replace("\\", "/")
-    macro = (
-        'List.setCommands; cmds = List.getList; '
-        'f = File.open("' + tmpfile + '"); '
-        'print(f, cmds); File.close(f);'
-    )
+    # Return the inventory over the authenticated response. The Python helper
+    # owns its .tmp cache; the Fiji macro never receives a host filesystem path.
+    macro = 'List.setCommands; return List.getList;'
     r = send({"command": "execute_macro", "code": macro})
     if r.get("ok") and r.get("result", {}).get("success"):
+        raw_path = os.path.join(TMP_DIR, "commands.raw.txt")
+        output = r.get("result", {}).get("output", "")
+        if not isinstance(output, str):
+            output = str(output)
+        with open(raw_path, "w", encoding="utf-8", newline="\n") as f:
+            f.write(output)
+            if output and not output.endswith("\n"):
+                f.write("\n")
         print("Saved raw command dump to .tmp/commands.raw.txt")
     else:
         print("WARNING: Could not enumerate commands:",

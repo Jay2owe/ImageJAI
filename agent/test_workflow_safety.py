@@ -102,6 +102,12 @@ class FakeFiji:
             self.active = selected[-1]
         return {"ok": True, "result": {"success": True, "output": "", "newImages": []}}
 
+    def open_image(self, path, series=None, timeout=120):
+        self.calls.append(("open_image", path, series, timeout))
+        self.images.append(path)
+        self.active = path
+        return {"ok": True, "result": {"success": True, "opened": True}}
+
 
 def assert_user_state(fake):
     assert fake.images == ["User image"]
@@ -184,9 +190,9 @@ def test_guard_refuses_to_start_when_snapshot_is_unavailable(tmp_path):
 def test_multiseries_open_enumerates_metadata_and_opens_only_first_series():
     fake = FakeFiji()
     assert train_agent._open_image(fake, "C:/data/container.lif") is True
-    macro_calls = [code for kind, code in fake.calls if kind == "macro"]
-    assert any("series_1" in code for code in macro_calls)
-    assert all("open_all_series" not in code for code in macro_calls)
+    macro_calls = [call[1] for call in fake.calls if call[0] == "macro"]
+    assert macro_calls == []
+    assert ("open_image", "C:/data/container.lif", 0, 120) in fake.calls
     assert fake._imagejai_last_series_count == 3
 
 

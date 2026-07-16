@@ -31,6 +31,11 @@ from pathlib import Path
 import ollama
 
 try:
+    from .tcp_frames import recv_bounded
+except ImportError:
+    from tcp_frames import recv_bounded
+
+try:
     from prompt_toolkit import prompt as _pt_prompt
     from prompt_toolkit.completion import WordCompleter
     from prompt_toolkit.formatted_text import ANSI
@@ -140,19 +145,16 @@ def _tcp(port: int, cmd: str, timeout: float = 5) -> str:
     try:
         with socket.create_connection(("127.0.0.1", port), timeout=timeout) as s:
             s.sendall(f"{cmd}\n".encode())
-            chunks = []
-            while True:
-                try:
-                    data = s.recv(8192)
-                    if not data:
-                        break
-                    chunks.append(data.decode(errors="replace"))
-                except socket.timeout:
-                    break
-            reply = "".join(chunks).strip()
+            try:
+                raw = recv_bounded(s)
+            except socket.timeout:
+                raw = b""
+            reply = raw.decode(errors="replace").strip()
             if reply:
                 return reply
             return f"ACCEPTED_NO_REPLY (port {port}) — service accepted '{cmd[:60]}' but returned no data."
+    except ValueError as e:
+        return f"ERROR: service on port {port} returned an invalid reply ({e})"
     except (ConnectionRefusedError, OSError) as e:
         return f"ERROR: service on port {port} not reachable ({e})"
 
@@ -179,22 +181,17 @@ def _ac_tcp(cmd: str, timeout: float = 15) -> str:
             if token:
                 s.sendall(f"{token}\n".encode())
             s.sendall(f"{cmd}\n".encode())
-            chunks = []
-            while True:
-                try:
-                    data = s.recv(65536)
-                    if not data:
-                        break
-                    chunks.append(data)
-                    if b"\n" in b"".join(chunks):
-                        break
-                except socket.timeout:
-                    break
-            raw = b"".join(chunks).decode("utf-8", errors="replace").strip()
+            try:
+                reply = recv_bounded(s, newline=True)
+            except socket.timeout:
+                reply = b""
+            raw = reply.decode("utf-8", errors="replace").strip()
             try:
                 return json.loads(raw).get("result", raw)
             except (json.JSONDecodeError, ValueError):
                 return raw
+    except ValueError as e:
+        return f"ERROR: AgentConsole returned an invalid reply ({e})"
     except (ConnectionRefusedError, OSError) as e:
         return f"ERROR: AgentConsole not reachable ({e})"
 

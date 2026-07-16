@@ -1864,23 +1864,35 @@ def _task_bioformats_import(runner):
 
     learnings.append("Bio-Formats is installed and accessible")
 
-    # Test 2: Open a TIFF using Bio-Formats (to test the macro syntax)
-    # Use a known sample image - save Blobs as temp tif then reopen via Bio-Formats
-    import tempfile
+    # Test 2: Open a TIFF through the governed Bio-Formats path. Macro
+    # filesystem primitives are intentionally blocked at the TCP boundary, so
+    # this operator-run practice task uses the explicit host-code command only
+    # to create its disposable fixture, then opens it through open_image.
     temp_tif = os.path.join(TMP_DIR, "bioformats_test.tif").replace("\\", "/")
 
     runner._run_macro('run("Blobs");', "Open Blobs")
-    resp = runner._run_macro(
-        'saveAs("Tiff", "%s");' % temp_tif,
-        "Save as TIFF for Bio-Formats test"
-    )
+    save_script = """
+import ij.IJ
+import ij.WindowManager
+def image = WindowManager.getCurrentImage()
+if (image == null) throw new IllegalStateException("No image is open")
+IJ.saveAsTiff(image, %s)
+return "saved"
+""" % json.dumps(temp_tif)
+    try:
+        resp = _ij_module.run_groovy(save_script)
+    except Exception as exc:
+        resp = {"ok": False, "error": str(exc)}
 
     if runner._macro_ok(resp):
         runner._run_macro('run("Close All");')
 
-        # Reopen with Bio-Formats
-        bf_macro = 'run("Bio-Formats Importer", "open=[%s] color_mode=Default view=Hyperstack");' % temp_tif
-        resp = runner._run_macro(bf_macro, "Bio-Formats Importer on TIFF")
+        # A series index selects Bio-Formats inside the server. The path is a
+        # first-class command field rather than executable macro source.
+        try:
+            resp = _ij_module.open_image(temp_tif, series=0, timeout=120)
+        except Exception as exc:
+            resp = {"ok": False, "error": str(exc)}
 
         bf_open_ok = runner._macro_ok(resp)
 
@@ -1905,7 +1917,7 @@ def _task_bioformats_import(runner):
             })
             learnings.append("Bio-Formats TIFF import works: %dx%d %s" % (
                 img_info.get("width", 0), img_info.get("height", 0), img_info.get("type", "?")))
-            learnings.append('Syntax: run("Bio-Formats Importer", "open=[path] color_mode=Default view=Hyperstack");')
+            learnings.append("Use open_image(path, series=0) for governed Bio-Formats import")
             runner._capture("practice_bioformats_opened")
         else:
             error_msg = resp.get("error", resp.get("result", {}).get("error", "unknown"))
@@ -1915,19 +1927,7 @@ def _task_bioformats_import(runner):
                 "result": {"opened": False, "error": error_msg},
                 "passed": False,
             })
-            learnings.append("Bio-Formats Importer macro failed: %s" % error_msg)
-
-    # Test 3: Check supported formats via macro
-    resp = runner._run_macro(
-        'run("Bio-Formats Importer");',
-        "Open Bio-Formats dialog (no file)"
-    )
-    # This will open a file chooser dialog -- close it
-    try:
-        from ij import close_dialogs
-        close_dialogs()
-    except Exception:
-        pass
+            learnings.append("Governed Bio-Formats import failed: %s" % error_msg)
 
     learnings.append("Bio-Formats supports: .nd2 (Nikon), .lif (Leica), .czi (Zeiss), .ome.tif, etc.")
     learnings.append("For batch: use windowless mode: open=[path] autoscale color_mode=Default view=Hyperstack stack_order=XYCZT")
@@ -1936,7 +1936,7 @@ def _task_bioformats_import(runner):
     return {
         "status": "pass" if any_passed else "fail",
         "attempts": attempts,
-        "best_approach": 'run("Bio-Formats Importer", "open=[path] color_mode=Default view=Hyperstack")',
+        "best_approach": "open_image(path, series=0)",
         "learnings": learnings,
     }
 

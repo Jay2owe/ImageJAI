@@ -317,16 +317,17 @@ try {
         if series_count < 1:
             return False
         setattr(ij, "_imagejai_last_series_count", series_count)
-        macro_path = filepath_escaped.replace("]", "\\]")
-        macro = (
-            'run("Bio-Formats Importer", '
-            '"open=[' + macro_path + '] '
-            'autoscale=false color_mode=Default view=Hyperstack '
-            'stack_order=XYCZT series_1");'
-        )
+    # Host files enter Fiji through the governed open_image command, never a
+    # macro filesystem primitive. Series zero is the former `series_1` choice.
+    series = 0 if ext in BIOFORMATS_EXTENSIONS else None
+    if hasattr(ij, "open_image"):
+        resp = ij.open_image(filepath, series=series, timeout=120)
     else:
-        macro = 'open("' + filepath_escaped + '");'
-    resp = ij.execute_macro(macro)
+        request = {"command": "open_image", "path": filepath,
+                   "timeout_ms": 120000}
+        if series is not None:
+            request["series"] = series
+        resp = ij.imagej_command(request, timeout=120)
     if not resp.get("ok"):
         return False
     result = resp.get("result", {})

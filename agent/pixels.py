@@ -18,7 +18,6 @@ As a module:
     cells = find_bright_objects(data, meta)     # returns list of {x, y, area, mean}
 """
 
-import socket
 import json
 import base64
 import binascii
@@ -35,16 +34,15 @@ try:
 except ValueError:
     PORT = 7746
 TIMEOUT = 60
-MAX_REPLY_FRAME_BYTES = 32 * 1024 * 1024
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 TMP_DIR = os.path.join(SCRIPT_DIR, ".tmp")
 
 try:
-    from ij import imagej_command as _ij_imagej_command
-except Exception:
+    from .ij import imagej_command as _ij_imagej_command
+except ImportError:
     try:
-        from .ij import imagej_command as _ij_imagej_command
-    except Exception:
+        from ij import imagej_command as _ij_imagej_command
+    except ImportError:
         _ij_imagej_command = None
 
 # REGRESSION GUARD: Past pixel workflows existed only as CLI branches, so importing agents could not reuse them.
@@ -65,47 +63,12 @@ __all__ = [
 ]
 
 
-def _socket_command(cmd, host=HOST, port=PORT, timeout=TIMEOUT):
-    """Fallback JSON-over-TCP client used when ij.py cannot be imported."""
-    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    s.settimeout(timeout)
-    try:
-        s.connect((host, port))
-        s.sendall((json.dumps(cmd) + "\n").encode("utf-8"))
-        data = b""
-        while True:
-            try:
-                chunk = s.recv(65536)
-                if not chunk:
-                    break
-                data += chunk
-                newline = data.find(b"\n")
-                if newline >= 0:
-                    if newline > MAX_REPLY_FRAME_BYTES:
-                        raise ValueError(
-                            "ImageJAI reply frame exceeds {} bytes".format(
-                                MAX_REPLY_FRAME_BYTES))
-                    data = data[:newline]
-                    break
-                if len(data) > MAX_REPLY_FRAME_BYTES:
-                    raise ValueError(
-                        "ImageJAI reply frame exceeds {} bytes".format(
-                            MAX_REPLY_FRAME_BYTES))
-            except socket.timeout:
-                break
-        return json.loads(data.decode("utf-8"))
-    finally:
-        try:
-            s.close()
-        except Exception:
-            pass
-
-
 def imagej_command(cmd, host=HOST, port=PORT, timeout=TIMEOUT):
-    """Send a JSON command to ImageJAI, preferring ij.py's shared client."""
-    if _ij_imagej_command is not None:
-        return _ij_imagej_command(cmd, host=host, port=port, timeout=timeout)
-    return _socket_command(cmd, host=host, port=port, timeout=timeout)
+    """Send through ij.py's bounded, authenticated durable session."""
+    if _ij_imagej_command is None:
+        raise RuntimeError(
+            "pixels.py requires the authenticated agent/ij.py client")
+    return _ij_imagej_command(cmd, host=host, port=port, timeout=timeout)
 
 
 def send(cmd):

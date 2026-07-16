@@ -13,13 +13,15 @@ import hashlib
 import json
 import os
 import re
-import socket
 import sys
 import tempfile
 import unicodedata
 
-HOST = "localhost"
-PORT = 7746
+HOST = os.environ.get("IMAGEJAI_TCP_HOST", "localhost")
+try:
+    PORT = int(os.environ.get("IMAGEJAI_TCP_PORT", "7746"))
+except ValueError:
+    PORT = 7746
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 CACHE_DIR = os.path.join(SCRIPT_DIR, ".tmp", "plugin_args")
 CACHE_SCHEMA_VERSION = 2
@@ -47,13 +49,13 @@ __all__ = [
 def _load_ij_probe_command():
     """Return ij.probe_command when ij.py is importable in this context."""
     try:
-        from ij import probe_command
+        from .ij import probe_command
         return probe_command
     except ImportError:
         pass
 
     try:
-        from .ij import probe_command
+        from ij import probe_command
         return probe_command
     except ImportError:
         return None
@@ -62,47 +64,25 @@ def _load_ij_probe_command():
 def _load_ij_imagej_command():
     """Return ij.imagej_command when ij.py is importable in this context."""
     try:
-        from ij import imagej_command
+        from .ij import imagej_command
         return imagej_command
     except ImportError:
         pass
 
     try:
-        from .ij import imagej_command
+        from ij import imagej_command
         return imagej_command
     except ImportError:
         return None
 
 
-def _raw_send(cmd):
-    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    s.settimeout(15)
-    try:
-        s.connect((HOST, PORT))
-        s.sendall((json.dumps(cmd) + "\n").encode("utf-8"))
-        data = b""
-        while True:
-            try:
-                chunk = s.recv(65536)
-                if not chunk:
-                    break
-                data += chunk
-            except socket.timeout:
-                break
-        return json.loads(data.decode("utf-8"))
-    finally:
-        try:
-            s.close()
-        except Exception:
-            pass
-
-
 def send(cmd):
-    """Legacy low-level helper for sending a JSON command to ImageJAI."""
+    """Legacy alias routed through ij.py's authenticated shared client."""
     imagej_command = _load_ij_imagej_command()
-    if imagej_command is not None:
-        return imagej_command(cmd, timeout=15)
-    return _raw_send(cmd)
+    if imagej_command is None:
+        raise RuntimeError(
+            "probe_plugin.py requires the authenticated agent/ij.py client")
+    return imagej_command(cmd, host=HOST, port=PORT, timeout=15)
 
 
 def _request_probe_command(plugin_name):

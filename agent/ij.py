@@ -6,6 +6,7 @@ Usage:
     python ij.py ping
     python ij.py state
     python ij.py info
+    python ij.py open path/to/image.tif [series]
     python ij.py results
     python ij.py capture [name]
     python ij.py macro "run('Blobs (25K)');"
@@ -15,10 +16,9 @@ Usage:
     # The `run` subcommand takes a single string argument containing a
     # |||-delimited chain. You MUST quote the whole chain so your shell doesn't
     # word-split on spaces or mangle the embedded quotes:
-    #   bash/zsh:  python ij.py run 'open("x.tif") ||| run("Measure") ||| capture done'
-    #   cmd.exe:   python ij.py run "open(""x.tif"") ||| run(""Measure"") ||| capture done"
-    #   powershell: python ij.py run 'open("x.tif") ||| run("Measure") ||| capture done'
-    python ij.py run 'open("x.tif") ||| run("Measure") ||| capture done'
+    # Open host files through the governed command, then run macro-only chains:
+    #   python ij.py open x.tif
+    python ij.py run 'run("Measure") ||| capture done'
     python ij.py explore Otsu Triangle Li
     python ij.py log
     python ij.py histogram
@@ -144,6 +144,7 @@ __all__ = [
     "get_roi_state",
     "get_display_state",
     "get_console",
+    "open_image",
     "execute_macro",
     "run_script",
     "run_groovy",
@@ -588,25 +589,37 @@ class ImageJSession:
             try:
                 sock.connect((self.host, self.port))
                 sock.sendall((json.dumps(request) + "\n").encode("utf-8"))
-                buf = b""
+                buf = bytearray()
+                frame_start = 0
                 while True:
-                    chunk = sock.recv(8192)
+                    remaining = MAX_EVENT_FRAME_BYTES - (len(buf) - frame_start)
+                    chunk = sock.recv(min(8192, remaining + 1))
                     if not chunk:
                         break
-                    buf += chunk
+                    buf.extend(chunk)
                     while True:
-                        newline = buf.find(b"\n")
+                        newline = buf.find(b"\n", frame_start)
                         if newline < 0:
-                            if len(buf) > MAX_EVENT_FRAME_BYTES:
+                            if len(buf) - frame_start > MAX_EVENT_FRAME_BYTES:
                                 raise ValueError(
                                     "ImageJAI event frame exceeds {} bytes".format(
                                         MAX_EVENT_FRAME_BYTES))
                             break
-                        if newline > MAX_EVENT_FRAME_BYTES:
+                        if newline - frame_start > MAX_EVENT_FRAME_BYTES:
                             raise ValueError(
                                 "ImageJAI event frame exceeds {} bytes".format(
                                     MAX_EVENT_FRAME_BYTES))
-                        line, buf = buf[:newline], buf[newline + 1:]
+                        line = bytes(buf[frame_start:newline])
+                        frame_start = newline + 1
+                        # Compact only after consuming a meaningful prefix.
+                        # Tracking an offset avoids copying the entire pending
+                        # buffer once per event when many frames arrive at once.
+                        if frame_start == len(buf):
+                            buf.clear()
+                            frame_start = 0
+                        elif frame_start >= 65536:
+                            del buf[:frame_start]
+                            frame_start = 0
                         line = line.strip()
                         if not line:
                             continue
@@ -730,22 +743,23 @@ class ImageJSession:
         return []
 
     def _exchange(self, request, timeout):
-        data = b""
+        data = bytearray()
         with socket.create_connection((self.host, self.port), timeout=timeout) as sock:
             sock.settimeout(timeout)
             sock.sendall((json.dumps(request) + "\n").encode("utf-8"))
             while True:
-                chunk = sock.recv(65536)
+                remaining = MAX_REPLY_FRAME_BYTES - len(data)
+                chunk = sock.recv(min(65536, remaining + 1))
                 if not chunk:
                     break
-                data += chunk
+                data.extend(chunk)
                 newline = data.find(b"\n")
                 if newline >= 0:
                     if newline > MAX_REPLY_FRAME_BYTES:
                         raise ValueError(
                             "ImageJAI reply frame exceeds {} bytes".format(
                                 MAX_REPLY_FRAME_BYTES))
-                    data = data[:newline]
+                    del data[newline:]
                     break
                 if len(data) > MAX_REPLY_FRAME_BYTES:
                     raise ValueError(
@@ -753,7 +767,7 @@ class ImageJSession:
                             MAX_REPLY_FRAME_BYTES))
         if not data.strip():
             raise ConnectionError("empty reply from ImageJAI")
-        return json.loads(data.decode("utf-8"))
+        return json.loads(bytes(data).decode("utf-8"))
 
     def _expired_locked(self):
         if self._expires_at is None:
@@ -934,6 +948,13 @@ def get_display_state():
 
 def get_console(tail=2000):
     return imagej_command({"command": "get_console", "tail": tail})
+
+
+def open_image(path, series=None, timeout=120):
+    request = {"command": "open_image", "path": os.fspath(path)}
+    if series is not None:
+        request["series"] = int(series)
+    return imagej_command(request, timeout=timeout)
 
 
 def execute_macro(code):
@@ -1353,6 +1374,13 @@ def main():
 
         elif cmd == "info":
             print(json.dumps(get_image_info(), indent=2))
+
+        elif cmd == "open":
+            if len(sys.argv) < 3:
+                print("Usage: python ij.py open path/to/image [series]")
+                sys.exit(1)
+            series = int(sys.argv[3]) if len(sys.argv) > 3 else None
+            print(json.dumps(open_image(sys.argv[2], series=series), indent=2))
 
         elif cmd == "results":
             resp = get_results_table()

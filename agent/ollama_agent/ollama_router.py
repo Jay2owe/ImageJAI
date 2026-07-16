@@ -26,6 +26,11 @@ import time
 from pathlib import Path
 
 try:
+    from .tcp_frames import recv_bounded
+except ImportError:
+    from tcp_frames import recv_bounded
+
+try:
     import ollama
 except ImportError:
     ollama = None
@@ -81,16 +86,13 @@ def _tcp(port: int, cmd: str, timeout: float = 5) -> str:
     try:
         with socket.create_connection(("127.0.0.1", port), timeout=timeout) as s:
             s.sendall(f"{cmd}\n".encode())
-            chunks = []
-            while True:
-                try:
-                    data = s.recv(8192)
-                    if not data:
-                        break
-                    chunks.append(data.decode(errors="replace"))
-                except socket.timeout:
-                    break
-            return "".join(chunks).strip() or "OK"
+            try:
+                reply = recv_bounded(s)
+            except socket.timeout:
+                reply = b""
+            return reply.decode(errors="replace").strip() or "OK"
+    except ValueError as e:
+        return f"ERROR: service on port {port} returned an invalid reply ({e})"
     except (ConnectionRefusedError, OSError) as e:
         return f"ERROR: service on port {port} not reachable ({e})"
 

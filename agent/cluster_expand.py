@@ -16,7 +16,12 @@ from scipy.ndimage import binary_dilation, binary_erosion, generate_binary_struc
 from matplotlib.path import Path as MplPath
 from pathlib import Path
 from PIL import Image
-import socket, struct, json, base64
+import base64
+
+try:
+    from .ij import imagej_command as _imagej_command
+except ImportError:
+    from ij import imagej_command as _imagej_command
 
 AGENT_DIR = Path(__file__).parent
 TMP = AGENT_DIR / ".tmp"
@@ -30,18 +35,7 @@ CELL_DIAM_UM = 15.0
 
 
 def tcp(cmd, timeout=120):
-    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    s.settimeout(timeout)
-    s.connect(("localhost", 7746))
-    d = json.dumps(cmd).encode()
-    s.sendall(struct.pack(">I", len(d)) + d)
-    b = b""
-    while len(b) < 4: b += s.recv(4 - len(b))
-    n = struct.unpack(">I", b)[0]
-    r = b""
-    while len(r) < n: r += s.recv(min(65536, n - len(r)))
-    s.close()
-    return json.loads(r)
+    return _imagej_command(cmd, timeout=timeout)
 
 
 def macro(code):

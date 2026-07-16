@@ -2,12 +2,17 @@
 Cluster-based 3D cell segmentation — vectorized, robust I/O.
 """
 
-import json, socket, struct, sys, csv, base64, time
+import sys, csv, base64, time
 import numpy as np
 from sklearn.cluster import DBSCAN
 from scipy.spatial import ConvexHull, Delaunay
 from matplotlib.path import Path as MplPath
 from pathlib import Path
+
+try:
+    from .ij import imagej_command as _imagej_command
+except ImportError:
+    from ij import imagej_command as _imagej_command
 
 AGENT_DIR = Path(__file__).parent
 TMP_DIR = AGENT_DIR / ".tmp"
@@ -20,18 +25,7 @@ SINGLE_R = 5
 
 
 def tcp(cmd, timeout=120):
-    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    s.settimeout(timeout)
-    s.connect(("localhost", 7746))
-    d = json.dumps(cmd).encode()
-    s.sendall(struct.pack(">I", len(d)) + d)
-    b = b""
-    while len(b) < 4: b += s.recv(4 - len(b))
-    n = struct.unpack(">I", b)[0]
-    r = b""
-    while len(r) < n: r += s.recv(min(65536, n - len(r)))
-    s.close()
-    return json.loads(r)
+    return _imagej_command(cmd, timeout=timeout)
 
 
 def macro(code, timeout=120):
@@ -208,8 +202,8 @@ def save_and_import(stack, title):
     import tifffile
     tif_path = str(TMP_DIR / f"{title}.tif")
     tifffile.imwrite(tif_path, stack.astype(np.uint16), imagej=True)
-    tif_fwd = tif_path.replace("\\", "/")
-    macro(f'open("{tif_fwd}"); rename("{title}");')
+    tcp({"command": "open_image", "path": tif_path})
+    macro(f'rename("{title}");')
     print(f"  Opened '{title}'")
 
 
