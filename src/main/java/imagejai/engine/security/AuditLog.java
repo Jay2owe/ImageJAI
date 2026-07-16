@@ -36,7 +36,6 @@ import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
-import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * Append-only audit CSV writer for ImageJAI Data Governance.
@@ -72,6 +71,9 @@ public final class AuditLog {
     private final PathResolver pathResolver;
     private final ThreadPoolExecutor writer;
     private final ThreadPoolExecutor notifier;
+    private final Object writerLifecycleLock = new Object();
+    private final Object notifierLifecycleLock = new Object();
+    private final ArrayDeque<AuditRow> pendingWrites = new ArrayDeque<AuditRow>();
     private final ArrayDeque<AuditRow> recentRows = new ArrayDeque<AuditRow>();
     private final CopyOnWriteArrayList<Listener> listeners =
             new CopyOnWriteArrayList<Listener>();
@@ -81,7 +83,11 @@ public final class AuditLog {
     private final AtomicLong rejectedListeners = new AtomicLong(0L);
     private final AtomicLong listenerFailures = new AtomicLong(0L);
     private final AtomicLong notificationVersion = new AtomicLong(0L);
-    private final AtomicBoolean notificationScheduled = new AtomicBoolean(false);
+    private final AtomicLong completedWriterBatches = new AtomicLong(0L);
+    private boolean writerDrainScheduled;
+    private boolean notificationScheduled;
+    private volatile Runnable beforeWriterDrainHookForTest;
+    private volatile Runnable beforeWriterIdleHookForTest;
 
     public AuditLog(Path csvPath) {
         this(new FixedPathResolver(csvPath));
@@ -113,27 +119,115 @@ public final class AuditLog {
         remember(boundedRow);
         notificationVersion.incrementAndGet();
         notifyListenersAsync();
+        enqueueWrite(boundedRow);
+    }
+
+    private void enqueueWrite(AuditRow row) {
+        synchronized (writerLifecycleLock) {
+            if (writer.isShutdown() || pendingWrites.size() >= WRITER_QUEUE_CAPACITY) {
+                droppedWriterTasks.incrementAndGet();
+                System.err.println("[ImageJAI-Audit] append queue full or closed; "
+                        + "row retained in memory only");
+                return;
+            }
+            pendingWrites.addLast(row);
+            if (!writerDrainScheduled) {
+                scheduleWriterDrainLocked();
+            }
+        }
+    }
+
+    /** Must be called while holding {@link #writerLifecycleLock}. */
+    private void scheduleWriterDrainLocked() {
+        writerDrainScheduled = true;
         try {
             writer.submit(new Runnable() {
                 @Override
                 public void run() {
-                    Path csvPath = resolveCsvPath();
-                    if (csvPath == null) {
-                        return;
-                    }
-                    try {
-                        writeSync(csvPath, boundedRow);
-                    } catch (IOException e) {
-                        System.err.println("[ImageJAI-Audit] append failed: " + e.getMessage());
-                    }
+                    drainWriterQueue();
                 }
             });
         } catch (RejectedExecutionException e) {
-            droppedWriterTasks.incrementAndGet();
-            System.err.println("[ImageJAI-Audit] append queue full; row retained in memory only");
+            discardUnscheduledWritesLocked("append queue closed");
         } catch (RuntimeException e) {
-            droppedWriterTasks.incrementAndGet();
-            System.err.println("[ImageJAI-Audit] append scheduling failed: " + e.getMessage());
+            discardUnscheduledWritesLocked("append scheduling failed: " + e.getMessage());
+        }
+    }
+
+    /** Must be called while holding {@link #writerLifecycleLock}. */
+    private void discardUnscheduledWritesLocked(String reason) {
+        int discarded = pendingWrites.size();
+        pendingWrites.clear();
+        writerDrainScheduled = false;
+        droppedWriterTasks.addAndGet(discarded);
+        System.err.println("[ImageJAI-Audit] " + reason + "; " + discarded
+                + " row(s) retained in memory only");
+    }
+
+    private void drainWriterQueue() {
+        boolean handedOffIdle = false;
+        try {
+            Runnable hook = beforeWriterDrainHookForTest;
+            beforeWriterDrainHookForTest = null;
+            if (hook != null) {
+                hook.run();
+            }
+            while (true) {
+                List<AuditRow> batch = new ArrayList<AuditRow>();
+                synchronized (writerLifecycleLock) {
+                    if (pendingWrites.isEmpty()) {
+                        Runnable idleHook = beforeWriterIdleHookForTest;
+                        beforeWriterIdleHookForTest = null;
+                        if (idleHook != null) {
+                            idleHook.run();
+                        }
+                        // Admission and the active-drain transition are atomic.
+                        // An append after this point sees false and submits its own
+                        // drain before it can return successfully.
+                        writerDrainScheduled = false;
+                        handedOffIdle = true;
+                        return;
+                    }
+                    while (!pendingWrites.isEmpty()) {
+                        batch.add(pendingWrites.removeFirst());
+                    }
+                }
+                writeBatch(batch);
+                completedWriterBatches.incrementAndGet();
+            }
+        } finally {
+            if (!handedOffIdle) {
+                synchronized (writerLifecycleLock) {
+                    writerDrainScheduled = false;
+                    if (!pendingWrites.isEmpty()) {
+                        scheduleWriterDrainLocked();
+                    }
+                }
+            }
+        }
+    }
+
+    private void writeBatch(List<AuditRow> batch) {
+        Map<Path, List<AuditRow>> rowsByPath =
+                new LinkedHashMap<Path, List<AuditRow>>();
+        for (AuditRow row : batch) {
+            Path csvPath = resolveCsvPath();
+            if (csvPath == null) {
+                continue;
+            }
+            List<AuditRow> rows = rowsByPath.get(csvPath);
+            if (rows == null) {
+                rows = new ArrayList<AuditRow>();
+                rowsByPath.put(csvPath, rows);
+            }
+            rows.add(row);
+        }
+        for (Map.Entry<Path, List<AuditRow>> entry : rowsByPath.entrySet()) {
+            try {
+                writeBatchSync(entry.getKey(), entry.getValue());
+            } catch (IOException e) {
+                System.err.println("[ImageJAI-Audit] append failed: " + e.getMessage());
+            }
         }
     }
 
@@ -246,31 +340,56 @@ public final class AuditLog {
     public long rejectedListenerCount() { return rejectedListeners.get(); }
     public long listenerFailureCount() { return listenerFailures.get(); }
     public int listenerCount() { return listeners.size(); }
-    public int writerQueueSize() { return writer.getQueue().size(); }
+    public int writerQueueSize() {
+        synchronized (writerLifecycleLock) {
+            return pendingWrites.size();
+        }
+    }
     public int notifierQueueSize() { return notifier.getQueue().size(); }
 
     public void flushForTest() throws Exception {
-        Future<?> writeFuture = writer.submit(new Runnable() {
-            @Override
-            public void run() {
+        Future<?> writeFuture;
+        synchronized (writerLifecycleLock) {
+            if (!pendingWrites.isEmpty() && !writerDrainScheduled) {
+                scheduleWriterDrainLocked();
             }
-        });
-        writeFuture.get(5, TimeUnit.SECONDS);
-        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5L);
-        while (notificationScheduled.get() && System.nanoTime() < deadline) {
-            Thread.sleep(5L);
+            // Submission shares the lifecycle lock with append scheduling. The
+            // barrier therefore cannot overtake an accepted-but-not-yet-submitted drain.
+            writeFuture = writer.submit(new Runnable() {
+                @Override
+                public void run() {
+                }
+            });
         }
-        Future<?> notifyFuture = notifier.submit(new Runnable() {
-            @Override
-            public void run() {
+        writeFuture.get(5, TimeUnit.SECONDS);
+        Future<?> notifyFuture = null;
+        synchronized (notifierLifecycleLock) {
+            if (notificationScheduled) {
+                // The notification drain remains one executor task until it has
+                // observed a stable version. A fence behind it cannot overtake a
+                // coalesced update.
+                notifyFuture = notifier.submit(new Runnable() {
+                    @Override
+                    public void run() {
+                    }
+                });
             }
-        });
-        notifyFuture.get(5, TimeUnit.SECONDS);
+        }
+        if (notifyFuture != null) {
+            notifyFuture.get(5, TimeUnit.SECONDS);
+        }
     }
 
     public void shutdownAndAwait(long millis) {
-        writer.shutdown();
-        notifier.shutdown();
+        // Serialize shutdown with append admission. If append holds the lock first,
+        // its drain is submitted before shutdown; if shutdown wins, append observes
+        // the closed executor and is rejected before entering pendingWrites.
+        synchronized (writerLifecycleLock) {
+            writer.shutdown();
+        }
+        synchronized (notifierLifecycleLock) {
+            notifier.shutdown();
+        }
         try {
             writer.awaitTermination(Math.max(0L, millis), TimeUnit.MILLISECONDS);
             notifier.awaitTermination(Math.max(0L, millis), TimeUnit.MILLISECONDS);
@@ -383,32 +502,40 @@ public final class AuditLog {
         if (listeners.isEmpty()) {
             return;
         }
-        if (!notificationScheduled.compareAndSet(false, true)) {
-            droppedNotifications.incrementAndGet();
-            return;
-        }
-        try {
-            notifier.submit(new Runnable() {
-                @Override
-                public void run() {
-                    long observed = notificationVersion.get();
-                    try {
-                        // Snapshot only after bounded executor admission.
-                        notifyListeners(recent(DEFAULT_RECENT_LIMIT));
-                    } finally {
-                        notificationScheduled.set(false);
-                        if (notificationVersion.get() != observed) {
-                            notifyListenersAsync();
-                        }
+        synchronized (notifierLifecycleLock) {
+            if (notificationScheduled) {
+                droppedNotifications.incrementAndGet();
+                return;
+            }
+            notificationScheduled = true;
+            try {
+                notifier.submit(new Runnable() {
+                    @Override
+                    public void run() {
+                        drainNotifications();
                     }
+                });
+            } catch (RejectedExecutionException full) {
+                notificationScheduled = false;
+                droppedNotifications.incrementAndGet();
+            } catch (RuntimeException ignore) {
+                notificationScheduled = false;
+                droppedNotifications.incrementAndGet();
+            }
+        }
+    }
+
+    private void drainNotifications() {
+        while (true) {
+            long observed = notificationVersion.get();
+            // Snapshot only after bounded executor admission.
+            notifyListeners(recent(DEFAULT_RECENT_LIMIT));
+            synchronized (notifierLifecycleLock) {
+                if (notificationVersion.get() == observed) {
+                    notificationScheduled = false;
+                    return;
                 }
-            });
-        } catch (RejectedExecutionException full) {
-            notificationScheduled.set(false);
-            droppedNotifications.incrementAndGet();
-        } catch (RuntimeException ignore) {
-            notificationScheduled.set(false);
-            droppedNotifications.incrementAndGet();
+            }
         }
     }
 
@@ -457,18 +584,24 @@ public final class AuditLog {
     }
 
     private void writeSync(Path csvPath, AuditRow row) throws IOException {
+        writeBatchSync(csvPath, row == null
+                ? Collections.<AuditRow>emptyList()
+                : Collections.singletonList(row));
+    }
+
+    private void writeBatchSync(Path csvPath, List<AuditRow> rows) throws IOException {
         try {
-            writeWithLock(csvPath, row);
+            writeWithLock(csvPath, rows);
         } catch (IOException e) {
             Path sidecar = sidecarPath(csvPath);
             if (sidecar == null || sidecar.equals(csvPath)) {
                 throw e;
             }
-            writeWithLock(sidecar, row);
+            writeWithLock(sidecar, rows);
         }
     }
 
-    private void writeWithLock(Path path, AuditRow row) throws IOException {
+    private void writeWithLock(Path path, List<AuditRow> rows) throws IOException {
         Path parent = path.getParent();
         if (parent != null) {
             Files.createDirectories(parent);
@@ -485,9 +618,11 @@ public final class AuditLog {
                 if (channel.size() == 0L) {
                     write(channel, HEADER + System.lineSeparator());
                 }
-                if (row != null) {
+                if (rows != null && !rows.isEmpty()) {
                     channel.position(channel.size());
-                    write(channel, row.toCsvLine() + System.lineSeparator());
+                    for (AuditRow row : rows) {
+                        write(channel, row.toCsvLine() + System.lineSeparator());
+                    }
                 }
                 channel.force(true);
             } finally {
@@ -590,6 +725,18 @@ public final class AuditLog {
 
     static void setBeforeSummaryReadHookForTest(Runnable hook) {
         beforeSummaryReadHookForTest = hook;
+    }
+
+    void setBeforeWriterDrainHookForTest(Runnable hook) {
+        beforeWriterDrainHookForTest = hook;
+    }
+
+    void setBeforeWriterIdleHookForTest(Runnable hook) {
+        beforeWriterIdleHookForTest = hook;
+    }
+
+    long completedWriterBatchCountForTest() {
+        return completedWriterBatches.get();
     }
 
     private static final class CsvRecord {

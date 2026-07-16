@@ -19,6 +19,8 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
@@ -74,43 +76,123 @@ public class AuditLogTest {
     }
 
     @Test
-    public void concurrentAppendsProduceWellFormedRows() throws Exception {
+    public void concurrentAppendsAreBatchedAndProduceWellFormedRows() throws Exception {
         Path csv = tmp.newFolder("audit").toPath().resolve(AuditLog.FILE_NAME);
         final AuditLog log = new AuditLog(csv);
         ExecutorService pool = Executors.newFixedThreadPool(2);
         final CountDownLatch ready = new CountDownLatch(2);
         final CountDownLatch start = new CountDownLatch(1);
+        final CountDownLatch writerStarted = new CountDownLatch(1);
+        final CountDownLatch releaseWriter = new CountDownLatch(1);
+        log.setBeforeWriterDrainHookForTest(new Runnable() {
+            @Override
+            public void run() {
+                writerStarted.countDown();
+                try {
+                    releaseWriter.await(5, TimeUnit.SECONDS);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+            }
+        });
 
-        for (int t = 0; t < 2; t++) {
-            final int threadId = t;
-            pool.submit(new Runnable() {
+        try {
+            for (int t = 0; t < 2; t++) {
+                final int threadId = t;
+                pool.submit(new Runnable() {
+                    @Override
+                    public void run() {
+                        ready.countDown();
+                        try {
+                            start.await(5, TimeUnit.SECONDS);
+                        } catch (InterruptedException e) {
+                            Thread.currentThread().interrupt();
+                        }
+                        for (int i = 0; i < 100; i++) {
+                            log.append(row("s" + threadId, "cmd_" + i, "", ""));
+                        }
+                    }
+                });
+            }
+
+            assertTrue(ready.await(5, TimeUnit.SECONDS));
+            start.countDown();
+            assertTrue(writerStarted.await(5, TimeUnit.SECONDS));
+            pool.shutdown();
+            assertTrue(pool.awaitTermination(10, TimeUnit.SECONDS));
+            releaseWriter.countDown();
+            log.flushForTest();
+
+            List<String> lines = Files.readAllLines(csv, StandardCharsets.UTF_8);
+            assertEquals(201, lines.size());
+            for (int i = 1; i < lines.size(); i++) {
+                assertEquals(12, AuditRow.parseCsvLine(lines.get(i)).size());
+            }
+            assertEquals("queued rows should share one lock/force cycle",
+                    1L, log.completedWriterBatchCountForTest());
+        } finally {
+            start.countDown();
+            releaseWriter.countDown();
+            pool.shutdownNow();
+            log.shutdownAndAwait(1000);
+        }
+    }
+
+    @Test
+    public void appendAtDrainExitIsSubmittedBeforeShutdown() throws Exception {
+        Path csv = tmp.newFolder("drain-exit").toPath().resolve(AuditLog.FILE_NAME);
+        final AuditLog log = new AuditLog(csv);
+        final CountDownLatch drainAtIdleHandoff = new CountDownLatch(1);
+        final CountDownLatch releaseIdleHandoff = new CountDownLatch(1);
+        final CountDownLatch appendAttempted = new CountDownLatch(1);
+        log.setBeforeWriterIdleHookForTest(new Runnable() {
+            @Override
+            public void run() {
+                drainAtIdleHandoff.countDown();
+                try {
+                    releaseIdleHandoff.await(5, TimeUnit.SECONDS);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+            }
+        });
+        ExecutorService appender = Executors.newSingleThreadExecutor();
+        try {
+            log.append(row("s", "first", "", ""));
+            assertTrue(drainAtIdleHandoff.await(5, TimeUnit.SECONDS));
+
+            Future<?> secondAppend = appender.submit(new Runnable() {
                 @Override
                 public void run() {
-                    ready.countDown();
-                    try {
-                        start.await(5, TimeUnit.SECONDS);
-                    } catch (InterruptedException e) {
-                        Thread.currentThread().interrupt();
-                    }
-                    for (int i = 0; i < 100; i++) {
-                        log.append(row("s" + threadId, "cmd_" + i, "", ""));
-                    }
+                    appendAttempted.countDown();
+                    log.append(row("s", "second", "", ""));
                 }
             });
-        }
+            assertTrue(appendAttempted.await(5, TimeUnit.SECONDS));
+            try {
+                secondAppend.get(100, TimeUnit.MILLISECONDS);
+                throw new AssertionError("append bypassed the locked idle handoff");
+            } catch (TimeoutException expected) {
+                // The idle transition and append admission share one lock.
+            }
 
-        assertTrue(ready.await(5, TimeUnit.SECONDS));
-        start.countDown();
-        pool.shutdown();
-        assertTrue(pool.awaitTermination(10, TimeUnit.SECONDS));
-        log.flushForTest();
+            releaseIdleHandoff.countDown();
+            secondAppend.get(5, TimeUnit.SECONDS);
+            log.shutdownAndAwait(5000L);
 
-        List<String> lines = Files.readAllLines(csv, StandardCharsets.UTF_8);
-        assertEquals(201, lines.size());
-        for (int i = 1; i < lines.size(); i++) {
-            assertEquals(12, AuditRow.parseCsvLine(lines.get(i)).size());
+            List<String> lines = Files.readAllLines(csv, StandardCharsets.UTF_8);
+            assertEquals(3, lines.size());
+            assertEquals("first", AuditRow.fromCsvLine(lines.get(1)).command());
+            assertEquals("second", AuditRow.fromCsvLine(lines.get(2)).command());
+            assertEquals(0L, log.droppedWriterTaskCount());
+
+            log.append(row("s", "after-shutdown", "", ""));
+            assertEquals(1L, log.droppedWriterTaskCount());
+        } finally {
+            releaseIdleHandoff.countDown();
+            appender.shutdownNow();
+            log.shutdownAndAwait(1000L);
         }
-        log.shutdownAndAwait(100);
     }
 
     @Test
@@ -224,6 +306,71 @@ public class AuditLogTest {
         assertEquals(1, sizes[0]);
         subscription.close();
         log.shutdownAndAwait(100);
+    }
+
+    @Test
+    public void flushDoesNotOvertakeCoalescedListenerUpdate() throws Exception {
+        Path csv = tmp.newFolder("notification-fence").toPath()
+                .resolve(AuditLog.FILE_NAME);
+        final AuditLog log = new AuditLog(csv);
+        final CountDownLatch firstNotificationStarted = new CountDownLatch(1);
+        final CountDownLatch releaseFirstNotification = new CountDownLatch(1);
+        final CountDownLatch finalNotificationSeen = new CountDownLatch(1);
+        final AtomicBoolean firstNonEmpty = new AtomicBoolean(true);
+        final AtomicInteger lastSize = new AtomicInteger(0);
+        AutoCloseable subscription = log.subscribeRecent(new AuditLog.Listener() {
+            @Override
+            public void auditRowsUpdated(List<AuditRow> recentRows) {
+                if (recentRows.isEmpty()) {
+                    return;
+                }
+                lastSize.set(recentRows.size());
+                if (firstNonEmpty.compareAndSet(true, false)) {
+                    firstNotificationStarted.countDown();
+                    try {
+                        releaseFirstNotification.await(5, TimeUnit.SECONDS);
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                    }
+                }
+                if (recentRows.size() >= 2) {
+                    finalNotificationSeen.countDown();
+                }
+            }
+        });
+        ExecutorService flusher = Executors.newSingleThreadExecutor();
+        try {
+            log.append(row("s", "first", "", ""));
+            assertTrue(firstNotificationStarted.await(5, TimeUnit.SECONDS));
+            log.append(row("s", "second", "", ""));
+
+            Future<?> flush = flusher.submit(new Runnable() {
+                @Override
+                public void run() {
+                    try {
+                        log.flushForTest();
+                    } catch (Exception e) {
+                        throw new RuntimeException(e);
+                    }
+                }
+            });
+            try {
+                flush.get(100, TimeUnit.MILLISECONDS);
+                throw new AssertionError("flush overtook the blocked notification drain");
+            } catch (TimeoutException expected) {
+                // The fence must remain behind the active, coalescing drain.
+            }
+
+            releaseFirstNotification.countDown();
+            flush.get(5, TimeUnit.SECONDS);
+            assertTrue(finalNotificationSeen.await(1, TimeUnit.SECONDS));
+            assertEquals(2, lastSize.get());
+        } finally {
+            releaseFirstNotification.countDown();
+            flusher.shutdownNow();
+            subscription.close();
+            log.shutdownAndAwait(1000L);
+        }
     }
 
     @Test
