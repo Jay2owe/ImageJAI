@@ -27,31 +27,59 @@ public class CrossToolRunnerTest {
     }
 
     @Test
-    public void timeoutTerminatesParentAndDescendant() throws Exception {
+    public void timeoutIsReportedWithoutDependingOnFixtureStartupSpeed() {
+        CrossToolRunner.ToolResult result = CrossToolRunner.runCommand(
+                fixtureCommand("child"), null, 800L);
+
+        assertFalse(result.success);
+        assertTrue(result.timedOut);
+        assertTrue(result.stderr.contains("timed out"));
+    }
+
+    @Test
+    public void terminateProcessTreeKillsReadyParentAndDescendant() throws Exception {
         Path childPidFile = Files.createTempFile("imagejai-child-", ".pid");
+        Path grandchildPidFile = Files.createTempFile("imagejai-grandchild-", ".pid");
         Files.deleteIfExists(childPidFile);
+        Files.deleteIfExists(grandchildPidFile);
+        Process parent = null;
+        ProcessHandle child = null;
+        ProcessHandle grandchild = null;
         try {
-            CrossToolRunner.ToolResult result = CrossToolRunner.runCommand(
-                    fixtureCommand("parent", childPidFile.toString()), null, 800L);
-            assertFalse(result.success);
-            assertTrue(result.timedOut);
-            assertTrue(result.stderr.contains("timed out"));
+            parent = new ProcessBuilder(
+                    fixtureCommand("parent", childPidFile.toString(),
+                            grandchildPidFile.toString())).start();
+            long childPid = awaitPid(childPidFile, 20_000L);
+            long grandchildPid = awaitPid(grandchildPidFile, 20_000L);
+            child = ProcessHandle.of(childPid).orElse(null);
+            grandchild = ProcessHandle.of(grandchildPid).orElse(null);
+            assertTrue("fixture descendant must be alive before termination",
+                    child != null && child.isAlive());
+            assertTrue("fixture grandchild must be alive before termination",
+                    grandchild != null && grandchild.isAlive());
+
+            CrossToolRunner.terminateProcessTree(parent);
 
             long deadline = System.currentTimeMillis() + 3000L;
-            while (!Files.exists(childPidFile) && System.currentTimeMillis() < deadline) {
-                Thread.sleep(25L);
-            }
-            assertTrue("fixture must expose the descendant pid", Files.exists(childPidFile));
-            long childPid = Long.parseLong(new String(
-                    Files.readAllBytes(childPidFile), StandardCharsets.UTF_8).trim());
-            while (ProcessHandle.of(childPid).map(ProcessHandle::isAlive).orElse(false)
+            while ((parent.isAlive() || child.isAlive() || grandchild.isAlive())
                     && System.currentTimeMillis() < deadline) {
                 Thread.sleep(25L);
             }
-            assertFalse("timed-out descendant must not survive",
-                    ProcessHandle.of(childPid).map(ProcessHandle::isAlive).orElse(false));
+            assertFalse("terminated parent must not survive", parent.isAlive());
+            assertFalse("terminated descendant must not survive", child.isAlive());
+            assertFalse("terminated grandchild must not survive", grandchild.isAlive());
         } finally {
+            if (parent != null && parent.isAlive()) {
+                CrossToolRunner.terminateProcessTree(parent);
+            }
+            if (child != null && child.isAlive()) {
+                child.destroyForcibly();
+            }
+            if (grandchild != null && grandchild.isAlive()) {
+                grandchild.destroyForcibly();
+            }
             Files.deleteIfExists(childPidFile);
+            Files.deleteIfExists(grandchildPidFile);
         }
     }
 
@@ -87,6 +115,29 @@ public class CrossToolRunnerTest {
         return command;
     }
 
+    private static long awaitPid(Path pidFile, long timeoutMs) throws Exception {
+        long deadline = System.currentTimeMillis() + timeoutMs;
+        NumberFormatException lastParseFailure = null;
+        while (System.currentTimeMillis() < deadline) {
+            if (Files.exists(pidFile)) {
+                String value = new String(Files.readAllBytes(pidFile),
+                        StandardCharsets.UTF_8).trim();
+                if (!value.isEmpty()) {
+                    try {
+                        return Long.parseLong(value);
+                    } catch (NumberFormatException e) {
+                        lastParseFailure = e;
+                    }
+                }
+            }
+            Thread.sleep(25L);
+        }
+        AssertionError failure = new AssertionError(
+                "fixture did not expose the descendant pid within " + timeoutMs + "ms");
+        if (lastParseFailure != null) failure.initCause(lastParseFailure);
+        throw failure;
+    }
+
     private static boolean isWindows() {
         return System.getProperty("os.name", "").toLowerCase().startsWith("windows");
     }
@@ -113,11 +164,31 @@ public class CrossToolRunnerTest {
                 Thread.sleep(60_000L);
                 return;
             }
-            if ("parent".equals(args[0])) {
-                Process child = new ProcessBuilder(fixtureCommand("child")).start();
-                Files.write(Paths.get(args[1]),
-                        Long.toString(child.pid()).getBytes(StandardCharsets.UTF_8));
+            if ("middle".equals(args[0])) {
+                Process grandchild = new ProcessBuilder(fixtureCommand("child")).start();
+                publishPid(Paths.get(args[1]), grandchild.pid());
                 Thread.sleep(60_000L);
+                return;
+            }
+            if ("parent".equals(args[0])) {
+                Process child = new ProcessBuilder(
+                        fixtureCommand("middle", args[2])).start();
+                publishPid(Paths.get(args[1]), child.pid());
+                Thread.sleep(60_000L);
+            }
+        }
+
+        private static void publishPid(Path target, long pid) throws Exception {
+            Path temporary = target.resolveSibling(
+                    target.getFileName().toString() + ".tmp-" + ProcessHandle.current().pid());
+            Files.write(temporary, Long.toString(pid).getBytes(StandardCharsets.UTF_8));
+            try {
+                Files.move(temporary, target,
+                        java.nio.file.StandardCopyOption.ATOMIC_MOVE,
+                        java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+            } catch (java.nio.file.AtomicMoveNotSupportedException unsupported) {
+                Files.move(temporary, target,
+                        java.nio.file.StandardCopyOption.REPLACE_EXISTING);
             }
         }
     }
