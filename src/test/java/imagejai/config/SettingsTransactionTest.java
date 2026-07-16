@@ -10,6 +10,7 @@ import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotEquals;
+import static org.junit.Assert.assertTrue;
 
 public class SettingsTransactionTest {
 
@@ -58,6 +59,25 @@ public class SettingsTransactionTest {
             working.getActiveConfig().model = "mutated-after-apply";
             assertEquals("new-model", live.getActiveConfig().model);
             assertFalse(live.detachedCopy() == live);
+        } finally {
+            restoreHome(oldHome);
+        }
+    }
+
+    @Test
+    public void corruptSettingsLoadIsObservableWithoutExposingContents() throws Exception {
+        String oldHome = System.getProperty("user.home");
+        Path home = Files.createTempDirectory("imagejai-settings-corrupt");
+        try {
+            System.setProperty("user.home", home.toString());
+            Path config = Settings.getConfigDir().resolve("config.json");
+            Files.createDirectories(config.getParent());
+            Files.write(config, "{not-json".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+
+            Settings.load();
+
+            assertTrue(Settings.lastPersistenceError().contains("load failed"));
+            assertFalse(Settings.lastPersistenceError().contains("not-json"));
         } finally {
             restoreHome(oldHome);
         }

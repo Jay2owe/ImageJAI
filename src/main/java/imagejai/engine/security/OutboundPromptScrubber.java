@@ -65,8 +65,7 @@ public final class OutboundPromptScrubber {
     private final PathTokenMap pathTokenMap;
     private final Notifier notifier;
     private final AuditLog auditLog;
-    private final CopyOnWriteArrayList<Notifier> extraNotifiers =
-            new CopyOnWriteArrayList<Notifier>();
+    private final CopyOnWriteArrayList<Notifier> extraNotifiers;
     private final StringBuilder lineBuffer = new StringBuilder();
     private boolean nextEnterRaw;
 
@@ -76,13 +75,32 @@ public final class OutboundPromptScrubber {
 
     public OutboundPromptScrubber(PathTokenMap pathTokenMap, Notifier notifier,
                                   AuditLog auditLog) {
+        this(pathTokenMap, notifier, auditLog,
+                new CopyOnWriteArrayList<Notifier>());
+    }
+
+    private OutboundPromptScrubber(PathTokenMap pathTokenMap, Notifier notifier,
+                                   AuditLog auditLog,
+                                   CopyOnWriteArrayList<Notifier> sharedNotifiers) {
         this.pathTokenMap = pathTokenMap == null ? PathTokenMap.getInstance() : pathTokenMap;
         this.notifier = notifier;
         this.auditLog = auditLog;
+        this.extraNotifiers = sharedNotifiers == null
+                ? new CopyOnWriteArrayList<Notifier>() : sharedNotifiers;
     }
 
     public static OutboundPromptScrubber getInstance() {
         return INSTANCE;
+    }
+
+    /**
+     * Create a scrubber with an independent partial-line/raw-enter buffer for
+     * one PTY session. Notification subscribers remain shared so the launcher
+     * toast continues to observe every session without sharing decoder state.
+     */
+    public static OutboundPromptScrubber createSessionScrubber() {
+        return new OutboundPromptScrubber(INSTANCE.pathTokenMap,
+                INSTANCE.notifier, INSTANCE.auditLog, INSTANCE.extraNotifiers);
     }
 
     public AutoCloseable addNotifier(final Notifier notifier) {
@@ -102,10 +120,47 @@ public final class OutboundPromptScrubber {
         };
     }
 
-    public synchronized byte[] filter(byte[] bytes) {
-        if (bytes == null || bytes.length == 0) {
-            return bytes;
+    /** Two-phase filtered write so a failed PTY write can restore its buffer. */
+    public static final class PreparedWrite {
+        private final OutboundPromptScrubber owner;
+        private final byte[] bytes;
+        private final String priorLine;
+        private final boolean priorRaw;
+        private final List<Scrubbed> scrubbed;
+        private final List<String> rawLines;
+        private boolean completed;
+
+        private PreparedWrite(OutboundPromptScrubber owner, byte[] bytes,
+                              String priorLine, boolean priorRaw,
+                              List<Scrubbed> scrubbed, List<String> rawLines) {
+            this.owner = owner;
+            this.bytes = bytes;
+            this.priorLine = priorLine;
+            this.priorRaw = priorRaw;
+            this.scrubbed = scrubbed;
+            this.rawLines = rawLines;
         }
+
+        public byte[] bytes() { return bytes; }
+        public void commit() { owner.complete(this, true); }
+        public void rollback() { owner.complete(this, false); }
+    }
+
+    public byte[] filter(byte[] bytes) {
+        PreparedWrite prepared = prepare(bytes);
+        prepared.commit();
+        return prepared.bytes();
+    }
+
+    public synchronized PreparedWrite prepare(byte[] bytes) {
+        if (bytes == null || bytes.length == 0) {
+            return new PreparedWrite(this, bytes, lineBuffer.toString(), nextEnterRaw,
+                    Collections.<Scrubbed>emptyList(), Collections.<String>emptyList());
+        }
+        String priorLine = lineBuffer.toString();
+        boolean priorRaw = nextEnterRaw;
+        List<Scrubbed> scrubbedEvents = new ArrayList<Scrubbed>();
+        List<String> rawEvents = new ArrayList<String>();
         String text = new String(bytes, StandardCharsets.UTF_8);
         StringBuilder out = new StringBuilder();
         for (int i = 0; i < text.length(); i++) {
@@ -115,13 +170,13 @@ public final class OutboundPromptScrubber {
                 lineBuffer.setLength(0);
                 if (nextEnterRaw) {
                     nextEnterRaw = false;
-                    notifySentRaw(line);
+                    rawEvents.add(line);
                     out.append(c);
                     continue;
                 }
                 Scrubbed scrubbed = scrubOutgoing(line);
                 if (scrubbed.changed) {
-                    notifyPseudonymised(scrubbed);
+                    scrubbedEvents.add(scrubbed);
                     out.append('\u0015'); // terminal line kill before sending replacement
                     out.append(scrubbed.text);
                 }
@@ -136,7 +191,22 @@ public final class OutboundPromptScrubber {
                 out.append(c);
             }
         }
-        return out.toString().getBytes(StandardCharsets.UTF_8);
+        return new PreparedWrite(this,
+                out.toString().getBytes(StandardCharsets.UTF_8),
+                priorLine, priorRaw, scrubbedEvents, rawEvents);
+    }
+
+    private synchronized void complete(PreparedWrite prepared, boolean committed) {
+        if (prepared == null || prepared.owner != this || prepared.completed) return;
+        prepared.completed = true;
+        if (!committed) {
+            lineBuffer.setLength(0);
+            lineBuffer.append(prepared.priorLine);
+            nextEnterRaw = prepared.priorRaw;
+            return;
+        }
+        for (Scrubbed event : prepared.scrubbed) notifyPseudonymised(event);
+        for (String line : prepared.rawLines) notifySentRaw(line);
     }
 
     public synchronized String scrub(String userTyped) {

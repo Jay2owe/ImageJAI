@@ -12,6 +12,7 @@ import javax.swing.JOptionPane;
 import javax.swing.JPanel;
 import javax.swing.JTextField;
 import javax.swing.SwingUtilities;
+import javax.swing.SwingWorker;
 import javax.swing.border.EmptyBorder;
 import java.awt.BorderLayout;
 import java.awt.Color;
@@ -246,10 +247,15 @@ public class LocalRuntimeWizard implements InstallerWizard {
         install.addActionListener(e -> openUrl(meta.installUrl));
         JButton cancel = new JButton("Cancel");
         final boolean[] saved = new boolean[] { false };
-        cancel.addActionListener(e -> dialog.dispose());
+        final SwingWorker<DaemonResult, Void>[] active = new SwingWorker[1];
+        cancel.addActionListener(e -> {
+            if (active[0] != null) active[0].cancel(true);
+            dialog.dispose();
+        });
         JButton save = new JButton("Save");
         save.addActionListener(e -> {
-            Map<String, String> entries = new LinkedHashMap<String, String>();
+            final Map<String, String> entries = new LinkedHashMap<String, String>();
+            final String runtimeUrl;
             if (cloudFlow) {
                 String token = tokenField.getText().trim();
                 if (token.isEmpty()) {
@@ -258,6 +264,7 @@ public class LocalRuntimeWizard implements InstallerWizard {
                     return;
                 }
                 entries.put("OLLAMA_API_KEY", token);
+                runtimeUrl = null;
             } else {
                 String url = urlField.getText().trim();
                 if (url.isEmpty()) {
@@ -265,23 +272,50 @@ public class LocalRuntimeWizard implements InstallerWizard {
                     return;
                 }
                 url = normaliseRuntimeUrl(url);
-                DaemonResult result = daemonProbe.probe(url, DAEMON_PROBE_TIMEOUT_MS);
-                if (!result.ok) {
-                    setError(statusLine, "Could not reach " + url + meta.healthPath + ": "
-                            + result.message);
-                    return;
-                }
-                setOk(statusLine, "Server reachable (HTTP " + result.httpCode + ")");
+                runtimeUrl = url;
                 String urlEnv = ProviderCredentials.ENV_VAR_FOR_PROVIDER.get(providerKey);
                 entries.put(urlEnv != null ? urlEnv : "OLLAMA_API_BASE", url);
             }
-            try {
-                credentials.saveEntries(providerKey, entries);
-                saved[0] = true;
-                dialog.dispose();
-            } catch (IOException ex) {
-                setError(statusLine, "Could not save: " + ex.getMessage());
-            }
+            save.setEnabled(false);
+            statusLine.setText(cloudFlow ? "Savingâ€¦" : "Checking serverâ€¦");
+            active[0] = new SwingWorker<DaemonResult, Void>() {
+                @Override protected DaemonResult doInBackground() {
+                    DaemonResult result = cloudFlow
+                            ? new DaemonResult(true, 0, "ok")
+                            : daemonProbe.probe(runtimeUrl, DAEMON_PROBE_TIMEOUT_MS);
+                    if (!result.ok || isCancelled()) return result;
+                    try {
+                        credentials.saveEntries(providerKey, entries);
+                        return result;
+                    } catch (IOException failure) {
+                        return new DaemonResult(false, 0, "credential save failed ("
+                                + failure.getClass().getSimpleName() + ")");
+                    }
+                }
+
+                @Override protected void done() {
+                    if (isCancelled()) return;
+                    active[0] = null;
+                    try {
+                        DaemonResult result = get();
+                        if (result.ok) {
+                            saved[0] = true;
+                            dialog.dispose();
+                        } else {
+                            save.setEnabled(true);
+                            setError(statusLine, runtimeUrl == null
+                                    ? result.message
+                                    : "Could not reach " + runtimeUrl + meta.healthPath
+                                            + ": " + result.message);
+                        }
+                    } catch (Exception failure) {
+                        save.setEnabled(true);
+                        setError(statusLine, "Setup failed ("
+                                + failure.getClass().getSimpleName() + ")");
+                    }
+                }
+            };
+            active[0].execute();
         });
         buttons.add(install);
         buttons.add(Box.createHorizontalStrut(12));

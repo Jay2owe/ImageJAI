@@ -22,6 +22,7 @@ public class TerminalHost extends JPanel {
 
     private EmbeddedAgentSession session;
     private JComponent terminalComponent;
+    private JLabel writeStatus;
 
     public TerminalHost() {
         super(new BorderLayout());
@@ -42,7 +43,11 @@ public class TerminalHost extends JPanel {
         removeAll();
         session = newSession;
         terminalComponent = newSession.component();
+        writeStatus = new JLabel(" ");
+        writeStatus.setForeground(new Color(220, 105, 95));
+        writeStatus.setVisible(false);
         add(terminalComponent, BorderLayout.CENTER);
+        add(writeStatus, BorderLayout.SOUTH);
         revalidate();
         repaint();
         IJ.log("[ImageJAI-Term] Attached embedded terminal for " + newSession.info().name);
@@ -54,6 +59,7 @@ public class TerminalHost extends JPanel {
         }
         session = null;
         terminalComponent = null;
+        writeStatus = null;
         removeAll();
         showPlaceholder();
         revalidate();
@@ -62,6 +68,26 @@ public class TerminalHost extends JPanel {
 
     public boolean isSession(EmbeddedAgentSession expected) {
         return expected != null && session == expected;
+    }
+
+    /** Write without hiding failure from the caller or the user. */
+    public EmbeddedAgentSession.WriteResult writeRaw(String text) {
+        EmbeddedAgentSession.WriteResult result = session == null
+                ? EmbeddedAgentSession.WriteResult.failure("No embedded terminal session is attached.")
+                : session.writeRaw(text);
+        showWriteResult(result);
+        return result;
+    }
+
+    private void showWriteResult(EmbeddedAgentSession.WriteResult result) {
+        if (writeStatus == null) return;
+        boolean failed = result == null || !result.isSuccess();
+        writeStatus.setText(failed
+                ? (result == null ? "Terminal write failed. Retry." : result.message())
+                : " ");
+        writeStatus.setVisible(failed);
+        revalidate();
+        repaint();
     }
 
     public void requestTerminalFocus() {

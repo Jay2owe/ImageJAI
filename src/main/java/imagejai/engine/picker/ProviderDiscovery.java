@@ -2,10 +2,9 @@ package imagejai.engine.picker;
 
 import imagejai.engine.LaunchPolicy;
 
-import java.io.BufferedReader;
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
-import java.io.InputStreamReader;
 import java.net.HttpURLConnection;
 import java.net.URI;
 import java.net.URISyntaxException;
@@ -13,12 +12,19 @@ import java.net.URL;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.Collections;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.Callable;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.ThreadFactory;
+import java.util.concurrent.TimeUnit;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -39,6 +45,12 @@ import java.util.regex.Pattern;
  * </ul>
  */
 public final class ProviderDiscovery {
+
+    public static final int MAX_RESPONSE_BYTES = 1024 * 1024;
+    public static final int MAX_MODEL_IDS = 2000;
+    public static final int MAX_TIMEOUT_MS = 10000;
+    public static final int MAX_CONCURRENT_DISCOVERIES = 4;
+    public static final int MAX_DISCOVER_ALL_MS = 30000;
 
     /** Endpoint metadata for one provider. */
     public static final class Endpoint {
@@ -256,9 +268,28 @@ public final class ProviderDiscovery {
             lastErrors.put(providerId, reason);
             return MergeFunction.LiveResult.failure(reason);
         }
-        HttpFetcher.HttpResult response = fetcher.fetch(endpoint, timeout);
+        HttpFetcher.HttpResult response;
+        try {
+            response = fetcher.fetch(endpoint,
+                    Duration.ofMillis(timeoutMillis(timeout)));
+        } catch (Throwable failure) {
+            String reason = "discovery failed (" + failure.getClass().getSimpleName() + ")";
+            lastErrors.put(providerId, reason);
+            return MergeFunction.LiveResult.failure(reason);
+        }
+        if (response == null) {
+            String reason = "discovery returned no response";
+            lastErrors.put(providerId, reason);
+            return MergeFunction.LiveResult.failure(reason);
+        }
         if (!response.ok()) {
             String reason = describeFailure(response, endpoint);
+            lastErrors.put(providerId, reason);
+            return MergeFunction.LiveResult.failure(reason);
+        }
+        if (response.body != null && (response.body.length() > MAX_RESPONSE_BYTES
+                || response.body.getBytes(StandardCharsets.UTF_8).length > MAX_RESPONSE_BYTES)) {
+            String reason = "provider response exceeded " + MAX_RESPONSE_BYTES + " byte limit";
             lastErrors.put(providerId, reason);
             return MergeFunction.LiveResult.failure(reason);
         }
@@ -310,9 +341,62 @@ public final class ProviderDiscovery {
      * wiring in {@link ProviderRegistry} parallelises explicitly.
      */
     public Map<String, MergeFunction.LiveResult> discoverAll(Duration timeout) {
-        Map<String, MergeFunction.LiveResult> out = new ConcurrentHashMap<String, MergeFunction.LiveResult>();
-        for (String providerId : endpoints.keySet()) {
-            out.put(providerId, discover(providerId, timeout));
+        final List<String> providerIds = new ArrayList<String>(endpoints.keySet());
+        Map<String, MergeFunction.LiveResult> out =
+                new LinkedHashMap<String, MergeFunction.LiveResult>();
+        if (providerIds.isEmpty()) return out;
+        int threads = Math.min(MAX_CONCURRENT_DISCOVERIES, providerIds.size());
+        ExecutorService executor = Executors.newFixedThreadPool(threads, new ThreadFactory() {
+            private int sequence;
+            @Override public synchronized Thread newThread(Runnable task) {
+                Thread thread = new Thread(task,
+                        "imagejai-provider-discovery-" + (++sequence));
+                thread.setDaemon(true);
+                return thread;
+            }
+        });
+        List<Callable<MergeFunction.LiveResult>> tasks =
+                new ArrayList<Callable<MergeFunction.LiveResult>>();
+        for (final String providerId : providerIds) {
+            tasks.add(new Callable<MergeFunction.LiveResult>() {
+                @Override public MergeFunction.LiveResult call() {
+                    return discover(providerId, timeout);
+                }
+            });
+        }
+        int perProviderMs = timeoutMillis(timeout);
+        long waves = (providerIds.size() + threads - 1L) / threads;
+        long totalMs = Math.min(MAX_DISCOVER_ALL_MS, perProviderMs * waves);
+        try {
+            List<Future<MergeFunction.LiveResult>> futures =
+                    executor.invokeAll(tasks, Math.max(1L, totalMs), TimeUnit.MILLISECONDS);
+            for (int i = 0; i < providerIds.size(); i++) {
+                String providerId = providerIds.get(i);
+                Future<MergeFunction.LiveResult> future = futures.get(i);
+                if (future.isCancelled()) {
+                    String reason = "discovery timed out";
+                    lastErrors.put(providerId, reason);
+                    out.put(providerId, MergeFunction.LiveResult.failure(reason));
+                } else {
+                    try {
+                        out.put(providerId, future.get());
+                    } catch (Exception failure) {
+                        String reason = "discovery failed ("
+                                + failure.getClass().getSimpleName() + ")";
+                        lastErrors.put(providerId, reason);
+                        out.put(providerId, MergeFunction.LiveResult.failure(reason));
+                    }
+                }
+            }
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+            for (String providerId : providerIds) {
+                String reason = "discovery cancelled";
+                lastErrors.put(providerId, reason);
+                out.put(providerId, MergeFunction.LiveResult.failure(reason));
+            }
+        } finally {
+            executor.shutdownNow();
         }
         return out;
     }
@@ -326,6 +410,7 @@ public final class ProviderDiscovery {
             // {"models": [{"name": "llama3.2:3b"}, ...]} — Ollama-specific shape.
             for (String name : extractKeyFromArray(body, "name")) {
                 out.add(name);
+                if (out.size() >= MAX_MODEL_IDS) break;
             }
             return out;
         }
@@ -336,6 +421,7 @@ public final class ProviderDiscovery {
             for (int i = 0; i < names.size(); i++) {
                 String publisher = i < publishers.size() ? publishers.get(i) : "";
                 out.add(publisher.isEmpty() ? names.get(i) : publisher + "/" + names.get(i));
+                if (out.size() >= MAX_MODEL_IDS) break;
             }
             return out;
         }
@@ -343,12 +429,14 @@ public final class ProviderDiscovery {
             for (String name : extractKeyFromArray(body, "name")) {
                 String stripped = name.startsWith("models/") ? name.substring("models/".length()) : name;
                 out.add(stripped);
+                if (out.size() >= MAX_MODEL_IDS) break;
             }
             return out;
         }
         // Default: OpenAI shape — {"data": [{"id": "..."}, ...]}.
         for (String id : extractKeyFromArray(body, "id")) {
             out.add(id);
+            if (out.size() >= MAX_MODEL_IDS) break;
         }
         return out;
     }
@@ -360,6 +448,7 @@ public final class ProviderDiscovery {
         List<String> out = new java.util.ArrayList<String>();
         while (m.find()) {
             out.add(m.group(1));
+            if (out.size() >= MAX_MODEL_IDS) break;
         }
         return out;
     }
@@ -401,22 +490,25 @@ public final class ProviderDiscovery {
         if (millis <= 0L) {
             return 5000;
         }
-        return millis > Integer.MAX_VALUE ? Integer.MAX_VALUE : (int) millis;
+        return millis > MAX_TIMEOUT_MS ? MAX_TIMEOUT_MS : (int) millis;
     }
 
     private static String readAll(InputStream stream) throws IOException {
         if (stream == null) {
             return "";
         }
-        StringBuilder out = new StringBuilder();
-        try (BufferedReader reader = new BufferedReader(new InputStreamReader(
-                stream, StandardCharsets.UTF_8))) {
-            char[] buffer = new char[4096];
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        try (InputStream input = stream) {
+            byte[] buffer = new byte[4096];
             int n;
-            while ((n = reader.read(buffer)) >= 0) {
-                out.append(buffer, 0, n);
+            while ((n = input.read(buffer)) >= 0) {
+                if (out.size() + n > MAX_RESPONSE_BYTES) {
+                    throw new IOException("provider response exceeded "
+                            + MAX_RESPONSE_BYTES + " byte limit");
+                }
+                out.write(buffer, 0, n);
             }
         }
-        return out.toString();
+        return new String(out.toByteArray(), StandardCharsets.UTF_8);
     }
 }

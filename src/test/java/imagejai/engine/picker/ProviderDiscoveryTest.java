@@ -7,6 +7,11 @@ import java.time.Duration;
 import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.charset.StandardCharsets;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
@@ -277,5 +282,94 @@ public class ProviderDiscoveryTest {
         discovery.discover("ollama-cloud", Duration.ofSeconds(4));
         assertNull("curated-only providers never produce a discovery error",
                 discovery.lastErrorFor("ollama-cloud"));
+    }
+
+    @Test
+    public void oversizedResponseIsRejectedAndObservable() {
+        Map<String, ProviderDiscovery.Endpoint> endpoints =
+                new LinkedHashMap<String, ProviderDiscovery.Endpoint>();
+        endpoints.put("groq", endpoint("groq"));
+        char[] payload = new char[ProviderDiscovery.MAX_RESPONSE_BYTES + 1];
+        java.util.Arrays.fill(payload, 'x');
+        String oversized = new String(payload);
+        ProviderDiscovery discovery = new ProviderDiscovery(endpoints,
+                (endpoint, timeout) ->
+                        new ProviderDiscovery.HttpFetcher.HttpResult(200, oversized));
+
+        MergeFunction.LiveResult result =
+                discovery.discover("groq", Duration.ofSeconds(4));
+
+        assertFalse(result.successful());
+        assertTrue(discovery.lastErrorFor("groq").contains("exceeded"));
+    }
+
+    @Test
+    public void parsedModelIdsAreCapped() {
+        StringBuilder body = new StringBuilder("{\"data\":[");
+        for (int i = 0; i < ProviderDiscovery.MAX_MODEL_IDS + 50; i++) {
+            if (i > 0) body.append(',');
+            body.append("{\"id\":\"model-").append(i).append("\"}");
+        }
+        body.append("]}");
+        assertEquals(ProviderDiscovery.MAX_MODEL_IDS,
+                ProviderDiscovery.parseModelIds("groq", body.toString()).size());
+    }
+
+    @Test
+    public void discoveryTimeoutPassedToFetcherIsCapped() {
+        Map<String, ProviderDiscovery.Endpoint> endpoints =
+                new LinkedHashMap<String, ProviderDiscovery.Endpoint>();
+        endpoints.put("groq", endpoint("groq"));
+        AtomicReference<Duration> seen = new AtomicReference<Duration>();
+        ProviderDiscovery discovery = new ProviderDiscovery(endpoints, (endpoint, timeout) -> {
+            seen.set(timeout);
+            return new ProviderDiscovery.HttpFetcher.HttpResult(200, "{\"data\":[]}");
+        });
+        discovery.discover("groq", Duration.ofDays(1));
+        assertEquals(ProviderDiscovery.MAX_TIMEOUT_MS, seen.get().toMillis());
+    }
+
+    @Test
+    public void discoverAllUsesBoundedConcurrentFanout() {
+        Map<String, ProviderDiscovery.Endpoint> endpoints =
+                new LinkedHashMap<String, ProviderDiscovery.Endpoint>();
+        for (String id : new String[] {"groq", "xai", "mistral", "openai"}) {
+            endpoints.put(id, endpoint(id));
+        }
+        AtomicInteger active = new AtomicInteger();
+        AtomicInteger maximum = new AtomicInteger();
+        ProviderDiscovery discovery = new ProviderDiscovery(endpoints, (endpoint, timeout) -> {
+            int now = active.incrementAndGet();
+            maximum.accumulateAndGet(now, Math::max);
+            try { Thread.sleep(150L); }
+            catch (InterruptedException interrupted) { Thread.currentThread().interrupt(); }
+            finally { active.decrementAndGet(); }
+            return new ProviderDiscovery.HttpFetcher.HttpResult(200,
+                    "{\"data\":[{\"id\":\"one\"}]}");
+        });
+        long start = System.nanoTime();
+        Map<String, MergeFunction.LiveResult> results =
+                discovery.discoverAll(Duration.ofSeconds(1));
+        long elapsedMs = (System.nanoTime() - start) / 1_000_000L;
+
+        assertEquals(4, results.size());
+        assertTrue(maximum.get() > 1);
+        assertTrue("fanout was effectively sequential: " + elapsedMs, elapsedMs < 500L);
+    }
+
+    private static ProviderDiscovery.Endpoint endpoint(String providerId) {
+        return new ProviderDiscovery.Endpoint(providerId,
+                "https://example.invalid/models", Collections.<String, String>emptyMap());
+    }
+
+    @Test
+    public void corruptUserModelOverridesExposeLoadError() throws Exception {
+        Path file = Files.createTempDirectory("models-local-corrupt")
+                .resolve("models_local.yaml");
+        Files.write(file, "overrides: [unterminated".getBytes(StandardCharsets.UTF_8));
+        ModelsLocalLoader loader = new ModelsLocalLoader(file);
+
+        assertTrue(loader.load().isEmpty());
+        assertFalse(loader.lastError().isEmpty());
     }
 }

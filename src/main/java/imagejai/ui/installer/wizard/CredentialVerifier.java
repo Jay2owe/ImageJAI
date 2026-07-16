@@ -1,16 +1,17 @@
 package imagejai.ui.installer.wizard;
 
+import javax.swing.SwingWorker;
+
 /**
- * Refresh-and-test step run by the install-shape wizards after a credential
- * is persisted, per Phase E acceptance ({@code 07_implementation_plan.md §E}):
+ * Validate-and-persist step run by the install-shape wizards, per Phase E
+ * acceptance:
  *
  * <ol>
- *   <li>Wizard saves the key to {@code <config>/secrets/<provider>.env}.</li>
- *   <li>Wizard calls
- *       {@link #verify(String, int) verify(providerKey, 4000)} synchronously
- *       (the 4 s timeout is the {@code 06 §4.4} manual-refresh budget).</li>
+ *   <li>The candidate key is tested in a background worker without saving it.</li>
+ *   <li>Only an accepted candidate is saved to
+ *       {@code <config>/secrets/<provider>.env}.</li>
  *   <li>On {@link Result#ok success}, the dialog disposes and the card flips
- *       to ✓.</li>
+ *       to its connected state.</li>
  *   <li>On failure, the wizard surfaces the {@link Result#message} as an
  *       inline red error and the dialog stays open for a retry.</li>
  * </ol>
@@ -44,14 +45,89 @@ public interface CredentialVerifier {
 
     /**
      * Verify that the saved credential for {@code providerKey} actually works.
-     * Implementations must respect {@code timeoutMs} so the EDT never blocks
-     * longer than the {@code 06 §4.4} budget.
+     * Implementations must respect {@code timeoutMs}; callers should still run
+     * network-backed implementations away from the Swing event thread.
      */
     Result verify(String providerKey, int timeoutMs);
+
+    /** Validate a candidate before it reaches persistent storage. */
+    default Result verifyCandidate(String providerKey, String candidate, int timeoutMs) {
+        return verify(providerKey, timeoutMs);
+    }
 
     /** No-op verifier — returns success without any network call. */
     static CredentialVerifier noop() {
         return (providerKey, timeoutMs) ->
                 Result.success("(verification skipped — wire a CredentialVerifier in production)");
+    }
+
+    interface Persister {
+        void persist(String providerKey, String candidate) throws Exception;
+    }
+
+    interface Completion {
+        void complete(Result result);
+    }
+
+    /** Off-EDT validate-then-persist transaction used by credential wizards. */
+    final class ValidationWorker extends SwingWorker<Result, Void> {
+        private final String providerKey;
+        private final String candidate;
+        private final int timeoutMs;
+        private final CredentialVerifier verifier;
+        private final Persister persister;
+        private final Completion completion;
+
+        public ValidationWorker(String providerKey, String candidate, int timeoutMs,
+                                CredentialVerifier verifier, Persister persister,
+                                Completion completion) {
+            this.providerKey = providerKey;
+            this.candidate = candidate == null ? "" : candidate;
+            this.timeoutMs = timeoutMs;
+            this.verifier = verifier == null ? CredentialVerifier.noop() : verifier;
+            this.persister = persister;
+            this.completion = completion;
+        }
+
+        @Override protected Result doInBackground() {
+            Result result;
+            try {
+                result = verifier.verifyCandidate(providerKey, candidate, timeoutMs);
+            } catch (Throwable failure) {
+                result = Result.failure("validation failed ("
+                        + failure.getClass().getSimpleName() + ")");
+            }
+            if (result == null) result = Result.failure("validator returned no result");
+            result = new Result(result.ok, safeMessage(result.message, candidate));
+            if (!result.ok || isCancelled()) return result;
+            if (persister == null) return Result.failure("credential store unavailable");
+            try {
+                if (isCancelled()) return Result.failure("validation cancelled");
+                persister.persist(providerKey, candidate);
+                return result;
+            } catch (Throwable failure) {
+                return Result.failure("credential save failed ("
+                        + failure.getClass().getSimpleName() + ")");
+            }
+        }
+
+        @Override protected void done() {
+            if (completion == null || isCancelled()) return;
+            try {
+                completion.complete(get());
+            } catch (Exception failure) {
+                completion.complete(Result.failure("validation worker failed ("
+                        + failure.getClass().getSimpleName() + ")"));
+            }
+        }
+
+        private static String safeMessage(String message, String candidate) {
+            String safe = message == null ? "" : message;
+            if (candidate != null && !candidate.isEmpty()) {
+                safe = safe.replace(candidate, "[REDACTED]");
+            }
+            safe = safe.replace('\r', ' ').replace('\n', ' ');
+            return safe.length() > 240 ? safe.substring(0, 240) : safe;
+        }
     }
 }

@@ -77,6 +77,27 @@ public class OutboundPromptScrubberTest {
     }
 
     @Test
+    public void failedWriteRollbackRetainsBufferedPromptForRetry() {
+        PathTokenMap map = new PathTokenMap(bytes(9));
+        String raw = "C:\\study\\retry_subject.lif";
+        String token = map.tokenForPathString(raw);
+        OutboundPromptScrubber scrubber = new OutboundPromptScrubber(map, null);
+        scrubber.filter(("open " + raw).getBytes(StandardCharsets.UTF_8));
+
+        OutboundPromptScrubber.PreparedWrite failed =
+                scrubber.prepare("\r".getBytes(StandardCharsets.UTF_8));
+        failed.rollback();
+        OutboundPromptScrubber.PreparedWrite retry =
+                scrubber.prepare("\r".getBytes(StandardCharsets.UTF_8));
+        String retried = new String(retry.bytes(), StandardCharsets.UTF_8);
+        retry.commit();
+
+        assertTrue(retried.startsWith("\u0015"));
+        assertTrue(retried.contains(token));
+        assertFalse(retried.contains("retry_subject"));
+    }
+
+    @Test
     public void promptReplacementEmitsRedactedAuditRowOnly() throws Exception {
         Path csv = Files.createTempDirectory("imagejai-prompt-audit")
                 .resolve(AuditLog.FILE_NAME);

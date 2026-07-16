@@ -25,7 +25,6 @@ import java.awt.Frame;
 import java.awt.GridBagConstraints;
 import java.awt.GridBagLayout;
 import java.awt.Insets;
-import java.io.IOException;
 import java.net.URI;
 
 /**
@@ -40,8 +39,8 @@ import java.net.URI;
  * (no Phase-E provider exposes a redirect URL we can listen on), so the
  * port-collision risk in the register does not apply here.
  *
- * <p>Save flow per Phase E acceptance: persist the token, then synchronously
- * call the {@link CredentialVerifier} with a 4 s timeout. On success the
+ * <p>Save flow validates off the Swing event thread and persists only an
+ * accepted token. On success the
  * dialog disposes; on failure the error message renders inline in red.
  */
 public class BrowserAuthWizard implements InstallerWizard {
@@ -131,36 +130,37 @@ public class BrowserAuthWizard implements InstallerWizard {
         openSignin.addActionListener(e -> openUrl(signupUrl));
         JButton cancel = new JButton("Cancel");
         final boolean[] saved = new boolean[] { false };
-        cancel.addActionListener(e -> dialog.dispose());
+        final CredentialVerifier.ValidationWorker[] active =
+                new CredentialVerifier.ValidationWorker[1];
+        cancel.addActionListener(e -> {
+            if (active[0] != null) active[0].cancel(true);
+            dialog.dispose();
+        });
         JButton save = new JButton("Save & test");
         save.addActionListener(e -> {
-            String value = new String(tokenField.getPassword()).trim();
+            final String value = new String(tokenField.getPassword()).trim();
             if (value.isEmpty()) {
                 setError(statusLine, "Paste the token from the sign-in flow first.");
                 return;
             }
-            try {
-                credentials.saveApiKey(providerKey, value);
-            } catch (IOException ex) {
-                setError(statusLine, "Could not save token: " + ex.getMessage());
-                return;
-            }
             setBusy(statusLine, "Verifying…");
-            CredentialVerifier.Result result;
-            try {
-                result = verifier.verify(providerKey, VERIFY_TIMEOUT_MS);
-            } catch (RuntimeException re) {
-                result = CredentialVerifier.Result.failure(
-                        "verifier threw " + re.getClass().getSimpleName()
-                                + (re.getMessage() == null ? "" : ": " + re.getMessage()));
-            }
-            if (result == null || !result.ok) {
-                String msg = result == null ? "verifier returned null" : result.message;
-                setError(statusLine, "Verification failed: " + msg);
-                return;
-            }
-            saved[0] = true;
-            dialog.dispose();
+            save.setEnabled(false);
+            active[0] = new CredentialVerifier.ValidationWorker(
+                    providerKey, value, VERIFY_TIMEOUT_MS, verifier,
+                    (key, candidate) -> credentials.saveApiKey(key, candidate),
+                    result -> {
+                        active[0] = null;
+                        if (result != null && result.ok) {
+                            saved[0] = true;
+                            dialog.dispose();
+                        } else {
+                            save.setEnabled(true);
+                            setError(statusLine, "Verification failed: "
+                                    + (result == null ? "no result" : result.message));
+                            tokenField.requestFocusInWindow();
+                        }
+                    });
+            active[0].execute();
         });
         buttons.add(openSignin);
         buttons.add(Box.createHorizontalStrut(12));

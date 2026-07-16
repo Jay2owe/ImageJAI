@@ -37,6 +37,10 @@ public class Settings {
                 }
             })
             .create();
+    private static volatile String lastPersistenceError = "";
+
+    /** Last settings load/save corruption or I/O category, safe for UI display. */
+    public static String lastPersistenceError() { return lastPersistenceError; }
 
     /** Env-var name under which a legacy "custom" provider key is stored in custom.env. */
     public static final String CUSTOM_API_KEY_ENV = "CUSTOM_API_KEY";
@@ -274,11 +278,18 @@ public class Settings {
                 if (loaded != null) {
                     loaded.configPath = s.configPath;
                     loaded.migrateIfNeeded();
+                    lastPersistenceError = "";
                     return loaded;
                 }
+                lastPersistenceError = "Settings load failed (empty or corrupt JSON)";
+                System.err.println("[ImageJAI] " + lastPersistenceError);
             } catch (Exception e) {
+                lastPersistenceError = "Settings load failed ("
+                        + e.getClass().getSimpleName() + ")";
                 System.err.println("[ImageJAI] Failed to load settings: " + e.getMessage());
             }
+        } else {
+            lastPersistenceError = "";
         }
         
         // No settings or load failed: create default Gemini config
@@ -546,7 +557,10 @@ public class Settings {
             } catch (java.nio.file.AtomicMoveNotSupportedException ignore) {
                 Files.move(tmp, configPath, StandardCopyOption.REPLACE_EXISTING);
             }
+            lastPersistenceError = "";
         } catch (Exception e) {
+            lastPersistenceError = "Settings save failed ("
+                    + e.getClass().getSimpleName() + ")";
             System.err.println("[ImageJAI] Failed to save settings: " + e.getMessage());
         }
     }

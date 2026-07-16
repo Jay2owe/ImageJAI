@@ -94,6 +94,13 @@ public class ModelPickerButton extends JButton {
     private SettingsLink settingsLink;
     private InstallerLink installerLink;
     private RefreshTask refreshTask;
+    private final ProviderRegistry.RefreshGeneration refreshGeneration =
+            new ProviderRegistry.RefreshGeneration();
+    private SwingWorker<RefreshOutcome, Void> activeRefreshWorker;
+    private final Map<String, ProviderRegistry.RefreshGeneration> providerRefreshGenerations =
+            new LinkedHashMap<String, ProviderRegistry.RefreshGeneration>();
+    private final Map<String, ProviderRegistry.RefreshWorker> providerRefreshWorkers =
+            new LinkedHashMap<String, ProviderRegistry.RefreshWorker>();
     private ProviderTierGate tierGate;
     private PinListener pinListener;
     private PopupFilter popupFilter = PopupFilter.ALL;
@@ -445,6 +452,14 @@ public class ModelPickerButton extends JButton {
         if (providerId == null || fetcher == null) {
             return;
         }
+        ProviderRegistry.RefreshGeneration generation =
+                providerRefreshGenerations.get(providerId);
+        if (generation == null) {
+            generation = new ProviderRegistry.RefreshGeneration();
+            providerRefreshGenerations.put(providerId, generation);
+        }
+        ProviderRegistry.RefreshWorker previous = providerRefreshWorkers.get(providerId);
+        if (previous != null) previous.cancel(true);
         ProviderRegistry.RefreshWorker worker = new ProviderRegistry.RefreshWorker(
                 providerId, fetcher,
                 new ProviderRegistry.RefreshWorker.Applier() {
@@ -460,7 +475,8 @@ public class ModelPickerButton extends JButton {
                             applyProviderRefresh(pid, newEntry);
                         }
                     }
-                });
+                }, generation);
+        providerRefreshWorkers.put(providerId, worker);
         worker.execute();
     }
 
@@ -627,6 +643,9 @@ public class ModelPickerButton extends JButton {
         if (headerRefreshButton != null) {
             headerRefreshButton.setEnabled(false);
         }
+        final long generation = refreshGeneration.next();
+        SwingWorker<RefreshOutcome, Void> previous = activeRefreshWorker;
+        if (previous != null) previous.cancel(true);
         SwingWorker<RefreshOutcome, Void> worker = new SwingWorker<RefreshOutcome, Void>() {
             @Override
             protected RefreshOutcome doInBackground() throws Exception {
@@ -635,19 +654,31 @@ public class ModelPickerButton extends JButton {
 
             @Override
             protected void done() {
+                if (isCancelled() || !refreshGeneration.isCurrent(generation)) return;
                 try {
                     RefreshOutcome outcome = get();
-                    handleRefreshSuccess(outcome);
+                    if (refreshGeneration.isCurrent(generation)) {
+                        handleRefreshSuccess(outcome);
+                    }
                 } catch (Exception ex) {
-                    handleRefreshFailure(ex);
+                    if (refreshGeneration.isCurrent(generation) && !isCancelled()) {
+                        handleRefreshFailure(ex);
+                    }
                 } finally {
-                    if (headerRefreshButton != null) {
+                    if (refreshGeneration.isCurrent(generation)
+                            && headerRefreshButton != null) {
                         headerRefreshButton.setEnabled(true);
                     }
                 }
             }
         };
+        activeRefreshWorker = worker;
         worker.execute();
+    }
+
+    /** Start the same generation-gated refresh used by the header button. */
+    public void refreshAsync() {
+        runRefresh();
     }
 
     private void handleRefreshSuccess(RefreshOutcome outcome) {

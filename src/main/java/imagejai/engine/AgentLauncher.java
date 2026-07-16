@@ -6,13 +6,19 @@ import imagejai.config.Settings;
 
 import java.io.File;
 import java.io.IOException;
+import java.io.ByteArrayOutputStream;
+import java.io.InputStream;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 
 /**
  * Detects and launches external AI CLI agents (Claude Code, Aider, etc.)
@@ -28,6 +34,9 @@ public class AgentLauncher {
     public static final String LOCAL_ASSISTANT_NAME = "Local Assistant";
     public static final String GEMMA_WRAPPER_COMMAND = "gemma4_31b_agent";
     private static final String GEMMA_BUNDLED_MODULE = "gemma4_31b";
+    static final long PROCESS_PROBE_TIMEOUT_MS = 3000L;
+    static final long CONTEXT_SYNC_TIMEOUT_MS = 15000L;
+    static final int MAX_PROCESS_OUTPUT_BYTES = 64 * 1024;
 
     /** How an agent should be launched. */
     public enum Mode {
@@ -322,8 +331,9 @@ public class AgentLauncher {
             cmd.add("/k");
             cmd.add(fullCommand);
         } else if (os.contains("mac")) {
+            String shell = "cd " + shellQuote(agentWorkspace) + " && exec " + fullCommand;
             String script = "tell application \"Terminal\" to do script "
-                    + "\"cd '" + agentWorkspace + "' && " + fullCommand + "\"";
+                    + appleScriptString(shell);
             cmd.add("osascript");
             cmd.add("-e");
             cmd.add(script);
@@ -335,7 +345,10 @@ public class AgentLauncher {
             }
             cmd.add(terminal);
             cmd.add("-e");
-            cmd.add("bash -c 'cd \"" + agentWorkspace + "\" && " + fullCommand + "; bash'");
+            cmd.add("bash");
+            cmd.add("-lc");
+            cmd.add("cd " + shellQuote(agentWorkspace)
+                    + " && " + fullCommand + "; exec bash");
         }
 
         Map<String, String> env = new LinkedHashMap<>();
@@ -568,19 +581,13 @@ public class AgentLauncher {
             String os = System.getProperty("os.name", "").toLowerCase();
             String whichCmd = os.contains("win") ? "where" : "which";
 
-            ProcessBuilder pb = new ProcessBuilder(whichCmd, baseCommand);
-            pb.redirectErrorStream(true);
-            Process proc = pb.start();
-            int exit = proc.waitFor();
-            if (exit == 0) {
-                byte[] buf = new byte[4096];
-                int len = proc.getInputStream().read(buf);
-                if (len > 0) {
-                    String path = new String(buf, 0, len).trim().split("\\r?\\n")[0];
-                    return path;
-                }
+            ProcessResult result = runBoundedProcess(
+                    new ProcessBuilder(whichCmd, baseCommand).redirectErrorStream(true),
+                    PROCESS_PROBE_TIMEOUT_MS, 16 * 1024);
+            if (!result.timedOut && result.exitCode == 0 && !result.output.trim().isEmpty()) {
+                return result.output.trim().split("\\r?\\n")[0];
             }
-        } catch (Exception ignore) {
+        } catch (IOException ignore) {
             // where/which not available or failed
         }
 
@@ -936,11 +943,13 @@ public class AgentLauncher {
         };
         for (String term : terminals) {
             try {
-                Process p = new ProcessBuilder("which", term).start();
-                if (p.waitFor() == 0) {
+                ProcessResult result = runBoundedProcess(
+                        new ProcessBuilder("which", term).redirectErrorStream(true),
+                        PROCESS_PROBE_TIMEOUT_MS, 4096);
+                if (!result.timedOut && result.exitCode == 0) {
                     return term;
                 }
-            } catch (Exception ignore) {
+            } catch (IOException ignore) {
                 // continue
             }
         }
@@ -958,18 +967,109 @@ public class AgentLauncher {
         }
 
         try {
-            ProcessBuilder pb = new ProcessBuilder("python", syncScript.getAbsolutePath());
+            ProcessBuilder pb = new ProcessBuilder(pythonCommand(), syncScript.getAbsolutePath());
             pb.directory(new File(agentWorkspace));
             pb.redirectErrorStream(true);
-            Process proc = pb.start();
-            boolean finished = proc.waitFor() == 0;
-            if (finished) {
+            ProcessResult result = runBoundedProcess(pb, CONTEXT_SYNC_TIMEOUT_MS,
+                    MAX_PROCESS_OUTPUT_BYTES);
+            if (result.timedOut) {
+                IJ.log("[AgentLauncher] Context sync timed out; owned process tree terminated");
+            } else if (result.exitCode == 0) {
                 IJ.log("[AgentLauncher] Context files synced for all agents");
             } else {
-                IJ.log("[AgentLauncher] Warning: sync_context.py exited with errors");
+                IJ.log("[AgentLauncher] Warning: sync_context.py exited "
+                        + result.exitCode);
             }
-        } catch (Exception e) {
-            IJ.log("[AgentLauncher] Could not run sync_context.py: " + e.getMessage());
+        } catch (IOException e) {
+            IJ.log("[AgentLauncher] Could not run sync_context.py ("
+                    + e.getClass().getSimpleName() + ")");
         }
+    }
+
+    static final class ProcessResult {
+        final int exitCode;
+        final boolean timedOut;
+        final String output;
+        ProcessResult(int exitCode, boolean timedOut, String output) {
+            this.exitCode = exitCode;
+            this.timedOut = timedOut;
+            this.output = output == null ? "" : output;
+        }
+    }
+
+    /** Start, continuously drain and bound one process owned by this launcher. */
+    static ProcessResult runBoundedProcess(ProcessBuilder builder, long timeoutMs,
+                                           int maxOutputBytes) throws IOException {
+        if (builder == null) throw new IllegalArgumentException("process builder is required");
+        builder.redirectErrorStream(true);
+        final Process process = builder.start();
+        final int cap = Math.max(0, Math.min(MAX_PROCESS_OUTPUT_BYTES, maxOutputBytes));
+        final ByteArrayOutputStream captured = new ByteArrayOutputStream(Math.min(cap, 4096));
+        final AtomicReference<IOException> drainFailure = new AtomicReference<IOException>();
+        Thread drain = new Thread(new Runnable() {
+            @Override public void run() {
+                byte[] buffer = new byte[4096];
+                try (InputStream input = process.getInputStream()) {
+                    int read;
+                    while ((read = input.read(buffer)) >= 0) {
+                        int room = cap - captured.size();
+                        if (room > 0) captured.write(buffer, 0, Math.min(room, read));
+                    }
+                } catch (IOException failure) {
+                    if (process.isAlive()) drainFailure.compareAndSet(null, failure);
+                }
+            }
+        }, "imagejai-process-output-drain");
+        drain.setDaemon(true);
+        drain.start();
+
+        boolean finished;
+        try {
+            finished = process.waitFor(Math.max(1L, timeoutMs), TimeUnit.MILLISECONDS);
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+            terminateOwnedProcessTree(process);
+            throw new IOException("interrupted while waiting for owned process", interrupted);
+        }
+        if (!finished) terminateOwnedProcessTree(process);
+        try {
+            drain.join(1000L);
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+        }
+        IOException failure = drainFailure.get();
+        if (failure != null && finished) throw failure;
+        int exit = finished ? process.exitValue() : -1;
+        return new ProcessResult(exit, !finished,
+                new String(captured.toByteArray(), StandardCharsets.UTF_8));
+    }
+
+    private static void terminateOwnedProcessTree(Process process) {
+        if (process == null) return;
+        try {
+            List<ProcessHandle> descendants = new ArrayList<ProcessHandle>();
+            process.toHandle().descendants().forEach(descendants::add);
+            Collections.reverse(descendants);
+            for (ProcessHandle child : descendants) child.destroy();
+            process.destroy();
+            try { process.waitFor(250L, TimeUnit.MILLISECONDS); }
+            catch (InterruptedException interrupted) { Thread.currentThread().interrupt(); }
+            for (ProcessHandle child : descendants) {
+                if (child.isAlive()) child.destroyForcibly();
+            }
+            if (process.isAlive()) process.destroyForcibly();
+        } catch (Throwable unavailable) {
+            process.destroyForcibly();
+        }
+    }
+
+    static String shellQuote(String value) {
+        String safe = value == null ? "" : value;
+        return "'" + safe.replace("'", "'\"'\"'") + "'";
+    }
+
+    private static String appleScriptString(String value) {
+        String safe = value == null ? "" : value;
+        return "\"" + safe.replace("\\", "\\\\").replace("\"", "\\\"") + "\"";
     }
 }

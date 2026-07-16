@@ -1515,13 +1515,13 @@ public class AiRootPanel extends JPanel implements ChatSurface {
         Map<String, MergeFunction.LiveResult> live =
                 new LinkedHashMap<String, MergeFunction.LiveResult>();
         List<String> failed = new ArrayList<String>();
+        Map<String, MergeFunction.LiveResult> discovered = discovery.discoverAll(timeout);
 
         for (String providerId : endpoints.keySet()) {
-            if (ProviderDiscovery.CURATED_ONLY.contains(providerId)) {
-                live.put(providerId, MergeFunction.LiveResult.failure());
-                continue;
+            MergeFunction.LiveResult result = discovered.get(providerId);
+            if (result == null) {
+                result = MergeFunction.LiveResult.failure("discovery returned no result");
             }
-            MergeFunction.LiveResult result = discovery.discover(providerId, timeout);
             if (result.successful()) {
                 try {
                     cache.write(providerId, fetchedAt,
@@ -1668,10 +1668,13 @@ public class AiRootPanel extends JPanel implements ChatSurface {
         try (InputStream in = ProviderRegistry.class
                 .getResourceAsStream(ProviderRegistry.BUNDLED_RESOURCE)) {
             if (in == null) {
+                IJ.log("[ImageJAI] Bundled model registry is missing; model list is incomplete");
                 return java.util.Collections.emptyList();
             }
             return ModelsYamlLoader.loadFromStream(in);
         } catch (Exception ex) {
+            IJ.log("[ImageJAI] Bundled model registry failed to load ("
+                    + ex.getClass().getSimpleName() + ")");
             return java.util.Collections.emptyList();
         }
     }
@@ -1680,8 +1683,14 @@ public class AiRootPanel extends JPanel implements ChatSurface {
         try {
             ModelsLocalLoader loader = new ModelsLocalLoader(
                     ModelsLocalLoader.resolveDefaultPath());
-            return loader.loadAsMap();
+            Map<String, ModelsLocalLoader.Override> loaded = loader.loadAsMap();
+            if (!loader.lastError().isEmpty()) {
+                IJ.log("[ImageJAI] " + loader.lastError());
+            }
+            return loaded;
         } catch (Exception ex) {
+            IJ.log("[ImageJAI] Model overrides failed to load ("
+                    + ex.getClass().getSimpleName() + ")");
             return java.util.Collections.emptyMap();
         }
     }
@@ -1759,28 +1768,7 @@ public class AiRootPanel extends JPanel implements ChatSurface {
      * the picker on the EDT. Bundled models stay visible until it completes.
      */
     private void triggerStartupRefresh() {
-        javax.swing.SwingWorker<ModelPickerButton.RefreshOutcome, Void> worker =
-                new javax.swing.SwingWorker<ModelPickerButton.RefreshOutcome, Void>() {
-                    @Override
-                    protected ModelPickerButton.RefreshOutcome doInBackground() {
-                        return runRefreshOffEdt();
-                    }
-
-                    @Override
-                    protected void done() {
-                        try {
-                            ModelPickerButton.RefreshOutcome outcome = get();
-                            if (outcome != null && outcome.newRegistry != null
-                                    && modelPicker != null) {
-                                modelPicker.setRegistry(outcome.newRegistry);
-                            }
-                        } catch (Exception ex) {
-                            IJ.log("[ImageJAI] Startup model refresh failed: "
-                                    + ex.getMessage());
-                        }
-                    }
-                };
-        worker.execute();
+        if (modelPicker != null) modelPicker.refreshAsync();
     }
 
     private static Set<String> collectModelKeys(ProviderRegistry registry) {

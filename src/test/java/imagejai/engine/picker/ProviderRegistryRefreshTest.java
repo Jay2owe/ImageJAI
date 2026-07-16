@@ -7,6 +7,7 @@ import java.util.Collections;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotNull;
@@ -122,6 +123,74 @@ public class ProviderRegistryRefreshTest {
         Object[] keysBefore = streamProviderIds(registry).toArray();
         Object[] keysAfter = streamProviderIds(next).toArray();
         assertTrue(Arrays.equals(keysBefore, keysAfter));
+    }
+
+    @Test
+    public void slowStaleRefreshCannotOverwriteNewerGeneration() throws Exception {
+        ProviderRegistry.RefreshGeneration generation =
+                new ProviderRegistry.RefreshGeneration();
+        CountDownLatch firstStarted = new CountDownLatch(1);
+        CountDownLatch releaseFirst = new CountDownLatch(1);
+        CountDownLatch applied = new CountDownLatch(1);
+        AtomicReference<String> appliedName = new AtomicReference<String>();
+        AtomicInteger callbacks = new AtomicInteger();
+        ProviderEntry stale = entry("groq", "stale");
+        ProviderEntry fresh = entry("groq", "fresh");
+
+        ProviderRegistry.RefreshWorker first = new ProviderRegistry.RefreshWorker(
+                "groq", () -> {
+                    firstStarted.countDown();
+                    while (releaseFirst.getCount() > 0) {
+                        try { releaseFirst.await(); }
+                        catch (InterruptedException ignored) { }
+                    }
+                    return stale;
+                }, (id, entry, error) -> {
+                    callbacks.incrementAndGet();
+                    appliedName.set(entry == null ? null : entry.displayName());
+                    applied.countDown();
+                }, generation);
+        first.execute();
+        assertTrue(firstStarted.await(2, TimeUnit.SECONDS));
+
+        ProviderRegistry.RefreshWorker second = new ProviderRegistry.RefreshWorker(
+                "groq", () -> fresh, (id, entry, error) -> {
+                    callbacks.incrementAndGet();
+                    appliedName.set(entry.displayName());
+                    applied.countDown();
+                }, generation);
+        first.cancel(true);
+        second.execute();
+        assertTrue(applied.await(2, TimeUnit.SECONDS));
+        releaseFirst.countDown();
+        Thread.sleep(100L);
+
+        assertEquals(1, callbacks.get());
+        assertEquals("fresh", appliedName.get());
+    }
+
+    @Test
+    public void cancelledGenerationIgnoresLateCompletion() throws Exception {
+        ProviderRegistry.RefreshGeneration generation =
+                new ProviderRegistry.RefreshGeneration();
+        CountDownLatch release = new CountDownLatch(1);
+        AtomicInteger callbacks = new AtomicInteger();
+        ProviderRegistry.RefreshWorker worker = new ProviderRegistry.RefreshWorker(
+                "groq", () -> {
+                    try { release.await(); } catch (InterruptedException ignored) { }
+                    return entry("groq", "late");
+                }, (id, entry, error) -> callbacks.incrementAndGet(), generation);
+        worker.execute();
+        generation.cancel();
+        worker.cancel(true);
+        release.countDown();
+        Thread.sleep(100L);
+        assertEquals(0, callbacks.get());
+    }
+
+    private static ProviderEntry entry(String provider, String displayName) {
+        return new ProviderEntry(provider, displayName,
+                ProviderEntry.Status.READY, "", Collections.<ModelEntry>emptyList());
     }
 
     private static java.util.stream.Stream<String> streamProviderIds(ProviderRegistry r) {

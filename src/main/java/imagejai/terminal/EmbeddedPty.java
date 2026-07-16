@@ -53,6 +53,7 @@ public final class EmbeddedPty {
     private final ImageJAITtyConnector connector;
     private final JediTermWidget widget;
     private final ImageJAITermSettingsProvider settingsProvider;
+    private final OutboundPromptScrubber scrubber;
 
     public EmbeddedPty(AgentLaunchSpec spec) throws IOException {
         configurePtyNativeFolder();
@@ -65,7 +66,8 @@ public final class EmbeddedPty {
                 .setInitialRows(INITIAL_ROWS);
 
         process = builder.start();
-        connector = new ImageJAITtyConnector(process, OutboundPromptScrubber.getInstance());
+        scrubber = OutboundPromptScrubber.createSessionScrubber();
+        connector = new ImageJAITtyConnector(process, scrubber);
         settingsProvider = new ImageJAITermSettingsProvider();
         widget = new JediTermWidget(INITIAL_COLUMNS, INITIAL_ROWS, settingsProvider);
         widget.setTtyConnector(connector);
@@ -148,7 +150,7 @@ public final class EmbeddedPty {
                 }
                 if (e.isShiftDown() && e.getKeyCode() == KeyEvent.VK_ENTER) {
                     try {
-                        OutboundPromptScrubber.getInstance().sendNextEnterRaw();
+                        scrubber.sendNextEnterRaw();
                         connector.write(new byte[] { '\r' });
                     } catch (IOException ex) {
                         IJ.log("[ImageJAI-Term] Ctrl+Shift+Enter write failed: "

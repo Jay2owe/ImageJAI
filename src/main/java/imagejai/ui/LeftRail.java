@@ -432,8 +432,9 @@ public class LeftRail extends JPanel {
                 @Override
                 public void actionPerformed(ActionEvent e) {
                     if (session != null && session.isAlive()) {
-                        session.writeInput(entry.command);
-                        IJ.log("[ImageJAI-Term] Injected agent command: " + entry.command);
+                        if (sendInput(session, entry.command)) {
+                            IJ.log("[ImageJAI-Term] Injected agent command: " + entry.command);
+                        }
                         focusTerminal();
                     }
                 }
@@ -451,7 +452,7 @@ public class LeftRail extends JPanel {
         }
 
         final Pattern clearPattern = AgentRegistry.clearPattern(current.info());
-        current.writeInput("/clear");
+        if (!sendInput(current, "/clear")) return;
         showStatus("Sent /clear");
         focusTerminal();
 
@@ -513,8 +514,10 @@ public class LeftRail extends JPanel {
 
             String path = wip.toAbsolutePath().normalize().toString();
             if (session != null && session.isAlive()) {
-                session.writeInput("Start new WIP: read `" + path + "` and help me scope it.");
-                showStatus("WIP prompt sent");
+                if (sendInput(session, "Start new WIP: read `" + path
+                        + "` and help me scope it.")) {
+                    showStatus("WIP prompt sent");
+                }
             } else {
                 showStatus("WIP note created");
             }
@@ -768,7 +771,8 @@ public class LeftRail extends JPanel {
                 for (String line : chunks) {
                     showStatus(line);
                     if (current != null && current.isAlive()) {
-                        current.writeRaw(line + "\r");
+                        EmbeddedAgentSession.WriteResult write = current.writeRaw(line + "\r");
+                        if (!write.isSuccess()) showStatus(write.message());
                     }
                 }
             }
@@ -810,9 +814,10 @@ public class LeftRail extends JPanel {
                     + "numeric parameters should be reusable. Keep every other literal "
                     + "number marked image_specific: true. Show me the draft YAML before "
                     + "writing it, then tell me the saved filename.";
-            current.writeInput(prompt);
-            showStatus("Recipe prompt sent");
-            IJ.log("[ImageJAI-Term] Sent recipe-save prompt for " + target);
+            if (sendInput(current, prompt)) {
+                showStatus("Recipe prompt sent");
+                IJ.log("[ImageJAI-Term] Sent recipe-save prompt for " + target);
+            }
         } catch (IOException e) {
             String msg = readableMessage(e);
             showStatus(msg);
@@ -861,7 +866,10 @@ public class LeftRail extends JPanel {
                 try {
                     String summary = get();
                     if (current != null && current.isAlive()) {
-                        current.writeInput("Audit my results:\n" + summary);
+                        if (!sendInput(current, "Audit my results:\n" + summary)) {
+                            focusTerminal();
+                            return;
+                        }
                     }
                     showStatus("Audit sent");
                     IJ.log("[ImageJAI-Term] Audit summary sent to PTY");
@@ -873,6 +881,18 @@ public class LeftRail extends JPanel {
                 focusTerminal();
             }
         }.execute();
+    }
+
+    private boolean sendInput(EmbeddedAgentSession target, String text) {
+        EmbeddedAgentSession.WriteResult result = target == null
+                ? EmbeddedAgentSession.WriteResult.failure("No terminal session is attached.")
+                : target.writeInputResult(text);
+        if (!result.isSuccess()) {
+            showStatus(result.message());
+            IJ.log("[ImageJAI-Term] Prompt retained after failed PTY write");
+            return false;
+        }
+        return true;
     }
 
     private JLabel sectionTitle(String text) {

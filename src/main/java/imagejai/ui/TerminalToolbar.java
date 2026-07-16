@@ -34,6 +34,7 @@ public final class TerminalToolbar extends JPanel {
     private final JButton interruptButton = new JButton("Interrupt");
     private final JButton killButton = new JButton("Kill session");
     private final JButton copyUrlButton = new JButton("Copy URL");
+    private final JLabel writeStatus = new JLabel(" ");
     private final Runnable focusReturn;
     private final Timer urlTimer;
 
@@ -55,6 +56,9 @@ public final class TerminalToolbar extends JPanel {
         buttons.add(killButton);
         buttons.add(copyUrlButton);
         add(buttons, BorderLayout.CENTER);
+        writeStatus.setForeground(new Color(220, 105, 95));
+        writeStatus.setVisible(false);
+        add(writeStatus, BorderLayout.SOUTH);
         styleButton(confirmButton);
         styleButton(cancelButton);
         styleButton(interruptButton);
@@ -66,17 +70,27 @@ public final class TerminalToolbar extends JPanel {
         copyUrlButton.setVisible(false);
 
         confirmButton.addActionListener(e -> {
-            if (session != null) {
-                session.writeRaw("\r");
+            EmbeddedAgentSession.WriteResult result = session == null
+                    ? EmbeddedAgentSession.WriteResult.failure("No terminal session is attached.")
+                    : session.writeRaw("\r");
+            if (result.isSuccess()) {
+                clearPendingPrompt();
+                clearWriteFailure();
+            } else {
+                showWriteFailure(result);
             }
-            clearPendingPrompt();
             refocus();
         });
         cancelButton.addActionListener(e -> {
-            if (session != null) {
-                session.writeRaw("\u001b");
+            EmbeddedAgentSession.WriteResult result = session == null
+                    ? EmbeddedAgentSession.WriteResult.failure("No terminal session is attached.")
+                    : session.writeRaw("\u001b");
+            if (result.isSuccess()) {
+                clearPendingPrompt();
+                clearWriteFailure();
+            } else {
+                showWriteFailure(result);
             }
-            clearPendingPrompt();
             refocus();
         });
         interruptButton.addActionListener(e -> {
@@ -118,6 +132,7 @@ public final class TerminalToolbar extends JPanel {
 
     public void attachSession(EmbeddedAgentSession newSession) {
         this.session = newSession;
+        clearWriteFailure();
         clearPendingPrompt();
         hideCopyUrl();
     }
@@ -127,6 +142,7 @@ public final class TerminalToolbar extends JPanel {
             return;
         }
         session = null;
+        clearWriteFailure();
         clearPendingPrompt();
         hideCopyUrl();
     }
@@ -180,7 +196,14 @@ public final class TerminalToolbar extends JPanel {
                 options,
                 options[1]);
         if (session != null) {
-            session.writeRaw(result == 0 ? "\r" : "\u001b");
+            EmbeddedAgentSession.WriteResult write =
+                    session.writeRaw(result == 0 ? "\r" : "\u001b");
+            if (!write.isSuccess()) {
+                showPendingPrompt(promptText);
+                showWriteFailure(write);
+            } else {
+                clearWriteFailure();
+            }
         }
         refocus();
     }
@@ -201,6 +224,19 @@ public final class TerminalToolbar extends JPanel {
         if (focusReturn != null) {
             SwingUtilities.invokeLater(focusReturn);
         }
+    }
+
+    private void showWriteFailure(EmbeddedAgentSession.WriteResult result) {
+        writeStatus.setText(result == null ? "Terminal write failed. Retry."
+                : result.message());
+        writeStatus.setVisible(true);
+        revalidate();
+        repaint();
+    }
+
+    private void clearWriteFailure() {
+        writeStatus.setText(" ");
+        writeStatus.setVisible(false);
     }
 
     private static void styleButton(JButton button) {
