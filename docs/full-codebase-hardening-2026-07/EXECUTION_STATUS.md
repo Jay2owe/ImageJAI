@@ -61,7 +61,7 @@ Conflict watchlist:
 | 23 | completed | `d3cbe77`, `24ecd6b`, `98c6906` | 123/123 security companion tests, 40/40 bounded scan/cache tests, and 1,039/1,039 full Maven tests passed; cross-cutting socket, parser, job, capture, audit, event, UI, filesystem, token, path, and visual-scope bounds are enforced |
 | 24 | completed | `91ffbaa` | 24/24 runner/session and 120/120 context tests passed; AgentLauncher integration, Python compilation, whitespace audit, and offline structured doctor behavior passed |
 | 25 | completed | `a5a66a5` | Generated command docs and reference index are current; 166 Python tests, 34 focused Java tests, and 1,045/1,045 full Maven package tests passed; the packaged schema-1 manifest has 61 commands and matches the source hash |
-| 26 | pending | - | - |
+| 26 | completed | `fef61bd` | 1,055 unit, 3 integration, 31 lifecycle, 483 offline Python, 3 build/install, and 10 bundle-transaction tests passed; two committed-source JAR builds matched SHA-256 `41516E2B...BAB8`; disposable bundle verification passed with 186 allowlisted agent files |
 
 ## Corrective passes
 
