@@ -132,10 +132,20 @@ def filter_relevant_paths(paths: Iterable[str | Path]) -> list[str]:
 def _atomic_write_json(path: Path, payload: object) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f".{path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
-    temporary.write_text(
-        json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8"
-    )
-    os.replace(temporary, path)
+    try:
+        temporary.write_text(
+            json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+        )
+        os.replace(temporary, path)
+    except BaseException:
+        # Dropbox and antivirus scanners can interrupt the replace after the
+        # temporary file is complete. Do not leave that private staging file
+        # behind, and never let a cleanup failure hide the original error.
+        try:
+            temporary.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
 
 
 def _queue_request(

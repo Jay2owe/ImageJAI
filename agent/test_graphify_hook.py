@@ -50,6 +50,56 @@ def test_relevant_suffix_filter_is_deterministic() -> None:
     ]
 
 
+def test_atomic_json_replace_failure_removes_temp_and_preserves_destination(
+    tmp_path: Path, monkeypatch
+) -> None:
+    destination = tmp_path / "state.json"
+    destination.write_text('{"original": true}\n', encoding="utf-8")
+    replace_error = PermissionError("simulated Dropbox sharing interruption")
+
+    def fail_replace(source: Path, target: Path) -> None:
+        assert Path(source).exists()
+        assert Path(target) == destination
+        raise replace_error
+
+    monkeypatch.setattr(graphify_hook.os, "replace", fail_replace)
+
+    try:
+        graphify_hook._atomic_write_json(destination, {"replacement": True})
+    except PermissionError as error:
+        assert error is replace_error
+    else:  # pragma: no cover - assertion guard
+        raise AssertionError("failed atomic replacement must propagate its error")
+
+    assert destination.read_text(encoding="utf-8") == '{"original": true}\n'
+    assert list(tmp_path.glob(".state.json.*.tmp")) == []
+
+
+def test_atomic_json_cleanup_failure_does_not_mask_replace_error(
+    tmp_path: Path, monkeypatch
+) -> None:
+    destination = tmp_path / "state.json"
+    replace_error = PermissionError("simulated replace failure")
+
+    monkeypatch.setattr(
+        graphify_hook.os,
+        "replace",
+        lambda *_args: (_ for _ in ()).throw(replace_error),
+    )
+    monkeypatch.setattr(
+        Path,
+        "unlink",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("cleanup failed")),
+    )
+
+    try:
+        graphify_hook._atomic_write_json(destination, {"replacement": True})
+    except PermissionError as error:
+        assert error is replace_error
+    else:  # pragma: no cover - assertion guard
+        raise AssertionError("cleanup failure must not mask the replace error")
+
+
 def test_debounce_uses_newest_request_timestamp(tmp_path: Path) -> None:
     older = tmp_path / "older.json"
     newer = tmp_path / "newer.json"
