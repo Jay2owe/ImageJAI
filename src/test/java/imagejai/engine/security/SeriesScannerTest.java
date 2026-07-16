@@ -7,14 +7,19 @@ import org.junit.rules.TemporaryFolder;
 
 import java.io.IOException;
 import java.nio.file.Files;
+import java.nio.file.AccessDeniedException;
+import java.nio.file.DirectoryStream;
 import java.nio.file.Path;
 import java.util.Arrays;
 import java.util.Hashtable;
 import java.util.List;
 import java.util.Locale;
+import java.util.Iterator;
+import java.util.NoSuchElementException;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 
 public class SeriesScannerTest {
@@ -82,6 +87,96 @@ public class SeriesScannerTest {
         }
     }
 
+    @Test
+    public void unreadableMetadataIsNotCachedAndSucceedsAfterAccessIsRestored() throws Exception {
+        Path file = temp.newFile("restored.lif").toPath();
+        AtomicInteger created = new AtomicInteger();
+        SeriesScanner scanner = new SeriesScanner(new PathTokenMap(bytes(11)),
+                new SeriesScanner.ReaderFactory() {
+                    @Override
+                    public SeriesScanner.MetadataReader create() {
+                        if (created.getAndIncrement() == 0) {
+                            return new FakeReader() {
+                                @Override
+                                public void setId(String id) throws IOException {
+                                    throw new AccessDeniedException(id);
+                                }
+                            };
+                        }
+                        return new FakeReader();
+                    }
+                });
+
+        List<SeriesScanner.SeriesInfo> denied = scanner.scan(file);
+        List<SeriesScanner.SeriesInfo> restored = scanner.scan(file);
+
+        assertEquals(2, created.get());
+        assertEquals(1, denied.size());
+        assertFalse(denied.get(0).readable());
+        assertEquals(2, restored.size());
+        assertTrue(restored.get(0).readable());
+    }
+
+    @Test
+    public void deniedFolderIsDistinctFromEmptyAndCanBeRetried() throws Exception {
+        Path folder = temp.newFolder("folder-restored").toPath();
+        Files.createFile(folder.resolve("image.tif"));
+        AtomicInteger opens = new AtomicInteger();
+        SeriesScanner scanner = new SeriesScanner(new PathTokenMap(bytes(12)),
+                new SeriesScanner.ReaderFactory() {
+                    @Override public SeriesScanner.MetadataReader create() { return new FakeReader(); }
+                }, directory -> {
+                    if (opens.getAndIncrement() == 0) {
+                        throw new AccessDeniedException(directory.toString());
+                    }
+                    return Files.newDirectoryStream(directory);
+                });
+
+        try {
+            scanner.scanFolder(folder);
+            throw new AssertionError("Expected folder_unreadable");
+        } catch (SeriesScanner.ScanException expected) {
+            assertEquals("folder_unreadable", expected.code());
+        }
+        assertEquals(2, scanner.scanFolder(folder).size());
+    }
+
+    @Test
+    public void folderEnumerationStopsAtSafetyCap() throws Exception {
+        Path folder = temp.newFolder("bounded-folder").toPath();
+        Path repeated = Files.createFile(folder.resolve("image.tif"));
+        SeriesScanner scanner = new SeriesScanner(new PathTokenMap(bytes(13)),
+                new SeriesScanner.ReaderFactory() {
+                    @Override public SeriesScanner.MetadataReader create() { return new FakeReader(); }
+                }, directory -> repeatingDirectory(repeated,
+                        SeriesScanner.MAX_DIRECTORY_ENTRIES + 1));
+
+        try {
+            scanner.scanFolder(folder);
+            throw new AssertionError("Expected directory_entry_cap");
+        } catch (SeriesScanner.ScanException expected) {
+            assertEquals("directory_entry_cap", expected.code());
+        }
+    }
+
+    private static DirectoryStream<Path> repeatingDirectory(final Path path, final int count) {
+        return new DirectoryStream<Path>() {
+            @Override
+            public Iterator<Path> iterator() {
+                return new Iterator<Path>() {
+                    private int index;
+                    @Override public boolean hasNext() { return index < count; }
+                    @Override public Path next() {
+                        if (!hasNext()) throw new NoSuchElementException();
+                        index++;
+                        return path;
+                    }
+                };
+            }
+            @Override public void close() { }
+        };
+    }
+
     private static byte[] bytes(int value) {
         byte[] salt = new byte[32];
         for (int i = 0; i < salt.length; i++) {
@@ -90,7 +185,7 @@ public class SeriesScannerTest {
         return salt;
     }
 
-    private static final class FakeReader implements SeriesScanner.MetadataReader {
+    private static class FakeReader implements SeriesScanner.MetadataReader {
         private int series;
 
         @Override public void setId(String id) throws IOException, FormatException { }

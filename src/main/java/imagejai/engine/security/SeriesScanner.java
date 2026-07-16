@@ -5,8 +5,11 @@ import loci.formats.IFormatReader;
 import loci.formats.ImageReader;
 
 import java.io.IOException;
+import java.nio.file.DirectoryStream;
 import java.nio.file.Files;
+import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
+import java.nio.file.attribute.BasicFileAttributes;
 import java.nio.file.attribute.FileTime;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -16,7 +19,6 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
-import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * Metadata-only Bio-Formats series scanner. It calls {@code setId},
@@ -24,6 +26,11 @@ import java.util.concurrent.ConcurrentHashMap;
  * pixel-plane APIs such as {@code openBytes}.
  */
 public final class SeriesScanner {
+    public static final int MAX_DIRECTORY_ENTRIES = 4096;
+    public static final int MAX_SERIES_PER_FILE = 1024;
+    public static final int MAX_FOLDER_SERIES = 16384;
+    public static final int MAX_CACHE_ENTRIES = 256;
+
     public interface MetadataReader extends AutoCloseable {
         void setId(String id) throws IOException, FormatException;
         int getSeriesCount();
@@ -42,6 +49,10 @@ public final class SeriesScanner {
         MetadataReader create();
     }
 
+    interface DirectorySource {
+        DirectoryStream<Path> open(Path directory) throws IOException;
+    }
+
     private static final ReaderFactory BIO_FORMATS_READER_FACTORY = new ReaderFactory() {
         @Override
         public MetadataReader create() {
@@ -51,52 +62,106 @@ public final class SeriesScanner {
 
     private final PathTokenMap tokenMap;
     private final ReaderFactory readerFactory;
-    private final ConcurrentHashMap<CacheKey, List<SeriesInfo>> cache =
-            new ConcurrentHashMap<CacheKey, List<SeriesInfo>>();
+    private final DirectorySource directorySource;
+    private final Map<CacheKey, List<SeriesInfo>> cache =
+            new LinkedHashMap<CacheKey, List<SeriesInfo>>(16, 0.75f, true) {
+                @Override
+                protected boolean removeEldestEntry(Map.Entry<CacheKey, List<SeriesInfo>> eldest) {
+                    return size() > MAX_CACHE_ENTRIES;
+                }
+            };
 
     public SeriesScanner() {
-        this(PathTokenMap.getInstance(), BIO_FORMATS_READER_FACTORY);
+        this(PathTokenMap.getInstance(), BIO_FORMATS_READER_FACTORY, Files::newDirectoryStream);
     }
 
     SeriesScanner(PathTokenMap tokenMap, ReaderFactory readerFactory) {
+        this(tokenMap, readerFactory, Files::newDirectoryStream);
+    }
+
+    SeriesScanner(PathTokenMap tokenMap, ReaderFactory readerFactory,
+                  DirectorySource directorySource) {
         this.tokenMap = tokenMap == null ? PathTokenMap.getInstance() : tokenMap;
         this.readerFactory = readerFactory == null
                 ? BIO_FORMATS_READER_FACTORY
                 : readerFactory;
+        this.directorySource = directorySource == null
+                ? Files::newDirectoryStream
+                : directorySource;
     }
 
     public List<SeriesInfo> scanFolder(Path folder) {
-        if (folder == null || !Files.isDirectory(folder)) {
+        if (folder == null || !Files.exists(folder)) {
             return Collections.emptyList();
         }
         List<Path> files = new ArrayList<Path>();
-        try (java.util.stream.Stream<Path> stream = Files.list(folder)) {
-            stream.filter(Files::isRegularFile)
-                    .filter(SeriesScanner::isSupportedImage)
-                    .sorted()
-                    .forEach(files::add);
+        int entries = 0;
+        try (DirectoryStream<Path> stream = directorySource.open(folder)) {
+            for (Path candidate : stream) {
+                entries++;
+                if (entries > MAX_DIRECTORY_ENTRIES) {
+                    throw new ScanException("directory_entry_cap", folder,
+                            "Folder contains more than " + MAX_DIRECTORY_ENTRIES + " entries.");
+                }
+                BasicFileAttributes attributes = Files.readAttributes(
+                        candidate, BasicFileAttributes.class);
+                if (attributes.isRegularFile() && isSupportedImage(candidate)) {
+                    files.add(candidate);
+                }
+            }
         } catch (IOException e) {
-            return Collections.emptyList();
+            throw new ScanException("folder_unreadable", folder,
+                    "Could not read image folder: " + message(e), e);
         }
+        Collections.sort(files);
         List<SeriesInfo> out = new ArrayList<SeriesInfo>();
         for (Path file : files) {
-            out.addAll(scan(file));
+            List<SeriesInfo> scanned = scan(file);
+            if (scanned.size() > MAX_FOLDER_SERIES - out.size()) {
+                throw new ScanException("folder_series_cap", folder,
+                        "Folder contains more than " + MAX_FOLDER_SERIES + " image series.");
+            }
+            out.addAll(scanned);
         }
         return Collections.unmodifiableList(out);
     }
 
     public List<SeriesInfo> scan(Path file) {
-        if (file == null || !Files.isRegularFile(file) || !isSupportedImage(file)) {
+        if (file == null || !Files.exists(file) || !isSupportedImage(file)) {
             return Collections.emptyList();
         }
-        CacheKey key = cacheKey(file);
-        List<SeriesInfo> cached = cache.get(key);
-        if (cached != null) {
-            return cached;
+        CacheKey key;
+        try {
+            BasicFileAttributes attributes = Files.readAttributes(file, BasicFileAttributes.class);
+            if (!attributes.isRegularFile()) {
+                return Collections.emptyList();
+            }
+            key = new CacheKey(file.toAbsolutePath().normalize(),
+                    attributes.lastModifiedTime().toMillis());
+        } catch (NoSuchFileException e) {
+            return Collections.emptyList();
+        } catch (IOException e) {
+            throw new ScanException("file_unreadable", file,
+                    "Could not inspect image file: " + message(e), e);
+        }
+        synchronized (cache) {
+            List<SeriesInfo> cached = cache.get(key);
+            if (cached != null) {
+                return cached;
+            }
         }
         List<SeriesInfo> scanned = scanUncached(file.toAbsolutePath().normalize());
-        List<SeriesInfo> existing = cache.putIfAbsent(key, scanned);
-        return existing == null ? scanned : existing;
+        if (!allReadable(scanned)) {
+            return scanned;
+        }
+        synchronized (cache) {
+            List<SeriesInfo> existing = cache.get(key);
+            if (existing != null) {
+                return existing;
+            }
+            cache.put(key, scanned);
+            return scanned;
+        }
     }
 
     private List<SeriesInfo> scanUncached(Path file) {
@@ -105,6 +170,10 @@ public final class SeriesScanner {
         try {
             reader.setId(file.toString());
             int count = Math.max(1, reader.getSeriesCount());
+            if (count > MAX_SERIES_PER_FILE) {
+                throw new IllegalStateException("Series count exceeds safety cap of "
+                        + MAX_SERIES_PER_FILE + ".");
+            }
             boolean tokeniseAsSeries = count > 1 || isContainerFormat(file);
             for (int i = 0; i < count; i++) {
                 reader.setSeries(i);
@@ -151,14 +220,20 @@ public final class SeriesScanner {
         return name.endsWith(".lif") || name.endsWith(".czi") || name.endsWith(".nd2");
     }
 
-    private static CacheKey cacheKey(Path file) {
-        Path normalised = file.toAbsolutePath().normalize();
-        try {
-            FileTime mtime = Files.getLastModifiedTime(normalised);
-            return new CacheKey(normalised, mtime.toMillis());
-        } catch (IOException e) {
-            return new CacheKey(normalised, -1L);
+    private static boolean allReadable(List<SeriesInfo> values) {
+        for (SeriesInfo value : values) {
+            if (!value.readable()) {
+                return false;
+            }
         }
+        return true;
+    }
+
+    private static String message(Exception e) {
+        String value = e.getMessage();
+        return value == null || value.trim().isEmpty()
+                ? e.getClass().getSimpleName()
+                : value;
     }
 
     private static String labelFor(Path file, int zeroBasedSeries,
@@ -249,6 +324,26 @@ public final class SeriesScanner {
         public int hashCode() {
             return Objects.hash(path, mtime);
         }
+    }
+
+    public static final class ScanException extends IllegalStateException {
+        private final String code;
+        private final Path path;
+
+        ScanException(String code, Path path, String message) {
+            super(message);
+            this.code = code;
+            this.path = path;
+        }
+
+        ScanException(String code, Path path, String message, Throwable cause) {
+            super(message, cause);
+            this.code = code;
+            this.path = path;
+        }
+
+        public String code() { return code; }
+        public Path path() { return path; }
     }
 
     public static final class SeriesInfo {

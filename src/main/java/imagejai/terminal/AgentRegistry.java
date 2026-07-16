@@ -11,13 +11,18 @@ import ij.IJ;
 import imagejai.engine.AgentLauncher;
 
 import java.io.File;
+import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.DirectoryStream;
+import java.nio.file.Files;
+import java.nio.file.NoSuchFileException;
+import java.nio.file.Path;
+import java.nio.file.attribute.BasicFileAttributes;
 import java.util.ArrayList;
 import java.util.Collections;
-import java.util.Comparator;
-import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -29,9 +34,23 @@ import java.util.regex.PatternSyntaxException;
  */
 public final class AgentRegistry {
     private static final long USER_COMMAND_CACHE_MS = 5000L;
+    public static final int MAX_USER_COMMAND_DIRECTORY_ENTRIES = 4096;
+    public static final int MAX_USER_COMMANDS = 512;
+    public static final int MAX_USER_COMMAND_CACHE_ENTRIES = 64;
     private static final String DEFAULT_ID = "default";
     private static final Map<String, CachedCommands> USER_COMMAND_CACHE =
-            new HashMap<String, CachedCommands>();
+            new LinkedHashMap<String, CachedCommands>(16, 0.75f, true) {
+                @Override
+                protected boolean removeEldestEntry(Map.Entry<String, CachedCommands> eldest) {
+                    return size() > MAX_USER_COMMAND_CACHE_ENTRIES;
+                }
+            };
+
+    interface DirectorySource {
+        DirectoryStream<Path> open(Path path) throws IOException;
+    }
+
+    private static final DirectorySource FILE_DIRECTORY_SOURCE = Files::newDirectoryStream;
 
     private AgentRegistry() {
     }
@@ -179,22 +198,31 @@ public final class AgentRegistry {
     }
 
     public static List<CommandEntry> userCommands(AgentLauncher.AgentInfo info, File workspace) {
+        return userCommandsResult(info, workspace).commands();
+    }
+
+    public static UserCommandsResult userCommandsResult(AgentLauncher.AgentInfo info,
+                                                         File workspace) {
+        return userCommandsResult(info, workspace, FILE_DIRECTORY_SOURCE,
+                System.currentTimeMillis());
+    }
+
+    static UserCommandsResult userCommandsResult(AgentLauncher.AgentInfo info, File workspace,
+                                                  DirectorySource directorySource, long now) {
         String id = agentId(info);
         String cacheKey = id + "|" + (workspace == null ? "" : workspace.getAbsolutePath());
-        long now = System.currentTimeMillis();
         synchronized (USER_COMMAND_CACHE) {
             CachedCommands cached = USER_COMMAND_CACHE.get(cacheKey);
             if (cached != null && now - cached.loadedAtMs < USER_COMMAND_CACHE_MS) {
-                return cached.commands;
+                return cached.result;
             }
         }
 
-        List<CommandEntry> commands = scanUserCommands(id, workspace);
-        List<CommandEntry> immutable = Collections.unmodifiableList(commands);
+        UserCommandsResult result = scanUserCommands(id, workspace, directorySource);
         synchronized (USER_COMMAND_CACHE) {
-            USER_COMMAND_CACHE.put(cacheKey, new CachedCommands(now, immutable));
+            USER_COMMAND_CACHE.put(cacheKey, new CachedCommands(now, result));
         }
-        return immutable;
+        return result;
     }
 
     @SuppressWarnings({"deprecation", "removal"})
@@ -225,53 +253,83 @@ public final class AgentRegistry {
         return out.toString();
     }
 
-    private static List<CommandEntry> scanUserCommands(String id, File workspace) {
+    private static UserCommandsResult scanUserCommands(String id, File workspace,
+                                                        DirectorySource directorySource) {
         List<CommandEntry> commands = new ArrayList<CommandEntry>();
+        int[] inspected = new int[]{0};
+        int[] directories = new int[]{0};
         if ("claude".equals(id) && workspace != null) {
             File dir = new File(workspace, ".claude" + File.separator + "commands");
-            scanFiles(dir, ".md", "/", commands);
+            scanFiles(dir.toPath(), ".md", "/", commands, directorySource,
+                    inspected, directories);
         } else if ("gemma4_31b".equals(id) || "gemma4_31b_claude".equals(id)) {
             File dir = new File(System.getProperty("user.home", ""),
                     ".config" + File.separator + "imagej-ai" + File.separator
                             + "gemma4_31b" + File.separator + ".ccommands");
-            scanFiles(dir, null, "/ccommands ", commands);
+            scanFiles(dir.toPath(), null, "/ccommands ", commands, directorySource,
+                    inspected, directories);
         }
-        return commands;
+        return new UserCommandsResult(commands, directories[0], inspected[0]);
     }
 
-    private static void scanFiles(File dir, String requiredSuffix,
-                                  String commandPrefix, List<CommandEntry> out) {
-        if (dir == null || !dir.isDirectory()) {
+    private static void scanFiles(Path dir, String requiredSuffix,
+                                  String commandPrefix, List<CommandEntry> out,
+                                  DirectorySource directorySource, int[] inspected,
+                                  int[] directories) {
+        if (dir == null || !Files.exists(dir)) {
             return;
         }
-        File[] files = dir.listFiles();
-        if (files == null) {
+        List<Path> sorted = new ArrayList<Path>();
+        directories[0]++;
+        try (DirectoryStream<Path> stream = directorySource.open(dir)) {
+            for (Path path : stream) {
+                inspected[0]++;
+                if (inspected[0] > MAX_USER_COMMAND_DIRECTORY_ENTRIES) {
+                    throw new CommandScanException("directory_entry_cap", dir,
+                            "Command directory contains more than "
+                                    + MAX_USER_COMMAND_DIRECTORY_ENTRIES + " entries.",
+                            inspected[0]);
+                }
+                BasicFileAttributes attributes = Files.readAttributes(
+                        path, BasicFileAttributes.class);
+                if (!attributes.isRegularFile()) {
+                    continue;
+                }
+                String name = path.getFileName().toString().toLowerCase(Locale.ROOT);
+                if (requiredSuffix != null && !name.endsWith(requiredSuffix)) {
+                    continue;
+                }
+                if (requiredSuffix == null
+                        && !(name.endsWith(".md") || name.endsWith(".txt"))) {
+                    continue;
+                }
+                if (sorted.size() >= MAX_USER_COMMANDS) {
+                    throw new CommandScanException("command_cap", dir,
+                            "Command directory contains more than "
+                                    + MAX_USER_COMMANDS + " supported commands.", inspected[0]);
+                }
+                sorted.add(path);
+            }
+        } catch (NoSuchFileException e) {
             return;
+        } catch (IOException e) {
+            throw new CommandScanException("directory_unreadable", dir,
+                    "Could not read command directory: " + message(e), e, inspected[0]);
         }
-        List<File> sorted = new ArrayList<File>();
-        for (File file : files) {
-            if (!file.isFile()) {
-                continue;
-            }
-            String name = file.getName().toLowerCase(Locale.ROOT);
-            if (requiredSuffix != null && !name.endsWith(requiredSuffix)) {
-                continue;
-            }
-            if (requiredSuffix == null && !(name.endsWith(".md") || name.endsWith(".txt"))) {
-                continue;
-            }
-            sorted.add(file);
+        Collections.sort(sorted, (a, b) -> a.getFileName().toString()
+                .compareToIgnoreCase(b.getFileName().toString()));
+        for (Path path : sorted) {
+            String stem = stripExtension(path.getFileName().toString());
+            out.add(new CommandEntry(commandPrefix + stem,
+                    path.toAbsolutePath().normalize().toString()));
         }
-        Collections.sort(sorted, new Comparator<File>() {
-            @Override
-            public int compare(File a, File b) {
-                return a.getName().compareToIgnoreCase(b.getName());
-            }
-        });
-        for (File file : sorted) {
-            String stem = stripExtension(file.getName());
-            out.add(new CommandEntry(commandPrefix + stem, file.getAbsolutePath()));
-        }
+    }
+
+    private static String message(Exception e) {
+        String value = e.getMessage();
+        return value == null || value.trim().isEmpty()
+                ? e.getClass().getSimpleName()
+                : value;
     }
 
     private static String stripExtension(String name) {
@@ -305,13 +363,54 @@ public final class AgentRegistry {
         }
     }
 
+    public static final class UserCommandsResult {
+        private final List<CommandEntry> commands;
+        private final int directoriesRead;
+        private final int entriesInspected;
+
+        UserCommandsResult(List<CommandEntry> commands, int directoriesRead,
+                           int entriesInspected) {
+            this.commands = Collections.unmodifiableList(
+                    new ArrayList<CommandEntry>(commands));
+            this.directoriesRead = directoriesRead;
+            this.entriesInspected = entriesInspected;
+        }
+
+        public List<CommandEntry> commands() { return commands; }
+        public int directoriesRead() { return directoriesRead; }
+        public int entriesInspected() { return entriesInspected; }
+    }
+
+    public static final class CommandScanException extends IllegalStateException {
+        private final String code;
+        private final Path path;
+        private final int entriesInspected;
+
+        CommandScanException(String code, Path path, String message,
+                             int entriesInspected) {
+            this(code, path, message, null, entriesInspected);
+        }
+
+        CommandScanException(String code, Path path, String message, Throwable cause,
+                             int entriesInspected) {
+            super(message, cause);
+            this.code = code;
+            this.path = path;
+            this.entriesInspected = entriesInspected;
+        }
+
+        public String code() { return code; }
+        public Path path() { return path; }
+        public int entriesInspected() { return entriesInspected; }
+    }
+
     private static final class CachedCommands {
         final long loadedAtMs;
-        final List<CommandEntry> commands;
+        final UserCommandsResult result;
 
-        CachedCommands(long loadedAtMs, List<CommandEntry> commands) {
+        CachedCommands(long loadedAtMs, UserCommandsResult result) {
             this.loadedAtMs = loadedAtMs;
-            this.commands = commands;
+            this.result = result;
         }
     }
 }

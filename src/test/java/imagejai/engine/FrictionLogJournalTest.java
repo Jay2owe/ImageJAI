@@ -8,6 +8,7 @@ import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
+import java.nio.file.AccessDeniedException;
 import java.nio.file.Path;
 import java.util.Comparator;
 import java.util.HashSet;
@@ -19,6 +20,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
@@ -302,6 +304,75 @@ public class FrictionLogJournalTest {
                 assertTrue(new JsonParser().parse(line).isJsonObject());
                 assertFalse(line.contains("\r"));
             }
+        } finally {
+            journal.close();
+        }
+    }
+
+    @Test
+    public void unreadableJournalIsNotEmptyAndSucceedsAfterAccessIsRestored() throws Exception {
+        Path root = newRoot();
+        FrictionLogJournal writer = new FrictionLogJournal(root);
+        writer.append(entry(1, "restored"));
+        writer.awaitIdle(5, TimeUnit.SECONDS);
+        writer.close();
+        AtomicInteger opens = new AtomicInteger();
+        FrictionLogJournal reader = new FrictionLogJournal(root, path -> {
+            if (opens.getAndIncrement() == 0) {
+                throw new AccessDeniedException(path.toString());
+            }
+            return Files.newInputStream(path);
+        });
+        try {
+            try {
+                reader.streamEntries();
+                throw new AssertionError("Expected unreadable journal error");
+            } catch (FrictionLogJournal.JournalReadException expected) {
+                assertEquals("unreadable", expected.code());
+                assertTrue(expected.diagnostics().truncated());
+            }
+            assertEquals(1L, reader.streamEntries().count());
+        } finally {
+            reader.close();
+        }
+    }
+
+    @Test
+    public void overlongJsonlLineRaisesCapErrorWithDiagnostics() throws Exception {
+        Path root = newRoot();
+        Files.createDirectories(root);
+        byte[] line = new byte[FrictionLogJournal.MAX_JSONL_LINE_BYTES + 2];
+        java.util.Arrays.fill(line, (byte) 'x');
+        line[line.length - 1] = (byte) '\n';
+        Files.write(root.resolve(FrictionLogJournal.FILE_NAME), line);
+        FrictionLogJournal journal = new FrictionLogJournal(root);
+        try {
+            try {
+                journal.streamEntries();
+                throw new AssertionError("Expected line_too_large");
+            } catch (FrictionLogJournal.JournalReadException expected) {
+                assertEquals("line_too_large", expected.code());
+                assertEquals("line_too_large", journal.lastReadDiagnostics().errorCode());
+            }
+        } finally {
+            journal.close();
+        }
+    }
+
+    @Test
+    public void malformedLinesAreCountedAsDropped() throws Exception {
+        Path root = newRoot();
+        Files.createDirectories(root);
+        String rows = "not-json\n"
+                + "{\"ts\":1,\"agent_id\":\"a\",\"command\":\"c\","
+                + "\"args_summary\":\"\",\"error\":\"e\"}\n";
+        Files.write(root.resolve(FrictionLogJournal.FILE_NAME),
+                rows.getBytes(StandardCharsets.UTF_8));
+        FrictionLogJournal journal = new FrictionLogJournal(root);
+        try {
+            assertEquals(1L, journal.streamEntries().count());
+            assertEquals(1L, journal.lastReadDiagnostics().malformedLines());
+            assertEquals(1L, journal.lastReadDiagnostics().droppedEntries());
         } finally {
             journal.close();
         }

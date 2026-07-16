@@ -2,13 +2,15 @@ package imagejai.engine.picker;
 
 import imagejai.engine.LaunchPolicy;
 
-import java.io.BufferedReader;
 import java.io.BufferedWriter;
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.io.InputStream;
 import java.net.URI;
 import java.net.URISyntaxException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
+import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.time.Duration;
@@ -44,6 +46,12 @@ public final class ModelsCache {
 
     /** TTL after which {@link #isFresh(String, Instant)} returns {@code false}. */
     public static final Duration TTL = Duration.ofHours(24);
+    public static final int MAX_CACHE_BYTES = 1024 * 1024;
+    public static final int MAX_MODELS = 2048;
+
+    interface InputOpener {
+        InputStream open(Path path) throws IOException;
+    }
 
     /** One provider's cache slot — loaded snapshot. */
     public static final class Snapshot {
@@ -65,9 +73,15 @@ public final class ModelsCache {
     }
 
     private final Path rootDir;
+    private final InputOpener inputOpener;
 
     public ModelsCache(Path rootDir) {
+        this(rootDir, Files::newInputStream);
+    }
+
+    ModelsCache(Path rootDir, InputOpener inputOpener) {
         this.rootDir = Objects.requireNonNull(rootDir, "rootDir");
+        this.inputOpener = Objects.requireNonNull(inputOpener, "inputOpener");
     }
 
     public Path rootDir() {
@@ -97,15 +111,27 @@ public final class ModelsCache {
         if (!Files.exists(path)) {
             return null;
         }
-        try (BufferedReader r = Files.newBufferedReader(path, StandardCharsets.UTF_8)) {
-            StringBuilder sb = new StringBuilder();
-            String line;
-            while ((line = r.readLine()) != null) {
-                sb.append(line);
+        try (InputStream in = inputOpener.open(path)) {
+            byte[] bytes = readBounded(in, path);
+            Snapshot parsed = parse(providerId, new String(bytes, StandardCharsets.UTF_8));
+            if (parsed == null) {
+                throw new IllegalArgumentException("Cache JSON is malformed.");
             }
-            return parse(providerId, sb.toString());
-        } catch (IOException ex) {
+            return parsed;
+        } catch (NoSuchFileException ex) {
             return null;
+        } catch (IOException ex) {
+            throw new CacheReadException("unreadable", path,
+                    "Could not read model cache: " + message(ex), ex);
+        } catch (ModelCountLimitException ex) {
+            throw new CacheReadException("model_cap", path,
+                    "Model cache exceeds safety cap of " + MAX_MODELS + " models.", ex);
+        } catch (RuntimeException ex) {
+            if (ex instanceof CacheReadException) {
+                throw ex;
+            }
+            throw new CacheReadException("malformed", path,
+                    "Could not parse model cache: " + message(ex), ex);
         }
     }
 
@@ -126,6 +152,10 @@ public final class ModelsCache {
         Set<String> ids = new LinkedHashSet<String>();
         if (modelIds != null) {
             for (String id : modelIds) {
+                if (ids.size() >= MAX_MODELS) {
+                    throw new IllegalArgumentException("Model cache exceeds safety cap of "
+                            + MAX_MODELS + " models.");
+                }
                 ids.add(LaunchPolicy.requireModelId(id));
             }
         }
@@ -156,13 +186,7 @@ public final class ModelsCache {
         // "fetched_at" as an ISO instant and "models" as either ["id"] or
         // [{"id": "..."}] for forward compat with richer payloads.
         Instant fetchedAt;
-        try {
-            fetchedAt = Instant.parse(extractStringField(body, "fetched_at"));
-        } catch (DateTimeParseException ex) {
-            return null;
-        } catch (RuntimeException ex) {
-            return null;
-        }
+        fetchedAt = Instant.parse(extractStringField(body, "fetched_at"));
         List<String> ids = new ArrayList<String>();
         for (String id : extractIds(body)) {
             try {
@@ -209,10 +233,10 @@ public final class ModelsCache {
 
     private static List<String> extractIds(String body) {
         int idx = body.indexOf("\"models\"");
-        if (idx < 0) return Collections.emptyList();
+        if (idx < 0) throw new IllegalStateException("missing field models");
         int open = body.indexOf('[', idx);
         int close = body.indexOf(']', open);
-        if (open < 0 || close < 0) return Collections.emptyList();
+        if (open < 0 || close < 0) throw new IllegalStateException("malformed field models");
         String inner = body.substring(open + 1, close).trim();
         if (inner.isEmpty()) return Collections.emptyList();
         List<String> out = new ArrayList<String>();
@@ -221,11 +245,63 @@ public final class ModelsCache {
             int q1 = inner.indexOf('"', i);
             if (q1 < 0) break;
             int q2 = inner.indexOf('"', q1 + 1);
-            if (q2 < 0) break;
+            if (q2 < 0) throw new IllegalStateException("malformed model identifier");
+            if (out.size() >= MAX_MODELS) {
+                throw new ModelCountLimitException();
+            }
             out.add(inner.substring(q1 + 1, q2));
             i = q2 + 1;
         }
         return out;
+    }
+
+    private static byte[] readBounded(InputStream in, Path path) throws IOException {
+        ByteArrayOutputStream out = new ByteArrayOutputStream(Math.min(8192, MAX_CACHE_BYTES));
+        byte[] buffer = new byte[8192];
+        int total = 0;
+        int read;
+        while ((read = in.read(buffer)) >= 0) {
+            if (read == 0) {
+                continue;
+            }
+            if (read > MAX_CACHE_BYTES - total) {
+                throw new CacheReadException("too_large", path,
+                        "Model cache exceeds safety cap of " + MAX_CACHE_BYTES + " bytes.");
+            }
+            out.write(buffer, 0, read);
+            total += read;
+        }
+        return out.toByteArray();
+    }
+
+    private static String message(Exception e) {
+        String value = e.getMessage();
+        return value == null || value.trim().isEmpty()
+                ? e.getClass().getSimpleName()
+                : value;
+    }
+
+    public static final class CacheReadException extends IllegalStateException {
+        private final String code;
+        private final Path path;
+
+        CacheReadException(String code, Path path, String message) {
+            super(message);
+            this.code = code;
+            this.path = path;
+        }
+
+        CacheReadException(String code, Path path, String message, Throwable cause) {
+            super(message, cause);
+            this.code = code;
+            this.path = path;
+        }
+
+        public String code() { return code; }
+        public Path path() { return path; }
+    }
+
+    private static final class ModelCountLimitException extends IllegalStateException {
     }
 
     private static String jsonString(String s) {

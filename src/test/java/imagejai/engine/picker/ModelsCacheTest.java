@@ -2,7 +2,10 @@ package imagejai.engine.picker;
 
 import org.junit.Test;
 
+import java.io.ByteArrayInputStream;
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.AccessDeniedException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Instant;
@@ -10,6 +13,7 @@ import java.util.Arrays;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
@@ -122,5 +126,57 @@ public class ModelsCacheTest {
     @Test(expected = IllegalArgumentException.class)
     public void providerIdCannotEscapeCacheDirectory() {
         new ModelsCache(java.nio.file.Paths.get("cache")).pathFor("../secrets");
+    }
+
+    @Test
+    public void unreadableCacheIsNotMissingAndSucceedsAfterAccessIsRestored() throws Exception {
+        Path dir = Files.createTempDirectory("mc-test");
+        ModelsCache writer = new ModelsCache(dir);
+        writer.write("openai", Instant.parse("2026-05-02T00:00:00Z"), "endpoint",
+                new LinkedHashSet<String>(Arrays.asList("gpt-5")));
+        AtomicInteger opens = new AtomicInteger();
+        ModelsCache cache = new ModelsCache(dir, path -> {
+            if (opens.getAndIncrement() == 0) {
+                throw new AccessDeniedException(path.toString());
+            }
+            return Files.newInputStream(path);
+        });
+
+        try {
+            cache.read("openai");
+            throw new AssertionError("Expected unreadable cache error");
+        } catch (ModelsCache.CacheReadException expected) {
+            assertEquals("unreadable", expected.code());
+        }
+        assertEquals("gpt-5", cache.read("openai").modelIds().get(0));
+    }
+
+    @Test
+    public void cacheReadStopsAtByteCapBeforeParsing() throws Exception {
+        Path dir = Files.createTempDirectory("mc-test");
+        Path slot = dir.resolve("openai.json");
+        Files.write(slot, "{}".getBytes(StandardCharsets.UTF_8));
+        byte[] oversized = new byte[ModelsCache.MAX_CACHE_BYTES + 1];
+        ModelsCache cache = new ModelsCache(dir,
+                path -> new ByteArrayInputStream(oversized));
+
+        try {
+            cache.read("openai");
+            throw new AssertionError("Expected too_large cache error");
+        } catch (ModelsCache.CacheReadException expected) {
+            assertEquals("too_large", expected.code());
+        }
+    }
+
+    @Test
+    public void malformedCacheIsDistinctFromMissing() throws Exception {
+        Path dir = Files.createTempDirectory("mc-test");
+        Files.write(dir.resolve("openai.json"), "not-json".getBytes(StandardCharsets.UTF_8));
+        try {
+            new ModelsCache(dir).read("openai");
+            throw new AssertionError("Expected malformed cache error");
+        } catch (ModelsCache.CacheReadException expected) {
+            assertEquals("malformed", expected.code());
+        }
     }
 }
