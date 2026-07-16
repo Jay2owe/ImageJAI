@@ -263,11 +263,52 @@ public class TCPCommandServerBatchCapsTest {
         assertEquals(2, witness.size());
         assertSame(outer, witness.get(0));
         assertSame(outer, witness.get(1));
-        // handleBatch wraps the per-step results array directly in
-        // successResponse, so resp.result IS the JsonArray.
-        JsonArray results = resp.getAsJsonArray("result");
+        JsonObject batch = resp.getAsJsonObject("result");
+        JsonArray results = batch.getAsJsonArray("results");
         assertNotNull(results);
         assertEquals(2, results.size());
+        assertEquals(1, batch.get("firstFailureIndex").getAsInt());
+        assertEquals(0, results.get(0).getAsJsonObject().get("index").getAsInt());
+        assertTrue(results.get(0).getAsJsonObject().has("response"));
+    }
+
+    @Test
+    public void batchReportsFailureIndexAndRetainsPriorResults() {
+        TCPCommandServer.AgentCaps caps = new TCPCommandServer.AgentCaps();
+        caps.safeMode = true;
+        JsonObject req = parse(
+                "{\"command\":\"batch\",\"commands\":["
+              + "{\"command\":\"ping\"},"
+              + "{\"command\":\"not_a_real_command\"},"
+              + "{\"command\":\"ping\"}]}");
+
+        JsonObject response = server.dispatch(req, caps);
+        JsonObject batch = response.getAsJsonObject("result");
+        JsonArray results = batch.getAsJsonArray("results");
+
+        assertEquals(1, batch.get("firstFailureIndex").getAsInt());
+        assertEquals(3, batch.get("executed").getAsInt());
+        assertEquals(3, results.size());
+        assertTrue(results.get(0).getAsJsonObject()
+                .getAsJsonObject("response").get("ok").getAsBoolean());
+        assertEquals(2, results.get(2).getAsJsonObject().get("index").getAsInt());
+    }
+
+    @Test
+    public void batchCanHaltAfterIndexedFailureWithoutDiscardingSuccess() {
+        TCPCommandServer.AgentCaps caps = new TCPCommandServer.AgentCaps();
+        JsonObject req = parse(
+                "{\"command\":\"batch\",\"halt_on_error\":true,\"commands\":["
+              + "{\"command\":\"ping\"},"
+              + "{\"command\":\"not_a_real_command\"},"
+              + "{\"command\":\"ping\"}]}");
+
+        JsonObject batch = server.dispatch(req, caps).getAsJsonObject("result");
+        assertEquals(1, batch.get("firstFailureIndex").getAsInt());
+        assertEquals(2, batch.get("executed").getAsInt());
+        assertEquals(3, batch.get("total").getAsInt());
+        assertTrue(batch.get("halted").getAsBoolean());
+        assertEquals(2, batch.getAsJsonArray("results").size());
     }
 
     private static JsonObject parse(String s) {

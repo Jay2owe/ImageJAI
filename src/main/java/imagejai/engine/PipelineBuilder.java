@@ -173,7 +173,20 @@ public class PipelineBuilder {
     public void executePipeline(Pipeline pipeline, PipelineCallback callback) {
         pipeline.status = "running";
         pipeline.currentStepIndex = 0;
-        executeFromStep(pipeline, 0, callback);
+        executeFromStep(pipeline, 0, callback, false);
+    }
+
+    /**
+     * Execute a pipeline when the caller already owns the coordinator's
+     * mutation monitor. This is the TCP pipeline operation seam: the whole
+     * chain is admitted once, while individual stages avoid recursively
+     * submitting more coordinator jobs.
+     */
+    void executePipelineOnCurrentThread(Pipeline pipeline,
+                                        PipelineCallback callback) {
+        pipeline.status = "running";
+        pipeline.currentStepIndex = 0;
+        executeFromStep(pipeline, 0, callback, true);
     }
 
     /**
@@ -184,7 +197,7 @@ public class PipelineBuilder {
      */
     public void resumePipeline(Pipeline pipeline, PipelineCallback callback) {
         // Find the first non-success step
-        int resumeFrom = 0;
+        int resumeFrom = pipeline.steps.size();
         for (int i = 0; i < pipeline.steps.size(); i++) {
             PipelineStep step = pipeline.steps.get(i);
             if (!"success".equals(step.status)) {
@@ -192,8 +205,14 @@ public class PipelineBuilder {
                 break;
             }
         }
+        if (resumeFrom >= pipeline.steps.size()) {
+            pipeline.status = "completed";
+            pipeline.currentStepIndex = pipeline.steps.size();
+            if (callback != null) callback.onPipelineCompleted(pipeline);
+            return;
+        }
         pipeline.status = "running";
-        executeFromStep(pipeline, resumeFrom, callback);
+        executeFromStep(pipeline, resumeFrom, callback, false);
     }
 
     /**
@@ -214,7 +233,7 @@ public class PipelineBuilder {
         step.result = null;
         step.executionTimeMs = 0;
         pipeline.status = "running";
-        executeFromStep(pipeline, stepIndex, callback);
+        executeFromStep(pipeline, stepIndex, callback, false);
     }
 
     /**
@@ -289,7 +308,9 @@ public class PipelineBuilder {
     /**
      * Execute pipeline steps starting from a given index.
      */
-    private void executeFromStep(Pipeline pipeline, int startIndex, PipelineCallback callback) {
+    private void executeFromStep(Pipeline pipeline, int startIndex,
+                                 PipelineCallback callback,
+                                 boolean coordinatorAlreadyOwned) {
         for (int i = startIndex; i < pipeline.steps.size(); i++) {
             PipelineStep step = pipeline.steps.get(i);
             pipeline.currentStepIndex = i;
@@ -300,7 +321,9 @@ public class PipelineBuilder {
             }
 
             long stepStart = System.currentTimeMillis();
-            ExecutionResult result = commandEngine.executeMacro(step.macroCode);
+            ExecutionResult result = coordinatorAlreadyOwned
+                    ? commandEngine.executeMacroOnCurrentThread(step.macroCode, null)
+                    : commandEngine.executeMacro(step.macroCode);
             step.executionTimeMs = System.currentTimeMillis() - stepStart;
             step.result = result;
 

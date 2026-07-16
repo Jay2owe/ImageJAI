@@ -73,8 +73,6 @@ import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutionException;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.LinkedBlockingDeque;
 import java.util.concurrent.TimeUnit;
@@ -193,11 +191,6 @@ public class TCPCommandServer {
         }
     }
 
-    /** Has this request opted out of the watchdog? */
-    private static boolean timeoutDisabled(long timeoutMs) {
-        return timeoutMs <= 0L;
-    }
-
     // -----------------------------------------------------------------------
     // Shared-token authentication (Jupyter-style ?token=...)
     // -----------------------------------------------------------------------
@@ -296,19 +289,6 @@ public class TCPCommandServer {
     // macro.started/macro.completed pair like CommandEngine does.
     private static final java.util.concurrent.atomic.AtomicLong MACRO_ID_SEQ =
             new java.util.concurrent.atomic.AtomicLong(0);
-    // JVM-wide mutex serializing every IJ.runMacro call. ImageJ has a single
-    // global Interpreter / WindowManager; two macros running concurrently
-    // (e.g. client A blocked on a dialog while client B starts a new macro)
-    // corrupt each other's active-image state. Every client thread acquires
-    // this before submitting to the executor and releases after the worker
-    // actually terminates (or the abort timeout elapses).
-    private static final Object MACRO_MUTEX = new Object();
-    // How long we wait for IJ.Macro.abort() + thread-interrupt to actually kill
-    // a running macro before giving up and returning the error response. The
-    // MACRO_MUTEX stays held for this whole window so the next macro cannot
-    // start until the zombie is either dead or demonstrably unkillable.
-    private static final long MACRO_ABORT_WAIT_MS = 1500L;
-
     /**
      * Commands treated as pure readers — eligible for hash dedup via the
      * optional {@code if_none_match} request field. Every entry must be a
@@ -604,6 +584,7 @@ public class TCPCommandServer {
 
     static java.util.function.BiFunction<JsonObject, AgentCaps, JsonObject>
             executeMacroForTest = null;
+    java.util.function.Function<String, ScriptEngine> scriptEngineResolverForTest = null;
 
     /**
      * Step 13: session-scoped image provenance DAG shared across all
@@ -641,8 +622,8 @@ public class TCPCommandServer {
     final SessionUndo sessionUndo = new SessionUndo();
 
     /**
-     * Step 15: number of mutating handlers currently inside their
-     * synchronized(MACRO_MUTEX) block. Read by the rewind / branch
+     * Step 15: number of coordinator-backed mutating handlers in flight.
+     * Read by the rewind / branch
      * handlers so a rewind that races a still-running macro returns
      * UNDO_BUSY instead of corrupting the state mid-flight.
      * Incremented at the top of every mutating handler, decremented in a
@@ -700,7 +681,20 @@ public class TCPCommandServer {
                             PipelineBuilder pipelineBuilder,
                             ExplorationEngine explorationEngine) {
         this(port, commandEngine, stateInspector, pipelineBuilder,
-                explorationEngine, new SessionCapsRegistry<AgentCaps>());
+                explorationEngine, new SessionCapsRegistry<AgentCaps>(), null);
+    }
+
+    /**
+     * Construct the TCP surface with an application-owned coordinator so
+     * other in-process assistants can share the same mutation boundary.
+     */
+    public TCPCommandServer(int port, CommandEngine commandEngine,
+                            StateInspector stateInspector,
+                            PipelineBuilder pipelineBuilder,
+                            ExplorationEngine explorationEngine,
+                            MutationCoordinator coordinator) {
+        this(port, commandEngine, stateInspector, pipelineBuilder,
+                explorationEngine, new SessionCapsRegistry<AgentCaps>(), coordinator);
     }
 
     TCPCommandServer(int port, CommandEngine commandEngine,
@@ -708,17 +702,25 @@ public class TCPCommandServer {
                      PipelineBuilder pipelineBuilder,
                      ExplorationEngine explorationEngine,
                      SessionCapsRegistry<AgentCaps> sessionRegistry) {
+        this(port, commandEngine, stateInspector, pipelineBuilder,
+                explorationEngine, sessionRegistry, null);
+    }
+
+    TCPCommandServer(int port, CommandEngine commandEngine,
+                     StateInspector stateInspector,
+                     PipelineBuilder pipelineBuilder,
+                     ExplorationEngine explorationEngine,
+                     SessionCapsRegistry<AgentCaps> sessionRegistry,
+                     MutationCoordinator coordinator) {
         this.port = port;
         this.commandEngine = commandEngine;
         this.stateInspector = stateInspector;
         this.pipelineBuilder = pipelineBuilder;
         this.explorationEngine = explorationEngine;
         this.sessionRegistry = sessionRegistry;
-        // Share the legacy JVM macro monitor during staged migration. New
-        // coordinator jobs therefore cannot overlap the older synchronized
-        // paths that stages 09/10/13 will move behind the same API.
-        this.mutationCoordinator = new MutationCoordinator(
-                MutationCoordinator.DEFAULT_CAPACITY, MACRO_MUTEX);
+        // One application-owned coordinator spans every mutation surface.
+        this.mutationCoordinator = coordinator != null ? coordinator
+                : new MutationCoordinator();
         if (commandEngine != null) {
             commandEngine.setMutationCoordinator(mutationCoordinator);
         }
@@ -743,6 +745,11 @@ public class TCPCommandServer {
     /** Phase 3: expose the job registry (primarily for tests). */
     public JobRegistry getJobRegistry() {
         return jobRegistry;
+    }
+
+    /** The single coordinator shared by every mutation producer in this app. */
+    public MutationCoordinator getMutationCoordinator() {
+        return mutationCoordinator;
     }
 
     /**
@@ -3318,15 +3325,23 @@ public class TCPCommandServer {
             }
         }
 
+        final String rewindImageTitle = imageTitle;
+        final String rewindToCallId = toCallId;
+        final int rewindCount = n;
+        Future<JsonObject> rewindFuture;
+        try {
+            MutationCoordinator.Handle<JsonObject> handle = mutationCoordinator.submit(
+                    MutationCoordinator.Request.<JsonObject>builder()
+                            .ownerSession(mutationOwnerOrInternal(caps))
+                            .sourceKind("rewind")
+                            .code(request.toString())
+                            .timeoutMs(resolveTimeoutMs(request, MACRO_TIMEOUT_MS))
+                            .operation(new MutationCoordinator.Operation<JsonObject>() {
+                                @Override public JsonObject run() {
+        String imageTitle = rewindImageTitle;
+        String toCallId = rewindToCallId;
+        int n = rewindCount;
         List<UndoFrame> popped;
-        // Wrap the entire frame walk + restore in MACRO_MUTEX so a concurrent
-        // execute_macro that bumps macroInFlight after our fast-path check
-        // cannot race the pixel write. The macroInFlight check above is
-        // still the cheap early-fail; this is the correctness guarantee.
-        // Plan §Failure modes: "Concurrent rewind during an in-flight macro.
-        // Reject with UNDO_BUSY error — serialise via the existing macro
-        // mutex." The MACRO_MUTEX block below is that serialisation.
-        synchronized (MACRO_MUTEX) {
         if (toCallId != null && !toCallId.isEmpty()) {
             String resolvedTitle = imageTitle;
             if (resolvedTitle == null) {
@@ -3470,7 +3485,27 @@ public class TCPCommandServer {
             }
         }
         return successResponse(result);
-        } // end synchronized (MACRO_MUTEX)
+                                }
+                            })
+                            .build());
+            rewindFuture = new CoordinatorFuture<JsonObject>(handle);
+        } catch (IllegalArgumentException
+                 | java.util.concurrent.RejectedExecutionException e) {
+            return errorResponse("Mutation admission rejected: " + e.getMessage());
+        }
+        try {
+            return rewindFuture.get();
+        } catch (InterruptedException e) {
+            rewindFuture.cancel(true);
+            awaitFutureTerminal(rewindFuture);
+            Thread.currentThread().interrupt();
+            return errorResponse("Rewind interrupted");
+        } catch (ExecutionException e) {
+            Throwable failure = e.getCause();
+            return errorResponse("Rewind failed: "
+                    + (failure == null || failure.getMessage() == null
+                            ? "unknown error" : failure.getMessage()));
+        }
     }
 
     private int remainingFramesFor(String imageTitle) {
@@ -3842,25 +3877,10 @@ public class TCPCommandServer {
             }
         }
 
-        if (isScientificIntegrityScanEnabled(caps)) {
-            DestructiveScanner.Context scanCtx = captureScannerContext(caps);
-            List<DestructiveScanner.DestructiveOp> findings =
-                    DestructiveScanner.scan(code, scanCtx);
-            if (!findings.isEmpty()) {
-                List<DestructiveScanner.DestructiveOp> rejects =
-                        DestructiveScanner.rejections(findings);
-                if (!rejects.isEmpty()) {
-                    return destructiveBlockedReply(rejects, caps);
-                }
-                for (DestructiveScanner.DestructiveOp op : DestructiveScanner.backups(findings)) {
-                    if (DestructiveScanner.RULE_ROI_WIPE.equals(op.ruleId)
-                            && caps.safeModeOptions != null
-                            && caps.safeModeOptions.autoBackupRoiOnReset) {
-                        runRoiAutoBackup(op, caps);
-                    }
-                }
-            }
-        }
+        final boolean safetyEnabled = isScientificIntegrityScanEnabled(caps);
+        final List<DestructiveScanner.DestructiveOp> safetyFindings = safetyEnabled
+                ? DestructiveScanner.scan(code, captureScannerContext(caps))
+                : java.util.Collections.<DestructiveScanner.DestructiveOp>emptyList();
 
         if (executeMacroForTest != null) {
             return executeMacroForTest.apply(request, caps);
@@ -3904,8 +3924,6 @@ public class TCPCommandServer {
         // docs/tcp_upgrade/13_provenance_graph.md. Captured regardless of
         // caps.graphDelta — the graph itself is always maintained; the flag
         // only gates whether the reply carries a graphDelta field.
-        final Set<String> graphTitlesBefore = ImageGraph.captureOpenTitles();
-        final String graphActiveTitleBefore = ImageGraph.captureActiveTitle();
         final long graphMarkerBefore = imageGraph.currentMarker();
 
         // Step 15: capture an undo frame BEFORE the macro mutates pixels,
@@ -3914,10 +3932,6 @@ public class TCPCommandServer {
         // subsequent {@code rewind to_call_id} can restore precisely. Per
         // plan: docs/tcp_upgrade/15_undo_stack_api.md. Snapshot failures
         // are swallowed so undo never blocks the macro path.
-        final String undoCallId = nextCallId();
-        final UndoFrame undoFrame = captureUndoFrameIfEnabled(
-                undoCallId, code, caps);
-
         // Gate image.* events while this macro runs. The agent's event
         // subscribers react to image.opened by sending get_image_info /
         // get_histogram — those wrap work in SwingUtilities.invokeLater
@@ -4006,37 +4020,21 @@ public class TCPCommandServer {
         }
 
         long startTime = System.currentTimeMillis();
+        MacroMutationContext mutationContext = null;
         // Step 15: announce we're about to start mutating so a concurrent
         // rewind (from another socket) returns UNDO_BUSY rather than
         // racing the in-flight macro. Decrement happens in the matching
         // finally below so an exception unwinds the counter cleanly.
         macroInFlight.incrementAndGet();
         try {
-        // Serialize every execute_macro call JVM-wide. ImageJ has a single global
-        // Interpreter / WindowManager — two overlapping macros (one zombied on a
-        // blocking dialog, a second sent by the agent after it received the
-        // server's error) corrupt each other's active-image state. Root cause of
-        // the "orig gets thresholded and every Duplicate inherits" bug.
-        synchronized (MACRO_MUTEX) {
-        // Prior-error *messages* are now snapshotted, but a Macro Error
-        // *dialog* from the previous failed call can still be sitting on the
-        // AWT event queue. Dismiss it only while holding MACRO_MUTEX so a
-        // second request cannot close a live Macro Error dialog that still
-        // belongs to the previous synchronized caller.
-        dismissOpenDialogs("Macro Error");
-
-        ExecutorService executor = Executors.newSingleThreadExecutor();
+        // MutationCoordinator owns JVM-wide serialization and worker lifetime.
+        {
         Future<String> future = null;
         try {
-            future = executor.submit(new java.util.concurrent.Callable<String>() {
-                @Override
-                public String call() {
-                    // Step 04: codeToRun is the fuzzy-validated macro — either
-                    // the original (no corrections) or a patched string with
-                    // run("name") spellings replaced by canonical names.
-                    return IJ.runMacro(codeToRun);
-                }
-            });
+            mutationContext = submitTcpMacroMutation(code, codeToRun,
+                    macroTimeoutMs, caps, safetyEnabled, safetyFindings,
+                    graphMarkerBefore);
+            future = mutationContext.future;
 
             while (true) {
                 try {
@@ -4057,7 +4055,7 @@ public class TCPCommandServer {
                     }
                     String detected = detectIjMacroError(logLenBefore, priorInterpError, priorIjError, dialogs);
                     if (detected != null) {
-                        abortMacroFuture(future);
+                        future.cancel(true);
                         failureMessage = detected;
                         break;
                     }
@@ -4067,7 +4065,7 @@ public class TCPCommandServer {
                     // instead of waiting the full MACRO_TIMEOUT_MS.
                     String blocking = detectBlockingDialog(dialogs);
                     if (blocking != null) {
-                        abortMacroFuture(future);
+                        future.cancel(true);
                         // Actively dismiss the blocking dialog so it does not
                         // linger on screen and block subsequent macros. The
                         // dismiss runs on the EDT and waits up to 2 s and
@@ -4104,32 +4102,45 @@ public class TCPCommandServer {
                         }
                         break;
                     }
-                    if (!timeoutDisabled(macroTimeoutMs)
-                            && (System.currentTimeMillis() - startTime) > macroTimeoutMs) {
-                        abortMacroFuture(future);
-                        failureMessage = "Macro execution timed out after " + macroTimeoutMs + "ms";
-                        break;
-                    }
                 } catch (ExecutionException e) {
                     Throwable cause = e.getCause();
-                    String msg = cause != null ? cause.getMessage() : e.getMessage();
-                    failureMessage = "Macro error: " + (msg != null ? msg : "unknown error");
+                    if (cause instanceof DestructiveMacroException) {
+                        publishTcpMacroCompleted(macroId, false,
+                                System.currentTimeMillis() - startTime,
+                                cause.getMessage());
+                        return destructiveBlockedReply(
+                                ((DestructiveMacroException) cause).rejections, caps);
+                    }
+                    if (cause instanceof MutationTimedOutException) {
+                        failureMessage = "Macro execution timed out after "
+                                + macroTimeoutMs + "ms";
+                    } else if (cause instanceof InterruptedException) {
+                        failureMessage = "Macro execution interrupted";
+                    } else {
+                        String msg = cause != null ? cause.getMessage() : e.getMessage();
+                        failureMessage = "Macro error: "
+                                + (msg != null ? msg : "unknown error");
+                    }
                     break;
                 }
             }
+        } catch (IllegalArgumentException
+                 | java.util.concurrent.RejectedExecutionException e) {
+            publishTcpMacroCompleted(macroId, false,
+                    System.currentTimeMillis() - startTime, e.getMessage());
+            return errorResponse("Mutation admission rejected: " + e.getMessage());
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
-            if (future != null && !future.isDone()) abortMacroFuture(future);
-            executor.shutdownNow();
+            if (future != null && !future.isDone()) future.cancel(true);
+            awaitFutureTerminal(future);
+            publishTcpMacroCompleted(macroId, false,
+                    System.currentTimeMillis() - startTime, "Interrupted");
             return errorResponse("Interrupted");
         } finally {
-            // Belt-and-braces: if we broke out of the loop without the worker
-            // actually terminating (e.g. IJ.Macro.abort() failed or the user
-            // had an OpenDialog the dismiss path could not kill), force-kill
-            // now so the next synchronized(MACRO_MUTEX) caller does not start
-            // on top of a live interpreter.
-            if (future != null && !future.isDone()) abortMacroFuture(future);
-            executor.shutdownNow();
+            // Do not inspect or report state until the coordinator has
+            // observed the real worker exit.
+            if (future != null && !future.isDone()) future.cancel(true);
+            awaitFutureTerminal(future);
         }
         if (success) {
             dialogs = safeDetectOpenDialogs();
@@ -4139,10 +4150,9 @@ public class TCPCommandServer {
                 failureMessage = detected;
             }
         }
-        } // end synchronized (MACRO_MUTEX)
+        } // end coordinator-backed macro wait block
         } finally {
-            // Step 15: in-flight counter must drop even if the synchronized
-            // block threw — otherwise rewind locks out forever.
+            // In-flight accounting unwinds after coordinator completion.
             macroInFlight.decrementAndGet();
         }
 
@@ -4377,14 +4387,11 @@ public class TCPCommandServer {
         // failure paths so partial work (e.g. a plugin that ran to
         // completion before a dialog-pause) still lands in the graph.
         try {
-            Set<String> graphTitlesAfter = ImageGraph.captureOpenTitles();
-            imageGraph.trackMacroChange(graphTitlesBefore, graphActiveTitleBefore,
-                    graphTitlesAfter, code, "macro");
-            if (caps != null && caps.graphDelta) {
-                ImageGraph.Delta gDelta = imageGraph.deltaSince(graphMarkerBefore);
-                if (!gDelta.isEmpty()) {
-                    result.add("graphDelta", gDelta.toJson());
-                }
+            ImageGraph.Delta gDelta = mutationContext == null
+                    ? null : mutationContext.graphDelta.get();
+            if (caps != null && caps.graphDelta
+                    && gDelta != null && !gDelta.isEmpty()) {
+                result.add("graphDelta", gDelta.toJson());
             }
         } catch (Throwable ignore) {}
         if (caps != null && caps.pulse) {
@@ -4411,6 +4418,349 @@ public class TCPCommandServer {
                 && caps.safeMode
                 && caps.safeModeOptions != null
                 && caps.safeModeOptions.scientificIntegrityScan;
+    }
+
+    private static final class DestructiveMacroException
+            extends MutationCoordinator.SafetyException {
+        final List<DestructiveScanner.DestructiveOp> rejections;
+
+        DestructiveMacroException(List<DestructiveScanner.DestructiveOp> rejections) {
+            super("Macro blocked by safe-mode scanner");
+            this.rejections = rejections;
+        }
+    }
+
+    private static final class MutationTimedOutException extends Exception {
+        MutationTimedOutException(String message) { super(message); }
+    }
+
+    /** Future compatibility adapter used by the legacy dialog polling loop. */
+    private static final class CoordinatorFuture<T> implements Future<T> {
+        private final MutationCoordinator.Handle<T> handle;
+
+        CoordinatorFuture(MutationCoordinator.Handle<T> handle) {
+            this.handle = handle;
+        }
+
+        @Override public boolean cancel(boolean mayInterruptIfRunning) {
+            return handle.cancel();
+        }
+
+        @Override public boolean isCancelled() {
+            MutationCoordinator.State state = handle.state();
+            return state == MutationCoordinator.State.CANCELLED
+                    || state == MutationCoordinator.State.TIMED_OUT
+                    || state == MutationCoordinator.State.CANCEL_REQUESTED
+                    || state == MutationCoordinator.State.TIMEOUT_REQUESTED;
+        }
+
+        @Override public boolean isDone() { return handle.isTerminal(); }
+
+        @Override public T get() throws InterruptedException, ExecutionException {
+            return unwrap(handle.awaitCompletion());
+        }
+
+        @Override public T get(long timeout, TimeUnit unit)
+                throws InterruptedException, ExecutionException, TimeoutException {
+            MutationCoordinator.Completion<T> completion =
+                    handle.awaitCompletion(timeout, unit);
+            if (completion == null) throw new TimeoutException();
+            return unwrap(completion);
+        }
+
+        private T unwrap(MutationCoordinator.Completion<T> completion)
+                throws ExecutionException {
+            if (completion.state() == MutationCoordinator.State.SUCCEEDED) {
+                return completion.result();
+            }
+            Throwable failure = completion.error();
+            if (completion.state() == MutationCoordinator.State.TIMED_OUT) {
+                failure = new MutationTimedOutException("Mutation timed out");
+            } else if (failure == null) {
+                failure = new InterruptedException("Mutation cancelled");
+            }
+            throw new ExecutionException(failure);
+        }
+    }
+
+    private static void awaitFutureTerminal(Future<?> future) {
+        if (future == null) return;
+        boolean interrupted = false;
+        while (true) {
+            try {
+                future.get();
+                break;
+            } catch (InterruptedException e) {
+                interrupted = true;
+            } catch (ExecutionException e) {
+                break;
+            }
+        }
+        if (interrupted) Thread.currentThread().interrupt();
+    }
+
+    private static final class MacroMutationContext {
+        final Future<String> future;
+        final java.util.concurrent.atomic.AtomicReference<ImageGraph.Delta> graphDelta;
+
+        MacroMutationContext(Future<String> future,
+                             java.util.concurrent.atomic.AtomicReference<ImageGraph.Delta> graphDelta) {
+            this.future = future;
+            this.graphDelta = graphDelta;
+        }
+    }
+
+    private static final class ScriptMutationContext {
+        final Future<Object> future;
+        final java.util.concurrent.atomic.AtomicReference<ImageGraph.Delta> graphDelta;
+
+        ScriptMutationContext(Future<Object> future,
+                              java.util.concurrent.atomic.AtomicReference<ImageGraph.Delta> graphDelta) {
+            this.future = future;
+            this.graphDelta = graphDelta;
+        }
+    }
+
+    private static final class PipelineMutationContext {
+        final Future<PipelineBuilder.Pipeline> future;
+        final java.util.concurrent.atomic.AtomicReference<ImageGraph.Delta> graphDelta;
+
+        PipelineMutationContext(Future<PipelineBuilder.Pipeline> future,
+                                java.util.concurrent.atomic.AtomicReference<ImageGraph.Delta> graphDelta) {
+            this.future = future;
+            this.graphDelta = graphDelta;
+        }
+    }
+
+    private MacroMutationContext submitTcpMacroMutation(
+            final String submittedCode,
+            final String executableCode,
+            final long timeoutMs,
+            final AgentCaps caps,
+            final boolean safetyEnabled,
+            final List<DestructiveScanner.DestructiveOp> safetyFindings,
+            final long graphMarkerBefore) {
+        final java.util.concurrent.atomic.AtomicReference<ImageGraph.Delta> graphDelta =
+                new java.util.concurrent.atomic.AtomicReference<ImageGraph.Delta>();
+        MutationCoordinator.Lifecycle<String> lifecycle =
+                new MutationCoordinator.Lifecycle<String>() {
+            private Set<String> graphTitlesBefore;
+            private String graphActiveTitleBefore;
+            private SourceImageTagger sourceTagger;
+
+            @Override public void checkSafety() throws Exception {
+                enforceMacroSafety(safetyFindings, caps);
+            }
+
+            @Override public void beforeMutation() {
+                dismissOpenDialogs("Macro Error");
+                graphTitlesBefore = ImageGraph.captureOpenTitles();
+                graphActiveTitleBefore = ImageGraph.captureActiveTitle();
+                if (caps != null && caps.undo) {
+                    captureUndoFrameIfEnabled(nextCallId(), submittedCode, caps);
+                }
+                sourceTagger = SourceImageTagger.beginIfEnabled(
+                        caps != null && caps.safeMode
+                                && caps.safeModeOptions != null
+                                && caps.safeModeOptions.autoSourceImageColumn,
+                        submittedCode, WindowManager.getCurrentImage());
+            }
+
+            @Override public void afterMutation(MutationCoordinator.Outcome<String> outcome) {
+                if (sourceTagger != null) {
+                    sourceTagger.postExec(WindowManager.getCurrentImage());
+                }
+                if (graphTitlesBefore != null) {
+                    imageGraph.trackMacroChange(graphTitlesBefore, graphActiveTitleBefore,
+                            ImageGraph.captureOpenTitles(), submittedCode, "macro");
+                    graphDelta.set(imageGraph.deltaSince(graphMarkerBefore));
+                }
+            }
+        };
+        MutationCoordinator.Request<String> request =
+                MutationCoordinator.Request.<String>builder()
+                        .ownerSession(mutationOwnerOrInternal(caps))
+                        .sourceKind("macro")
+                        .code(executableCode)
+                        .timeoutMs(timeoutMs)
+                        .safetyEnabled(safetyEnabled)
+                        .undoEnabled(caps != null && caps.undo)
+                        .provenanceEnabled(true)
+                        .operation(new MutationCoordinator.Operation<String>() {
+                            @Override public String run() { return IJ.runMacro(executableCode); }
+                        })
+                        .cancellationAction(new MutationCoordinator.CancellationAction() {
+                            @Override public void cancel() {
+                                CommandEngine.requestOwnedMacroAbort();
+                            }
+                        })
+                        .lifecycle(lifecycle)
+                        .build();
+        return new MacroMutationContext(
+                new CoordinatorFuture<String>(mutationCoordinator.submit(request)), graphDelta);
+    }
+
+    private ScriptMutationContext submitScriptMutation(
+            final String language,
+            final String code,
+            final ScriptEngine engine,
+            final long timeoutMs,
+            final AgentCaps caps,
+            final boolean safetyEnabled,
+            final List<DestructiveScanner.DestructiveOp> safetyFindings,
+            final long graphMarkerBefore) {
+        final java.util.concurrent.atomic.AtomicReference<ImageGraph.Delta> graphDelta =
+                new java.util.concurrent.atomic.AtomicReference<ImageGraph.Delta>();
+        MutationCoordinator.Lifecycle<Object> lifecycle =
+                new MutationCoordinator.Lifecycle<Object>() {
+            private Set<String> graphTitlesBefore;
+            private String graphActiveTitleBefore;
+            private SourceImageTagger sourceTagger;
+
+            @Override public void checkSafety() throws Exception {
+                enforceMacroSafety(safetyFindings, caps);
+            }
+
+            @Override public void beforeMutation() {
+                graphTitlesBefore = ImageGraph.captureOpenTitles();
+                graphActiveTitleBefore = ImageGraph.captureActiveTitle();
+                if (caps != null && caps.undo) {
+                    ImagePlus active = WindowManager.getCurrentImage();
+                    if (active != null) {
+                        sessionUndo.pushBoundary(active.getTitle(), nextCallId());
+                    }
+                }
+                sourceTagger = SourceImageTagger.beginIfEnabled(
+                        caps != null && caps.safeMode
+                                && caps.safeModeOptions != null
+                                && caps.safeModeOptions.autoSourceImageColumn,
+                        code, WindowManager.getCurrentImage());
+            }
+
+            @Override public void afterMutation(MutationCoordinator.Outcome<Object> outcome) {
+                if (sourceTagger != null) {
+                    sourceTagger.postExec(WindowManager.getCurrentImage());
+                }
+                if (graphTitlesBefore != null) {
+                    imageGraph.trackMacroChange(graphTitlesBefore, graphActiveTitleBefore,
+                            ImageGraph.captureOpenTitles(), code, "script");
+                    graphDelta.set(imageGraph.deltaSince(graphMarkerBefore));
+                }
+            }
+        };
+        MutationCoordinator.Request<Object> request =
+                MutationCoordinator.Request.<Object>builder()
+                        .ownerSession(mutationOwnerOrInternal(caps))
+                        .sourceKind("script")
+                        .code(code)
+                        .timeoutMs(timeoutMs)
+                        .safetyEnabled(safetyEnabled)
+                        .undoEnabled(caps != null && caps.undo)
+                        .provenanceEnabled(true)
+                        .operation(new MutationCoordinator.Operation<Object>() {
+                            @Override public Object run() throws ScriptException {
+                                return engine.eval(code);
+                            }
+                        })
+                        .cancellationAction(new MutationCoordinator.CancellationAction() {
+                            @Override public void cancel() {
+                                CommandEngine.requestOwnedMacroAbort();
+                            }
+                        })
+                        .lifecycle(lifecycle)
+                        .build();
+        return new ScriptMutationContext(
+                new CoordinatorFuture<Object>(mutationCoordinator.submit(request)), graphDelta);
+    }
+
+    private PipelineMutationContext submitPipelineMutation(
+            final PipelineBuilder.Pipeline pipeline,
+            final String code,
+            final long timeoutMs,
+            final AgentCaps caps,
+            final boolean safetyEnabled,
+            final List<DestructiveScanner.DestructiveOp> safetyFindings,
+            final long graphMarkerBefore) {
+        final java.util.concurrent.atomic.AtomicReference<ImageGraph.Delta> graphDelta =
+                new java.util.concurrent.atomic.AtomicReference<ImageGraph.Delta>();
+        MutationCoordinator.Lifecycle<PipelineBuilder.Pipeline> lifecycle =
+                new MutationCoordinator.Lifecycle<PipelineBuilder.Pipeline>() {
+            private Set<String> graphTitlesBefore;
+            private String graphActiveTitleBefore;
+            private SourceImageTagger sourceTagger;
+
+            @Override public void checkSafety() throws Exception {
+                enforceMacroSafety(safetyFindings, caps);
+            }
+
+            @Override public void beforeMutation() {
+                graphTitlesBefore = ImageGraph.captureOpenTitles();
+                graphActiveTitleBefore = ImageGraph.captureActiveTitle();
+                if (caps != null && caps.undo) {
+                    ImagePlus active = WindowManager.getCurrentImage();
+                    if (active != null) {
+                        sessionUndo.pushBoundary(active.getTitle(), nextCallId());
+                    }
+                }
+                sourceTagger = SourceImageTagger.beginIfEnabled(
+                        caps != null && caps.safeMode
+                                && caps.safeModeOptions != null
+                                && caps.safeModeOptions.autoSourceImageColumn,
+                        code, WindowManager.getCurrentImage());
+            }
+
+            @Override public void afterMutation(
+                    MutationCoordinator.Outcome<PipelineBuilder.Pipeline> outcome) {
+                if (sourceTagger != null) {
+                    sourceTagger.postExec(WindowManager.getCurrentImage());
+                }
+                if (graphTitlesBefore != null) {
+                    imageGraph.trackMacroChange(graphTitlesBefore, graphActiveTitleBefore,
+                            ImageGraph.captureOpenTitles(), code, "pipeline");
+                    graphDelta.set(imageGraph.deltaSince(graphMarkerBefore));
+                }
+            }
+        };
+        MutationCoordinator.Request<PipelineBuilder.Pipeline> request =
+                MutationCoordinator.Request.<PipelineBuilder.Pipeline>builder()
+                        .ownerSession(mutationOwnerOrInternal(caps))
+                        .sourceKind("pipeline")
+                        .code(code)
+                        .timeoutMs(timeoutMs)
+                        .safetyEnabled(safetyEnabled)
+                        .undoEnabled(caps != null && caps.undo)
+                        .provenanceEnabled(true)
+                        .operation(new MutationCoordinator.Operation<PipelineBuilder.Pipeline>() {
+                            @Override public PipelineBuilder.Pipeline run() {
+                                pipelineBuilder.executePipelineOnCurrentThread(pipeline, null);
+                                return pipeline;
+                            }
+                        })
+                        .cancellationAction(new MutationCoordinator.CancellationAction() {
+                            @Override public void cancel() {
+                                CommandEngine.requestOwnedMacroAbort();
+                            }
+                        })
+                        .lifecycle(lifecycle)
+                        .build();
+        return new PipelineMutationContext(
+                new CoordinatorFuture<PipelineBuilder.Pipeline>(
+                        mutationCoordinator.submit(request)), graphDelta);
+    }
+
+    private void enforceMacroSafety(
+            List<DestructiveScanner.DestructiveOp> findings,
+            AgentCaps caps) throws DestructiveMacroException {
+        List<DestructiveScanner.DestructiveOp> rejections =
+                DestructiveScanner.rejections(findings);
+        if (!rejections.isEmpty()) throw new DestructiveMacroException(rejections);
+        for (DestructiveScanner.DestructiveOp op : DestructiveScanner.backups(findings)) {
+            if (DestructiveScanner.RULE_ROI_WIPE.equals(op.ruleId)
+                    && caps != null && caps.safeModeOptions != null
+                    && caps.safeModeOptions.autoBackupRoiOnReset) {
+                runRoiAutoBackup(op, caps);
+            }
+        }
     }
 
     private DestructiveScanner.Context captureScannerContext(AgentCaps caps) {
@@ -4632,54 +4982,6 @@ public class TCPCommandServer {
         try {
             eventBus.publish(topic, data == null ? new JsonObject() : data);
         } catch (Throwable ignore) {}
-    }
-
-    /**
-     * Stop a running IJ.runMacro future for real. {@code Future.cancel(true)}
-     * by itself only interrupts the worker thread, and the ImageJ macro
-     * interpreter silently swallows {@link Thread#interrupted()} — the macro
-     * keeps stepping through the remaining statements against global
-     * WindowManager state while the TCP handler returns an error to the
-     * client. That zombie is what lets a later macro's threshold/mask steps
-     * land on the wrong image.
-     *
-     * Order of operations, mirroring {@code JobRegistry.cancel}: reflectively
-     * invoke {@code ij.Macro.abort()} (the interpreter's cooperative stop
-     * signal), then cancel the Future to interrupt the worker, then poll for
-     * up to {@link #MACRO_ABORT_WAIT_MS} so the MACRO_MUTEX is not released
-     * until the zombie is actually gone.
-     *
-     * Returns {@code true} when the worker terminates within the window,
-     * {@code false} when it is still alive (genuinely unkillable). Callers
-     * currently ignore the boolean but it is logged so future diagnostics can
-     * see unkillable-macro incidents.
-     */
-    private static boolean abortMacroFuture(Future<?> future) {
-        if (future == null) return true;
-        try {
-            Class<?> macroClass = Class.forName("ij.Macro");
-            java.lang.reflect.Method abort = macroClass.getMethod("abort");
-            abort.invoke(null);
-        } catch (Throwable ignore) {
-            // ij.Macro absent or signature changed — fall through to interrupt.
-        }
-        future.cancel(true);
-        long deadline = System.currentTimeMillis() + MACRO_ABORT_WAIT_MS;
-        while (System.currentTimeMillis() < deadline) {
-            if (future.isDone()) return true;
-            try {
-                Thread.sleep(25);
-            } catch (InterruptedException ie) {
-                Thread.currentThread().interrupt();
-                return future.isDone();
-            }
-        }
-        boolean dead = future.isDone();
-        if (!dead) {
-            System.err.println("[ImageJAI-TCP] WARNING: macro did not terminate within "
-                    + MACRO_ABORT_WAIT_MS + "ms of IJ.Macro.abort() — proceeding with zombie interpreter");
-        }
-        return dead;
     }
 
     private JsonArray safeDetectOpenDialogs() {
@@ -4974,12 +5276,17 @@ public class TCPCommandServer {
         }
         final String code = codeElement.getAsString();
         final long scriptTimeoutMs = resolveTimeoutMs(request, MACRO_TIMEOUT_MS);
+        final boolean safetyEnabled = isScientificIntegrityScanEnabled(caps);
+        final List<DestructiveScanner.DestructiveOp> safetyFindings = safetyEnabled
+                ? DestructiveScanner.scan(code, captureScannerContext(caps))
+                : java.util.Collections.<DestructiveScanner.DestructiveOp>emptyList();
 
         JsonObject result = new JsonObject();
         result.addProperty("language", language);
 
-        ScriptEngineManager manager = new ScriptEngineManager();
-        final ScriptEngine engine = manager.getEngineByName(language);
+        final ScriptEngine engine = scriptEngineResolverForTest != null
+                ? scriptEngineResolverForTest.apply(language)
+                : new ScriptEngineManager().getEngineByName(language);
 
         if (engine == null) {
             return errorResponse("ScriptEngine not found for language: " + language
@@ -5006,30 +5313,19 @@ public class TCPCommandServer {
         // handleExecuteMacro — scripts that create images get the derived
         // node and edge in the same shape. Per plan:
         // docs/tcp_upgrade/13_provenance_graph.md.
-        final Set<String> graphTitlesBefore = ImageGraph.captureOpenTitles();
-        final String graphActiveTitleBefore = ImageGraph.captureActiveTitle();
         final long graphMarkerBefore = imageGraph.currentMarker();
 
         // Step 15: scripts are uninvertible side-effects. Plan §Out-of-scope
         // marks them a "branch boundary" — push a sentinel onto the active
         // image's undo stack so a later rewind cannot walk past this point.
         // Best-effort: capture failures must not block the script.
-        if (caps != null && caps.undo) {
-            try {
-                ImagePlus boundaryImp = WindowManager.getCurrentImage();
-                if (boundaryImp != null) {
-                    sessionUndo.pushBoundary(boundaryImp.getTitle(), nextCallId());
-                }
-            } catch (Throwable ignore) {}
-        }
-
-        // Mirror handleExecuteMacro: run the script on a single-thread executor
-        // and poll for blocking dialogs every 150 ms. Without this, a Groovy
+        // Poll the coordinator-owned script worker for blocking dialogs every
+        // 150 ms. Without this, a Groovy
         // hallucination like IJ.run("setAutoThreshold", ...) opens a command
         // dialog and pins Fiji until the client socket times out — leaving the
         // dialog on screen to block every subsequent call.
         long startTime = System.currentTimeMillis();
-        ExecutorService executor = Executors.newSingleThreadExecutor();
+        ScriptMutationContext scriptMutationContext = null;
         Future<Object> future = null;
         Object scriptResult = null;
         Throwable scriptError = null;
@@ -5043,18 +5339,13 @@ public class TCPCommandServer {
         // unwinds the counter cleanly. Plan §Failure modes.
         macroInFlight.incrementAndGet();
         try {
-        // Step 15: serialise behind MACRO_MUTEX too — same global
-        // Interpreter / WindowManager state that handleExecuteMacro guards
-        // against, plus mutual exclusion with the rewind handler's
-        // synchronized(MACRO_MUTEX) restoration block.
-        synchronized (MACRO_MUTEX) {
+        // MutationCoordinator owns script serialization and worker lifetime.
+        {
         try {
-            future = executor.submit(new java.util.concurrent.Callable<Object>() {
-                @Override
-                public Object call() throws ScriptException {
-                    return engine.eval(code);
-                }
-            });
+            scriptMutationContext = submitScriptMutation(language, code, engine,
+                    scriptTimeoutMs, caps, safetyEnabled, safetyFindings,
+                    graphMarkerBefore);
+            future = scriptMutationContext.future;
 
             while (true) {
                 try {
@@ -5072,29 +5363,35 @@ public class TCPCommandServer {
                                 : blocking;
                         break;
                     }
-                    if (!timeoutDisabled(scriptTimeoutMs)
-                            && (System.currentTimeMillis() - startTime) > scriptTimeoutMs) {
-                        future.cancel(true);
-                        blockingFailure = "Script execution timed out after " + scriptTimeoutMs + "ms";
-                        break;
-                    }
                 } catch (ExecutionException ee) {
-                    scriptError = ee.getCause() != null ? ee.getCause() : ee;
+                    Throwable cause = ee.getCause() != null ? ee.getCause() : ee;
+                    if (cause instanceof DestructiveMacroException) {
+                        return destructiveBlockedReply(
+                                ((DestructiveMacroException) cause).rejections, caps);
+                    }
+                    if (cause instanceof MutationTimedOutException) {
+                        blockingFailure = "Script execution timed out after "
+                                + scriptTimeoutMs + "ms";
+                    } else {
+                        scriptError = cause;
+                    }
                     break;
                 }
             }
+        } catch (IllegalArgumentException
+                 | java.util.concurrent.RejectedExecutionException e) {
+            return errorResponse("Mutation admission rejected: " + e.getMessage());
         } catch (InterruptedException ie) {
             Thread.currentThread().interrupt();
             if (future != null && !future.isDone()) future.cancel(true);
-            executor.shutdownNow();
             return errorResponse("Interrupted");
         } finally {
             if (future != null && !future.isDone()) future.cancel(true);
-            executor.shutdownNow();
+            awaitFutureTerminal(future);
         }
-        } // end synchronized (MACRO_MUTEX)
+        } // end coordinator-backed script wait block
         } finally {
-            // Step 15: counter must drop even if MACRO_MUTEX block threw.
+            // Counter must drop even if coordinator execution failed.
             macroInFlight.decrementAndGet();
         }
 
@@ -5197,14 +5494,11 @@ public class TCPCommandServer {
         // origin tag is "script" so the agent can tell at a glance whether
         // a derived node came from a macro run or a Groovy/Jython script.
         try {
-            Set<String> graphTitlesAfter = ImageGraph.captureOpenTitles();
-            imageGraph.trackMacroChange(graphTitlesBefore, graphActiveTitleBefore,
-                    graphTitlesAfter, code, "script");
-            if (caps != null && caps.graphDelta) {
-                ImageGraph.Delta gDelta = imageGraph.deltaSince(graphMarkerBefore);
-                if (!gDelta.isEmpty()) {
-                    result.add("graphDelta", gDelta.toJson());
-                }
+            ImageGraph.Delta gDelta = scriptMutationContext == null
+                    ? null : scriptMutationContext.graphDelta.get();
+            if (caps != null && caps.graphDelta
+                    && gDelta != null && !gDelta.isEmpty()) {
+                result.add("graphDelta", gDelta.toJson());
             }
         } catch (Throwable ignore) {}
         if (caps != null && caps.pulse) {
@@ -5593,6 +5887,7 @@ public class TCPCommandServer {
         }
 
         JsonArray stepsArray = stepsElement.getAsJsonArray();
+        final long pipelineTimeoutMs = resolveTimeoutMs(request, PIPELINE_TIMEOUT_MS);
         final List<PipelineBuilder.PipelineStep> steps = new ArrayList<PipelineBuilder.PipelineStep>();
         // Step 04: mirror handleExecuteMacro's pre-validation for each step's
         // macro code. Any rejection short-circuits the whole pipeline; a
@@ -5640,40 +5935,55 @@ public class TCPCommandServer {
         // stored on derived nodes is the concatenated step code so the
         // graph carries enough provenance to rerun the full chain. Per
         // plan: docs/tcp_upgrade/13_provenance_graph.md.
-        final Set<String> graphTitlesBefore = ImageGraph.captureOpenTitles();
-        final String graphActiveTitleBefore = ImageGraph.captureActiveTitle();
         final long graphMarkerBefore = imageGraph.currentMarker();
         final StringBuilder pipelineMacro = new StringBuilder();
         for (PipelineBuilder.PipelineStep s : steps) {
             if (pipelineMacro.length() > 0) pipelineMacro.append('\n');
             if (s.macroCode != null) pipelineMacro.append(s.macroCode);
         }
+        final String pipelineCode = pipelineMacro.toString();
+        final boolean safetyEnabled = isScientificIntegrityScanEnabled(caps);
+        final List<DestructiveScanner.DestructiveOp> safetyFindings = safetyEnabled
+                ? DestructiveScanner.scan(pipelineCode, captureScannerContext(caps))
+                : java.util.Collections.<DestructiveScanner.DestructiveOp>emptyList();
 
         // Step 15: pipelines are macro chains; treat them as a script-level
         // boundary so a later rewind cannot undo only some of the steps.
         // Plan §Out-of-scope on script-runs applies here by extension.
-        if (caps != null && caps.undo) {
-            try {
-                ImagePlus boundaryImp = WindowManager.getCurrentImage();
-                if (boundaryImp != null) {
-                    sessionUndo.pushBoundary(boundaryImp.getTitle(), nextCallId());
-                }
-            } catch (Throwable ignore) {}
-        }
-
-        // executePipeline calls commandEngine.executeMacro() which handles EDT
-        // dispatch internally, so call directly from TCP handler thread.
-        // Step 15: announce in-flight + serialise behind MACRO_MUTEX so a
-        // concurrent rewind sees UNDO_BUSY rather than racing the chain.
+        // Submit the complete chain once so no stage can interleave with
+        // another mutation. In-flight accounting keeps rewind fail-closed.
+        PipelineMutationContext pipelineMutationContext = null;
         macroInFlight.incrementAndGet();
         try {
-        synchronized (MACRO_MUTEX) {
             try {
-                pipelineBuilder.executePipeline(pipeline, null);
-            } catch (Exception e) {
-                return errorResponse("Pipeline error: " + e.getMessage());
+                pipelineMutationContext = submitPipelineMutation(pipeline,
+                        pipelineCode, pipelineTimeoutMs, caps, safetyEnabled,
+                        safetyFindings, graphMarkerBefore);
+                pipelineMutationContext.future.get();
+            } catch (IllegalArgumentException
+                     | java.util.concurrent.RejectedExecutionException e) {
+                return errorResponse("Mutation admission rejected: " + e.getMessage());
+            } catch (InterruptedException e) {
+                if (pipelineMutationContext != null) {
+                    pipelineMutationContext.future.cancel(true);
+                    awaitFutureTerminal(pipelineMutationContext.future);
+                }
+                Thread.currentThread().interrupt();
+                return errorResponse("Pipeline interrupted");
+            } catch (ExecutionException e) {
+                Throwable cause = e.getCause();
+                if (cause instanceof DestructiveMacroException) {
+                    return destructiveBlockedReply(
+                            ((DestructiveMacroException) cause).rejections, caps);
+                }
+                if (cause instanceof MutationTimedOutException) {
+                    return errorResponse("Pipeline timed out after "
+                            + pipelineTimeoutMs + "ms");
+                }
+                return errorResponse("Pipeline error: "
+                        + (cause == null || cause.getMessage() == null
+                                ? "unknown error" : cause.getMessage()));
             }
-        }
         } finally {
             macroInFlight.decrementAndGet();
         }
@@ -5718,14 +6028,11 @@ public class TCPCommandServer {
         // single reply field. Origin is "pipeline" so downstream agents can
         // distinguish pipeline-built provenance from ad-hoc macros.
         try {
-            Set<String> graphTitlesAfter = ImageGraph.captureOpenTitles();
-            imageGraph.trackMacroChange(graphTitlesBefore, graphActiveTitleBefore,
-                    graphTitlesAfter, pipelineMacro.toString(), "pipeline");
-            if (caps != null && caps.graphDelta) {
-                ImageGraph.Delta gDelta = imageGraph.deltaSince(graphMarkerBefore);
-                if (!gDelta.isEmpty()) {
-                    resultJson.add("graphDelta", gDelta.toJson());
-                }
+            ImageGraph.Delta gDelta = pipelineMutationContext == null
+                    ? null : pipelineMutationContext.graphDelta.get();
+            if (caps != null && caps.graphDelta
+                    && gDelta != null && !gDelta.isEmpty()) {
+                resultJson.add("graphDelta", gDelta.toJson());
             }
         } catch (Throwable ignore) {}
         return successResponse(resultJson);
@@ -6068,18 +6375,42 @@ public class TCPCommandServer {
 
         JsonArray commands = commandsElement.getAsJsonArray();
         JsonArray results = new JsonArray();
+        boolean haltOnError = request.has("halt_on_error")
+                && request.get("halt_on_error").isJsonPrimitive()
+                && request.get("halt_on_error").getAsBoolean();
+        int firstFailureIndex = -1;
+        boolean halted = false;
 
         for (int i = 0; i < commands.size(); i++) {
             JsonElement elem = commands.get(i);
+            JsonObject subResult;
             if (elem.isJsonObject()) {
-                JsonObject subResult = dispatch(elem.getAsJsonObject(), caps);
-                results.add(subResult);
+                subResult = dispatch(elem.getAsJsonObject(), caps);
             } else {
-                results.add(errorResponse("Invalid batch command at index " + i));
+                subResult = errorResponse("Invalid batch command at index " + i);
+            }
+            JsonObject indexed = new JsonObject();
+            indexed.addProperty("index", i);
+            indexed.add("response", subResult);
+            results.add(indexed);
+            if (isFailure(subResult) && firstFailureIndex < 0) {
+                firstFailureIndex = i;
+                if (haltOnError) {
+                    halted = true;
+                    break;
+                }
             }
         }
 
-        return successResponse(results);
+        JsonObject result = new JsonObject();
+        result.add("results", results);
+        result.addProperty("executed", results.size());
+        result.addProperty("total", commands.size());
+        result.addProperty("halted", halted);
+        if (firstFailureIndex >= 0) {
+            result.addProperty("firstFailureIndex", firstFailureIndex);
+        }
+        return successResponse(result);
     }
 
     // -----------------------------------------------------------------------
@@ -6264,10 +6595,26 @@ public class TCPCommandServer {
             return errorResponse("execute_macro_async requires a durable session; call hello first");
         }
         final String code = codeEl.getAsString();
+        final PluginNameValidator.Result validation =
+                (caps != null && caps.fuzzyMatch)
+                        ? PluginNameValidator.validate(code) : null;
+        if (validation != null && validation.hasRejections()) {
+            JsonObject rejected = new JsonObject();
+            rejected.addProperty("success", false);
+            rejected.add("error", PluginNameValidator
+                    .buildPluginNotFoundError(validation.rejections)
+                    .buildJsonElement(caps));
+            return successResponse(rejected);
+        }
+        final String codeToRun = validation != null && validation.hasCorrections()
+                ? validation.patchedCode : code;
         final String source = optString(request, "source", "tcp-async");
         final long timeoutMs = resolveTimeoutMs(request, MACRO_TIMEOUT_MS);
         final boolean safetyEnabled = isScientificIntegrityScanEnabled(caps);
         final boolean undoEnabled = caps != null && caps.undo;
+        final List<DestructiveScanner.DestructiveOp> safetyFindings = safetyEnabled
+                ? DestructiveScanner.scan(codeToRun, captureScannerContext(caps))
+                : java.util.Collections.<DestructiveScanner.DestructiveOp>emptyList();
 
         MutationCoordinator.Lifecycle<ExecutionResult> lifecycle =
                 new MutationCoordinator.Lifecycle<ExecutionResult>() {
@@ -6278,29 +6625,7 @@ public class TCPCommandServer {
             private boolean prepared;
 
             @Override public void checkSafety() throws Exception {
-                DestructiveScanner.Context context = captureScannerContext(caps);
-                List<DestructiveScanner.DestructiveOp> findings =
-                        DestructiveScanner.scan(code, context);
-                List<DestructiveScanner.DestructiveOp> rejected =
-                        DestructiveScanner.rejections(findings);
-                if (!rejected.isEmpty()) {
-                    StringBuilder message = new StringBuilder(
-                            "Macro blocked by safe-mode scanner: ");
-                    for (int i = 0; i < rejected.size(); i++) {
-                        if (i > 0) message.append("; ");
-                        DestructiveScanner.DestructiveOp op = rejected.get(i);
-                        message.append(op.ruleId).append(" @ line ").append(op.line);
-                    }
-                    throw new MutationCoordinator.SafetyException(message.toString());
-                }
-                for (DestructiveScanner.DestructiveOp op
-                        : DestructiveScanner.backups(findings)) {
-                    if (DestructiveScanner.RULE_ROI_WIPE.equals(op.ruleId)
-                            && caps.safeModeOptions != null
-                            && caps.safeModeOptions.autoBackupRoiOnReset) {
-                        runRoiAutoBackup(op, caps);
-                    }
-                }
+                enforceMacroSafety(safetyFindings, caps);
             }
 
             @Override public void beforeMutation() {
@@ -6309,15 +6634,13 @@ public class TCPCommandServer {
                 graphMarkerBefore = imageGraph.currentMarker();
                 prepared = true;
                 if (undoEnabled) {
-                    captureUndoFrameIfEnabled(nextCallId(), code, caps);
+                    captureUndoFrameIfEnabled(nextCallId(), codeToRun, caps);
                 }
-                if (caps != null && caps.safeMode
-                        && caps.safeModeOptions != null
-                        && caps.safeModeOptions.autoSourceImageColumn
-                        && !SourceImageTagger.macroOptsOut(code)) {
-                    sourceTagger = new SourceImageTagger();
-                    sourceTagger.preExec(WindowManager.getCurrentImage());
-                }
+                sourceTagger = SourceImageTagger.beginIfEnabled(
+                        caps != null && caps.safeMode
+                                && caps.safeModeOptions != null
+                                && caps.safeModeOptions.autoSourceImageColumn,
+                        codeToRun, WindowManager.getCurrentImage());
             }
 
             @Override public void afterMutation(
@@ -6328,7 +6651,7 @@ public class TCPCommandServer {
                 }
                 Set<String> after = ImageGraph.captureOpenTitles();
                 imageGraph.trackMacroChange(graphTitlesBefore, graphActiveTitleBefore,
-                        after, code, "macro");
+                        after, codeToRun, "macro");
                 if (caps != null && caps.graphDelta) {
                     // Materialise the delta while still serialized so later
                     // mutations cannot move the marker before provenance is observed.
@@ -6343,14 +6666,14 @@ public class TCPCommandServer {
                         && completion.result().isSuccess();
                 String failure = completion.error() == null
                         ? null : completion.error().getMessage();
-                SessionCodeJournal.INSTANCE.record("ijm", code, source, 0L,
+                SessionCodeJournal.INSTANCE.record("ijm", codeToRun, source, 0L,
                         completion.startedAtMs(), completion.elapsedMs(), success, failure);
             }
         };
 
         final JobRegistry.Job job;
         try {
-            job = jobRegistry.submit(code, owner, timeoutMs,
+            job = jobRegistry.submit(codeToRun, owner, timeoutMs,
                     safetyEnabled, undoEnabled, true, lifecycle);
         } catch (IllegalArgumentException | java.util.concurrent.RejectedExecutionException e) {
             return errorResponse("Mutation admission rejected: " + e.getMessage());
@@ -6359,6 +6682,10 @@ public class TCPCommandServer {
         result.addProperty("job_id", job.id);
         result.addProperty("state", job.state);
         result.addProperty("startedAt", job.startedAt);
+        if (validation != null && validation.hasCorrections()) {
+            result.add("autocorrected",
+                    PluginNameValidator.buildAutocorrectedArray(validation.corrections));
+        }
         return successResponse(result);
     }
 
@@ -6411,6 +6738,11 @@ public class TCPCommandServer {
             return null;
         }
         return caps.sessionId;
+    }
+
+    private static String mutationOwnerOrInternal(AgentCaps caps) {
+        String owner = mutationOwner(caps);
+        return owner == null ? "__imagejai_tcp_internal__" : owner;
     }
 
     // -----------------------------------------------------------------------

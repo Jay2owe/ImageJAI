@@ -1,11 +1,18 @@
 package imagejai.engine;
 
-import java.io.BufferedReader;
+import java.io.ByteArrayOutputStream;
 import java.io.File;
-import java.io.FileWriter;
 import java.io.IOException;
 import java.io.InputStream;
-import java.io.InputStreamReader;
+import java.io.OutputStreamWriter;
+import java.io.Writer;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.List;
+import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.TimeUnit;
 
 /**
  * Optional integration for running external Python/R scripts from the
@@ -14,12 +21,14 @@ import java.io.InputStreamReader;
  * Uses {@link ProcessBuilder} to launch processes, writes script content
  * to temp files, captures stdout/stderr, and enforces timeouts.
  * <p>
- * Java 8 compatible: uses a timer thread for timeout enforcement since
- * {@code Process.waitFor(long, TimeUnit)} is available in Java 8.
+ * Compiled for Java 11: process-tree control uses {@link ProcessHandle}.
  */
 public class CrossToolRunner {
 
     private static final long DEFAULT_TIMEOUT_MS = 60000;
+    static final int MAX_CAPTURE_BYTES = 1024 * 1024;
+    static final String TRUNCATION_MARKER = "\n[output truncated by ImageJAI]";
+    private static final long TERMINATION_GRACE_MS = 1000L;
 
     /** Result of an external tool invocation. */
     public static class ToolResult {
@@ -28,22 +37,42 @@ public class CrossToolRunner {
         public String stderr;
         public int exitCode;
         public long executionTimeMs;
+        public boolean stdoutTruncated;
+        public boolean stderrTruncated;
+        public boolean timedOut;
 
         private ToolResult(boolean success, String stdout, String stderr,
-                           int exitCode, long executionTimeMs) {
+                           int exitCode, long executionTimeMs,
+                           boolean stdoutTruncated, boolean stderrTruncated,
+                           boolean timedOut) {
             this.success = success;
             this.stdout = stdout;
             this.stderr = stderr;
             this.exitCode = exitCode;
             this.executionTimeMs = executionTimeMs;
+            this.stdoutTruncated = stdoutTruncated;
+            this.stderrTruncated = stderrTruncated;
+            this.timedOut = timedOut;
         }
 
-        static ToolResult ok(String stdout, String stderr, int exitCode, long timeMs) {
-            return new ToolResult(exitCode == 0, stdout, stderr, exitCode, timeMs);
+        static ToolResult completed(StreamGobbler stdout, StreamGobbler stderr,
+                                    int exitCode, long timeMs) {
+            return new ToolResult(exitCode == 0, stdout.getOutput(), stderr.getOutput(),
+                    exitCode, timeMs, stdout.wasTruncated(), stderr.wasTruncated(), false);
         }
 
         static ToolResult error(String message, long timeMs) {
-            return new ToolResult(false, "", message, -1, timeMs);
+            return new ToolResult(false, "", message, -1, timeMs,
+                    false, false, false);
+        }
+
+        static ToolResult timeout(StreamGobbler stdout, StreamGobbler stderr,
+                                  long timeoutMs, long timeMs) {
+            String capturedErr = stderr.getOutput();
+            String message = "Process timed out after " + timeoutMs + "ms";
+            if (!capturedErr.isEmpty()) message = capturedErr + "\n" + message;
+            return new ToolResult(false, stdout.getOutput(), message, -1, timeMs,
+                    stdout.wasTruncated(), stderr.wasTruncated(), true);
         }
     }
 
@@ -66,9 +95,11 @@ public class CrossToolRunner {
             }
             pb.redirectErrorStream(true);
             Process p = pb.start();
-            int exit = p.waitFor();
-            return exit == 0;
+            boolean finished = p.waitFor(5, TimeUnit.SECONDS);
+            if (!finished) terminateProcessTree(p);
+            return finished && p.exitValue() == 0;
         } catch (Exception e) {
+            if (e instanceof InterruptedException) Thread.currentThread().interrupt();
             return false;
         }
     }
@@ -137,21 +168,30 @@ public class CrossToolRunner {
             stdoutGobbler.start();
             stderrGobbler.start();
 
-            boolean finished = waitForProcess(process, timeoutMs);
+            boolean finished;
+            try {
+                finished = process.waitFor(timeoutMs, TimeUnit.MILLISECONDS);
+            } catch (InterruptedException interrupted) {
+                terminateProcessTree(process);
+                Thread.currentThread().interrupt();
+                long elapsed = System.currentTimeMillis() - startTime;
+                return ToolResult.error("Command interrupted", elapsed);
+            }
             long elapsed = System.currentTimeMillis() - startTime;
 
             if (!finished) {
-                process.destroy();
-                stdoutGobbler.join(1000);
-                stderrGobbler.join(1000);
-                return ToolResult.error("Process timed out after " + timeoutMs + "ms", elapsed);
+                terminateProcessTree(process);
+                joinQuietly(stdoutGobbler, TERMINATION_GRACE_MS);
+                joinQuietly(stderrGobbler, TERMINATION_GRACE_MS);
+                return ToolResult.timeout(stdoutGobbler, stderrGobbler,
+                        timeoutMs, elapsed);
             }
 
-            stdoutGobbler.join(5000);
-            stderrGobbler.join(5000);
+            joinQuietly(stdoutGobbler, 5000L);
+            joinQuietly(stderrGobbler, 5000L);
 
             int exitCode = process.exitValue();
-            return ToolResult.ok(stdoutGobbler.getOutput(), stderrGobbler.getOutput(),
+            return ToolResult.completed(stdoutGobbler, stderrGobbler,
                     exitCode, elapsed);
 
         } catch (Exception e) {
@@ -267,9 +307,10 @@ public class CrossToolRunner {
         File tempFile = null;
         try {
             tempFile = File.createTempFile("imagej_ai_", extension);
-            FileWriter writer = null;
+            Writer writer = null;
             try {
-                writer = new FileWriter(tempFile);
+                writer = new OutputStreamWriter(
+                        Files.newOutputStream(tempFile.toPath()), StandardCharsets.UTF_8);
                 writer.write(scriptContent);
             } finally {
                 if (writer != null) {
@@ -293,34 +334,101 @@ public class CrossToolRunner {
         }
     }
 
-    /**
-     * Wait for a process to complete with a timeout.
-     * Uses Thread.sleep polling since Process.waitFor(long, TimeUnit) is
-     * available in Java 8 but we keep it simple and portable.
-     *
-     * @return true if process exited, false if timed out
-     */
-    private static boolean waitForProcess(final Process process, long timeoutMs) {
-        final boolean[] done = new boolean[]{ false };
-        Thread waiter = new Thread(new Runnable() {
-            public void run() {
-                try {
-                    process.waitFor();
-                    done[0] = true;
-                } catch (InterruptedException e) {
-                    Thread.currentThread().interrupt();
-                }
-            }
-        });
-        waiter.setDaemon(true);
-        waiter.start();
-
+    /** Terminate descendants before their parent so they cannot be orphaned. */
+    static void terminateProcessTree(Process process) {
+        if (process == null) return;
+        List<ProcessHandle> descendants = new ArrayList<ProcessHandle>();
         try {
-            waiter.join(timeoutMs);
+            process.toHandle().descendants().forEach(descendants::add);
+            descendants.sort(Comparator.comparingLong(ProcessHandle::pid).reversed());
+            for (ProcessHandle child : descendants) {
+                try { child.destroy(); } catch (Throwable ignore) {}
+            }
+            for (ProcessHandle child : descendants) {
+                try {
+                    if (child.isAlive()) child.destroyForcibly();
+                } catch (Throwable ignore) {}
+            }
+        } catch (Throwable ignore) {
+            // ProcessHandle discovery is best-effort on unusual JVMs.
+        }
+        try { process.destroy(); } catch (Throwable ignore) {}
+        try {
+            if (!process.waitFor(TERMINATION_GRACE_MS, TimeUnit.MILLISECONDS)) {
+                process.destroyForcibly();
+                process.waitFor(TERMINATION_GRACE_MS, TimeUnit.MILLISECONDS);
+            }
+        } catch (InterruptedException e) {
+            try { process.destroyForcibly(); } catch (Throwable ignore) {}
+            Thread.currentThread().interrupt();
+        } catch (Throwable ignore) {}
+        for (ProcessHandle child : descendants) {
+            try { if (child.isAlive()) child.destroyForcibly(); } catch (Throwable ignore) {}
+        }
+    }
+
+    /**
+     * Run an external command that is part of an ImageJ mutation through the
+     * server-owned coordinator. Plain analysis-only subprocesses may continue
+     * to use {@link #runCommand(String[], String, long)}.
+     */
+    public static ToolResult runCommandMutation(MutationCoordinator coordinator,
+                                                String ownerSession,
+                                                final String[] command,
+                                                final String workingDir,
+                                                long timeoutMs) {
+        if (coordinator == null) return ToolResult.error("Mutation coordinator is required", 0L);
+        final long effectiveTimeout = timeoutMs <= 0L ? DEFAULT_TIMEOUT_MS : timeoutMs;
+        final long started = System.currentTimeMillis();
+        final String commandText = command == null ? "" : String.join(" ", command);
+        MutationCoordinator.Handle<ToolResult> handle;
+        try {
+            handle = coordinator.submit(MutationCoordinator.Request.<ToolResult>builder()
+                    .ownerSession(ownerSession)
+                    .sourceKind("cross-tool")
+                    .code(commandText)
+                    .timeoutMs(effectiveTimeout)
+                    .operation(new MutationCoordinator.Operation<ToolResult>() {
+                        @Override public ToolResult run() {
+                            return runCommand(command, workingDir, effectiveTimeout);
+                        }
+                    })
+                    .build());
+        } catch (IllegalArgumentException | RejectedExecutionException e) {
+            return ToolResult.error("Mutation admission rejected: " + e.getMessage(),
+                    System.currentTimeMillis() - started);
+        }
+        try {
+            MutationCoordinator.Completion<ToolResult> completion = handle.awaitCompletion();
+            if (completion.state() == MutationCoordinator.State.SUCCEEDED
+                    && completion.result() != null) {
+                return completion.result();
+            }
+            if (completion.state() == MutationCoordinator.State.TIMED_OUT) {
+                return new ToolResult(false, "",
+                        "Process timed out after " + effectiveTimeout + "ms", -1,
+                        completion.elapsedMs(), false, false, true);
+            }
+            Throwable error = completion.error();
+            return ToolResult.error(error == null
+                            ? "Cross-tool mutation cancelled"
+                            : "Cross-tool mutation failed: " + error.getMessage(),
+                    completion.elapsedMs());
+        } catch (InterruptedException e) {
+            handle.cancel();
+            Thread.currentThread().interrupt();
+            return ToolResult.error("Cross-tool mutation interrupted",
+                    System.currentTimeMillis() - started);
+        }
+    }
+
+    private static void joinQuietly(Thread thread, long timeoutMs) {
+        if (thread == null) return;
+        try {
+            thread.join(timeoutMs);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
         }
-        return done[0];
     }
 
     /**
@@ -328,41 +436,52 @@ public class CrossToolRunner {
      */
     private static class StreamGobbler extends Thread {
         private final InputStream inputStream;
-        private final StringBuilder buffer;
+        private final ByteArrayOutputStream buffer;
+        private volatile boolean truncated;
 
         StreamGobbler(InputStream inputStream) {
             this.inputStream = inputStream;
-            this.buffer = new StringBuilder();
+            this.buffer = new ByteArrayOutputStream();
             setDaemon(true);
         }
 
         public void run() {
-            BufferedReader reader = null;
             try {
-                reader = new BufferedReader(new InputStreamReader(inputStream));
-                String line;
-                while ((line = reader.readLine()) != null) {
-                    if (buffer.length() > 0) {
-                        buffer.append("\n");
+                byte[] chunk = new byte[8192];
+                int read;
+                while ((read = inputStream.read(chunk)) >= 0) {
+                    synchronized (buffer) {
+                        int remaining = MAX_CAPTURE_BYTES - buffer.size();
+                        if (remaining > 0) {
+                            buffer.write(chunk, 0, Math.min(remaining, read));
+                        }
+                        if (read > remaining) truncated = true;
                     }
-                    buffer.append(line);
                 }
             } catch (IOException e) {
-                buffer.append("[stream read error: ").append(e.getMessage()).append("]");
-            } finally {
-                if (reader != null) {
-                    try {
-                        reader.close();
-                    } catch (IOException ignored) {
-                        // ignore
+                byte[] message = ("[stream read error: " + e.getMessage() + "]")
+                        .getBytes(StandardCharsets.UTF_8);
+                synchronized (buffer) {
+                    int remaining = MAX_CAPTURE_BYTES - buffer.size();
+                    if (!truncated && remaining > 0) {
+                        buffer.write(message, 0, Math.min(remaining, message.length));
+                        if (message.length > remaining) truncated = true;
                     }
                 }
+            } finally {
+                try { inputStream.close(); } catch (IOException ignored) {}
             }
         }
 
         String getOutput() {
-            return buffer.toString();
+            final String captured;
+            synchronized (buffer) {
+                captured = new String(buffer.toByteArray(), StandardCharsets.UTF_8);
+            }
+            return truncated ? captured + TRUNCATION_MARKER : captured;
         }
+
+        boolean wasTruncated() { return truncated; }
     }
 
     /**

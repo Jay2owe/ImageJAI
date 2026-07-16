@@ -32,7 +32,7 @@ import java.util.function.LongSupplier;
  * terminal state; {@link java.util.concurrent.Future#isDone()} is never used
  * as evidence that ImageJ code has stopped.</p>
  */
-public final class MutationCoordinator implements AutoCloseable {
+public class MutationCoordinator implements AutoCloseable {
 
     public static final int DEFAULT_CAPACITY = 16;
 
