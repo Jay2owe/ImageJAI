@@ -4448,10 +4448,6 @@ public class TCPCommandServer {
 
         final boolean safetyEnabled = isScientificIntegrityScanEnabled(caps);
 
-        if (executeMacroForTest != null) {
-            return executeMacroForTest.apply(request, caps);
-        }
-
         // Step 04: fuzzy plugin-name validation. Gate on caps.fuzzyMatch so
         // clients that opted out (or never said hello — DEFAULT_CAPS has the
         // field at its default, true) still get the backwards-compatible
@@ -4472,9 +4468,16 @@ public class TCPCommandServer {
         final String codeToRun = (validation != null && validation.hasCorrections())
                 ? validation.patchedCode
                 : code;
-        final List<DestructiveScanner.DestructiveOp> safetyFindings = safetyEnabled
-                ? DestructiveScanner.scan(codeToRun, captureScannerContext(caps))
-                : java.util.Collections.<DestructiveScanner.DestructiveOp>emptyList();
+        final List<DestructiveScanner.DestructiveOp> safetyFindings =
+                collectMacroSafetyFindings(codeToRun, caps, safetyEnabled);
+
+        if (executeMacroForTest != null) {
+            if (DestructiveScanner.hasRejection(safetyFindings)) {
+                return destructiveBlockedReply(
+                        DestructiveScanner.rejections(safetyFindings), caps);
+            }
+            return executeMacroForTest.apply(request, caps);
+        }
         final SessionCodeJournal.DatasetBinding journalDataset =
                 SessionCodeJournal.captureInitiatingDataset();
 
@@ -4601,7 +4604,7 @@ public class TCPCommandServer {
         Future<String> future = null;
         try {
             mutationContext = submitTcpMacroMutation(code, codeToRun,
-                    macroTimeoutMs, caps, safetyEnabled, safetyFindings,
+                    macroTimeoutMs, caps, true, safetyFindings,
                     graphMarkerBefore);
             future = mutationContext.future;
 
@@ -4984,6 +4987,25 @@ public class TCPCommandServer {
                 && caps.safeMode
                 && caps.safeModeOptions != null
                 && caps.safeModeOptions.scientificIntegrityScan;
+    }
+
+    /**
+     * Macro-language host and filesystem access is a mandatory boundary, not
+     * a Safe Mode preference. Scientific-integrity rules remain controlled by
+     * the negotiated Safe Mode options, while host escapes and File.* access
+     * are rejected even when a client disables those optional guards.
+     */
+    private List<DestructiveScanner.DestructiveOp> collectMacroSafetyFindings(
+            String code, AgentCaps caps, boolean scientificRulesEnabled) {
+        DestructiveScanner.Context context = captureScannerContext(caps);
+        List<DestructiveScanner.DestructiveOp> findings =
+                new ArrayList<DestructiveScanner.DestructiveOp>(
+                        scientificRulesEnabled
+                                ? DestructiveScanner.scan(code, context)
+                                : DestructiveScanner.scan(code, null));
+        findings.addAll(DestructiveScanner.scanMacroFilesystem(
+                code, context == null ? null : context.aiExportsRoot));
+        return findings;
     }
 
     private String boundedExactResultsCsvForUndo() {
@@ -6742,9 +6764,9 @@ public class TCPCommandServer {
         }
         final String pipelineCode = pipelineMacro.toString();
         final boolean safetyEnabled = isScientificIntegrityScanEnabled(caps);
-        final List<DestructiveScanner.DestructiveOp> safetyFindings = safetyEnabled
-                ? DestructiveScanner.scan(pipelineCode, captureScannerContext(caps))
-                : java.util.Collections.<DestructiveScanner.DestructiveOp>emptyList();
+        final List<DestructiveScanner.DestructiveOp> safetyFindings =
+                collectMacroSafetyFindings(
+                        pipelineCode, caps, safetyEnabled);
 
         // Step 15: pipelines are macro chains; treat them as a script-level
         // boundary so a later rewind cannot undo only some of the steps.
@@ -6756,7 +6778,7 @@ public class TCPCommandServer {
         try {
             try {
                 pipelineMutationContext = submitPipelineMutation(pipeline,
-                        pipelineCode, pipelineTimeoutMs, caps, safetyEnabled,
+                        pipelineCode, pipelineTimeoutMs, caps, true,
                         safetyFindings, graphMarkerBefore);
                 pipelineMutationContext.future.get();
             } catch (IllegalArgumentException
@@ -7657,9 +7679,8 @@ public class TCPCommandServer {
         final long timeoutMs = resolveTimeoutMs(request, MACRO_TIMEOUT_MS);
         final boolean safetyEnabled = isScientificIntegrityScanEnabled(caps);
         final boolean undoEnabled = caps != null && caps.undo;
-        final List<DestructiveScanner.DestructiveOp> safetyFindings = safetyEnabled
-                ? DestructiveScanner.scan(codeToRun, captureScannerContext(caps))
-                : java.util.Collections.<DestructiveScanner.DestructiveOp>emptyList();
+        final List<DestructiveScanner.DestructiveOp> safetyFindings =
+                collectMacroSafetyFindings(codeToRun, caps, safetyEnabled);
 
         MutationCoordinator.Lifecycle<ExecutionResult> lifecycle =
                 new MutationCoordinator.Lifecycle<ExecutionResult>() {
@@ -7719,7 +7740,7 @@ public class TCPCommandServer {
         final JobRegistry.Job job;
         try {
             job = jobRegistry.submit(codeToRun, owner, timeoutMs,
-                    safetyEnabled, undoEnabled, true, lifecycle);
+                    true, undoEnabled, true, lifecycle);
         } catch (IllegalArgumentException | java.util.concurrent.RejectedExecutionException e) {
             return errorResponse("Mutation admission rejected: " + e.getMessage());
         }

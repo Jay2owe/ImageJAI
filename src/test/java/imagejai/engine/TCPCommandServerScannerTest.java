@@ -106,6 +106,54 @@ public class TCPCommandServerScannerTest {
         assertTrue("test seam was hit (scanner did not block)", seamHit[0]);
     }
 
+    @Test
+    public void filesystemReadIsBlockedEvenWhenSafeModeIsOff() {
+        TCPCommandServer.AgentCaps caps = new TCPCommandServer.AgentCaps();
+        caps.safeMode = false;
+        caps.structuredErrors = true;
+        final boolean[] seamHit = { false };
+        TCPCommandServer.executeMacroForTest = (req, c) -> {
+            seamHit[0] = true;
+            return wrapOk(new JsonObject());
+        };
+
+        JsonObject reply = server.dispatch(parse(
+                "{\"command\":\"execute_macro\",\"code\":"
+                        + "\"text=File.openAsString('C:/private/secret.txt');\"}"), caps);
+
+        assertFalse("mandatory filesystem gate runs before execution seam", seamHit[0]);
+        JsonObject result = reply.getAsJsonObject("result");
+        assertTrue(reply.toString(), result.has("error"));
+        JsonObject error = result.getAsJsonObject("error");
+        assertEquals(ErrorReply.CODE_DESTRUCTIVE_OP_BLOCKED,
+                error.get("code").getAsString());
+        assertEquals(DestructiveScanner.RULE_MACRO_FILESYSTEM,
+                error.getAsJsonArray("operations").get(0).getAsJsonObject()
+                        .get("rule_id").getAsString());
+    }
+
+    @Test
+    public void hostEscapeIsBlockedEvenWhenSafeModeIsOff() {
+        TCPCommandServer.AgentCaps caps = new TCPCommandServer.AgentCaps();
+        caps.safeMode = false;
+        caps.structuredErrors = true;
+        assertTrue(DestructiveScanner.hasRejection(
+                DestructiveScanner.scan("exec(\"python\",\"-V\");", null)));
+
+        JsonObject reply = server.dispatch(parse(
+                "{\"command\":\"execute_macro\","
+                        + "\"code\":\"exec(\\\"python\\\",\\\"-V\\\");\"}"), caps);
+
+        JsonObject result = reply.getAsJsonObject("result");
+        assertTrue(reply.toString(), result.has("error"));
+        JsonObject error = result.getAsJsonObject("error");
+        assertEquals(ErrorReply.CODE_DESTRUCTIVE_OP_BLOCKED,
+                error.get("code").getAsString());
+        assertEquals(DestructiveScanner.RULE_HOST_CODE,
+                error.getAsJsonArray("operations").get(0).getAsJsonObject()
+                        .get("rule_id").getAsString());
+    }
+
     /**
      * Safe mode on, opt-in flag OFF → an Enhance Contrast normalize
      * macro is allowed through (the rule is opt-in by design). Mirrors

@@ -357,7 +357,8 @@ public class MutationCoordinatorTest {
         stranger.sessionId = "session-stranger";
         try {
             JsonObject submitted = server.dispatch(parseJson(
-                    "{\"command\":\"execute_macro_async\",\"code\":\"run();\"}"), owner);
+                    "{\"command\":\"execute_macro_async\","
+                            + "\"code\":\"run('Blobs');\"}"), owner);
             assertTrue(submitted.get("ok").getAsBoolean());
             String jobId = submitted.getAsJsonObject("result")
                     .get("job_id").getAsString();

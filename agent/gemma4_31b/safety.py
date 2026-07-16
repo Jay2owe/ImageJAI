@@ -31,40 +31,101 @@ _SESSION_ID = "gemma-{}-p{}".format(
 _RECENT_EXECUTIONS = collections.deque(maxlen=4)
 
 
-# Patterns that extract the path literal from a save-family call.
-# Each pattern captures the PATH string in group 1. The first arg
-# (format / data) may be a literal or a variable; we only require
-# the final path argument to be a double-quoted string literal.
-_SAVE_EXTRACTORS = [
-    ("saveAs", re.compile(r'\bsaveAs\s*\([^,()]*,\s*"([^"]*)"\s*\)')),
-    ("save", re.compile(r'(?<![\w.])save\s*\(\s*"([^"]*)"\s*\)')),
-    ("File.saveString", re.compile(r'\bFile\.saveString\s*\([^,()]*,\s*"([^"]*)"\s*\)')),
-    ("File.append", re.compile(r'\bFile\.append\s*\([^,()]*,\s*"([^"]*)"\s*\)')),
-    ("IJ.saveAs", re.compile(r'\bIJ\.saveAs\s*\([^,()]*,\s*"([^"]*)"\s*\)')),
-    (
-        'run(..., "save=...")',
-        re.compile(
-            r'\brun\s*\(\s*"[^"]+"\s*,\s*"[^"]*\bsave\s*=\s*(?:\[([^\]]+)\]|([^"\s]+))[^"]*"\s*\)',
-            re.IGNORECASE,
-        ),
-    ),
-]
+# Macro calls that may touch the host filesystem. Calls are located on a
+# string/comment-masked source view, then their arguments are parsed from the
+# comment-free view at the same offsets. This prevents documentation such as
+# ``print("File.delete(...)")`` from becoming a false positive.
+_FILESYSTEM_CALL_START = re.compile(
+    r"(?<![\w.])((?:File|IJ)\s*\.\s*[A-Za-z_][A-Za-z0-9_]*|"
+    r"saveAs|save|getFileList|getDirectory|openVirtual|open|run|doCommand)\s*\(",
+    re.IGNORECASE,
+)
+_FILESYSTEM_PROPERTY = re.compile(
+    r"\bFile\s*\.\s*(directory|nameWithoutExtension|name|separator)\b(?!\s*\()",
+    re.IGNORECASE,
+)
 
+# Macro execution is not a host-file-reading capability. This set covers the
+# File.* surface documented in agent/references/file-formats-saving-reference,
+# plus the equivalent global input and directory primitives.
+_FILESYSTEM_READ_CALLS = frozenset(
+    {
+        "open",
+        "openvirtual",
+        "getfilelist",
+        "getdirectory",
+        "file.openasstring",
+        "file.openasrawstring",
+        "file.openurlasstring",
+        "file.openurl",
+        "file.opensequence",
+        "file.opendialog",
+        "file.exists",
+        "file.isfile",
+        "file.isdirectory",
+        "file.length",
+        "file.getlength",
+        "file.lastmodified",
+        "file.datelastmodified",
+        "file.getdefaultdir",
+        "file.getabsolutepath",
+        "file.directory",
+        "file.name",
+        "file.namewithoutextension",
+    }
+)
 
-# Detectors used to notice the *presence* of a save call even when
-# the extractor regex above cannot pull out a literal path (e.g. the
-# path is a variable). Presence + unextractable path = reject.
-_SAVE_DETECTORS = [
-    ("saveAs", re.compile(r'\bsaveAs\s*\(')),
-    ("save", re.compile(r'(?<![\w.])save\s*\(')),
-    ("File.saveString", re.compile(r'\bFile\.saveString\s*\(')),
-    ("File.append", re.compile(r'\bFile\.append\s*\(')),
-    ("IJ.saveAs", re.compile(r'\bIJ\.saveAs\s*\(')),
-    (
-        'run(..., "save=...")',
-        re.compile(r'\brun\s*\(\s*"[^"]+"\s*,\s*"[^"]*\bsave\s*=', re.IGNORECASE),
-    ),
-]
+# Copy is categorical because it reads an arbitrary source even when its
+# destination is safe. setDefaultDir mutates process-wide path resolution.
+_FILESYSTEM_DESTRUCTIVE_CALLS = frozenset(
+    {"file.delete", "file.rename", "file.copy", "file.setdefaultdir"}
+)
+
+# Path argument (zero-based) for output writes retained when the argument is
+# one literal resolved beneath the current AI_Exports directory. IJ.saveAs
+# accepts either (format, path) or (image, format, path), hence -1.
+_FILESYSTEM_WRITE_PATH_ARGS = {
+    "saveas": 1,
+    "save": 0,
+    "ij.saveas": -1,
+    "ij.save": -1,
+    "file.savestring": 1,
+    "file.append": 1,
+    "file.makedirectory": 0,
+    "file.mkdir": 0,
+    "file.open": 0,
+}
+
+# Pure path-string helpers and writer-handle operations do not themselves
+# inspect or select a host path. File.open remains the path gate for print/
+# File.write output handles.
+_FILESYSTEM_BENIGN_CALLS = frozenset(
+    {
+        "file.getname",
+        "file.getnamewithoutextension",
+        "file.getdirectory",
+        "file.getparent",
+        "file.close",
+        "file.separator",
+    }
+)
+
+_READ_MENU_COMMANDS = frozenset(
+    {
+        "open",
+        "open...",
+        "open next",
+        "open samples",
+        "image sequence...",
+        "url...",
+        "bio-formats importer",
+        "bio-formats remote importer",
+    }
+)
+_DESTRUCTIVE_MENU_COMMANDS = frozenset({"save", "save as...", "revert"})
+_RUN_SAVE_PATH = re.compile(
+    r"(?:^|\s)save\s*=\s*(?:\[([^\]]+)\]|([^\s]+))", re.IGNORECASE
+)
 
 
 # ImageJ macro primitives that escape the macro sandbox and execute host/JVM
@@ -117,25 +178,102 @@ _HOST_COMMAND_PHRASES = ("compile and run", "run macro")
 
 
 def check_macro(code: str) -> str | None:
-    """Scan a macro for host-code escapes and unsafe save paths.
-
-    Returns None when the macro is safe to send (no save calls, or
-    every save path resolves under the current AI_Exports/). Returns
-    a human-readable error string when the macro must be blocked —
-    callers should surface this to the agent as the tool result.
-    """
+    """Scan a macro for host-code escapes and filesystem access."""
     if not isinstance(code, str) or not code:
         return None
 
     host_code_error = check_host_code(code)
     if host_code_error is not None:
         return host_code_error
+    return check_filesystem(code)
 
-    detected = _detect_save_sites(code)
-    if not detected:
+
+def check_filesystem(code: str, export_folder: str | None = None) -> str | None:
+    """Reject reads/destruction and constrain output writes to AI_Exports.
+
+    ``export_folder`` is optional for deterministic callers/tests. Unknown
+    File.* calls and malformed/dynamic path arguments fail closed so a new
+    ImageJ filesystem primitive cannot silently inherit macro permission.
+    """
+    if not isinstance(code, str) or not code:
         return None
 
-    folder = active_image.current_export_folder()
+    comments_removed, masked = _macro_views(code)
+    write_sites: list[tuple[str, str | None]] = []
+
+    for match in _FILESYSTEM_PROPERTY.finditer(masked):
+        if match.group(1).casefold() != "separator":
+            return _filesystem_rejection(
+                "File.{}".format(match.group(1)),
+                "reveals the last selected host path",
+            )
+
+    for match in _FILESYSTEM_CALL_START.finditer(masked):
+        raw_name = match.group(1)
+        name = re.sub(r"\s+", "", raw_name).casefold()
+        args = _parse_call_arguments(comments_removed, match.end() - 1)
+
+        if name in _FILESYSTEM_READ_CALLS:
+            return _filesystem_rejection(raw_name, "reads or enumerates host data")
+        if name in _FILESYSTEM_DESTRUCTIVE_CALLS:
+            return _filesystem_rejection(raw_name, "can modify or remove host files")
+
+        if name in ("run", "docommand"):
+            if args is None or not args:
+                return _filesystem_rejection(raw_name, "has malformed arguments")
+            command = _literal_string(args[0])
+            if command is None:
+                # check_host_code already rejects this, but keep this public
+                # policy independently fail-closed.
+                return _filesystem_rejection(raw_name, "uses a dynamic command")
+            normalized_command = re.sub(r"\s+", " ", command).strip().casefold()
+            if normalized_command in _READ_MENU_COMMANDS:
+                return _filesystem_rejection(
+                    '{}("{}")'.format(raw_name, command),
+                    "opens or imports host data",
+                )
+            if normalized_command in _DESTRUCTIVE_MENU_COMMANDS:
+                return _filesystem_rejection(
+                    '{}("{}")'.format(raw_name, command),
+                    "can overwrite the current host file",
+                )
+            if len(args) >= 2:
+                options = _literal_string(args[1])
+                if options is None:
+                    if re.search(r"\bsave\s*=", args[1], re.IGNORECASE):
+                        return _filesystem_rejection(
+                            raw_name, "uses a dynamic save path"
+                        )
+                    continue
+                save_match = _RUN_SAVE_PATH.search(options)
+                if save_match is not None:
+                    write_sites.append(
+                        ('{}(..., "save=...")'.format(raw_name),
+                         save_match.group(1) or save_match.group(2))
+                    )
+            continue
+
+        if name in _FILESYSTEM_WRITE_PATH_ARGS:
+            arg_index = _FILESYSTEM_WRITE_PATH_ARGS[name]
+            if args is None or not args:
+                write_sites.append((raw_name, None))
+                continue
+            index = arg_index if arg_index >= 0 else len(args) - 1
+            raw_path = _literal_string(args[index]) if index < len(args) else None
+            write_sites.append((raw_name, raw_path))
+            continue
+
+        if name.startswith("file.") and name not in _FILESYSTEM_BENIGN_CALLS:
+            return _filesystem_rejection(
+                raw_name, "is an unrecognised File.* primitive"
+            )
+
+    if not write_sites:
+        return None
+
+    folder = export_folder
+    if folder is None:
+        folder = active_image.current_export_folder()
     if folder is None:
         if not active_image.is_any_image_open():
             return (
@@ -150,29 +288,30 @@ def check_macro(code: str) -> str | None:
             "first, or launch the agent with --export-dir PATH to set a "
             "fallback output folder."
         )
-    folder_abs = os.path.abspath(folder)
+    folder_abs = os.path.realpath(os.path.abspath(folder))
 
-    extracted = _extract_save_paths(code)
-    # If every detected site was extracted we check each path.
-    # If at least one detector fired but nothing was extractable,
-    # reject the whole macro rather than let it through unchecked.
-    if len(extracted) < len(detected):
-        return (
-            "A save-family call was found but its path argument is not a "
-            "string literal. Refusing to run — pass the output path as a "
-            "plain double-quoted string under {}.".format(folder_abs)
-        )
-
-    for call_name, raw_path in extracted:
-        resolved = os.path.abspath(raw_path)
+    for call_name, raw_path in write_sites:
+        if raw_path is None:
+            return (
+                "{} output path is not one plain string literal. Refusing to "
+                "run; write only beneath {}."
+            ).format(call_name, folder_abs)
+        resolved = os.path.realpath(os.path.abspath(raw_path))
         if not _is_within(resolved, folder_abs):
             return (
                 "{} path '{}' is outside the current AI_Exports folder "
                 "({}). Move the output into that folder and try again."
                 .format(call_name, resolved, folder_abs)
             )
-
     return None
+
+
+def _filesystem_rejection(primitive: str, reason: str) -> str:
+    return (
+        "Macro filesystem primitive '{}' is not allowed because it {}. "
+        "Refusing before Fiji; use a separately elevated local run_script "
+        "capability when host-file access is genuinely required."
+    ).format(primitive, reason)
 
 
 def check_host_code(code: str) -> str | None:
@@ -315,6 +454,74 @@ def _macro_views(code: str) -> tuple[str, str]:
     return "".join(comments_removed), "".join(masked)
 
 
+def _parse_call_arguments(source: str, open_paren: int) -> list[str] | None:
+    """Return top-level argument expressions for one call, or None if broken."""
+    if open_paren < 0 or open_paren >= len(source) or source[open_paren] != "(":
+        return None
+    args: list[str] = []
+    start = open_paren + 1
+    depth = 1
+    quote = ""
+    escaped = False
+    i = start
+    while i < len(source):
+        char = source[i]
+        if quote:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == quote:
+                quote = ""
+            i += 1
+            continue
+        if char in ('"', "'"):
+            quote = char
+        elif char == "(":
+            depth += 1
+        elif char == ")":
+            depth -= 1
+            if depth == 0:
+                final = source[start:i].strip()
+                if final or args:
+                    args.append(final)
+                return args
+        elif char == "," and depth == 1:
+            args.append(source[start:i].strip())
+            start = i + 1
+        i += 1
+    return None
+
+
+def _literal_string(expression: str) -> str | None:
+    """Decode one whole quoted expression; reject concatenation/variables."""
+    value = expression.strip()
+    if len(value) < 2 or value[0] not in ('"', "'"):
+        return None
+    quote = value[0]
+    chars: list[str] = []
+    escaped = False
+    i = 1
+    while i < len(value):
+        char = value[i]
+        if escaped:
+            # ImageJ paths commonly contain backslashes. Only consume an
+            # escape when it protects a quote or another backslash.
+            if char in (quote, "\\"):
+                chars.append(char)
+            else:
+                chars.extend(("\\", char))
+            escaped = False
+        elif char == "\\":
+            escaped = True
+        elif char == quote:
+            return "".join(chars) if not value[i + 1:].strip() else None
+        else:
+            chars.append(char)
+        i += 1
+    return None
+
+
 def session_id() -> str:
     """Return the current agent session ID used to scope audit records."""
     return _SESSION_ID
@@ -384,32 +591,6 @@ friction_log.ENABLED = True  # type: ignore[attr-defined]
 
 
 # ---- helpers ----------------------------------------------------------
-
-
-def _detect_save_sites(code: str) -> list[str]:
-    """Return the call names whose detector fires in the macro.
-
-    Duplicates are preserved so we can compare detector count
-    against extractor count.
-    """
-    hits: list[str] = []
-    for name, detector in _SAVE_DETECTORS:
-        for _ in detector.finditer(code):
-            hits.append(name)
-    return hits
-
-
-def _extract_save_paths(code: str) -> list[tuple[str, str]]:
-    """Pull (call_name, path_literal) pairs from every extractable site."""
-    hits: list[tuple[str, str]] = []
-    for name, extractor in _SAVE_EXTRACTORS:
-        for match in extractor.finditer(code):
-            path = match.group(1)
-            if path is None and match.lastindex and match.lastindex >= 2:
-                path = match.group(2)
-            if path is not None:
-                hits.append((name, path))
-    return hits
 
 
 def _is_within(path: str, folder: str) -> bool:

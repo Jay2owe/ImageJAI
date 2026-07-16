@@ -138,6 +138,149 @@ public class DestructiveScannerTest {
     }
 
     // -----------------------------------------------------------------------
+    // Unconditional macro filesystem policy
+    // -----------------------------------------------------------------------
+
+    @Test
+    public void macroFilesystemReadsAndEnumerationAreRejected() {
+        String[] unsafe = {
+                "text = File.openAsString(\"/private/subjects.csv\");",
+                "raw = File.openAsRawString(\"/private/image.bin\", 64);",
+                "text = File.openUrlAsString(\"https://example.invalid/data\");",
+                "File.openSequence(\"/private/images\", \"virtual\");",
+                "path = File.openDialog(\"Choose private data\");",
+                "open(\"/private/subject.tif\");",
+                "openVirtual(\"/private/subject.tif\");",
+                "names = getFileList(\"/private\");",
+                "home = getDirectory(\"home\");",
+                "size = File.length(\"/private/subject.tif\");",
+                "size = File.getLength(\"/private/subject.tif\");",
+                "present = File.exists(\"/private/subject.tif\");",
+                "cwd = File.getAbsolutePath(\".\");",
+                "defaultDir = File.getDefaultDir();",
+                "lastDir = File.directory;",
+                "lastName = File.name;"
+        };
+        for (String code : unsafe) {
+            List<DestructiveScanner.FilesystemAccess> access =
+                    DestructiveScanner.classifyMacroFilesystem(
+                            code, "/safe/AI_Exports");
+            assertEquals("expected one filesystem finding for " + code,
+                    1, access.size());
+            assertFalse(access.get(0).allowed);
+            assertEquals(DestructiveScanner.FilesystemKind.READ,
+                    access.get(0).kind);
+        }
+    }
+
+    @Test
+    public void macroDestructiveAndImportPrimitivesAreRejected() {
+        String[] unsafe = {
+                "File.delete(\"/private/subject.tif\");",
+                "File.rename(\"/private/a.tif\", \"/private/b.tif\");",
+                "File.copy(\"/private/a.tif\", \"/safe/AI_Exports/a.tif\");",
+                "File.setDefaultDir(\"/private\");",
+                "run(\"Save\");",
+                "run(\"Revert\");",
+                "run(\"Open...\");",
+                "run(\"Bio-Formats Importer\");"
+        };
+        for (String code : unsafe) {
+            List<DestructiveScanner.DestructiveOp> ops =
+                    DestructiveScanner.scanMacroFilesystem(
+                            code, "/safe/AI_Exports");
+            assertEquals("expected one rejected filesystem access for " + code,
+                    1, ops.size());
+            assertEquals(DestructiveScanner.RULE_MACRO_FILESYSTEM,
+                    ops.get(0).ruleId);
+            assertEquals(DestructiveScanner.Severity.REJECT,
+                    ops.get(0).severity);
+        }
+    }
+
+    @Test
+    public void macroFilesystemWordsInStringsAndCommentsAreHarmless() {
+        String code = "// File.delete(\"/private/a.tif\");\n"
+                + "/* File.openAsString(\"/private/subjects.csv\"); */\n"
+                + "print(\"File.copy(a,b) and open('/private') docs\");\n"
+                + "name = File.getName(\"/private/subject.tif\");\n"
+                + "parent = File.getParent(\"/private/subject.tif\");\n"
+                + "separator = File.separator;\n"
+                + "run(\"Gaussian Blur...\", \"sigma=2\");";
+        assertTrue(DestructiveScanner.classifyMacroFilesystem(
+                code, "/safe/AI_Exports").isEmpty());
+    }
+
+    @Test
+    public void unknownFilePrimitiveAndDynamicWritesFailClosed() {
+        String[] unsafe = {
+                "File.futureFilesystemMethod(\"/private/a.tif\");",
+                "File.write(\"data\", handle);",
+                "saveAs(\"Tiff\", outputPath);",
+                "File.saveString(\"data\", exportDir + \"/result.csv\");",
+                "File.open(path);",
+                "File.makeDirectory(directory);",
+                "run(\"Tiff...\", \"save=\" + outputPath);"
+        };
+        for (String code : unsafe) {
+            assertEquals("expected fail-closed finding for " + code, 1,
+                    DestructiveScanner.scanMacroFilesystem(
+                            code, "/safe/AI_Exports").size());
+        }
+    }
+
+    @Test
+    public void literalOutputWritesUnderResolvedAiExportsAreAllowed() {
+        Path exports = Paths.get("target", "filesystem-policy", "AI_Exports")
+                .toAbsolutePath().normalize();
+        String root = exports.toString().replace('\\', '/');
+        String code = "File.makeDirectory(\"" + root + "/nested\");\n"
+                + "File.mkdir(\"" + root + "/nested\");\n"
+                + "File.saveString(\"header\", \"" + root + "/result.csv\");\n"
+                + "File.append(\"row\", \"" + root + "/result.csv\");\n"
+                + "f = File.open(\"" + root + "/log.txt\");\n"
+                + "print(f, \"ok\"); File.close(f);\n"
+                + "saveAs(\"Results\", \"" + root + "/result.csv\");\n"
+                + "IJ.saveAs(\"Tiff\", \"" + root + "/image.tif\");\n"
+                + "run(\"Tiff...\", \"save=[" + root + "/run.tif]\");";
+
+        List<DestructiveScanner.FilesystemAccess> access =
+                DestructiveScanner.classifyMacroFilesystem(code, root);
+        assertEquals(8, access.size());
+        for (DestructiveScanner.FilesystemAccess item : access) {
+            assertTrue(item.message, item.allowed);
+            assertEquals(DestructiveScanner.FilesystemKind.OUTPUT_WRITE, item.kind);
+        }
+        assertTrue(DestructiveScanner.scanMacroFilesystem(code, root).isEmpty());
+    }
+
+    @Test
+    public void literalOutputOutsideOrTraversingAiExportsIsRejected() {
+        Path exports = Paths.get("target", "filesystem-policy", "AI_Exports")
+                .toAbsolutePath().normalize();
+        String root = exports.toString().replace('\\', '/');
+        String outside = exports.resolve("..").resolve("subject.tif")
+                .toString().replace('\\', '/');
+        List<DestructiveScanner.DestructiveOp> ops =
+                DestructiveScanner.scanMacroFilesystem(
+                        "saveAs(\"Tiff\", \"" + outside + "\");", root);
+        assertEquals(1, ops.size());
+        assertEquals(DestructiveScanner.RULE_MACRO_FILESYSTEM,
+                ops.get(0).ruleId);
+    }
+
+    @Test
+    public void filesystemFindingCarriesSourceLine() {
+        List<DestructiveScanner.DestructiveOp> ops =
+                DestructiveScanner.scanMacroFilesystem(
+                        "run(\"Gaussian Blur...\", \"sigma=2\");\n"
+                                + "File.delete(\"/private/a.tif\");",
+                        "/safe/AI_Exports");
+        assertEquals(1, ops.size());
+        assertEquals(2, ops.get(0).line);
+    }
+
+    // -----------------------------------------------------------------------
     // Calibration loss
     // -----------------------------------------------------------------------
 

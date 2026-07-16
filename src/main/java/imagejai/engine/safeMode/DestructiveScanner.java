@@ -66,6 +66,34 @@ public final class DestructiveScanner {
      */
     public enum Severity { REJECT, BACKUP_THEN_ALLOW }
 
+    /** Macro filesystem classification used by the unconditional TCP gate. */
+    public enum FilesystemKind { READ, DESTRUCTIVE, OUTPUT_WRITE, UNKNOWN }
+
+    /**
+     * One filesystem-capable macro call. Safe output writes are returned with
+     * {@link #allowed} true so callers can audit them without blocking them.
+     * Reads, destructive operations, unknown File.* calls, dynamic paths, and
+     * outputs outside the resolved AI_Exports root have {@code allowed=false}.
+     */
+    public static final class FilesystemAccess {
+        public final FilesystemKind kind;
+        public final String primitive;
+        public final String target;
+        public final int line;
+        public final boolean allowed;
+        public final String message;
+
+        FilesystemAccess(FilesystemKind kind, String primitive, String target,
+                         int line, boolean allowed, String message) {
+            this.kind = kind;
+            this.primitive = primitive == null ? "" : primitive;
+            this.target = target == null ? "" : target;
+            this.line = line;
+            this.allowed = allowed;
+            this.message = message == null ? "" : message;
+        }
+    }
+
     /**
      * Rule identifiers. Stable across versions — surfaced in friction-log
      * rows and the structured error reply's {@code operations[].rule_id}
@@ -79,6 +107,7 @@ public final class DestructiveScanner {
     public static final String RULE_BIT_DEPTH_NARROWING = "bit_depth_narrowing";
     public static final String RULE_NORMALIZE_CONTRAST  = "normalize_contrast";
     public static final String RULE_HOST_CODE           = "host_code_execution";
+    public static final String RULE_MACRO_FILESYSTEM    = "macro_filesystem_access";
 
     /**
      * Single scanner finding. Plain data — caller decides how to format
@@ -239,6 +268,52 @@ public final class DestructiveScanner {
             "compile and run", "run macro"
     };
 
+    /** Calls whose names are needed for the standalone filesystem policy. */
+    static final Pattern FILESYSTEM_CALL_START = Pattern.compile(
+            "(?<![\\w.])((?:File|IJ)\\s*\\.\\s*[A-Za-z_][A-Za-z0-9_]*|"
+                    + "saveAs|save|getFileList|getDirectory|openVirtual|open|"
+                    + "run|doCommand)\\s*\\(",
+            Pattern.CASE_INSENSITIVE);
+
+    static final Pattern FILESYSTEM_PROPERTY = Pattern.compile(
+            "\\bFile\\s*\\.\\s*(directory|nameWithoutExtension|name|separator)"
+                    + "\\b(?!\\s*\\()",
+            Pattern.CASE_INSENSITIVE);
+
+    private static final Pattern RUN_SAVE_PATH = Pattern.compile(
+            "(?:^|\\s)save\\s*=\\s*(?:\\[([^\\]]+)\\]|([^\\s]+))",
+            Pattern.CASE_INSENSITIVE);
+
+    private static final String[] FILESYSTEM_READ_CALLS = {
+            "open", "openvirtual", "getfilelist", "getdirectory",
+            "file.openasstring", "file.openasrawstring",
+            "file.openurlasstring", "file.openurl", "file.opensequence",
+            "file.opendialog", "file.exists", "file.isfile",
+            "file.isdirectory", "file.length", "file.getlength",
+            "file.lastmodified", "file.datelastmodified",
+            "file.getdefaultdir", "file.getabsolutepath", "file.directory",
+            "file.name", "file.namewithoutextension"
+    };
+
+    private static final String[] FILESYSTEM_DESTRUCTIVE_CALLS = {
+            "file.delete", "file.rename", "file.copy", "file.setdefaultdir"
+    };
+
+    private static final String[] FILESYSTEM_BENIGN_CALLS = {
+            "file.getname", "file.getnamewithoutextension",
+            "file.getdirectory", "file.getparent", "file.close", "file.separator"
+    };
+
+    private static final String[] READ_MENU_COMMANDS = {
+            "open", "open...", "open next", "open samples",
+            "image sequence...", "url...", "bio-formats importer",
+            "bio-formats remote importer"
+    };
+
+    private static final String[] DESTRUCTIVE_MENU_COMMANDS = {
+            "save", "save as...", "revert"
+    };
+
     /** Microscopy-format extensions the overwrite rule guards. */
     private static final String[] MICROSCOPY_EXTS = {
             ".lif", ".czi", ".nd2", ".ome.tif", ".ome.tiff", ".tif", ".tiff",
@@ -283,6 +358,129 @@ public final class DestructiveScanner {
         List<DestructiveOp> out = new ArrayList<DestructiveOp>();
         if (code == null || code.isEmpty() || ctx == null) return out;
         scanScientificRules(code, ctx, out);
+        return out;
+    }
+
+    /**
+     * Classify every filesystem-capable ImageJ macro call independently of
+     * safe-mode feature flags. The dispatcher uses this policy for every
+     * macro entry point; trusted local host access belongs in the separately
+     * elevated {@code run_script} capability.
+     *
+     * <p>The classifier is deliberately fail-closed: dynamic output paths,
+     * malformed calls, and unknown {@code File.*} methods are denied. The
+     * only allowed accesses are explicit output writes whose one literal path
+     * resolves canonically beneath {@code aiExportsRoot}.
+     */
+    public static List<FilesystemAccess> classifyMacroFilesystem(
+            String code, String aiExportsRoot) {
+        List<FilesystemAccess> out = new ArrayList<FilesystemAccess>();
+        if (code == null || code.isEmpty()) return out;
+
+        MacroViews views = macroViews(code);
+        Matcher properties = FILESYSTEM_PROPERTY.matcher(views.masked);
+        while (properties.find()) {
+            String property = properties.group(1);
+            if ("separator".equalsIgnoreCase(property)) continue;
+            out.add(filesystemDenied(FilesystemKind.READ,
+                    "File." + property, "", lineOf(code, properties.start()),
+                    "reveals the last selected host path"));
+        }
+        Matcher calls = FILESYSTEM_CALL_START.matcher(views.masked);
+        while (calls.find()) {
+            String rawName = calls.group(1);
+            String name = rawName.replaceAll("\\s+", "")
+                    .toLowerCase(Locale.ROOT);
+            List<String> args = parseCallArguments(
+                    views.commentsRemoved, calls.end() - 1);
+            int line = lineOf(code, calls.start());
+
+            if (equalsAny(name, FILESYSTEM_READ_CALLS)) {
+                out.add(filesystemDenied(FilesystemKind.READ, rawName, "", line,
+                        "reads, selects, or enumerates host data"));
+                continue;
+            }
+            if (equalsAny(name, FILESYSTEM_DESTRUCTIVE_CALLS)) {
+                out.add(filesystemDenied(FilesystemKind.DESTRUCTIVE, rawName, "", line,
+                        "can modify, move, copy, or remove host files"));
+                continue;
+            }
+
+            if ("run".equals(name) || "docommand".equals(name)) {
+                if (args == null || args.isEmpty()) {
+                    out.add(filesystemDenied(FilesystemKind.UNKNOWN, rawName, "", line,
+                            "has malformed arguments"));
+                    continue;
+                }
+                String command = literalString(args.get(0));
+                if (command == null) {
+                    out.add(filesystemDenied(FilesystemKind.UNKNOWN, rawName, "", line,
+                            "uses a dynamic command name"));
+                    continue;
+                }
+                String normalizedCommand = command.replaceAll("\\s+", " ")
+                        .trim().toLowerCase(Locale.ROOT);
+                if (equalsAny(normalizedCommand, READ_MENU_COMMANDS)) {
+                    out.add(filesystemDenied(FilesystemKind.READ, rawName, command, line,
+                            "opens or imports host data"));
+                    continue;
+                }
+                if (equalsAny(normalizedCommand, DESTRUCTIVE_MENU_COMMANDS)) {
+                    out.add(filesystemDenied(FilesystemKind.DESTRUCTIVE, rawName,
+                            command, line, "can overwrite the current host file"));
+                    continue;
+                }
+                if (args.size() >= 2) {
+                    String options = literalString(args.get(1));
+                    if (options == null) {
+                        if (Pattern.compile("\\bsave\\s*=", Pattern.CASE_INSENSITIVE)
+                                .matcher(args.get(1)).find()) {
+                            out.add(filesystemDenied(FilesystemKind.OUTPUT_WRITE,
+                                    rawName, "", line, "uses a dynamic save path"));
+                        }
+                        continue;
+                    }
+                    Matcher savePath = RUN_SAVE_PATH.matcher(options);
+                    if (savePath.find()) {
+                        String target = savePath.group(1) != null
+                                ? savePath.group(1) : savePath.group(2);
+                        out.add(classifyOutputWrite(rawName, target, line,
+                                aiExportsRoot));
+                    }
+                }
+                continue;
+            }
+
+            Integer pathIndex = filesystemWritePathIndex(name, args);
+            if (pathIndex != null) {
+                String target = null;
+                if (args != null && pathIndex >= 0 && pathIndex < args.size()) {
+                    target = literalString(args.get(pathIndex));
+                }
+                out.add(classifyOutputWrite(rawName, target, line, aiExportsRoot));
+                continue;
+            }
+
+            if (name.startsWith("file.")
+                    && !equalsAny(name, FILESYSTEM_BENIGN_CALLS)) {
+                out.add(filesystemDenied(FilesystemKind.UNKNOWN, rawName, "", line,
+                        "is an unrecognised File.* primitive"));
+            }
+        }
+        return out;
+    }
+
+    /** Convert denied classifications into the scanner's standard envelope. */
+    public static List<DestructiveOp> scanMacroFilesystem(
+            String code, String aiExportsRoot) {
+        List<DestructiveOp> out = new ArrayList<DestructiveOp>();
+        for (FilesystemAccess access : classifyMacroFilesystem(code, aiExportsRoot)) {
+            if (access.allowed) continue;
+            String target = access.target.isEmpty()
+                    ? access.primitive : access.target;
+            out.add(new DestructiveOp(RULE_MACRO_FILESYSTEM, Severity.REJECT,
+                    target, access.line, access.message));
+        }
         return out;
     }
 
@@ -589,6 +787,130 @@ public final class DestructiveScanner {
     // -----------------------------------------------------------------------
     // Helpers
     // -----------------------------------------------------------------------
+
+    private static FilesystemAccess filesystemDenied(
+            FilesystemKind kind, String primitive, String target, int line,
+            String reason) {
+        return new FilesystemAccess(kind, primitive, target, line, false,
+                "Macro filesystem primitive '" + primitive
+                        + "' is blocked because it " + reason
+                        + "; use separately elevated local run_script when "
+                        + "host-file access is genuinely required.");
+    }
+
+    private static FilesystemAccess classifyOutputWrite(
+            String primitive, String target, int line, String aiExportsRoot) {
+        if (target == null) {
+            return filesystemDenied(FilesystemKind.OUTPUT_WRITE, primitive, "",
+                    line, "does not use one plain literal output path");
+        }
+        Containment containment = aiExportsContainment(
+                target, aiExportsRoot, REAL_PATH_RESOLVER);
+        if (containment == Containment.INSIDE) {
+            return new FilesystemAccess(FilesystemKind.OUTPUT_WRITE, primitive,
+                    target, line, true,
+                    "Literal output resolves beneath the active AI_Exports root.");
+        }
+        String reason = containment == Containment.ESCAPE
+                ? "escapes the canonical AI_Exports root through traversal, "
+                        + "a symbolic link, or an unreadable parent"
+                : "writes outside the resolved AI_Exports root";
+        return filesystemDenied(FilesystemKind.OUTPUT_WRITE, primitive, target,
+                line, reason);
+    }
+
+    /** Return the path argument for a known write, or null for a non-write. */
+    private static Integer filesystemWritePathIndex(
+            String name, List<String> args) {
+        if ("saveas".equals(name) || "file.savestring".equals(name)
+                || "file.append".equals(name)) return Integer.valueOf(1);
+        if ("save".equals(name) || "file.makedirectory".equals(name)
+                || "file.mkdir".equals(name) || "file.open".equals(name)) {
+            return Integer.valueOf(0);
+        }
+        if ("ij.saveas".equals(name) || "ij.save".equals(name)) {
+            return Integer.valueOf(args == null ? -1 : args.size() - 1);
+        }
+        return null;
+    }
+
+    /** Parse one call's top-level argument expressions; null means malformed. */
+    private static List<String> parseCallArguments(String source, int openParen) {
+        if (source == null || openParen < 0 || openParen >= source.length()
+                || source.charAt(openParen) != '(') return null;
+        List<String> args = new ArrayList<String>();
+        int start = openParen + 1;
+        int depth = 1;
+        char quote = 0;
+        boolean escaped = false;
+        for (int i = start; i < source.length(); i++) {
+            char ch = source.charAt(i);
+            if (quote != 0) {
+                if (escaped) {
+                    escaped = false;
+                } else if (ch == '\\') {
+                    escaped = true;
+                } else if (ch == quote) {
+                    quote = 0;
+                }
+                continue;
+            }
+            if (ch == '"' || ch == '\'') {
+                quote = ch;
+            } else if (ch == '(') {
+                depth++;
+            } else if (ch == ')') {
+                depth--;
+                if (depth == 0) {
+                    String value = source.substring(start, i).trim();
+                    if (!value.isEmpty() || !args.isEmpty()) args.add(value);
+                    return args;
+                }
+            } else if (ch == ',' && depth == 1) {
+                args.add(source.substring(start, i).trim());
+                start = i + 1;
+            }
+        }
+        return null;
+    }
+
+    /** Decode one whole string literal; concatenations and variables fail. */
+    private static String literalString(String expression) {
+        if (expression == null) return null;
+        String value = expression.trim();
+        if (value.length() < 2) return null;
+        char quote = value.charAt(0);
+        if (quote != '"' && quote != '\'') return null;
+        StringBuilder out = new StringBuilder();
+        boolean escaped = false;
+        for (int i = 1; i < value.length(); i++) {
+            char ch = value.charAt(i);
+            if (escaped) {
+                if (ch == quote || ch == '\\') {
+                    out.append(ch);
+                } else {
+                    out.append('\\').append(ch);
+                }
+                escaped = false;
+            } else if (ch == '\\') {
+                escaped = true;
+            } else if (ch == quote) {
+                return value.substring(i + 1).trim().isEmpty()
+                        ? out.toString() : null;
+            } else {
+                out.append(ch);
+            }
+        }
+        return null;
+    }
+
+    private static boolean equalsAny(String value, String[] candidates) {
+        if (value == null || candidates == null) return false;
+        for (String candidate : candidates) {
+            if (value.equals(candidate)) return true;
+        }
+        return false;
+    }
 
     private static final class MacroViews {
         final String commentsRemoved;
