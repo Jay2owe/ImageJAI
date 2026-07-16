@@ -275,6 +275,107 @@ public class AuditLogTest {
                 new ArrayList<String>(summary.commandCounts().keySet()));
     }
 
+    @Test
+    public void recentRowsAndListenersRemainBoundedUnderFlood() throws Exception {
+        AuditLog log = new AuditLog(new AuditLog.PathResolver() {
+            @Override public Path csvPath() { return null; }
+        });
+        List<AutoCloseable> subscriptions = new ArrayList<AutoCloseable>();
+        try {
+            for (int i = 0; i < AuditLog.MAX_LISTENERS + 10; i++) {
+                subscriptions.add(log.subscribeRecent(new AuditLog.Listener() {
+                    @Override public void auditRowsUpdated(List<AuditRow> rows) { }
+                }));
+            }
+            for (int i = 0; i < 700; i++) {
+                log.append(row("s", "cmd-" + i, "", ""));
+            }
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5L);
+            while ((log.writerQueueSize() > 0 || log.notifierQueueSize() > 0)
+                    && System.nanoTime() < deadline) {
+                Thread.sleep(10L);
+            }
+            log.flushForTest();
+
+            assertEquals(AuditLog.MAX_LISTENERS, log.listenerCount());
+            assertEquals(10L, log.rejectedListenerCount());
+            assertEquals(500, log.recent(1000).size());
+            assertEquals(200L, log.droppedRecentRowCount());
+            assertTrue(log.writerQueueSize() <= AuditLog.WRITER_QUEUE_CAPACITY);
+            assertTrue(log.notifierQueueSize() <= AuditLog.NOTIFIER_QUEUE_CAPACITY);
+        } finally {
+            for (AutoCloseable subscription : subscriptions) subscription.close();
+            log.shutdownAndAwait(1000L);
+        }
+    }
+
+    @Test
+    public void summaryRejectsOversizeFileInsteadOfReadingItAll() throws Exception {
+        Path csv = tmp.newFolder("oversize").toPath().resolve(AuditLog.FILE_NAME);
+        try (java.io.RandomAccessFile file = new java.io.RandomAccessFile(
+                csv.toFile(), "rw")) {
+            file.setLength(AuditLog.MAX_SUMMARY_BYTES + 1L);
+        }
+
+        try {
+            AuditLog.summaryFor(csv);
+            throw new AssertionError("Expected oversize audit summary to fail");
+        } catch (java.io.IOException expected) {
+            assertTrue(expected.getMessage().contains("exceeds summary limit"));
+        }
+    }
+
+    @Test
+    public void summaryRejectsFileThatGrowsAfterSizePrecheck() throws Exception {
+        Path csv = tmp.newFolder("growing").toPath().resolve(AuditLog.FILE_NAME);
+        Files.writeString(csv, AuditLog.HEADER + "\n", StandardCharsets.UTF_8);
+        AuditLog.setBeforeSummaryReadHookForTest(new Runnable() {
+            @Override public void run() {
+                try (java.io.RandomAccessFile file = new java.io.RandomAccessFile(
+                        csv.toFile(), "rw")) {
+                    file.setLength(AuditLog.MAX_SUMMARY_BYTES + 1L);
+                } catch (java.io.IOException e) {
+                    throw new RuntimeException(e);
+                }
+            }
+        });
+        try {
+            AuditLog.summaryFor(csv);
+            throw new AssertionError("Expected growing audit summary to fail");
+        } catch (java.io.IOException expected) {
+            assertTrue(expected.getMessage().contains("exceeds summary limit"));
+        } finally {
+            AuditLog.setBeforeSummaryReadHookForTest(null);
+        }
+    }
+
+    @Test
+    public void massiveSingleRowIsBoundedBeforeRecentRetention() {
+        AuditLog log = new AuditLog(new AuditLog.PathResolver() {
+            @Override public Path csvPath() { return null; }
+        });
+        List<String> fields = new ArrayList<String>();
+        for (int i = 0; i < AuditLog.MAX_ROW_FIELDS + 500; i++) {
+            fields.add(repeat('f', AuditLog.MAX_ROW_FIELD_CHARS + 100));
+        }
+        AuditRow huge = new AuditRow(Instant.now(), repeat('s', 1000),
+                repeat('c', 1000), PrivacyPosture.PSEUDONYMISED,
+                repeat('m', 1000), repeat('x', 1000), 1, 2,
+                repeat('h', 1000), true, fields,
+                repeat('n', AuditLog.MAX_ROW_TEXT_CHARS * 4));
+        try {
+            log.append(huge);
+            AuditRow retained = log.recent(1).get(0);
+            assertTrue(retained.notes().length() <= AuditLog.MAX_ROW_TEXT_CHARS);
+            assertEquals(AuditLog.MAX_ROW_FIELDS, retained.fieldsRedacted().size());
+            assertEquals("__truncated_fields__", retained.fieldsRedacted().get(
+                    retained.fieldsRedacted().size() - 1));
+            assertTrue(retained.sessionId().length() <= AuditLog.MAX_ROW_FIELD_CHARS);
+        } finally {
+            log.shutdownAndAwait(1000L);
+        }
+    }
+
     private static AuditRow row(String session, String command,
                                 String captureSource, String notes) {
         return new AuditRow(Instant.parse("2026-05-22T12:00:00Z"),
@@ -289,5 +390,11 @@ public class AuditLogTest {
                 true,
                 Collections.singletonList("path"),
                 notes);
+    }
+
+    private static String repeat(char value, int count) {
+        StringBuilder out = new StringBuilder(count);
+        for (int i = 0; i < count; i++) out.append(value);
+        return out.toString();
     }
 }

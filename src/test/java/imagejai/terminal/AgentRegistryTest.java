@@ -87,6 +87,39 @@ public class AgentRegistryTest {
     }
 
     @Test
+    public void deniedPathProbeFailsBeforeListingAndIsNotCached() throws Exception {
+        Path workspace = Files.createTempDirectory("registry-probe-restored");
+        Path commands = Files.createDirectories(workspace.resolve(".claude/commands"));
+        Files.write(commands.resolve("analyse.md"), new byte[]{1});
+        AtomicInteger probes = new AtomicInteger();
+        AtomicInteger opens = new AtomicInteger();
+        AgentRegistry.DirectorySource source = path -> {
+            opens.incrementAndGet();
+            return Files.newDirectoryStream(path);
+        };
+        AgentRegistry.PathProbe probe = path -> {
+            if (probes.getAndIncrement() == 0) {
+                throw new AccessDeniedException(path.toString());
+            }
+            return Files.readAttributes(path,
+                    java.nio.file.attribute.BasicFileAttributes.class);
+        };
+
+        try {
+            AgentRegistry.userCommandsResult(
+                    claudeInfo(), workspace.toFile(), source, probe, 3000L);
+            throw new AssertionError("Expected directory_unreadable");
+        } catch (AgentRegistry.CommandScanException expected) {
+            assertEquals("directory_unreadable", expected.code());
+        }
+        assertEquals(0, opens.get());
+        AgentRegistry.UserCommandsResult restored = AgentRegistry.userCommandsResult(
+                claudeInfo(), workspace.toFile(), source, probe, 3001L);
+        assertEquals(1, restored.commands().size());
+        assertEquals(1, opens.get());
+    }
+
+    @Test
     public void commandEnumerationStopsAtSafetyCap() throws Exception {
         Path workspace = Files.createTempDirectory("registry-cap");
         Path commands = Files.createDirectories(workspace.resolve(".claude/commands"));

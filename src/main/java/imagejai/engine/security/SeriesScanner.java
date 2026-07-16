@@ -10,7 +10,6 @@ import java.nio.file.Files;
 import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
 import java.nio.file.attribute.BasicFileAttributes;
-import java.nio.file.attribute.FileTime;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Hashtable;
@@ -53,6 +52,10 @@ public final class SeriesScanner {
         DirectoryStream<Path> open(Path directory) throws IOException;
     }
 
+    interface PathProbe {
+        BasicFileAttributes readAttributes(Path path) throws IOException;
+    }
+
     private static final ReaderFactory BIO_FORMATS_READER_FACTORY = new ReaderFactory() {
         @Override
         public MetadataReader create() {
@@ -63,6 +66,7 @@ public final class SeriesScanner {
     private final PathTokenMap tokenMap;
     private final ReaderFactory readerFactory;
     private final DirectorySource directorySource;
+    private final PathProbe pathProbe;
     private final Map<CacheKey, List<SeriesInfo>> cache =
             new LinkedHashMap<CacheKey, List<SeriesInfo>>(16, 0.75f, true) {
                 @Override
@@ -72,15 +76,22 @@ public final class SeriesScanner {
             };
 
     public SeriesScanner() {
-        this(PathTokenMap.getInstance(), BIO_FORMATS_READER_FACTORY, Files::newDirectoryStream);
+        this(PathTokenMap.getInstance(), BIO_FORMATS_READER_FACTORY,
+                Files::newDirectoryStream, SeriesScanner::readAttributes);
     }
 
     SeriesScanner(PathTokenMap tokenMap, ReaderFactory readerFactory) {
-        this(tokenMap, readerFactory, Files::newDirectoryStream);
+        this(tokenMap, readerFactory, Files::newDirectoryStream,
+                SeriesScanner::readAttributes);
     }
 
     SeriesScanner(PathTokenMap tokenMap, ReaderFactory readerFactory,
                   DirectorySource directorySource) {
+        this(tokenMap, readerFactory, directorySource, SeriesScanner::readAttributes);
+    }
+
+    SeriesScanner(PathTokenMap tokenMap, ReaderFactory readerFactory,
+                  DirectorySource directorySource, PathProbe pathProbe) {
         this.tokenMap = tokenMap == null ? PathTokenMap.getInstance() : tokenMap;
         this.readerFactory = readerFactory == null
                 ? BIO_FORMATS_READER_FACTORY
@@ -88,11 +99,23 @@ public final class SeriesScanner {
         this.directorySource = directorySource == null
                 ? Files::newDirectoryStream
                 : directorySource;
+        this.pathProbe = pathProbe == null ? SeriesScanner::readAttributes : pathProbe;
     }
 
     public List<SeriesInfo> scanFolder(Path folder) {
-        if (folder == null || !Files.exists(folder)) {
+        if (folder == null) {
             return Collections.emptyList();
+        }
+        try {
+            if (!pathProbe.readAttributes(folder).isDirectory()) {
+                throw new ScanException("not_a_folder", folder,
+                        "Image folder is not a directory.");
+            }
+        } catch (NoSuchFileException e) {
+            return Collections.emptyList();
+        } catch (IOException e) {
+            throw new ScanException("folder_unreadable", folder,
+                    "Could not inspect image folder: " + message(e), e);
         }
         List<Path> files = new ArrayList<Path>();
         int entries = 0;
@@ -103,8 +126,7 @@ public final class SeriesScanner {
                     throw new ScanException("directory_entry_cap", folder,
                             "Folder contains more than " + MAX_DIRECTORY_ENTRIES + " entries.");
                 }
-                BasicFileAttributes attributes = Files.readAttributes(
-                        candidate, BasicFileAttributes.class);
+                BasicFileAttributes attributes = pathProbe.readAttributes(candidate);
                 if (attributes.isRegularFile() && isSupportedImage(candidate)) {
                     files.add(candidate);
                 }
@@ -127,12 +149,12 @@ public final class SeriesScanner {
     }
 
     public List<SeriesInfo> scan(Path file) {
-        if (file == null || !Files.exists(file) || !isSupportedImage(file)) {
+        if (file == null || !isSupportedImage(file)) {
             return Collections.emptyList();
         }
         CacheKey key;
         try {
-            BasicFileAttributes attributes = Files.readAttributes(file, BasicFileAttributes.class);
+            BasicFileAttributes attributes = pathProbe.readAttributes(file);
             if (!attributes.isRegularFile()) {
                 return Collections.emptyList();
             }
@@ -234,6 +256,10 @@ public final class SeriesScanner {
         return value == null || value.trim().isEmpty()
                 ? e.getClass().getSimpleName()
                 : value;
+    }
+
+    private static BasicFileAttributes readAttributes(Path path) throws IOException {
+        return Files.readAttributes(path, BasicFileAttributes.class);
     }
 
     private static String labelFor(Path file, int zeroBasedSeries,

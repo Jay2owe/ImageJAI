@@ -64,10 +64,9 @@ public final class CaptureHandler {
         }
         boolean consumeOverride = posture == PrivacyPosture.PSEUDONYMISED
                 && source == CaptureSource.ACTIVE_IMAGE_CONTENT
-                && (hasInternalImageToken
-                ? visualOverrideRegistry.consumeIfPresent(
-                        sessionId, internalImageToken.getAsString())
-                : visualOverrideRegistry.consumeIfPresent(sessionId));
+                && hasInternalImageToken
+                && visualOverrideRegistry.consumeIfPresent(
+                        sessionId, internalImageToken.getAsString());
         byte[] processed = consumeOverride
                 ? burnInDetector.mask(png)
                 : burnInDetector.mask(downsampleTo(png, MAX_PSEUDONYMISED_DIMENSION));

@@ -5,6 +5,7 @@ import ij.WindowManager;
 import ij.io.FileInfo;
 
 import java.awt.Desktop;
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.net.InetAddress;
 import java.nio.ByteBuffer;
@@ -28,11 +29,14 @@ import java.util.Set;
 import java.util.TreeMap;
 import java.util.TreeSet;
 import java.util.concurrent.CopyOnWriteArrayList;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
+import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.Future;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ThreadFactory;
+import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * Append-only audit CSV writer for ImageJAI Data Governance.
@@ -53,16 +57,31 @@ public final class AuditLog {
                     + "fields_redacted,notes";
 
     private static final int DEFAULT_RECENT_LIMIT = 500;
+    public static final int MAX_LISTENERS = 64;
+    public static final int WRITER_QUEUE_CAPACITY = 2048;
+    public static final int NOTIFIER_QUEUE_CAPACITY = 1;
+    public static final long MAX_SUMMARY_BYTES = 16L * 1024L * 1024L;
+    public static final int MAX_ROW_TEXT_CHARS = 16_384;
+    public static final int MAX_ROW_FIELDS = 128;
+    public static final int MAX_ROW_FIELD_CHARS = 256;
     private static final int LOCK_ATTEMPTS = 3;
     private static final long LOCK_RETRY_MS = 333L;
     private static final AuditLog INSTANCE = new AuditLog(new CurrentImagePathResolver());
+    private static volatile Runnable beforeSummaryReadHookForTest;
 
     private final PathResolver pathResolver;
-    private final ExecutorService writer;
-    private final ExecutorService notifier;
+    private final ThreadPoolExecutor writer;
+    private final ThreadPoolExecutor notifier;
     private final ArrayDeque<AuditRow> recentRows = new ArrayDeque<AuditRow>();
     private final CopyOnWriteArrayList<Listener> listeners =
             new CopyOnWriteArrayList<Listener>();
+    private final AtomicLong droppedRecentRows = new AtomicLong(0L);
+    private final AtomicLong droppedWriterTasks = new AtomicLong(0L);
+    private final AtomicLong droppedNotifications = new AtomicLong(0L);
+    private final AtomicLong rejectedListeners = new AtomicLong(0L);
+    private final AtomicLong listenerFailures = new AtomicLong(0L);
+    private final AtomicLong notificationVersion = new AtomicLong(0L);
+    private final AtomicBoolean notificationScheduled = new AtomicBoolean(false);
 
     public AuditLog(Path csvPath) {
         this(new FixedPathResolver(csvPath));
@@ -90,7 +109,9 @@ public final class AuditLog {
         if (row == null) {
             return;
         }
-        remember(row);
+        final AuditRow boundedRow = boundedRow(row);
+        remember(boundedRow);
+        notificationVersion.incrementAndGet();
         notifyListenersAsync();
         try {
             writer.submit(new Runnable() {
@@ -101,15 +122,52 @@ public final class AuditLog {
                         return;
                     }
                     try {
-                        writeSync(csvPath, row);
+                        writeSync(csvPath, boundedRow);
                     } catch (IOException e) {
                         System.err.println("[ImageJAI-Audit] append failed: " + e.getMessage());
                     }
                 }
             });
+        } catch (RejectedExecutionException e) {
+            droppedWriterTasks.incrementAndGet();
+            System.err.println("[ImageJAI-Audit] append queue full; row retained in memory only");
         } catch (RuntimeException e) {
+            droppedWriterTasks.incrementAndGet();
             System.err.println("[ImageJAI-Audit] append scheduling failed: " + e.getMessage());
         }
+    }
+
+    private static AuditRow boundedRow(AuditRow row) {
+        List<String> boundedFields = new ArrayList<String>();
+        List<String> fields = row.fieldsRedacted();
+        boolean fieldsTruncated = fields.size() > MAX_ROW_FIELDS;
+        int retained = Math.min(fields.size(), fieldsTruncated
+                ? MAX_ROW_FIELDS - 1 : MAX_ROW_FIELDS);
+        for (int i = 0; i < retained; i++) {
+            boundedFields.add(boundChars(fields.get(i), MAX_ROW_FIELD_CHARS));
+        }
+        if (fieldsTruncated) boundedFields.add("__truncated_fields__");
+        String notes = boundChars(row.notes(), MAX_ROW_TEXT_CHARS);
+        if (row.notes().length() > notes.length()) {
+            String suffix = " [truncated from " + row.notes().length() + " chars]";
+            notes = notes.substring(0, Math.max(0,
+                    MAX_ROW_TEXT_CHARS - suffix.length())) + suffix;
+        }
+        return new AuditRow(row.timestampUtc(),
+                boundChars(row.sessionId(), MAX_ROW_FIELD_CHARS),
+                boundChars(row.command(), MAX_ROW_FIELD_CHARS),
+                row.posture(),
+                boundChars(row.modelEndpoint(), MAX_ROW_FIELD_CHARS),
+                boundChars(row.captureSource(), MAX_ROW_FIELD_CHARS),
+                row.bytesOut(), row.bytesIn(),
+                boundChars(row.imageHash(), MAX_ROW_FIELD_CHARS),
+                row.redactionApplied(), boundedFields, notes,
+                row.redactedPayloadJson());
+    }
+
+    private static String boundChars(String value, int max) {
+        String safe = value == null ? "" : value;
+        return safe.length() <= max ? safe : safe.substring(0, max);
     }
 
     public void open() throws IOException {
@@ -143,7 +201,8 @@ public final class AuditLog {
         return subscribeRecent(DEFAULT_RECENT_LIMIT, listener);
     }
 
-    public AutoCloseable subscribeRecent(final int limit, final Listener listener) {
+    public synchronized AutoCloseable subscribeRecent(final int limit,
+                                                      final Listener listener) {
         if (listener == null) {
             return new AutoCloseable() {
                 @Override
@@ -157,10 +216,15 @@ public final class AuditLog {
                 listener.auditRowsUpdated(limitRows(recentRows, limit));
             }
         };
+        if (listeners.size() >= MAX_LISTENERS) {
+            rejectedListeners.incrementAndGet();
+            return noOpSubscription();
+        }
         listeners.addIfAbsent(limitingListener);
         try {
             listener.auditRowsUpdated(recent(limit));
         } catch (Throwable ignore) {
+            listenerFailures.incrementAndGet();
         }
         return new AutoCloseable() {
             @Override
@@ -170,6 +234,21 @@ public final class AuditLog {
         };
     }
 
+    private static AutoCloseable noOpSubscription() {
+        return new AutoCloseable() {
+            @Override public void close() { }
+        };
+    }
+
+    public long droppedRecentRowCount() { return droppedRecentRows.get(); }
+    public long droppedWriterTaskCount() { return droppedWriterTasks.get(); }
+    public long droppedNotificationCount() { return droppedNotifications.get(); }
+    public long rejectedListenerCount() { return rejectedListeners.get(); }
+    public long listenerFailureCount() { return listenerFailures.get(); }
+    public int listenerCount() { return listeners.size(); }
+    public int writerQueueSize() { return writer.getQueue().size(); }
+    public int notifierQueueSize() { return notifier.getQueue().size(); }
+
     public void flushForTest() throws Exception {
         Future<?> writeFuture = writer.submit(new Runnable() {
             @Override
@@ -177,6 +256,10 @@ public final class AuditLog {
             }
         });
         writeFuture.get(5, TimeUnit.SECONDS);
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5L);
+        while (notificationScheduled.get() && System.nanoTime() < deadline) {
+            Thread.sleep(5L);
+        }
         Future<?> notifyFuture = notifier.submit(new Runnable() {
             @Override
             public void run() {
@@ -205,6 +288,16 @@ public final class AuditLog {
         if (csvPath == null || !Files.exists(csvPath)) {
             return emptySummary(csvPath);
         }
+        if (!Files.isRegularFile(csvPath)) {
+            throw new IOException("Audit log is not a regular readable file: " + csvPath);
+        }
+        long fileBytes = Files.size(csvPath);
+        if (fileBytes > MAX_SUMMARY_BYTES) {
+            throw new IOException("Audit log exceeds summary limit of "
+                    + MAX_SUMMARY_BYTES + " bytes");
+        }
+        Runnable beforeRead = beforeSummaryReadHookForTest;
+        if (beforeRead != null) beforeRead.run();
 
         List<CsvRecord> records = readCsvRecords(csvPath);
         Map<String, Integer> commandCounts = new TreeMap<String, Integer>();
@@ -281,6 +374,7 @@ public final class AuditLog {
             recentRows.addLast(row);
             while (recentRows.size() > DEFAULT_RECENT_LIMIT) {
                 recentRows.removeFirst();
+                droppedRecentRows.incrementAndGet();
             }
         }
     }
@@ -289,15 +383,32 @@ public final class AuditLog {
         if (listeners.isEmpty()) {
             return;
         }
-        final List<AuditRow> snapshot = recent(DEFAULT_RECENT_LIMIT);
+        if (!notificationScheduled.compareAndSet(false, true)) {
+            droppedNotifications.incrementAndGet();
+            return;
+        }
         try {
             notifier.submit(new Runnable() {
                 @Override
                 public void run() {
-                    notifyListeners(snapshot);
+                    long observed = notificationVersion.get();
+                    try {
+                        // Snapshot only after bounded executor admission.
+                        notifyListeners(recent(DEFAULT_RECENT_LIMIT));
+                    } finally {
+                        notificationScheduled.set(false);
+                        if (notificationVersion.get() != observed) {
+                            notifyListenersAsync();
+                        }
+                    }
                 }
             });
+        } catch (RejectedExecutionException full) {
+            notificationScheduled.set(false);
+            droppedNotifications.incrementAndGet();
         } catch (RuntimeException ignore) {
+            notificationScheduled.set(false);
+            droppedNotifications.incrementAndGet();
         }
     }
 
@@ -306,6 +417,7 @@ public final class AuditLog {
             try {
                 listener.auditRowsUpdated(snapshot);
             } catch (Throwable ignore) {
+                listenerFailures.incrementAndGet();
             }
         }
     }
@@ -322,15 +434,18 @@ public final class AuditLog {
                 new ArrayList<AuditRow>(rows.subList(rows.size() - n, rows.size())));
     }
 
-    private static ExecutorService daemonExecutor(final String name) {
-        return Executors.newSingleThreadExecutor(new ThreadFactory() {
+    private static ThreadPoolExecutor daemonExecutor(final String name) {
+        final int capacity = name.endsWith("listener")
+                ? NOTIFIER_QUEUE_CAPACITY : WRITER_QUEUE_CAPACITY;
+        return new ThreadPoolExecutor(1, 1, 0L, TimeUnit.MILLISECONDS,
+                new ArrayBlockingQueue<Runnable>(capacity), new ThreadFactory() {
             @Override
             public Thread newThread(Runnable runnable) {
                 Thread thread = new Thread(runnable, name);
                 thread.setDaemon(true);
                 return thread;
             }
-        });
+        }, new ThreadPoolExecutor.AbortPolicy());
     }
 
     private Path resolveCsvPath() {
@@ -417,7 +532,8 @@ public final class AuditLog {
     }
 
     private static List<CsvRecord> readCsvRecords(Path path) throws IOException {
-        String text = Files.readString(path, StandardCharsets.UTF_8);
+        String text = new String(readBounded(path, MAX_SUMMARY_BYTES),
+                StandardCharsets.UTF_8);
         List<CsvRecord> records = new ArrayList<CsvRecord>();
         StringBuilder current = new StringBuilder();
         boolean quoted = false;
@@ -446,6 +562,34 @@ public final class AuditLog {
         }
         if (current.length() > 0 || quoted) records.add(new CsvRecord(startLine, current.toString()));
         return records;
+    }
+
+    private static byte[] readBounded(Path path, long maxBytes) throws IOException {
+        if (maxBytes < 0L || maxBytes > Integer.MAX_VALUE - 1L) {
+            throw new IllegalArgumentException("invalid byte limit");
+        }
+        ByteArrayOutputStream out = new ByteArrayOutputStream(
+                (int) Math.min(maxBytes, 64L * 1024L));
+        try (FileChannel channel = FileChannel.open(path, StandardOpenOption.READ)) {
+            ByteBuffer buffer = ByteBuffer.allocate(8192);
+            long total = 0L;
+            while (channel.read(buffer) != -1) {
+                buffer.flip();
+                int count = buffer.remaining();
+                if (total + count > maxBytes) {
+                    throw new IOException("Audit log exceeds summary limit of "
+                            + maxBytes + " bytes");
+                }
+                out.write(buffer.array(), buffer.position(), count);
+                total += count;
+                buffer.clear();
+            }
+        }
+        return out.toByteArray();
+    }
+
+    static void setBeforeSummaryReadHookForTest(Runnable hook) {
+        beforeSummaryReadHookForTest = hook;
     }
 
     private static final class CsvRecord {

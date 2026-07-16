@@ -50,7 +50,12 @@ public final class AgentRegistry {
         DirectoryStream<Path> open(Path path) throws IOException;
     }
 
+    interface PathProbe {
+        BasicFileAttributes readAttributes(Path path) throws IOException;
+    }
+
     private static final DirectorySource FILE_DIRECTORY_SOURCE = Files::newDirectoryStream;
+    private static final PathProbe FILE_PATH_PROBE = AgentRegistry::readAttributes;
 
     private AgentRegistry() {
     }
@@ -204,11 +209,17 @@ public final class AgentRegistry {
     public static UserCommandsResult userCommandsResult(AgentLauncher.AgentInfo info,
                                                          File workspace) {
         return userCommandsResult(info, workspace, FILE_DIRECTORY_SOURCE,
-                System.currentTimeMillis());
+                FILE_PATH_PROBE, System.currentTimeMillis());
     }
 
     static UserCommandsResult userCommandsResult(AgentLauncher.AgentInfo info, File workspace,
                                                   DirectorySource directorySource, long now) {
+        return userCommandsResult(info, workspace, directorySource, FILE_PATH_PROBE, now);
+    }
+
+    static UserCommandsResult userCommandsResult(AgentLauncher.AgentInfo info, File workspace,
+                                                  DirectorySource directorySource,
+                                                  PathProbe pathProbe, long now) {
         String id = agentId(info);
         String cacheKey = id + "|" + (workspace == null ? "" : workspace.getAbsolutePath());
         synchronized (USER_COMMAND_CACHE) {
@@ -218,7 +229,8 @@ public final class AgentRegistry {
             }
         }
 
-        UserCommandsResult result = scanUserCommands(id, workspace, directorySource);
+        UserCommandsResult result = scanUserCommands(
+                id, workspace, directorySource, pathProbe);
         synchronized (USER_COMMAND_CACHE) {
             USER_COMMAND_CACHE.put(cacheKey, new CachedCommands(now, result));
         }
@@ -254,19 +266,20 @@ public final class AgentRegistry {
     }
 
     private static UserCommandsResult scanUserCommands(String id, File workspace,
-                                                        DirectorySource directorySource) {
+                                                        DirectorySource directorySource,
+                                                        PathProbe pathProbe) {
         List<CommandEntry> commands = new ArrayList<CommandEntry>();
         int[] inspected = new int[]{0};
         int[] directories = new int[]{0};
         if ("claude".equals(id) && workspace != null) {
             File dir = new File(workspace, ".claude" + File.separator + "commands");
-            scanFiles(dir.toPath(), ".md", "/", commands, directorySource,
+            scanFiles(dir.toPath(), ".md", "/", commands, directorySource, pathProbe,
                     inspected, directories);
         } else if ("gemma4_31b".equals(id) || "gemma4_31b_claude".equals(id)) {
             File dir = new File(System.getProperty("user.home", ""),
                     ".config" + File.separator + "imagej-ai" + File.separator
                             + "gemma4_31b" + File.separator + ".ccommands");
-            scanFiles(dir.toPath(), null, "/ccommands ", commands, directorySource,
+            scanFiles(dir.toPath(), null, "/ccommands ", commands, directorySource, pathProbe,
                     inspected, directories);
         }
         return new UserCommandsResult(commands, directories[0], inspected[0]);
@@ -274,10 +287,22 @@ public final class AgentRegistry {
 
     private static void scanFiles(Path dir, String requiredSuffix,
                                   String commandPrefix, List<CommandEntry> out,
-                                  DirectorySource directorySource, int[] inspected,
+                                  DirectorySource directorySource, PathProbe pathProbe,
+                                  int[] inspected,
                                   int[] directories) {
-        if (dir == null || !Files.exists(dir)) {
+        if (dir == null) {
             return;
+        }
+        try {
+            if (!pathProbe.readAttributes(dir).isDirectory()) {
+                throw new CommandScanException("not_a_directory", dir,
+                        "Command path is not a directory.", inspected[0]);
+            }
+        } catch (NoSuchFileException e) {
+            return;
+        } catch (IOException e) {
+            throw new CommandScanException("directory_unreadable", dir,
+                    "Could not inspect command directory: " + message(e), e, inspected[0]);
         }
         List<Path> sorted = new ArrayList<Path>();
         directories[0]++;
@@ -290,8 +315,7 @@ public final class AgentRegistry {
                                     + MAX_USER_COMMAND_DIRECTORY_ENTRIES + " entries.",
                             inspected[0]);
                 }
-                BasicFileAttributes attributes = Files.readAttributes(
-                        path, BasicFileAttributes.class);
+                BasicFileAttributes attributes = pathProbe.readAttributes(path);
                 if (!attributes.isRegularFile()) {
                     continue;
                 }
@@ -330,6 +354,10 @@ public final class AgentRegistry {
         return value == null || value.trim().isEmpty()
                 ? e.getClass().getSimpleName()
                 : value;
+    }
+
+    private static BasicFileAttributes readAttributes(Path path) throws IOException {
+        return Files.readAttributes(path, BasicFileAttributes.class);
     }
 
     private static String stripExtension(String name) {

@@ -152,6 +152,37 @@ public class ModelsCacheTest {
     }
 
     @Test
+    public void deniedPathProbeMakesHasAndReadExplicitThenRecovers() throws Exception {
+        Path dir = Files.createTempDirectory("mc-test");
+        ModelsCache writer = new ModelsCache(dir);
+        writer.write("openai", Instant.parse("2026-05-02T00:00:00Z"), "endpoint",
+                new LinkedHashSet<String>(Arrays.asList("gpt-5")));
+        AtomicInteger probes = new AtomicInteger();
+        AtomicInteger opens = new AtomicInteger();
+        ModelsCache cache = new ModelsCache(dir, path -> {
+            opens.incrementAndGet();
+            return Files.newInputStream(path);
+        }, path -> {
+            if (probes.getAndIncrement() == 0) {
+                throw new AccessDeniedException(path.toString());
+            }
+            return Files.readAttributes(path,
+                    java.nio.file.attribute.BasicFileAttributes.class);
+        });
+
+        try {
+            cache.has("openai");
+            throw new AssertionError("Expected unreadable cache error");
+        } catch (ModelsCache.CacheReadException expected) {
+            assertEquals("unreadable", expected.code());
+        }
+        assertEquals(0, opens.get());
+        assertTrue(cache.has("openai"));
+        assertEquals("gpt-5", cache.read("openai").modelIds().get(0));
+        assertEquals(1, opens.get());
+    }
+
+    @Test
     public void cacheReadStopsAtByteCapBeforeParsing() throws Exception {
         Path dir = Files.createTempDirectory("mc-test");
         Path slot = dir.resolve("openai.json");

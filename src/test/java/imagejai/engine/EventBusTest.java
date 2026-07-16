@@ -119,6 +119,36 @@ public class EventBusTest {
     }
 
     @Test
+    public void subscriptionFloodIsBoundedAndRejectedCountIsObservable() {
+        EventBus bus = new EventBus(fixedClock(1L));
+        for (int i = 0; i < EventBus.MAX_SUBSCRIPTIONS + 200; i++) {
+            bus.subscribe("topic." + i, new EventBus.Listener() {
+                @Override public void onEvent(JsonObject frame) { }
+            });
+        }
+        bus.subscribe(repeat('x', EventBus.MAX_PATTERN_CHARS + 1), collecting(
+                new ArrayList<JsonObject>()));
+
+        assertEquals(EventBus.MAX_SUBSCRIPTIONS, bus.subscriberCount());
+        assertEquals(201L, bus.rejectedSubscriptionCount());
+    }
+
+    @Test
+    public void multiPatternSubscriptionIsAtomicAtCapacity() {
+        EventBus bus = new EventBus(fixedClock(1L));
+        EventBus.Listener listener = collecting(new ArrayList<JsonObject>());
+        for (int i = 0; i < EventBus.MAX_SUBSCRIPTIONS - 1; i++) {
+            bus.subscribe("topic." + i, listener);
+        }
+        int before = bus.subscriberCount();
+
+        assertFalse(bus.subscribeAll(
+                java.util.Arrays.asList("one", "two"), listener));
+        assertEquals(before, bus.subscriberCount());
+        assertEquals(1L, bus.rejectedSubscriptionCount());
+    }
+
+    @Test
     public void outboundSignalNeverCarriesRawCustomTopicOrIdentity() throws Exception {
         final List<OutboundEvent> events = new ArrayList<OutboundEvent>();
         AutoCloseable subscription = OutboundEvent.subscribe(
@@ -164,5 +194,11 @@ public class EventBusTest {
                 return value;
             }
         };
+    }
+
+    private static String repeat(char value, int count) {
+        StringBuilder out = new StringBuilder(count);
+        for (int i = 0; i < count; i++) out.append(value);
+        return out.toString();
     }
 }

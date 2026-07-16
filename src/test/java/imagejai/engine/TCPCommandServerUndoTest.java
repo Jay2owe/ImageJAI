@@ -8,6 +8,7 @@ import ij.WindowManager;
 import ij.plugin.filter.Analyzer;
 import ij.plugin.frame.RoiManager;
 import ij.process.ByteProcessor;
+import ij.measure.ResultsTable;
 import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
@@ -146,6 +147,28 @@ public class TCPCommandServerUndoTest {
         JsonArray enabled = resp.getAsJsonObject("result").getAsJsonArray("enabled");
         assertTrue("undo advertised after opt-in",
                 enabledContains(enabled, "undo"));
+    }
+
+    @Test
+    public void oversizedExactResultsSnapshotRejectsInsteadOfDroppingTable() {
+        TCPCommandServer server = new TCPCommandServer(
+                0, null, new StateInspector(), null, null);
+        currentImage("large-results", 1);
+        ResultsTable table = ResultsTable.getResultsTable();
+        table.reset();
+        table.incrementCounter();
+        table.addValue("Payload", repeat('x',
+                StateInspector.DEFAULT_RESULTS_CSV_LIMIT_BYTES + 100));
+        Analyzer.setResultsTable(table);
+
+        try {
+            server.captureUndoFrameIfEnabled(
+                    "call-large", "setMinAndMax(0,255);", capsWithUndo(true));
+            throw new AssertionError("Expected exact undo snapshot rejection");
+        } catch (IllegalStateException expected) {
+            assertTrue(expected.getMessage().contains("mutation was not started"));
+            assertEquals(0, server.sessionUndo.totalFrames());
+        }
     }
 
     // -------------------------------------------------------------------
@@ -428,5 +451,10 @@ public class TCPCommandServerUndoTest {
                     .getAsJsonObject();
             assertEquals(1, b.get("frames").getAsInt());
         }
+    }
+    private static String repeat(char value, int count) {
+        StringBuilder out = new StringBuilder(count);
+        for (int i = 0; i < count; i++) out.append(value);
+        return out.toString();
     }
 }

@@ -12,6 +12,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotNull;
@@ -335,6 +336,88 @@ public class TCPCommandServerBatchCapsTest {
         assertEquals(1, failure.get("index").getAsInt());
         assertTrue(failure.getAsJsonObject("response").toString()
                 .contains("synthetic batch failure"));
+    }
+
+    @Test
+    public void nestedSixtyFourBySixtyFourBatchDispatchesAtMostSixtyFourLeaves() {
+        CountingServer counting = new CountingServer();
+        try {
+            JsonObject outer = nestedBatchGrid("ping");
+
+            JsonObject result = counting.dispatch(
+                    outer, new TCPCommandServer.AgentCaps()).getAsJsonObject("result");
+
+            assertTrue(counting.leafDispatches.get()
+                    <= TCPCommandServer.MAX_COMPOUND_WORK);
+            assertEquals(TCPCommandServer.MAX_COMPOUND_WORK,
+                    result.get("work_executed").getAsInt());
+            assertTrue(result.get("work_budget_exhausted").getAsBoolean());
+            assertEquals(1, result.get("executed").getAsInt());
+            JsonObject indexed = result.getAsJsonArray("results")
+                    .get(0).getAsJsonObject();
+            assertEquals(0, indexed.get("index").getAsInt());
+            JsonObject nested = indexed.getAsJsonObject("response")
+                    .getAsJsonObject("result");
+            assertEquals(63, nested.get("executed").getAsInt());
+            assertEquals(63, nested.getAsJsonArray("results").size());
+            assertEquals(63, nested.get("budget_exhausted_at_index").getAsInt());
+        } finally {
+            counting.stop();
+        }
+    }
+
+    @Test
+    public void throwingNestedLeavesAreChargedBeforeDispatch() {
+        AtomicInteger attempts = new AtomicInteger();
+        TCPCommandServer.executeMacroForTest = (request, caps) -> {
+            attempts.incrementAndGet();
+            throw new IllegalStateException("synthetic leaf failure");
+        };
+
+        JsonObject result = server.dispatch(
+                nestedBatchGrid("execute_macro"),
+                new TCPCommandServer.AgentCaps()).getAsJsonObject("result");
+
+        assertTrue(attempts.get() <= TCPCommandServer.MAX_COMPOUND_WORK);
+        assertEquals(63, attempts.get());
+        assertEquals(TCPCommandServer.MAX_COMPOUND_WORK,
+                result.get("work_executed").getAsInt());
+        assertTrue(result.get("work_budget_exhausted").getAsBoolean());
+    }
+
+    private static JsonObject nestedBatchGrid(String leafCommand) {
+        JsonObject outer = new JsonObject();
+        outer.addProperty("command", "batch");
+        JsonArray outerCommands = new JsonArray();
+        for (int i = 0; i < TCPCommandServer.MAX_BATCH_COMMANDS; i++) {
+            JsonObject nested = new JsonObject();
+            nested.addProperty("command", "batch");
+            JsonArray leaves = new JsonArray();
+            for (int j = 0; j < TCPCommandServer.MAX_BATCH_COMMANDS; j++) {
+                JsonObject leaf = new JsonObject();
+                leaf.addProperty("command", leafCommand);
+                if ("execute_macro".equals(leafCommand)) leaf.addProperty("code", "x");
+                leaves.add(leaf);
+            }
+            nested.add("commands", leaves);
+            outerCommands.add(nested);
+        }
+        outer.add("commands", outerCommands);
+        return outer;
+    }
+
+    private static final class CountingServer extends TCPCommandServer {
+        final AtomicInteger leafDispatches = new AtomicInteger();
+
+        CountingServer() { super(0, null, null, null, null); }
+
+        @Override JsonObject dispatch(JsonObject request, AgentCaps caps) {
+            if (request != null && "ping".equals(
+                    request.has("command") ? request.get("command").getAsString() : "")) {
+                leafDispatches.incrementAndGet();
+            }
+            return super.dispatch(request, caps);
+        }
     }
 
     private static JsonObject parse(String s) {

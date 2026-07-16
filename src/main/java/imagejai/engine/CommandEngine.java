@@ -299,19 +299,24 @@ public class CommandEngine {
                 if (!imagesBefore.contains(title)) newImages.add(title);
             }
 
-            String resultsCSV = null;
+            StateInspector.BoundedCsv resultsCSV = null;
             int resultsRowsAfter = getResultsTableRowCount();
             if (resultsRowsAfter > resultsRowsBefore) {
-                resultsCSV = inspector.getResultsTableCSV();
+                resultsCSV = inspector.getResultsTableCSVBounded(
+                        StateInspector.DEFAULT_RESULTS_CSV_LIMIT_BYTES);
                 JsonObject rdata = new JsonObject();
                 rdata.addProperty("rows", resultsRowsAfter);
                 rdata.addProperty("delta", resultsRowsAfter - resultsRowsBefore);
+                rdata.addProperty("truncated", resultsCSV.truncated());
+                rdata.addProperty("original_bytes", resultsCSV.originalBytes());
+                rdata.addProperty("returned_bytes", resultsCSV.returnedBytes());
                 bus.publish("results.changed", rdata);
             }
 
             String output = macroReturn != null ? macroReturn : "";
             publishMacroCompleted(macroId, true, null, newImages);
-            return ExecutionResult.success(output, resultsCSV, newImages, elapsed);
+            return ExecutionResult.successWithBoundedResults(
+                    output, resultsCSV, newImages, elapsed);
         } finally {
             done.set(true);
             if (poller != null) poller.interrupt();

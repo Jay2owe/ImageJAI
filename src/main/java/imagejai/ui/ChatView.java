@@ -26,15 +26,21 @@ import java.awt.*;
 import java.awt.event.*;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.ArrayDeque;
 import java.util.List;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.function.Consumer;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import java.util.function.Function;
 
 /**
  * Main chat panel — message history, input field, status bar.
@@ -45,6 +51,16 @@ import java.util.regex.Pattern;
  * prompts via TCP.
  */
 public class ChatView extends JPanel implements ChatPanelController, ChatSurface {
+
+    public static final int MAX_TRANSCRIPT_ENTRIES = 500;
+    public static final int MAX_TRANSCRIPT_CHARS = 1_000_000;
+    public static final int MAX_TRANSCRIPT_FRAGMENT_CHARS = 128_000;
+    public static final int MAX_INPUT_CHARS = 65_536;
+    public static final int MAX_CHAT_LISTENERS = 64;
+    public static final int MAX_PENDING_TRANSCRIPT_APPENDS = 128;
+    public static final int MAX_CONFIRM_OPTIONS = 16;
+    public static final int MAX_CONFIRM_OPTION_CHARS = 256;
+    private static final int MAX_IMAGE_TITLE_CHARS = 1024;
 
     private static final ThreadPoolExecutor AUTOCOMPLETE_EXECUTOR =
             new ThreadPoolExecutor(
@@ -74,11 +90,33 @@ public class ChatView extends JPanel implements ChatPanelController, ChatSurface
 
     private final Settings settings;
     private final LocalAssistant localAssistant;
-    private final List<ChatPanel.ChatListener> listeners = new ArrayList<ChatPanel.ChatListener>();
-    private final List<Runnable> conversationClearListeners = new ArrayList<Runnable>();
+    private final CopyOnWriteArrayList<ChatPanel.ChatListener> listeners =
+            new CopyOnWriteArrayList<ChatPanel.ChatListener>();
+    private final CopyOnWriteArrayList<Runnable> conversationClearListeners =
+            new CopyOnWriteArrayList<Runnable>();
+    private final ArrayDeque<String> transcriptFragments = new ArrayDeque<String>();
+    private int transcriptChars;
+    private final AtomicLong droppedTranscriptEntries = new AtomicLong();
+    private final AtomicLong rejectedChatListeners = new AtomicLong();
+    private final AtomicLong rejectedClearListeners = new AtomicLong();
+    private final AtomicLong chatListenerFailures = new AtomicLong();
+    private final AtomicInteger pendingTranscriptAppends = new AtomicInteger();
+    private final AtomicLong droppedPendingTranscriptAppends = new AtomicLong();
     private final AtomicLong localConversationGeneration = new AtomicLong();
     private final AtomicLong autocompleteGeneration = new AtomicLong();
-    private volatile boolean localAssistantBusy;
+    private final AtomicBoolean localAssistantBusy = new AtomicBoolean(false);
+    private final ThreadPoolExecutor localAssistantExecutor =
+            new ThreadPoolExecutor(
+                    1, 1, 0L, TimeUnit.MILLISECONDS,
+                    new ArrayBlockingQueue<Runnable>(1),
+                    new ThreadFactory() {
+                        @Override public Thread newThread(Runnable task) {
+                            Thread thread = new Thread(task, "ImageJAI-LocalAssistant");
+                            thread.setDaemon(true);
+                            return thread;
+                        }
+                    }, new ThreadPoolExecutor.AbortPolicy());
+    private volatile Function<String, AssistantReply> localAssistantHandlerForTest;
 
     private JTextPane messageArea;
     private JScrollPane scrollPane;
@@ -105,7 +143,7 @@ public class ChatView extends JPanel implements ChatPanelController, ChatSurface
         this.settings = settings;
         this.localAssistant = new LocalAssistant(settings, new ChatHistoryController() {
             public boolean canClear() {
-                return !localAssistantBusy;
+                return !localAssistantBusy.get();
             }
 
             public void clear() {
@@ -248,7 +286,12 @@ public class ChatView extends JPanel implements ChatPanelController, ChatSurface
     /**
      * Add a listener to be notified when the user sends a message.
      */
-    public void addChatListener(ChatPanel.ChatListener listener) {
+    public synchronized void addChatListener(ChatPanel.ChatListener listener) {
+        if (listener == null || listeners.contains(listener)) return;
+        if (listeners.size() >= MAX_CHAT_LISTENERS) {
+            rejectedChatListeners.incrementAndGet();
+            return;
+        }
         listeners.add(listener);
     }
 
@@ -259,10 +302,13 @@ public class ChatView extends JPanel implements ChatPanelController, ChatSurface
         listeners.remove(listener);
     }
 
-    public void addConversationClearListener(Runnable listener) {
-        if (listener != null && !conversationClearListeners.contains(listener)) {
-            conversationClearListeners.add(listener);
+    public synchronized void addConversationClearListener(Runnable listener) {
+        if (listener == null || conversationClearListeners.contains(listener)) return;
+        if (conversationClearListeners.size() >= MAX_CHAT_LISTENERS) {
+            rejectedClearListeners.incrementAndGet();
+            return;
         }
+        conversationClearListeners.add(listener);
     }
 
     public void removeConversationClearListener(Runnable listener) {
@@ -276,33 +322,31 @@ public class ChatView extends JPanel implements ChatPanelController, ChatSurface
      * @param content the message text (plain text; newlines become line breaks)
      */
     public void appendMessage(final String role, final String content) {
-        Runnable append = new Runnable() {
+        final String safeRole = "user".equals(role) ? "user" : "assistant";
+        final String safeContent = boundedDisplayText(content);
+        enqueueTranscriptAppend(new Runnable() {
             @Override
             public void run() {
-                appendMessageNow(role, content);
+                appendMessageNow(safeRole, safeContent);
             }
-        };
-        if (SwingUtilities.isEventDispatchThread()) append.run();
-        else SwingUtilities.invokeLater(append);
+        });
     }
 
     /**
      * Append raw HTML content to the chat (for image previews, etc.).
      */
     public void appendHtml(final String html) {
-        Runnable append = new Runnable() {
+        final String safeHtml = boundedHtmlFragment(html);
+        enqueueTranscriptAppend(new Runnable() {
             @Override
             public void run() {
-                appendHtmlNow(html);
+                appendHtmlNow(safeHtml);
             }
-        };
-        if (SwingUtilities.isEventDispatchThread()) append.run();
-        else SwingUtilities.invokeLater(append);
+        });
     }
 
     private void appendMessageNow(String role, String content) {
         try {
-            HTMLDocument doc = (HTMLDocument) messageArea.getDocument();
             boolean isUser = "user".equals(role);
             String bubbleBg = isUser ? "#1a3a4a" : "#2a2a32";
             String borderLeft = isUser ? "#00c8ff" : "#666670";
@@ -314,10 +358,9 @@ public class ChatView extends JPanel implements ChatPanelController, ChatSurface
                     + "<div style='color:" + labelColor
                     + ";font-weight:bold;font-size:11px;margin-bottom:3px;'>"
                     + label + "</div><div style='color:#d8d8d8;font-size:13px;'>"
-                    + escapeHtml(content).replace("\n", "<br>")
+                    + escapeHtml(boundedDisplayText(content)).replace("\n", "<br>")
                     + "</div></div>";
-            doc.insertBeforeEnd(doc.getDefaultRootElement(), html);
-            scrollToBottom();
+            appendTranscriptHtmlNow(html);
         } catch (Exception e) {
             System.err.println("[ImageJAI] Failed to append message: " + e.getMessage());
         }
@@ -325,9 +368,7 @@ public class ChatView extends JPanel implements ChatPanelController, ChatSurface
 
     private void appendHtmlNow(String html) {
         try {
-            HTMLDocument doc = (HTMLDocument) messageArea.getDocument();
-            doc.insertBeforeEnd(doc.getDefaultRootElement(), html);
-            scrollToBottom();
+            appendTranscriptHtmlNow(html);
         } catch (Exception e) {
             System.err.println("[ImageJAI] Failed to append HTML: " + e.getMessage());
         }
@@ -359,6 +400,7 @@ public class ChatView extends JPanel implements ChatPanelController, ChatSurface
     @Override
     public void setEnabled(boolean enabled) {
         super.setEnabled(enabled);
+        // Control state must never be dropped when the display queue is full.
         SwingUtilities.invokeLater(new Runnable() {
             @Override
             public void run() {
@@ -393,19 +435,19 @@ public class ChatView extends JPanel implements ChatPanelController, ChatSurface
     public void clearConversation() {
         localConversationGeneration.incrementAndGet();
         localAssistant.clearConversation();
-        localAssistantBusy = false;
         for (Runnable listener
                 : new ArrayList<Runnable>(conversationClearListeners)) {
             try {
                 listener.run();
             } catch (RuntimeException ignored) {
+                chatListenerFailures.incrementAndGet();
                 // One stale backend listener must not prevent the local reset.
             }
         }
         Runnable clearUi = new Runnable() {
             @Override
             public void run() {
-                initHtmlContent();
+                resetTranscriptAndHtml();
                 clarificationCandidates.clear();
                 if (confirmHost != null) {
                     confirmHost.removeAll();
@@ -422,10 +464,10 @@ public class ChatView extends JPanel implements ChatPanelController, ChatSurface
     }
 
     public void clearRenderedHistory() {
-        SwingUtilities.invokeLater(new Runnable() {
+        enqueueTranscriptAppend(new Runnable() {
             @Override
             public void run() {
-                initHtmlContent();
+                resetTranscriptAndHtml();
             }
         });
     }
@@ -453,7 +495,7 @@ public class ChatView extends JPanel implements ChatPanelController, ChatSurface
             IJ.log("[ImageJAI-GUI] inlineImage: null path ignored");
             return;
         }
-        SwingUtilities.invokeLater(new Runnable() {
+        enqueueTranscriptAppend(new Runnable() {
             @Override
             public void run() {
                 if (!isPanelLive()) {
@@ -479,9 +521,7 @@ public class ChatView extends JPanel implements ChatPanelController, ChatSurface
                             + escapeHtml(file.getName()) + "</div>"
                             + "<img src='" + escapeHtml(url) + "' width='" + maxWidth + "'>"
                             + "</div>";
-                    HTMLDocument doc = (HTMLDocument) messageArea.getDocument();
-                    doc.insertBeforeEnd(doc.getDefaultRootElement(), html);
-                    scrollToBottom();
+                    appendTranscriptHtmlNow(html);
                 } catch (Exception ex) {
                     IJ.log("[ImageJAI-GUI] inlineImage failed: " + ex.getMessage());
                 }
@@ -495,16 +535,18 @@ public class ChatView extends JPanel implements ChatPanelController, ChatSurface
      */
     @Override
     public void toast(final String message, final String level) {
-        SwingUtilities.invokeLater(new Runnable() {
+        final String safeMessage = boundedDisplayText(message);
+        final String safeLevel = boundedShortText(level, 32);
+        enqueueTranscriptAppend(new Runnable() {
             @Override
             public void run() {
                 if (!isPanelLive()) {
-                    IJ.log("[ImageJAI-GUI] toast (" + level + "): " + message);
+                    IJ.log("[ImageJAI-GUI] toast (" + safeLevel + "): " + safeMessage);
                     return;
                 }
                 Color bg;
                 Color fg = Color.WHITE;
-                String lvl = level == null ? "info" : level.toLowerCase();
+                String lvl = safeLevel.length() == 0 ? "info" : safeLevel.toLowerCase();
                 if ("warn".equals(lvl) || "warning".equals(lvl)) {
                     bg = new Color(180, 130, 0);   // amber
                 } else if ("error".equals(lvl) || "err".equals(lvl)) {
@@ -514,7 +556,7 @@ public class ChatView extends JPanel implements ChatPanelController, ChatSurface
                 }
                 toastLabel.setBackground(bg);
                 toastLabel.setForeground(fg);
-                toastLabel.setText(message != null ? message : "");
+                toastLabel.setText(safeMessage);
                 toastLabel.setVisible(true);
                 if (toastTimer.isRunning()) toastTimer.restart();
                 else toastTimer.start();
@@ -531,7 +573,8 @@ public class ChatView extends JPanel implements ChatPanelController, ChatSurface
     @Override
     public void showMarkdown(final String content) {
         if (content == null) return;
-        SwingUtilities.invokeLater(new Runnable() {
+        final String safeContent = boundedDisplayText(content);
+        enqueueTranscriptAppend(new Runnable() {
             @Override
             public void run() {
                 if (!isPanelLive()) {
@@ -539,7 +582,7 @@ public class ChatView extends JPanel implements ChatPanelController, ChatSurface
                     return;
                 }
                 try {
-                    String body = renderMarkdown(content);
+                    String body = renderMarkdown(safeContent);
                     String html = "<div style='"
                             + "background:#2a2a32;"
                             + "border-left:3px solid #aa88ff;"
@@ -550,9 +593,7 @@ public class ChatView extends JPanel implements ChatPanelController, ChatSurface
                             + "<div style='color:#d8d8d8;font-size:13px;'>"
                             + body
                             + "</div></div>";
-                    HTMLDocument doc = (HTMLDocument) messageArea.getDocument();
-                    doc.insertBeforeEnd(doc.getDefaultRootElement(), html);
-                    scrollToBottom();
+                    appendTranscriptHtmlNow(html);
                 } catch (Exception ex) {
                     IJ.log("[ImageJAI-GUI] showMarkdown failed: " + ex.getMessage());
                 }
@@ -571,15 +612,18 @@ public class ChatView extends JPanel implements ChatPanelController, ChatSurface
             IJ.log("[ImageJAI-GUI] highlightRoi: invalid arguments");
             return;
         }
-        SwingUtilities.invokeLater(new Runnable() {
+        final String safeTitle = boundedShortText(imageTitle, MAX_IMAGE_TITLE_CHARS);
+        final int[] safeBounds = roiBounds.clone();
+        enqueueTranscriptAppend(new Runnable() {
             @Override
             public void run() {
-                final ImagePlus imp = WindowManager.getImage(imageTitle);
+                final ImagePlus imp = WindowManager.getImage(safeTitle);
                 if (imp == null) {
-                    IJ.log("[ImageJAI-GUI] highlightRoi: no image titled '" + imageTitle + "'");
+                    IJ.log("[ImageJAI-GUI] highlightRoi: no image titled '" + safeTitle + "'");
                     return;
                 }
-                final Roi roi = new Roi(roiBounds[0], roiBounds[1], roiBounds[2], roiBounds[3]);
+                final Roi roi = new Roi(safeBounds[0], safeBounds[1],
+                        safeBounds[2], safeBounds[3]);
                 roi.setStrokeColor(new Color(0, 200, 255));
                 roi.setStrokeWidth(2);
                 final Overlay overlay = imp.getOverlay() != null ? imp.getOverlay() : new Overlay();
@@ -616,12 +660,13 @@ public class ChatView extends JPanel implements ChatPanelController, ChatSurface
     @Override
     public void focusImage(final String imageTitle) {
         if (imageTitle == null) return;
-        SwingUtilities.invokeLater(new Runnable() {
+        final String safeTitle = boundedShortText(imageTitle, MAX_IMAGE_TITLE_CHARS);
+        enqueueTranscriptAppend(new Runnable() {
             @Override
             public void run() {
-                ImagePlus imp = WindowManager.getImage(imageTitle);
+                ImagePlus imp = WindowManager.getImage(safeTitle);
                 if (imp == null) {
-                    IJ.log("[ImageJAI-GUI] focusImage: no image titled '" + imageTitle + "'");
+                    IJ.log("[ImageJAI-GUI] focusImage: no image titled '" + safeTitle + "'");
                     return;
                 }
                 ImageWindow win = imp.getWindow();
@@ -645,11 +690,13 @@ public class ChatView extends JPanel implements ChatPanelController, ChatSurface
             IJ.log("[ImageJAI-GUI] confirm: no options provided");
             return;
         }
-        SwingUtilities.invokeLater(new Runnable() {
+        final String safePrompt = boundedDisplayText(prompt);
+        final List<String> safeOptions = boundedConfirmOptions(options);
+        boolean admitted = enqueueTranscriptAppend(new Runnable() {
             @Override
             public void run() {
                 if (!isPanelLive()) {
-                    IJ.log("[ImageJAI-GUI] confirm skipped (panel not visible): " + prompt);
+                    IJ.log("[ImageJAI-GUI] confirm skipped (panel not visible): " + safePrompt);
                     if (onChoice != null) onChoice.accept(null);
                     return;
                 }
@@ -664,16 +711,17 @@ public class ChatView extends JPanel implements ChatPanelController, ChatSurface
                             + "<div style='color:#ffcc55;font-weight:bold;font-size:11px;"
                             + "margin-bottom:3px;'>[agent] confirm</div>"
                             + "<div style='color:#d8d8d8;font-size:13px;'>"
-                            + escapeHtml(prompt != null ? prompt : "").replace("\n", "<br>")
+                            + escapeHtml(safePrompt).replace("\n", "<br>")
                             + "</div></div>";
-                    HTMLDocument doc = (HTMLDocument) messageArea.getDocument();
-                    doc.insertBeforeEnd(doc.getDefaultRootElement(), html);
-                    scrollToBottom();
+                    appendTranscriptHtmlNow(html);
                 } catch (Exception ignore) {}
 
-                populateConfirmControls(options, onChoice);
+                populateConfirmControls(safeOptions, onChoice);
             }
         });
+        if (!admitted && onChoice != null) {
+            try { onChoice.accept(null); } catch (Throwable ignored) { }
+        }
     }
 
     private void populateConfirmControls(final List<String> options,
@@ -775,11 +823,158 @@ public class ChatView extends JPanel implements ChatPanelController, ChatSurface
 
     // --- Private helpers ---
 
+    private static final String HTML_HEAD = "<html><head><style>"
+            + "body { font-family: sans-serif; margin: 4px; padding: 0; "
+            + "background: #19191e; color: #d0d0d0; }"
+            + "</style></head><body>";
+    private static final String HTML_TAIL = "</body></html>";
+
     private void initHtmlContent() {
-        messageArea.setText("<html><head><style>"
-                + "body { font-family: sans-serif; margin: 4px; padding: 0; "
-                + "background: #19191e; color: #d0d0d0; }"
-                + "</style></head><body></body></html>");
+        messageArea.setText(HTML_HEAD + HTML_TAIL);
+    }
+
+    /** EDT-only bounded transcript append. */
+    private void appendTranscriptHtmlNow(String html) throws Exception {
+        String fragment = boundedHtmlFragment(html);
+        boolean evicted = false;
+        while (!transcriptFragments.isEmpty()
+                && (transcriptFragments.size() >= MAX_TRANSCRIPT_ENTRIES
+                || transcriptChars + fragment.length() > MAX_TRANSCRIPT_CHARS)) {
+            String removed = transcriptFragments.removeFirst();
+            transcriptChars -= removed.length();
+            droppedTranscriptEntries.incrementAndGet();
+            evicted = true;
+        }
+        transcriptFragments.addLast(fragment);
+        transcriptChars += fragment.length();
+
+        if (evicted) {
+            renderTranscriptFromBuffer();
+        } else {
+            HTMLDocument doc = (HTMLDocument) messageArea.getDocument();
+            doc.insertBeforeEnd(doc.getDefaultRootElement(), fragment);
+        }
+        scrollToBottom();
+    }
+
+    private void renderTranscriptFromBuffer() {
+        StringBuilder html = new StringBuilder(
+                Math.min(MAX_TRANSCRIPT_CHARS + HTML_HEAD.length() + HTML_TAIL.length(),
+                        transcriptChars + HTML_HEAD.length() + HTML_TAIL.length()));
+        html.append(HTML_HEAD);
+        for (String fragment : transcriptFragments) html.append(fragment);
+        html.append(HTML_TAIL);
+        messageArea.setText(html.toString());
+    }
+
+    private void resetTranscriptAndHtml() {
+        transcriptFragments.clear();
+        transcriptChars = 0;
+        initHtmlContent();
+    }
+
+    private static String boundedDisplayText(String value) {
+        String safe = value == null ? "" : value;
+        if (safe.length() <= MAX_TRANSCRIPT_FRAGMENT_CHARS / 2) return safe;
+        return safe.substring(0, MAX_TRANSCRIPT_FRAGMENT_CHARS / 2)
+                + "\n[content truncated; original character count: "
+                + safe.length() + "]";
+    }
+
+    private static String boundedHtmlFragment(String html) {
+        String fragment = html == null ? "" : html;
+        if (fragment.length() <= MAX_TRANSCRIPT_FRAGMENT_CHARS) return fragment;
+        return "<div style='color:#ffaa55'>[content omitted: "
+                + fragment.length() + " rendered characters exceeds the per-entry limit]"
+                + "</div>";
+    }
+
+    private static String boundedShortText(String value, int maxChars) {
+        String safe = value == null ? "" : value;
+        if (safe.length() <= maxChars) return safe;
+        int end = Math.max(0, maxChars);
+        if (end > 0 && Character.isHighSurrogate(safe.charAt(end - 1))) end--;
+        return safe.substring(0, end);
+    }
+
+    static List<String> boundedConfirmOptions(List<String> options) {
+        List<String> bounded = new ArrayList<String>();
+        if (options == null) return bounded;
+        int count = Math.min(MAX_CONFIRM_OPTIONS, options.size());
+        for (int i = 0; i < count; i++) {
+            bounded.add(boundedShortText(options.get(i), MAX_CONFIRM_OPTION_CHARS));
+        }
+        return bounded;
+    }
+
+    private boolean enqueueTranscriptAppend(final Runnable append) {
+        if (append == null) return false;
+        if (SwingUtilities.isEventDispatchThread()) {
+            append.run();
+            return true;
+        }
+        while (true) {
+            int pending = pendingTranscriptAppends.get();
+            if (pending >= MAX_PENDING_TRANSCRIPT_APPENDS) {
+                droppedPendingTranscriptAppends.incrementAndGet();
+                return false;
+            }
+            if (pendingTranscriptAppends.compareAndSet(pending, pending + 1)) break;
+        }
+        SwingUtilities.invokeLater(new Runnable() {
+            @Override public void run() {
+                try {
+                    append.run();
+                } finally {
+                    pendingTranscriptAppends.decrementAndGet();
+                }
+            }
+        });
+        return true;
+    }
+
+    public long droppedTranscriptEntryCount() {
+        return droppedTranscriptEntries.get();
+    }
+
+    int transcriptEntryCountForTest() {
+        return transcriptFragments.size();
+    }
+
+    int transcriptCharCountForTest() {
+        return transcriptChars;
+    }
+
+    public long rejectedChatListenerCount() {
+        return rejectedChatListeners.get();
+    }
+
+    public long rejectedClearListenerCount() {
+        return rejectedClearListeners.get();
+    }
+
+    public long chatListenerFailureCount() {
+        return chatListenerFailures.get();
+    }
+
+    public long droppedPendingTranscriptAppendCount() {
+        return droppedPendingTranscriptAppends.get();
+    }
+
+    public int pendingTranscriptAppendCount() {
+        return pendingTranscriptAppends.get();
+    }
+
+    long droppedTranscriptEntryCountForTest() {
+        return droppedTranscriptEntryCount();
+    }
+
+    long rejectedChatListenerCountForTest() {
+        return rejectedChatListenerCount();
+    }
+
+    long rejectedClearListenerCountForTest() {
+        return rejectedClearListenerCount();
     }
 
     private JPanel createInputPanel() {
@@ -963,8 +1158,17 @@ public class ChatView extends JPanel implements ChatPanelController, ChatSurface
         
         String text = inputArea.getText().trim();
         if (text.isEmpty()) return;
+        if (text.length() > MAX_INPUT_CHARS) {
+            appendMessage("assistant", "Message not sent: input is " + text.length()
+                    + " characters; the limit is " + MAX_INPUT_CHARS + ".");
+            return;
+        }
         if ("/clear".equalsIgnoreCase(text)) {
             clearConversation();
+            return;
+        }
+        if (localAssistantSelected
+                && !localAssistantBusy.compareAndSet(false, true)) {
             return;
         }
         inputArea.setText("");
@@ -975,34 +1179,51 @@ public class ChatView extends JPanel implements ChatPanelController, ChatSurface
         if (localAssistantSelected) {
             final long generation = localConversationGeneration.get();
             final String localText = text;
-            localAssistantBusy = true;
             setEnabled(false);
             setThinking(true);
-            Thread worker = new Thread(new Runnable() {
+            try {
+                localAssistantExecutor.execute(new Runnable() {
                 @Override
                 public void run() {
                     try {
-                        AssistantReply reply = localAssistant.handle(localText);
+                        Function<String, AssistantReply> handler =
+                                localAssistantHandlerForTest;
+                        AssistantReply reply = handler == null
+                                ? localAssistant.handle(localText)
+                                : handler.apply(localText);
                         if (generation != localConversationGeneration.get()) return;
                         renderLocalReply(reply, generation);
                     } finally {
+                        // Clear admission only when the actual worker exits.
+                        // A conversation clear invalidates rendering but must
+                        // not allow another queued backend call to accumulate.
+                        localAssistantBusy.set(false);
                         if (generation == localConversationGeneration.get()) {
-                            localAssistantBusy = false;
                             setThinking(false);
                             setEnabled(true);
                         }
                     }
                 }
-            }, "ImageJAI-LocalAssistant");
-            worker.setDaemon(true);
-            worker.start();
+                });
+            } catch (RejectedExecutionException rejected) {
+                localAssistantBusy.set(false);
+                setThinking(false);
+                setEnabled(true);
+                appendMessage("assistant", "Local Assistant is busy; try again shortly.");
+            }
             return;
         }
 
         // Notify listeners (Phase 2 conversation loop)
         if (!listeners.isEmpty()) {
             for (ChatPanel.ChatListener listener : listeners) {
-                listener.onUserMessage(text);
+                try {
+                    listener.onUserMessage(text);
+                } catch (Throwable failure) {
+                    chatListenerFailures.incrementAndGet();
+                    IJ.log("[ImageJAI-GUI] chat listener failed: "
+                            + failure.getClass().getSimpleName());
+                }
             }
         } else {
             // No listener wired yet — show placeholder
@@ -1108,6 +1329,23 @@ public class ChatView extends JPanel implements ChatPanelController, ChatSurface
 
     JButton sendButtonForTest() {
         return sendBtn;
+    }
+
+    void setLocalAssistantHandlerForTest(Function<String, AssistantReply> handler) {
+        localAssistantHandlerForTest = handler;
+    }
+
+    void sendMessageForTest(String text) {
+        inputArea.setText(text == null ? "" : text);
+        sendMessage();
+    }
+
+    boolean localAssistantBusyForTest() {
+        return localAssistantBusy.get();
+    }
+
+    int localAssistantQueuedTaskCountForTest() {
+        return localAssistantExecutor.getQueue().size();
     }
 
     JTextPane messageAreaForTest() {

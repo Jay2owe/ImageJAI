@@ -299,6 +299,32 @@ public class ImageGraphTest {
     }
 
     @Test
+    public void stableIdentityRegistryDoesNotRetainClosedImagePixelStacks()
+            throws Exception {
+        int before = ImageGraph.stableIdentityEntryCountForTest();
+        java.lang.ref.WeakReference<ImagePlus> transientImage =
+                registerTransientIdentity();
+
+        for (int i = 0; i < 100 && transientImage.get() != null; i++) {
+            System.gc();
+            System.runFinalization();
+            byte[] pressure = new byte[128 * 1024];
+            pressure[0] = (byte) i;
+            Thread.sleep(5L);
+        }
+
+        assertNull("identity map must not strongly retain ImagePlus",
+                transientImage.get());
+        assertTrue(ImageGraph.stableIdentityEntryCountForTest() <= before);
+    }
+
+    private static java.lang.ref.WeakReference<ImagePlus> registerTransientIdentity() {
+        ImagePlus image = image("transient");
+        ImageGraph.stableIdentity(image);
+        return new java.lang.ref.WeakReference<ImagePlus>(image);
+    }
+
+    @Test
     public void duplicateTitlesKeepDistinctStableIdsInDeterministicOrder() {
         ImagePlus first = image("duplicate.tif");
         ImagePlus second = image("duplicate.tif");

@@ -338,6 +338,40 @@ public class FrictionLogJournalTest {
     }
 
     @Test
+    public void deniedPathProbeFailsBeforeOpeningAndCanBeRetried() throws Exception {
+        Path root = newRoot();
+        FrictionLogJournal writer = new FrictionLogJournal(root);
+        writer.append(entry(1, "restored-probe"));
+        writer.awaitIdle(5, TimeUnit.SECONDS);
+        writer.close();
+        AtomicInteger probes = new AtomicInteger();
+        AtomicInteger opens = new AtomicInteger();
+        FrictionLogJournal reader = new FrictionLogJournal(root, path -> {
+            opens.incrementAndGet();
+            return Files.newInputStream(path);
+        }, path -> {
+            if (probes.getAndIncrement() == 0) {
+                throw new AccessDeniedException(path.toString());
+            }
+            return Files.readAttributes(path,
+                    java.nio.file.attribute.BasicFileAttributes.class);
+        });
+        try {
+            try {
+                reader.streamEntries();
+                throw new AssertionError("Expected unreadable journal error");
+            } catch (FrictionLogJournal.JournalReadException expected) {
+                assertEquals("unreadable", expected.code());
+            }
+            assertEquals(0, opens.get());
+            assertEquals(1L, reader.streamEntries().count());
+            assertEquals(1, opens.get());
+        } finally {
+            reader.close();
+        }
+    }
+
+    @Test
     public void overlongJsonlLineRaisesCapErrorWithDiagnostics() throws Exception {
         Path root = newRoot();
         Files.createDirectories(root);

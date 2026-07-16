@@ -1,7 +1,11 @@
 package imagejai.engine.security;
 
 import com.google.gson.JsonObject;
+import ij.ImagePlus;
+import ij.io.FileInfo;
+import ij.process.ByteProcessor;
 import imagejai.config.PrivacyPosture;
+import imagejai.engine.ImageGraph;
 import org.junit.Test;
 
 import javax.imageio.ImageIO;
@@ -11,6 +15,7 @@ import java.awt.image.BufferedImage;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.util.Base64;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
@@ -115,17 +120,21 @@ public class CaptureHandlerTest {
     public void visualOverrideIsConsumedOnceAndThenDownsamplesAgain() throws Exception {
         VisualOverrideRegistry registry = new VisualOverrideRegistry();
         VisualOverrideRegistry.PendingRequest pending =
-                registry.request("session-a", "test", "no-active-image");
+                registry.request("session-a", "test", "image-token-a");
         assertTrue(registry.grant("session-a", pending.requestId, "test"));
         CaptureHandler handler = new CaptureHandler(new BurnInDetector(), registry);
 
         JsonObject first = captureResponse(png(900, 700, false), "ACTIVE_IMAGE_CONTENT");
+        first.getAsJsonObject("result").addProperty(
+                "_visual_image_token", "image-token-a");
         handler.apply(first, PrivacyPosture.PSEUDONYMISED, "session-a",
                 RedactionReport.builder().posture(PrivacyPosture.PSEUDONYMISED));
         JsonObject firstResult = first.getAsJsonObject("result");
         BufferedImage full = decode(firstResult.get("base64").getAsString());
 
         JsonObject second = captureResponse(png(900, 700, false), "ACTIVE_IMAGE_CONTENT");
+        second.getAsJsonObject("result").addProperty(
+                "_visual_image_token", "image-token-a");
         handler.apply(second, PrivacyPosture.PSEUDONYMISED, "session-a",
                 RedactionReport.builder().posture(PrivacyPosture.PSEUDONYMISED));
         JsonObject secondResult = second.getAsJsonObject("result");
@@ -135,7 +144,7 @@ public class CaptureHandlerTest {
         assertEquals("consumed", firstResult.get("visual_override").getAsString());
         assertTrue(downsampled.getWidth() <= 512);
         assertEquals(512, secondResult.get("downsampled_to").getAsInt());
-        assertFalse(registry.hasGrant("session-a"));
+        assertFalse(registry.hasGrant("session-a", "image-token-a"));
     }
 
     @Test
@@ -179,6 +188,54 @@ public class CaptureHandlerTest {
         assertFalse(result.has("_visual_image_token"));
         assertEquals(512, result.get("downsampled_to").getAsInt());
         assertTrue(registry.hasGrant("session-a", "image-token-a"));
+    }
+
+    @Test
+    public void missingInternalImageTokenFailsClosedWithoutConsumingGrant() throws Exception {
+        VisualOverrideRegistry registry = new VisualOverrideRegistry();
+        VisualOverrideRegistry.PendingRequest pending =
+                registry.request("session-a", "test", "image-token-a");
+        assertTrue(registry.grant("session-a", pending.requestId, "test"));
+        JsonObject response = captureResponse(
+                png(900, 700, false), "ACTIVE_IMAGE_CONTENT");
+
+        new CaptureHandler(new BurnInDetector(), registry).apply(
+                response, PrivacyPosture.PSEUDONYMISED, "session-a",
+                RedactionReport.builder().posture(PrivacyPosture.PSEUDONYMISED));
+
+        JsonObject result = response.getAsJsonObject("result");
+        assertEquals(512, result.get("downsampled_to").getAsInt());
+        assertTrue(registry.hasGrant("session-a", "image-token-a"));
+    }
+
+    @Test
+    public void duplicateLiveImageCannotConsumeCompatibilityGrant() throws Exception {
+        ImagePlus first = new ImagePlus("duplicate.tif", new ByteProcessor(2, 2));
+        ImagePlus second = new ImagePlus("duplicate.tif", new ByteProcessor(2, 2));
+        FileInfo path = new FileInfo();
+        path.directory = "C:\\same\\";
+        path.fileName = "duplicate.tif";
+        first.setFileInfo(path);
+        second.setFileInfo(path);
+        AtomicReference<ImagePlus> active = new AtomicReference<ImagePlus>(first);
+        VisualOverrideRegistry registry = new VisualOverrideRegistry(active::get);
+        VisualOverrideRegistry.PendingRequest pending =
+                registry.request("session-a", "inspect");
+        assertTrue(registry.grant("session-a", pending.requestId, "inspect"));
+        active.set(second);
+        JsonObject response = captureResponse(
+                png(900, 700, false), "ACTIVE_IMAGE_CONTENT");
+        response.getAsJsonObject("result").addProperty(
+                "_visual_image_token", ImageGraph.stableIdentity(second));
+
+        new CaptureHandler(new BurnInDetector(), registry).apply(
+                response, PrivacyPosture.PSEUDONYMISED, "session-a",
+                RedactionReport.builder().posture(PrivacyPosture.PSEUDONYMISED));
+
+        assertEquals(512, response.getAsJsonObject("result")
+                .get("downsampled_to").getAsInt());
+        assertTrue(registry.hasGrant(
+                "session-a", ImageGraph.stableIdentity(first)));
     }
 
     private static JsonObject captureResponse(byte[] png, String source) {

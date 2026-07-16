@@ -1378,12 +1378,22 @@ public class ReactiveEngine {
             if (!isImageMutation(sourceKind)) return;
             ImagePlus imp = WindowManager.getCurrentImage();
             if (imp == null) return;
-            String csv = null;
-            try { csv = inspector.getResultsTableCSV(); } catch (Throwable ignore) {}
+            StateInspector.BoundedCsv csv = inspector.getResultsTableCSVBounded(
+                    StateInspector.DEFAULT_RESULTS_CSV_LIMIT_BYTES);
+            if (csv.truncated()) {
+                throw new MutationCoordinator.SafetyException(
+                        "Reactive mutation blocked: exact ResultsTable undo snapshot is "
+                                + csv.originalBytes() + " bytes (limit "
+                                + StateInspector.DEFAULT_RESULTS_CSV_LIMIT_BYTES + ").");
+            }
             UndoFrame frame = UndoFrame.capture(
                     "reactive-" + callSequence.incrementAndGet(), imp,
-                    RoiManager.getInstance(), csv, UndoFrame.macroHasDiskWrites(code));
-            if (frame != null) undo.pushFrame(frame);
+                    RoiManager.getInstance(), csv.text(), UndoFrame.macroHasDiskWrites(code));
+            if (frame == null) {
+                throw new MutationCoordinator.SafetyException(
+                        "Reactive mutation blocked: undo snapshot could not be captured.");
+            }
+            undo.pushFrame(frame);
         }
 
         @Override public void afterMutation(String ruleName, String sourceKind, String code,

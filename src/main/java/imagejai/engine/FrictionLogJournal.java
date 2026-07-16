@@ -16,6 +16,7 @@ import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.nio.file.StandardCopyOption;
 import java.nio.file.StandardOpenOption;
+import java.nio.file.attribute.BasicFileAttributes;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -49,10 +50,15 @@ public class FrictionLogJournal implements AutoCloseable {
         InputStream open(Path path) throws IOException;
     }
 
+    interface PathProbe {
+        BasicFileAttributes readAttributes(Path path) throws IOException;
+    }
+
     private final Path root;
     private final Path file;
     private final ExecutorService writer;
     private final InputOpener inputOpener;
+    private final PathProbe pathProbe;
     private final Gson gson = new Gson();
     private final AtomicLong droppedWrites = new AtomicLong();
     private volatile String lastWriteError = "";
@@ -63,13 +69,18 @@ public class FrictionLogJournal implements AutoCloseable {
     }
 
     public FrictionLogJournal(Path root) {
-        this(root, Files::newInputStream);
+        this(root, Files::newInputStream, FrictionLogJournal::readAttributes);
     }
 
     FrictionLogJournal(Path root, InputOpener inputOpener) {
+        this(root, inputOpener, FrictionLogJournal::readAttributes);
+    }
+
+    FrictionLogJournal(Path root, InputOpener inputOpener, PathProbe pathProbe) {
         this.root = root;
         this.file = root.resolve(FILE_NAME);
         this.inputOpener = inputOpener;
+        this.pathProbe = pathProbe;
         ThreadFactory tf = new ThreadFactory() {
             @Override
             public Thread newThread(Runnable r) {
@@ -118,9 +129,9 @@ public class FrictionLogJournal implements AutoCloseable {
     }
 
     public Stream<FrictionLog.FailureEntry> streamEntries() {
-        final List<Path> paths = journalFilesOldestFirst();
         List<FrictionLog.FailureEntry> entries = new ArrayList<FrictionLog.FailureEntry>();
         MutableReadDiagnostics diagnostics = new MutableReadDiagnostics();
+        final List<Path> paths = journalFilesOldestFirst(diagnostics);
         for (Path path : paths) {
             try {
                 readPath(path, entries, diagnostics);
@@ -163,8 +174,10 @@ public class FrictionLogJournal implements AutoCloseable {
     protected void writeLine(FrictionLog.FailureEntry e) {
         try {
             Files.createDirectories(root);
-            if (Files.exists(file) && Files.size(file) >= ROTATE_BYTES) {
-                rotate();
+            try {
+                if (Files.size(file) >= ROTATE_BYTES) rotate();
+            } catch (NoSuchFileException absent) {
+                // First append creates the live journal below.
             }
             String json = gson.toJson(toMap(e));
             if (json.getBytes(StandardCharsets.UTF_8).length > MAX_JSONL_LINE_BYTES) {
@@ -193,21 +206,40 @@ public class FrictionLogJournal implements AutoCloseable {
         for (int i = MAX_GENERATIONS - 1; i >= 1; i--) {
             Path src = generation(i);
             Path dst = generation(i + 1);
-            if (Files.exists(src)) {
+            try {
                 Files.move(src, dst, StandardCopyOption.REPLACE_EXISTING);
+            } catch (NoSuchFileException absent) {
+                // Sparse generations are expected.
             }
         }
         Files.move(file, generation(1), StandardCopyOption.REPLACE_EXISTING);
     }
 
-    private List<Path> journalFilesOldestFirst() {
+    private List<Path> journalFilesOldestFirst(MutableReadDiagnostics diagnostics) {
         List<Path> paths = new ArrayList<Path>();
         for (int i = MAX_GENERATIONS; i >= 1; i--) {
             Path p = generation(i);
-            if (Files.exists(p)) paths.add(p);
+            addReadableJournalPath(paths, p, diagnostics);
         }
-        if (Files.exists(file)) paths.add(file);
+        addReadableJournalPath(paths, file, diagnostics);
         return paths;
+    }
+
+    private void addReadableJournalPath(List<Path> paths, Path path,
+                                        MutableReadDiagnostics diagnostics) {
+        try {
+            if (!pathProbe.readAttributes(path).isRegularFile()) {
+                throw readFailure("not_regular", path,
+                        "Friction journal is not a regular file.", null, diagnostics);
+            }
+            paths.add(path);
+        } catch (NoSuchFileException absent) {
+            // Missing generations and a never-created live journal are empty.
+        } catch (IOException failure) {
+            throw readFailure("unreadable", path,
+                    "Could not inspect friction journal: " + message(failure),
+                    failure, diagnostics);
+        }
     }
 
     private Path generation(int generation) {
@@ -285,6 +317,10 @@ public class FrictionLogJournal implements AutoCloseable {
         return value == null || value.trim().isEmpty()
                 ? e.getClass().getSimpleName()
                 : value;
+    }
+
+    private static BasicFileAttributes readAttributes(Path path) throws IOException {
+        return Files.readAttributes(path, BasicFileAttributes.class);
     }
 
     private Map<String, Object> toMap(FrictionLog.FailureEntry e) {

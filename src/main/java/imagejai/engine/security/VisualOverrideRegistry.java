@@ -2,8 +2,8 @@ package imagejai.engine.security;
 
 import ij.ImagePlus;
 import ij.WindowManager;
-import ij.io.FileInfo;
 import imagejai.config.PrivacyPosture;
+import imagejai.engine.ImageGraph;
 import imagejai.engine.PostureController;
 
 import java.time.Instant;
@@ -16,6 +16,7 @@ import java.time.Duration;
 import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.Supplier;
 
 /**
  * One-shot visual consent tracker. Requests and grants are session-scoped and
@@ -38,6 +39,16 @@ public final class VisualOverrideRegistry {
     private final ConcurrentHashMap<String, Grant> grants =
             new ConcurrentHashMap<String, Grant>();
     private final AtomicLong rejectedEntries = new AtomicLong(0L);
+    private final Supplier<ImagePlus> activeImageSupplier;
+
+    public VisualOverrideRegistry() {
+        this(WindowManager::getCurrentImage);
+    }
+
+    VisualOverrideRegistry(Supplier<ImagePlus> activeImageSupplier) {
+        this.activeImageSupplier = activeImageSupplier == null
+                ? WindowManager::getCurrentImage : activeImageSupplier;
+    }
 
     public static VisualOverrideRegistry getInstance() {
         return INSTANCE;
@@ -267,30 +278,14 @@ public final class VisualOverrideRegistry {
         return notes.toString();
     }
 
-    private static String currentImageToken() {
-        ImagePlus image = null;
+    private String currentImageToken() {
         try {
-            image = WindowManager.getCurrentImage();
-            if (image == null) {
-                return "";
-            }
-            FileInfo fileInfo = image.getOriginalFileInfo();
-            if (fileInfo != null && fileInfo.directory != null
-                    && fileInfo.fileName != null) {
-                return PathTokenMap.getInstance().tokenForPathString(
-                        fileInfo.directory + fileInfo.fileName);
-            }
-            String title = image.getTitle() == null ? "" : image.getTitle();
-            if (title.isEmpty()) {
-                return "image-instance-"
-                        + Integer.toHexString(System.identityHashCode(image));
-            }
-            return PathTokenMap.getInstance().tokenForSensitiveText(title, "image");
+            ImagePlus image = activeImageSupplier.get();
+            String identity = ImageGraph.stableIdentity(image);
+            return identity == null ? "" : identity;
         } catch (Throwable t) {
-            return image == null
-                    ? "image-scope-unavailable-" + newRequestId()
-                    : "image-instance-"
-                    + Integer.toHexString(System.identityHashCode(image));
+            // Fail closed: an unavailable live identity must not match any image.
+            return "image-scope-unavailable-" + newRequestId();
         }
     }
 

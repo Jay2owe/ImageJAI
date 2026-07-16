@@ -12,6 +12,7 @@ import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Consumer;
 import java.util.function.DoubleConsumer;
 
@@ -27,6 +28,11 @@ public class JobRegistry {
     public static final long JANITOR_INTERVAL_MS = 60_000L;
     public static final long RETENTION_MS = 60L * 60_000L;
     public static final int MAX_JOBS = 256;
+    public static final int MAX_RETAINED_CODE_CHARS = 65_536;
+    public static final int MAX_RESULT_TEXT_BYTES = 1_048_576;
+    public static final int MAX_RESULT_IMAGES = 256;
+    public static final int MAX_IMAGE_NAME_CHARS = 1024;
+    public static final int MAX_ERROR_CHARS = 16_384;
 
     public static final String STATE_RUNNING = "running";
     public static final String STATE_CANCEL_REQUESTED = "cancel_requested";
@@ -44,6 +50,7 @@ public class JobRegistry {
     public static class Job {
         public final String id;
         public final String code;
+        public final boolean codeTruncated;
         public volatile String state = STATE_RUNNING;
         public volatile double progress = 0.0;
         public volatile JsonObject result;
@@ -56,7 +63,11 @@ public class JobRegistry {
         Job(MutationCoordinator.Handle<ExecutionResult> handle, String code) {
             this.handle = handle;
             this.id = handle.id();
-            this.code = code == null ? "" : code;
+            String submitted = code == null ? "" : code;
+            this.codeTruncated = submitted.length() > MAX_RETAINED_CODE_CHARS;
+            this.code = codeTruncated
+                    ? submitted.substring(0, MAX_RETAINED_CODE_CHARS)
+                    : submitted;
             this.ownerSession = handle.ownerSession();
             this.startedAt = handle.startedAtMs();
         }
@@ -72,6 +83,8 @@ public class JobRegistry {
     private final CommandEngine commandEngine;
     private final MutationCoordinator coordinator;
     private final Thread janitor;
+    private final Object admissionLock = new Object();
+    private final AtomicLong rejectedAdmissions = new AtomicLong(0L);
     private volatile boolean shutdown;
 
     public JobRegistry(CommandEngine commandEngine) {
@@ -136,7 +149,11 @@ public class JobRegistry {
                 try {
                     if (job != null) finishJob(job, completion);
                 } finally {
-                    delegate.onCompletion(completion);
+                    try {
+                        delegate.onCompletion(completion);
+                    } finally {
+                        if (job != null) job.handle.releaseRetainedPayload();
+                    }
                 }
             }
         };
@@ -179,6 +196,14 @@ public class JobRegistry {
                         .lifecycle(wrapped)
                         .build();
 
+        synchronized (admissionLock) {
+            makeRoomForAdmission();
+            if (jobs.size() >= MAX_JOBS) {
+                rejectedAdmissions.incrementAndGet();
+                throw new RejectedExecutionException("job registry capacity reached (max "
+                        + MAX_JOBS + ")");
+            }
+        try {
         coordinator.submit(request,
                 new Consumer<MutationCoordinator.Handle<ExecutionResult>>() {
                     @Override public void accept(
@@ -196,6 +221,12 @@ public class JobRegistry {
                         }
                     }
                 });
+        } catch (RuntimeException failure) {
+            Job admitted = jobRef.get();
+            if (admitted != null) jobs.remove(admitted.id, admitted);
+            throw failure;
+        }
+        }
         enforceCap();
         return jobRef.get();
     }
@@ -239,6 +270,8 @@ public class JobRegistry {
     }
 
     public int size() { return jobs.size(); }
+
+    public long rejectedAdmissionCount() { return rejectedAdmissions.get(); }
 
     public boolean cancel(String ownerSession, String id) {
         Job job = get(ownerSession, id);
@@ -287,10 +320,20 @@ public class JobRegistry {
         o.addProperty("workerExited", job.handle.isWorkerExited());
         if (job.result != null) o.add("result", job.result);
         if (job.error != null) o.addProperty("error", job.error);
+        o.addProperty("code_truncated", job.codeTruncated);
         String preview = job.code == null ? "" : job.code.trim();
         if (preview.length() > 160) preview = preview.substring(0, 160) + "...";
         o.addProperty("preview", preview);
         return o;
+    }
+
+    /** Bounded list representation; full retained results are status-only. */
+    public JsonObject toSummaryJson(Job job) {
+        JsonObject summary = toJson(job);
+        boolean available = summary.has("result");
+        summary.remove("result");
+        summary.addProperty("result_available", available);
+        return summary;
     }
 
     private void refreshTransientState(Job job) {
@@ -327,9 +370,9 @@ public class JobRegistry {
         } else {
             Throwable error = completion.error();
             String message = error == null ? "macro error" : error.getMessage();
-            job.error = message == null || message.isEmpty()
+            job.error = boundedChars(message == null || message.isEmpty()
                     ? (error == null ? "macro error" : error.getClass().getSimpleName())
-                    : message;
+                    : message, MAX_ERROR_CHARS);
             job.state = STATE_FAILED;
             publish("job.failed", failedFrame(job));
         }
@@ -347,16 +390,84 @@ public class JobRegistry {
         JsonObject json = new JsonObject();
         json.addProperty("success", r.isSuccess());
         if (r.isSuccess()) {
-            json.addProperty("output", r.getOutput() != null ? r.getOutput() : "");
-            json.addProperty("resultsTable", r.getResultsTable() != null ? r.getResultsTable() : "");
+            addBoundedUtf8(json, "output", r.getOutput(), MAX_RESULT_TEXT_BYTES);
+            addBoundedUtf8(json, "resultsTable", r.getResultsTable(),
+                    MAX_RESULT_TEXT_BYTES);
+            if (r.isResultsTableTruncated()) {
+                json.addProperty("resultsTable_truncated", true);
+                json.addProperty("resultsTable_original_bytes",
+                        r.getResultsTableOriginalBytes());
+                json.addProperty("resultsTable_returned_bytes",
+                        utf8Length(json.get("resultsTable").getAsString()));
+                json.addProperty("resultsTable_total_rows",
+                        r.getResultsTableTotalRows());
+                json.addProperty("resultsTable_returned_rows",
+                        r.getResultsTableReturnedRows());
+            }
             JsonArray newImages = new JsonArray();
-            for (String img : r.getNewImages()) newImages.add(img);
+            List<String> images = r.getNewImages() == null
+                    ? Collections.<String>emptyList() : r.getNewImages();
+            int retained = Math.min(images.size(), MAX_RESULT_IMAGES);
+            for (int i = 0; i < retained; i++) {
+                newImages.add(boundedChars(images.get(i), MAX_IMAGE_NAME_CHARS));
+            }
             json.add("newImages", newImages);
+            json.addProperty("newImages_truncated", images.size() > retained);
+            json.addProperty("newImages_total", images.size());
             json.addProperty("executionTimeMs", r.getExecutionTimeMs());
         } else {
-            json.addProperty("error", r.getError() != null ? r.getError() : "Unknown error");
+            json.addProperty("error", boundedChars(
+                    r.getError() != null ? r.getError() : "Unknown error",
+                    MAX_ERROR_CHARS));
         }
         return json;
+    }
+
+    private static void addBoundedUtf8(JsonObject target, String key,
+                                       String value, int byteLimit) {
+        String original = value == null ? "" : value;
+        long originalBytes = utf8Length(original);
+        if (originalBytes <= byteLimit) {
+            target.addProperty(key, original);
+            target.addProperty(key + "_truncated", false);
+            target.addProperty(key + "_original_bytes", originalBytes);
+            return;
+        }
+        int chars = 0;
+        int used = 0;
+        while (chars < original.length()) {
+            int cp = original.codePointAt(chars);
+            int cpBytes = utf8CodePointBytes(cp);
+            if (used + cpBytes > byteLimit) break;
+            used += cpBytes;
+            chars += Character.charCount(cp);
+        }
+        target.addProperty(key, original.substring(0, chars));
+        target.addProperty(key + "_truncated", true);
+        target.addProperty(key + "_original_bytes", originalBytes);
+        target.addProperty(key + "_returned_bytes", used);
+    }
+
+    private static String boundedChars(String value, int maxChars) {
+        String safe = value == null ? "" : value;
+        return safe.length() <= maxChars ? safe : safe.substring(0, maxChars);
+    }
+
+    private static long utf8Length(String value) {
+        long bytes = 0L;
+        for (int i = 0; i < value.length();) {
+            int cp = value.codePointAt(i);
+            bytes += utf8CodePointBytes(cp);
+            i += Character.charCount(cp);
+        }
+        return bytes;
+    }
+
+    private static int utf8CodePointBytes(int cp) {
+        if (cp <= 0x7f) return 1;
+        if (cp <= 0x7ff) return 2;
+        if (cp <= 0xffff) return 3;
+        return 4;
     }
 
     private JsonObject startFrame(Job job) {
@@ -413,6 +524,22 @@ public class JobRegistry {
         int remove = jobs.size() - MAX_JOBS;
         for (int i = 0; i < remove && i < terminal.size(); i++) {
             jobs.remove(terminal.get(i).id, terminal.get(i));
+        }
+    }
+
+    /** Evict the oldest terminal records before any coordinator/thread admission. */
+    private void makeRoomForAdmission() {
+        if (jobs.size() < MAX_JOBS) return;
+        List<Job> terminal = new ArrayList<Job>();
+        for (Job job : jobs.values()) if (isTerminal(job.state)) terminal.add(job);
+        Collections.sort(terminal, new Comparator<Job>() {
+            @Override public int compare(Job a, Job b) {
+                return Long.compare(a.endedAt, b.endedAt);
+            }
+        });
+        for (Job job : terminal) {
+            if (jobs.size() < MAX_JOBS) break;
+            jobs.remove(job.id, job);
         }
     }
 

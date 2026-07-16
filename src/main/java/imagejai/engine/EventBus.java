@@ -62,6 +62,8 @@ public class EventBus {
     private static final long COALESCE_MS = 200L;
     private static final int MAX_COALESCE_KEYS = 1024;
     private static final int MAX_LISTENER_FAILURES = 64;
+    public static final int MAX_SUBSCRIPTIONS = 1024;
+    public static final int MAX_PATTERN_CHARS = 128;
     private static final Set<String> COALESCIBLE_TOPICS =
             Collections.unmodifiableSet(new HashSet<String>(Arrays.asList(
                     "image.updated",
@@ -88,6 +90,7 @@ public class EventBus {
     private final ConcurrentHashMap<String, Long> lastPublish = new ConcurrentHashMap<String, Long>();
     private final AtomicLong seqCounter = new AtomicLong(0);
     private final AtomicLong listenerFailureCounter = new AtomicLong(0);
+    private final AtomicLong rejectedSubscriptionCounter = new AtomicLong(0);
     private final ArrayDeque<ListenerFailure> listenerFailures =
             new ArrayDeque<ListenerFailure>();
     private final LongSupplier clock;
@@ -125,13 +128,42 @@ public class EventBus {
     }
 
     /** Register a listener for a topic pattern. Supports exact match, {@code *}, and suffix wildcards like {@code image.*}. */
-    public void subscribe(String pattern, Listener listener) {
+    public synchronized void subscribe(String pattern, Listener listener) {
         if (pattern == null || listener == null) return;
+        if (pattern.length() == 0 || pattern.length() > MAX_PATTERN_CHARS
+                || subs.size() >= MAX_SUBSCRIPTIONS) {
+            rejectedSubscriptionCounter.incrementAndGet();
+            return;
+        }
         subs.add(new Subscription(pattern, listener));
     }
 
+    /** Atomically register all patterns or none; used by TCP subscribe ack. */
+    public synchronized boolean subscribeAll(List<String> patterns,
+                                             Listener listener) {
+        if (patterns == null || patterns.isEmpty() || listener == null) {
+            rejectedSubscriptionCounter.incrementAndGet();
+            return false;
+        }
+        if (patterns.size() > MAX_SUBSCRIPTIONS - subs.size()) {
+            rejectedSubscriptionCounter.incrementAndGet();
+            return false;
+        }
+        for (String pattern : patterns) {
+            if (pattern == null || pattern.length() == 0
+                    || pattern.length() > MAX_PATTERN_CHARS) {
+                rejectedSubscriptionCounter.incrementAndGet();
+                return false;
+            }
+        }
+        for (String pattern : patterns) {
+            subs.add(new Subscription(pattern, listener));
+        }
+        return true;
+    }
+
     /** Remove every subscription belonging to {@code listener}. */
-    public void unsubscribe(Listener listener) {
+    public synchronized void unsubscribe(Listener listener) {
         if (listener == null) return;
         List<Subscription> toRemove = new ArrayList<Subscription>();
         for (Subscription s : subs) {
@@ -188,6 +220,11 @@ public class EventBus {
 
     public long listenerFailureCount() {
         return listenerFailureCounter.get();
+    }
+
+    /** Number of subscriptions refused by the global count/pattern bounds. */
+    public long rejectedSubscriptionCount() {
+        return rejectedSubscriptionCounter.get();
     }
 
     public List<ListenerFailure> recentListenerFailures() {

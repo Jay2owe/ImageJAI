@@ -189,7 +189,9 @@ public class MutationCoordinator implements AutoCloseable {
     public static final class Handle<T> {
         private final MutationCoordinator coordinator;
         private final String id;
-        private final Request<T> request;
+        private volatile Request<T> request;
+        private final String ownerSession;
+        private final String sourceKind;
         private final long startedAtMs;
         private final boolean delegatedMonitorOwnership;
         private final CountDownLatch workerFinalized = new CountDownLatch(1);
@@ -215,14 +217,19 @@ public class MutationCoordinator implements AutoCloseable {
             this.coordinator = coordinator;
             this.id = id;
             this.request = request;
+            this.ownerSession = request.ownerSession;
+            this.sourceKind = request.sourceKind;
             this.startedAtMs = startedAtMs;
             this.delegatedMonitorOwnership = delegatedMonitorOwnership;
         }
 
         public String id() { return id; }
-        public String ownerSession() { return request.ownerSession; }
-        public String sourceKind() { return request.sourceKind; }
-        public String code() { return request.code; }
+        public String ownerSession() { return ownerSession; }
+        public String sourceKind() { return sourceKind; }
+        public String code() {
+            Request<T> retained = request;
+            return retained == null ? "" : retained.code;
+        }
         public long startedAtMs() { return startedAtMs; }
         public long endedAtMs() { return endedAtMs; }
         public T result() { return result; }
@@ -263,6 +270,24 @@ public class MutationCoordinator implements AutoCloseable {
         }
 
         Thread workerForTest() { return worker; }
+
+        /**
+         * Drop the heavy request closures/result after an owner has projected
+         * its bounded terminal record. Called only from the completion hook,
+         * after the worker has exited and the delegate lifecycle returned.
+         */
+        void releaseRetainedPayload() {
+            if (!isTerminal() || !workerExited) return;
+            request = null;
+            result = null;
+            error = null;
+            worker = null;
+            timeoutFuture = null;
+        }
+
+        boolean retainedPayloadReleasedForTest() {
+            return request == null && result == null && error == null && worker == null;
+        }
     }
 
     private final int capacity;

@@ -140,7 +140,7 @@ public final class AssistantMutationExecutor implements AutoCloseable {
             }
 
             @Override
-            public void beforeMutation() {
+            public void beforeMutation() throws Exception {
                 titlesBefore = ImageGraph.captureOpenTitles();
                 activeTitleBefore = ImageGraph.captureActiveTitle();
                 graphMarker = graph.currentMarker();
@@ -232,17 +232,26 @@ public final class AssistantMutationExecutor implements AutoCloseable {
         return coordinator;
     }
 
-    private void captureUndo(String callId, String code, ImagePlus fallbackImage) {
-        try {
-            ImagePlus image = WindowManager.getCurrentImage();
-            if (image == null) image = fallbackImage;
-            if (image == null) return;
-            UndoFrame frame = UndoFrame.capture(callId, image, RoiManager.getInstance(),
-                    inspector.getResultsTableCSV(), DestructiveScanner.hasDiskWrites(code));
-            undo.pushFrame(frame);
-        } catch (Throwable ignored) {
-            // Undo is best effort and must never prevent the governed mutation.
+    private void captureUndo(String callId, String code, ImagePlus fallbackImage)
+            throws Exception {
+        ImagePlus image = WindowManager.getCurrentImage();
+        if (image == null) image = fallbackImage;
+        if (image == null) return;
+        StateInspector.BoundedCsv csv = inspector.getResultsTableCSVBounded(
+                StateInspector.DEFAULT_RESULTS_CSV_LIMIT_BYTES);
+        if (csv.truncated()) {
+            throw new MutationCoordinator.SafetyException(
+                    "Mutation blocked: exact ResultsTable undo snapshot is "
+                            + csv.originalBytes() + " bytes (limit "
+                            + StateInspector.DEFAULT_RESULTS_CSV_LIMIT_BYTES + ").");
         }
+        UndoFrame frame = UndoFrame.capture(callId, image, RoiManager.getInstance(),
+                csv.text(), DestructiveScanner.hasDiskWrites(code));
+        if (frame == null) {
+            throw new MutationCoordinator.SafetyException(
+                    "Mutation blocked: undo snapshot could not be captured.");
+        }
+        undo.pushFrame(frame);
     }
 
     private void enforceSafety(String code, boolean explicitApprovalRequired)

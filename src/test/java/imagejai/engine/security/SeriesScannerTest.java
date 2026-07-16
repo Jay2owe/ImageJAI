@@ -142,6 +142,37 @@ public class SeriesScannerTest {
     }
 
     @Test
+    public void deniedPathProbeFailsBeforeListingAndCanBeRetried() throws Exception {
+        Path folder = temp.newFolder("probe-restored").toPath();
+        Files.createFile(folder.resolve("image.tif"));
+        AtomicInteger probes = new AtomicInteger();
+        AtomicInteger opens = new AtomicInteger();
+        SeriesScanner scanner = new SeriesScanner(new PathTokenMap(bytes(14)),
+                new SeriesScanner.ReaderFactory() {
+                    @Override public SeriesScanner.MetadataReader create() { return new FakeReader(); }
+                }, directory -> {
+                    opens.incrementAndGet();
+                    return Files.newDirectoryStream(directory);
+                }, path -> {
+                    if (probes.getAndIncrement() == 0) {
+                        throw new AccessDeniedException(path.toString());
+                    }
+                    return Files.readAttributes(path,
+                            java.nio.file.attribute.BasicFileAttributes.class);
+                });
+
+        try {
+            scanner.scanFolder(folder);
+            throw new AssertionError("Expected folder_unreadable");
+        } catch (SeriesScanner.ScanException expected) {
+            assertEquals("folder_unreadable", expected.code());
+        }
+        assertEquals(0, opens.get());
+        assertEquals(2, scanner.scanFolder(folder).size());
+        assertEquals(1, opens.get());
+    }
+
+    @Test
     public void folderEnumerationStopsAtSafetyCap() throws Exception {
         Path folder = temp.newFolder("bounded-folder").toPath();
         Path repeated = Files.createFile(folder.resolve("image.tif"));

@@ -519,6 +519,41 @@ public class TCPCommandServerHelloTest {
         }
     }
 
+    @Test
+    public void helloRejectsOversizedRetainedIdentityFields() {
+        TCPCommandServer server = newServer();
+        JsonObject request = new JsonObject();
+        request.addProperty("command", "hello");
+        request.addProperty("agent", repeat('a',
+                TCPCommandServer.MAX_HANDSHAKE_IDENTITY_CHARS + 1));
+
+        JsonObject response = server.handleHello(request, null);
+
+        assertEquals("invalid_hello", errorCode(response));
+    }
+
+    @Test
+    public void helloRejectsUnboundedAcceptedEventAllowlist() {
+        TCPCommandServer server = newServer();
+        JsonObject request = new JsonObject();
+        request.addProperty("command", "hello");
+        request.addProperty("agent", "tester");
+        JsonObject caps = new JsonObject();
+        JsonArray events = new JsonArray();
+        for (int i = 0; i <= TCPCommandServer.MAX_ACCEPT_EVENT_TOPICS; i++) {
+            events.add("topic." + i);
+        }
+        caps.add("accept_events", events);
+        request.add("capabilities", caps);
+
+        assertEquals("invalid_hello", errorCode(server.handleHello(request, null)));
+
+        events = new JsonArray();
+        events.add(repeat('x', TCPCommandServer.MAX_ACCEPT_EVENT_TOPIC_CHARS + 1));
+        caps.add("accept_events", events);
+        assertEquals("invalid_hello", errorCode(server.handleHello(request, null)));
+    }
+
     private static int startAndAwait(TCPCommandServer server) throws Exception {
         final CountDownLatch started = new CountDownLatch(1);
         final int[] boundPort = new int[1];
@@ -612,5 +647,11 @@ public class TCPCommandServerHelloTest {
             if (name.equals(arr.get(i).getAsString())) return true;
         }
         return false;
+    }
+
+    private static String repeat(char value, int count) {
+        StringBuilder out = new StringBuilder(count);
+        for (int i = 0; i < count; i++) out.append(value);
+        return out.toString();
     }
 }

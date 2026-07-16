@@ -38,9 +38,9 @@ import imagejai.engine.safeMode.SourceImageTagger;
 import imagejai.ui.ChatPanelController;
 
 import javax.swing.SwingUtilities;
-import java.io.BufferedReader;
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
-import java.io.InputStreamReader;
+import java.io.InputStream;
 import java.io.OutputStream;
 import java.io.OutputStreamWriter;
 import java.io.PrintWriter;
@@ -49,6 +49,8 @@ import java.net.ServerSocket;
 import java.net.Socket;
 import java.net.SocketException;
 import java.nio.charset.Charset;
+import java.nio.charset.CharacterCodingException;
+import java.nio.charset.CodingErrorAction;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.nio.file.Paths;
@@ -71,10 +73,14 @@ import java.util.Optional;
 import java.util.Properties;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Future;
 import java.util.concurrent.LinkedBlockingDeque;
+import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.ThreadFactory;
+import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -175,6 +181,21 @@ public class TCPCommandServer {
     // connection is closed).
     private static final long MACRO_TIMEOUT_MS = 600_000;
     private static final long PIPELINE_TIMEOUT_MS = 600_000;
+    public static final int MAX_CONNECTION_WORKERS = 16;
+    public static final int CONNECTION_QUEUE_CAPACITY = 64;
+    public static final int MAX_BATCH_COMMANDS = 64;
+    public static final int MAX_BATCH_DEPTH = 4;
+    public static final int MAX_COMPOUND_WORK = 64;
+    public static final long MAX_BATCH_RESPONSE_BYTES = 4L * 1024L * 1024L;
+    public static final long MAX_RESULTS_TABLE_BYTES = 2L * 1024L * 1024L;
+    public static final int MAX_CAPTURE_DIMENSION = 4096;
+    public static final int MAX_CAPTURE_PNG_BYTES = 16 * 1024 * 1024;
+    public static final int MAX_PROCESS_OUTPUT_BYTES = 1024 * 1024;
+    public static final int MAX_HANDSHAKE_IDENTITY_CHARS = 256;
+    public static final int MAX_HANDSHAKE_OUTPUT_FORMAT_CHARS = 64;
+    public static final int MAX_ACCEPT_EVENT_TOPICS = 64;
+    public static final int MAX_ACCEPT_EVENT_TOPIC_CHARS = 128;
+    private static final long COMPOUND_RESPONSE_OVERHEAD_BYTES = 2048L;
 
     /**
      * Resolve the per-request timeout override, falling back to the default.
@@ -212,15 +233,26 @@ public class TCPCommandServer {
      */
     private static String loadOrGenerateToken() {
         java.nio.file.Path p = tokenFilePath();
-        try {
-            if (java.nio.file.Files.exists(p)) {
+        if (java.nio.file.Files.exists(p)) {
+            try {
+                if (!java.nio.file.Files.isRegularFile(p)) {
+                    throw new java.io.IOException("token path is not a regular file");
+                }
+                long bytes = java.nio.file.Files.size(p);
+                if (bytes > 4096L) {
+                    throw new java.io.IOException("token file exceeds 4096 bytes");
+                }
                 String existing = new String(
                         java.nio.file.Files.readAllBytes(p),
                         StandardCharsets.UTF_8).trim();
-                if (existing.length() >= 32) return existing;
+                if (existing.length() < 32) {
+                    throw new java.io.IOException("token file is empty or invalid");
+                }
+                return existing;
+            } catch (java.io.IOException unreadable) {
+                throw new IllegalStateException("Existing server token is unreadable: "
+                        + unreadable.getMessage(), unreadable);
             }
-        } catch (java.io.IOException ignored) {
-            // fall through to regenerate
         }
         byte[] raw = new byte[32];
         new java.security.SecureRandom().nextBytes(raw);
@@ -284,6 +316,8 @@ public class TCPCommandServer {
             Collections.newSetFromMap(new ConcurrentHashMap<Socket, Boolean>());
     private final Set<Thread> subscriberThreads =
             Collections.newSetFromMap(new ConcurrentHashMap<Thread, Boolean>());
+    private final Set<Socket> activeClientSockets =
+            Collections.newSetFromMap(new ConcurrentHashMap<Socket, Boolean>());
     private final EventBus eventBus = EventBus.getInstance();
     // Monotonic macro-id counter so TCP-path execute_macro emits a well-formed
     // macro.started/macro.completed pair like CommandEngine does.
@@ -540,6 +574,10 @@ public class TCPCommandServer {
     static final class StateDelta {
         JsonArray newImages;
         String resultsTable;
+        long resultsTableOriginalBytes;
+        int resultsTableReturnedRows;
+        int resultsTableTotalRows;
+        boolean resultsTableTruncated;
         String logDelta;
         JsonArray dismissedDialogs;
 
@@ -552,8 +590,9 @@ public class TCPCommandServer {
         JsonObject toJsonObject() {
             JsonObject obj = new JsonObject();
             if (newImages != null) obj.add("newImages", newImages);
-            if (resultsTable != null) obj.addProperty("resultsTable", resultsTable);
-            if (logDelta != null) obj.addProperty("logDelta", logDelta);
+            if (resultsTable != null) addBoundedResultsCsv(obj);
+            if (logDelta != null) addBoundedUtf8Property(obj,
+                    "logDelta", logDelta, MAX_RESULTS_TABLE_BYTES);
             if (dismissedDialogs != null) obj.add("dismissedDialogs", dismissedDialogs);
             return obj;
         }
@@ -570,10 +609,29 @@ public class TCPCommandServer {
                 result.add("stateDelta", toJsonObject());
             } else {
                 if (newImages != null) result.add("newImages", newImages);
-                if (resultsTable != null) result.addProperty("resultsTable", resultsTable);
-                if (logDelta != null) result.addProperty("logDelta", logDelta);
+                if (resultsTable != null) addBoundedResultsCsv(result);
+                if (logDelta != null) addBoundedUtf8Property(result,
+                        "logDelta", logDelta, MAX_RESULTS_TABLE_BYTES);
                 if (dismissedDialogs != null) result.add("dismissedDialogs", dismissedDialogs);
             }
+        }
+
+        void setResultsTable(StateInspector.BoundedCsv csv) {
+            if (csv == null) return;
+            resultsTable = csv.text();
+            resultsTableOriginalBytes = csv.originalBytes();
+            resultsTableReturnedRows = csv.returnedRows();
+            resultsTableTotalRows = csv.totalRows();
+            resultsTableTruncated = csv.truncated();
+        }
+
+        private void addBoundedResultsCsv(JsonObject target) {
+            target.addProperty("resultsTable", resultsTable);
+            target.addProperty("resultsTable_truncated", resultsTableTruncated);
+            target.addProperty("resultsTable_original_bytes", resultsTableOriginalBytes);
+            target.addProperty("resultsTable_returned_bytes", utf8Length(resultsTable));
+            target.addProperty("resultsTable_returned_rows", resultsTableReturnedRows);
+            target.addProperty("resultsTable_total_rows", resultsTableTotalRows);
         }
     }
 
@@ -669,8 +727,36 @@ public class TCPCommandServer {
     // actions in response to matching events. Lifecycle tied to the TCP
     // server — {@link #start} / {@link #stop}.
     private final ReactiveEngine reactiveEngine;
-    private ServerSocket serverSocket;
+    private volatile ServerSocket serverSocket;
     private Thread serverThread;
+    private volatile ThreadPoolExecutor connectionWorkers;
+    private final AtomicLong rejectedConnections = new AtomicLong(0L);
+    private final ThreadLocal<Integer> batchDepth = new ThreadLocal<Integer>() {
+        @Override protected Integer initialValue() { return Integer.valueOf(0); }
+    };
+    private final ThreadLocal<Long> compoundResponseBudget = new ThreadLocal<Long>() {
+        @Override protected Long initialValue() { return Long.valueOf(Long.MAX_VALUE); }
+    };
+    private final ThreadLocal<CompoundWorkBudget> compoundWorkBudget =
+            new ThreadLocal<CompoundWorkBudget>();
+
+    private static final class CompoundWorkBudget {
+        int consumed;
+        boolean exhausted;
+
+        boolean tryConsume() {
+            if (consumed >= MAX_COMPOUND_WORK) {
+                exhausted = true;
+                return false;
+            }
+            consumed++;
+            return true;
+        }
+
+        int remaining() { return Math.max(0, MAX_COMPOUND_WORK - consumed); }
+    }
+    private final Object serverLifecycleLock = new Object();
+    private volatile Runnable beforeBindHookForTest;
     private volatile boolean running;
     private ServerListener listener;
 
@@ -730,6 +816,7 @@ public class TCPCommandServer {
         if (commandEngine != null) {
             commandEngine.setMutationCoordinator(mutationCoordinator);
         }
+
         this.jobRegistry = new JobRegistry(commandEngine, mutationCoordinator);
         this.reactiveEngine = new ReactiveEngine(
                 eventBus, commandEngine, intentRouter, guiActionDispatcher,
@@ -769,6 +856,19 @@ public class TCPCommandServer {
         this.listener = listener;
         running = true;
         sessionRegistry.activate();
+        connectionWorkers = new ThreadPoolExecutor(
+                MAX_CONNECTION_WORKERS, MAX_CONNECTION_WORKERS,
+                0L, TimeUnit.MILLISECONDS,
+                new ArrayBlockingQueue<Runnable>(CONNECTION_QUEUE_CAPACITY),
+                new ThreadFactory() {
+                    private final AtomicLong sequence = new AtomicLong(0L);
+                    @Override public Thread newThread(Runnable task) {
+                        Thread thread = new Thread(task, "imagej-ai-tcp-client-"
+                                + sequence.incrementAndGet());
+                        thread.setDaemon(true);
+                        return thread;
+                    }
+                }, new ThreadPoolExecutor.AbortPolicy());
 
         // Generate or reload the per-install shared token before opening the
         // listen socket. Always loaded — hello accepts and verifies it.
@@ -784,6 +884,8 @@ public class TCPCommandServer {
             this.serverToken = null;
             running = false;
             sessionRegistry.revokeAll();
+            connectionWorkers.shutdownNow();
+            connectionWorkers = null;
             if (listener != null) {
                 listener.onError("TCP authentication could not be initialized");
             }
@@ -824,7 +926,15 @@ public class TCPCommandServer {
      * Stop the server and close the listening socket.
      */
     public void stop() {
-        running = false;
+        // Swap the listener under the same lock used by runServer's bind.
+        // This prevents a delayed server thread from binding after stop().
+        ServerSocket listenerSocket;
+        synchronized (serverLifecycleLock) {
+            running = false;
+            listenerSocket = serverSocket;
+            serverSocket = null;
+        }
+        closeQuietly(listenerSocket);
         sessionRegistry.revokeAll();
         // Phase 8: stop the reactive engine first so it unsubscribes from the
         // bus and tears down the WatchService thread cleanly before the rest
@@ -856,13 +966,9 @@ public class TCPCommandServer {
             subscriberThread.interrupt();
         }
         subscriberThreads.clear();
-        if (serverSocket != null && !serverSocket.isClosed()) {
-            try {
-                serverSocket.close();
-            } catch (Exception e) {
-                System.err.println("[ImageJAI-TCP] Error closing server socket: " + e.getMessage());
-            }
-        }
+        shutdownConnectionWorkers();
+        for (Socket client : activeClientSockets) closeQuietly(client);
+        activeClientSockets.clear();
         // Step 07: restore the original System.out / System.err so a
         // subsequent plugin reload doesn't stack tees on top of the previous
         // ones. Safe to call even if install() never ran.
@@ -895,6 +1001,11 @@ public class TCPCommandServer {
     /** Package-private audit destination seam for side-effect-free tests. */
     void setAuditLogForTest(AuditLog auditLog) {
         this.auditLog = auditLog == null ? AuditLog.getInstance() : auditLog;
+    }
+
+    /** Package-private deterministic seam for stop-before-bind regression tests. */
+    void setBeforeBindHookForTest(Runnable hook) {
+        this.beforeBindHookForTest = hook;
     }
 
     /**
@@ -933,14 +1044,24 @@ public class TCPCommandServer {
     // -----------------------------------------------------------------------
 
     private void runServer() {
+        ServerSocket listenerSocket = null;
         try {
             // Loopback-only bind. Any non-loopback bind would expose the
             // unauthenticated macro/script execution surface to the local
             // network. Do not change without also shipping authentication
             // and a TLS-or-equivalent transport.
-            serverSocket = new ServerSocket(port, 50, InetAddress.getLoopbackAddress());
-            serverSocket.setReuseAddress(true);
-            int boundPort = serverSocket.getLocalPort();
+            Runnable beforeBind = beforeBindHookForTest;
+            if (beforeBind != null) beforeBind.run();
+            listenerSocket = new ServerSocket();
+            listenerSocket.setReuseAddress(true);
+            synchronized (serverLifecycleLock) {
+                if (!running) return;
+                listenerSocket.bind(new java.net.InetSocketAddress(
+                        InetAddress.getLoopbackAddress(), port), 50);
+                // stop() cannot interleave between bind and publication.
+                serverSocket = listenerSocket;
+            }
+            int boundPort = listenerSocket.getLocalPort();
             System.err.println("[ImageJAI-TCP] Server listening on " +
                     InetAddress.getLoopbackAddress().getHostAddress() + ":" + boundPort);
             if (listener != null) {
@@ -949,20 +1070,27 @@ public class TCPCommandServer {
 
             while (running) {
                 try {
-                    final Socket clientSocket = serverSocket.accept();
-                    String clientInfo = clientSocket.getRemoteSocketAddress().toString();
-                    if (listener != null) {
-                        listener.onClientConnected(clientInfo);
+                    final Socket clientSocket = listenerSocket.accept();
+                    ThreadPoolExecutor workers = connectionWorkers;
+                    if (workers == null || workers.isShutdown()) {
+                        closeQuietly(clientSocket);
+                        continue;
                     }
-
-                    Thread clientThread = new Thread(new Runnable() {
-                        @Override
-                        public void run() {
-                            handleClient(clientSocket);
+                    ClientTask task = new ClientTask(clientSocket);
+                    // Register before executor admission so stop() can close
+                    // both queued and already-running client sockets.
+                    activeClientSockets.add(clientSocket);
+                    try {
+                        workers.execute(task);
+                        if (listener != null) {
+                            listener.onClientConnected(
+                                    clientSocket.getRemoteSocketAddress().toString());
                         }
-                    }, "imagej-ai-tcp-client");
-                    clientThread.setDaemon(true);
-                    clientThread.start();
+                    } catch (RejectedExecutionException capacity) {
+                        rejectedConnections.incrementAndGet();
+                        writeCapacityRejection(clientSocket);
+                        task.close();
+                    }
                 } catch (SocketException e) {
                     // Expected when server is stopped
                     if (running) {
@@ -985,7 +1113,24 @@ public class TCPCommandServer {
                 }
             }
         } finally {
-            running = false;
+            closeQuietly(listenerSocket);
+            synchronized (serverLifecycleLock) {
+                if (serverSocket == listenerSocket) serverSocket = null;
+                running = false;
+            }
+            shutdownConnectionWorkers();
+            for (Socket client : activeClientSockets) closeQuietly(client);
+            activeClientSockets.clear();
+        }
+    }
+
+    private synchronized void shutdownConnectionWorkers() {
+        ThreadPoolExecutor workers = connectionWorkers;
+        connectionWorkers = null;
+        if (workers == null) return;
+        List<Runnable> queued = workers.shutdownNow();
+        for (Runnable task : queued) {
+            if (task instanceof ClientTask) ((ClientTask) task).close();
         }
     }
 
@@ -994,25 +1139,18 @@ public class TCPCommandServer {
     // -----------------------------------------------------------------------
 
     private void handleClient(Socket socket) {
-        BufferedReader reader = null;
         PrintWriter writer = null;
         try {
             socket.setSoTimeout(60000); // 60s read timeout
-            reader = new BufferedReader(
-                    new InputStreamReader(socket.getInputStream(), UTF8));
             writer = new PrintWriter(
                     new OutputStreamWriter(socket.getOutputStream(), UTF8), true);
 
-            // Read one line (max 1MB enforced by checking length)
-            String line = readLine(reader);
+            // Enforce the wire-byte cap before decoding or JSON allocation.
+            RequestLine requestLine = readUtf8Line(socket.getInputStream(),
+                    Constants.TCP_MAX_MESSAGE_SIZE);
+            String line = requestLine == null ? null : requestLine.text;
             if (line == null || line.trim().isEmpty()) {
                 writeOutbound(writer, "error", errorJson("Empty request"));
-                return;
-            }
-
-            if (line.length() > Constants.TCP_MAX_MESSAGE_SIZE) {
-                writeOutbound(writer, "error", errorJson("Request too large (max "
-                        + Constants.TCP_MAX_MESSAGE_SIZE + " bytes)"));
                 return;
             }
 
@@ -1037,13 +1175,23 @@ public class TCPCommandServer {
             String commandName = optString(request, "command", "");
             if ("subscribe".equals(commandName)) {
                 handleSubscribeStream(socket, request,
-                        line.getBytes(UTF8).length);
+                        requestLine.byteCount);
                 return; // finally closes the socket
             }
 
             JsonObject response = dispatch(request, socket);
             writeOutbound(writer, commandName, GSON.toJson(response));
 
+        } catch (RequestTooLargeException e) {
+            if (writer != null) {
+                writeOutbound(writer, "error", errorJson("Request too large (max "
+                        + Constants.TCP_MAX_MESSAGE_SIZE + " UTF-8 bytes)"));
+            }
+        } catch (CharacterCodingException e) {
+            if (writer != null) {
+                writeOutbound(writer, "error", errorJson(
+                        "Request is not valid UTF-8"));
+            }
         } catch (Exception e) {
             System.err.println("[ImageJAI-TCP] Client error: " + e.getMessage());
             if (writer != null) {
@@ -1055,9 +1203,6 @@ public class TCPCommandServer {
                 }
             }
         } finally {
-            try {
-                if (reader != null) reader.close();
-            } catch (Exception ignored) {}
             try {
                 if (writer != null) writer.close();
             } catch (Exception ignored) {}
@@ -1150,8 +1295,18 @@ public class TCPCommandServer {
             }
         };
 
-        // Register the listener for every requested pattern.
-        for (String p : patterns) eventBus.subscribe(p, listener);
+        // Register every pattern atomically so an accepted ack never masks a
+        // partial/zero subscription at the global EventBus cap.
+        if (!eventBus.subscribeAll(patterns, listener)) {
+            subscriberSockets.remove(socket);
+            subscriberThreads.remove(Thread.currentThread());
+            activeSubscribers.decrementAndGet();
+            writeRawJson(rawOut, protocolError("event_subscription_capacity",
+                    "Event subscription capacity reached; no topics were registered."));
+            appendSubscriptionAudit("subscribe.open", req, caps, patterns,
+                    "event_bus_capacity", requestBytes, 0L, 0L);
+            return;
+        }
         appendSubscriptionAudit("subscribe.open", req, caps, patterns,
                 "accepted", requestBytes, 0L, 0L);
 
@@ -1249,6 +1404,61 @@ public class TCPCommandServer {
                     closeReason, 0, sentFrames.get(), droppedFrames.get());
             activeSubscribers.decrementAndGet();
         }
+    }
+
+    private final class ClientTask implements Runnable {
+        private final Socket socket;
+        ClientTask(Socket socket) { this.socket = socket; }
+        @Override public void run() {
+            try {
+                handleClient(socket);
+            } finally {
+                activeClientSockets.remove(socket);
+            }
+        }
+        void close() {
+            activeClientSockets.remove(socket);
+            closeQuietly(socket);
+        }
+    }
+
+    private void writeCapacityRejection(Socket socket) {
+        if (socket == null) return;
+        try {
+            byte[] frame = (GSON.toJson(protocolError("connection_capacity",
+                    "Connection worker capacity reached; retry later.")) + "\n")
+                    .getBytes(UTF8);
+            socket.getOutputStream().write(frame);
+            socket.getOutputStream().flush();
+        } catch (IOException ignored) { }
+    }
+
+    private static void closeQuietly(Socket socket) {
+        if (socket == null) return;
+        try { socket.close(); } catch (IOException ignored) { }
+    }
+
+    private static void closeQuietly(ServerSocket socket) {
+        if (socket == null) return;
+        try { socket.close(); } catch (IOException ignored) { }
+    }
+
+    public int getActiveConnectionWorkerCount() {
+        ThreadPoolExecutor workers = connectionWorkers;
+        return workers == null ? 0 : workers.getActiveCount();
+    }
+
+    public int getQueuedConnectionCount() {
+        ThreadPoolExecutor workers = connectionWorkers;
+        return workers == null ? 0 : workers.getQueue().size();
+    }
+
+    int getTrackedClientSocketCountForTest() {
+        return activeClientSockets.size();
+    }
+
+    public long getRejectedConnectionCount() {
+        return rejectedConnections.get();
     }
 
     private List<String> parseSubscriptionPatterns(JsonObject req) {
@@ -1571,25 +1781,59 @@ public class TCPCommandServer {
         } catch (IOException ignore) {}
     }
 
-    /**
-     * Read a single line from the reader, enforcing max size.
-     */
-    private String readLine(BufferedReader reader) throws Exception {
-        StringBuilder sb = new StringBuilder();
-        int c;
-        while ((c = reader.read()) != -1) {
-            if (c == '\n') {
+    static final class RequestLine {
+        final String text;
+        final int byteCount;
+        RequestLine(String text, int byteCount) {
+            this.text = text;
+            this.byteCount = byteCount;
+        }
+    }
+
+    static final class RequestTooLargeException extends IOException {
+        RequestTooLargeException() { super("request byte limit exceeded"); }
+    }
+
+    /** Package-private exact UTF-8 request reader used by boundary tests. */
+    static RequestLine readUtf8Line(InputStream input, int maxBytes)
+            throws IOException, CharacterCodingException {
+        if (input == null) throw new IOException("input is required");
+        if (maxBytes < 1) throw new IllegalArgumentException("maxBytes must be positive");
+        ByteArrayOutputStream bytes = new ByteArrayOutputStream(
+                Math.min(8192, maxBytes));
+        int payloadBytes = 0;
+        boolean sawAny = false;
+        boolean pendingCarriageReturn = false;
+        int next;
+        while ((next = input.read()) != -1) {
+            sawAny = true;
+            if (next == '\n') {
+                // A CR immediately before LF is framing, not payload.
+                pendingCarriageReturn = false;
                 break;
             }
-            if (c == '\r') {
-                continue;
+            if (pendingCarriageReturn) {
+                payloadBytes++;
+                if (payloadBytes > maxBytes) throw new RequestTooLargeException();
+                bytes.write('\r');
+                pendingCarriageReturn = false;
             }
-            sb.append((char) c);
-            if (sb.length() > Constants.TCP_MAX_MESSAGE_SIZE) {
-                return sb.toString(); // Will be rejected by size check
+            if (next == '\r') {
+                pendingCarriageReturn = true;
+            } else {
+                payloadBytes++;
+                if (payloadBytes > maxBytes) throw new RequestTooLargeException();
+                bytes.write(next);
             }
         }
-        return sb.length() > 0 ? sb.toString() : null;
+        // A final CR at EOF is also line framing, matching readLine().
+        if (!sawAny && bytes.size() == 0) return null;
+        String decoded = UTF8.newDecoder()
+                .onMalformedInput(CodingErrorAction.REPORT)
+                .onUnmappableCharacter(CodingErrorAction.REPORT)
+                .decode(java.nio.ByteBuffer.wrap(bytes.toByteArray()))
+                .toString();
+        return new RequestLine(decoded, payloadBytes);
     }
 
     // -----------------------------------------------------------------------
@@ -1912,7 +2156,7 @@ public class TCPCommandServer {
             }
         } else if ("open_image".equals(command)) {
             String target = auditOpenTarget(request);
-            if (target.matches("(?i)image-[0-9a-f]{4,12}.*")) {
+            if (target.matches("(?i)image-[0-9a-f]{4,32}.*")) {
                 appendNote(notes, "token", target);
             }
         } else if ("get_pending_brief".equals(command)) {
@@ -2715,6 +2959,18 @@ public class TCPCommandServer {
                 optString(caps, "model_endpoint", ""));
         c.vision       = optBool(caps, "vision", false);
         c.outputFormat = optString(caps, "output_format", "json");
+        JsonObject helloFieldError = validateHelloField(
+                "agent", c.agent, MAX_HANDSHAKE_IDENTITY_CHARS);
+        if (helloFieldError != null) return helloFieldError;
+        helloFieldError = validateHelloField(
+                "session_id", c.sessionId, MAX_HANDSHAKE_IDENTITY_CHARS);
+        if (helloFieldError != null) return helloFieldError;
+        helloFieldError = validateHelloField(
+                "model_endpoint", c.modelEndpoint, MAX_HANDSHAKE_IDENTITY_CHARS);
+        if (helloFieldError != null) return helloFieldError;
+        helloFieldError = validateHelloField(
+                "output_format", c.outputFormat, MAX_HANDSHAKE_OUTPUT_FORMAT_CHARS);
+        if (helloFieldError != null) return helloFieldError;
         c.tokenBudget  = optInt(caps, "token_budget", Integer.MAX_VALUE);
         c.verbose      = optBool(caps, "verbose", false);
         // Step 05: pulse / state_delta default ON for clients that said hello
@@ -2806,8 +3062,15 @@ public class TCPCommandServer {
         }
         int sockPort = (sock != null) ? sock.getPort() : 0;
         c.agentId = optString(caps, "agent_id", c.agent + "-" + sockPort);
+        helloFieldError = validateHelloField(
+                "agent_id", c.agentId, MAX_HANDSHAKE_IDENTITY_CHARS);
+        if (helloFieldError != null) return helloFieldError;
         if (!c.compatibility) {
-            c.acceptEvents = parseStringSet(caps, "accept_events");
+            try {
+                c.acceptEvents = parseStringSet(caps, "accept_events");
+            } catch (IllegalArgumentException malformedEvents) {
+                return protocolError("invalid_hello", malformedEvents.getMessage());
+            }
         }
 
         SessionCapsRegistry.Created<AgentCaps> created;
@@ -3015,14 +3278,35 @@ public class TCPCommandServer {
         Set<String> result = new HashSet<String>();
         if (obj == null) return result;
         JsonElement el = obj.get(key);
-        if (el == null || !el.isJsonArray()) return result;
+        if (el == null || el.isJsonNull()) return result;
+        if (!el.isJsonArray()) {
+            throw new IllegalArgumentException(key + " must be an array of strings");
+        }
+        if (el.getAsJsonArray().size() > MAX_ACCEPT_EVENT_TOPICS) {
+            throw new IllegalArgumentException(key + " exceeds "
+                    + MAX_ACCEPT_EVENT_TOPICS + " topics");
+        }
         for (JsonElement item : el.getAsJsonArray()) {
-            if (item != null && item.isJsonPrimitive()) {
-                try { result.add(item.getAsString()); }
-                catch (Exception ignore) {}
+            if (item == null || !item.isJsonPrimitive()
+                    || !item.getAsJsonPrimitive().isString()) {
+                throw new IllegalArgumentException(key + " must contain only strings");
             }
+            String topic = item.getAsString();
+            if (topic.length() == 0 || topic.length() > MAX_ACCEPT_EVENT_TOPIC_CHARS) {
+                throw new IllegalArgumentException(key + " topic length must be 1.."
+                        + MAX_ACCEPT_EVENT_TOPIC_CHARS);
+            }
+            result.add(topic);
         }
         return result;
+    }
+
+    private JsonObject validateHelloField(String field, String value, int maxChars) {
+        if (value != null && value.length() > maxChars) {
+            return protocolError("invalid_hello", field + " exceeds "
+                    + maxChars + " characters");
+        }
+        return null;
     }
 
     // -----------------------------------------------------------------------
@@ -3556,8 +3840,7 @@ public class TCPCommandServer {
                     "target image is closed: " + target.imageTitle);
         }
         UndoFrame.RestorePlan targetPlan = target.prepareRestore(image);
-        String currentCsv = stateInspector == null
-                ? "" : stateInspector.getResultsTableCSV();
+        String currentCsv = boundedExactResultsCsvForUndo();
         UndoFrame rollbackFrame = UndoFrame.capture(
                 "rollback-" + target.callId, image, RoiManager.getRawInstance(),
                 currentCsv, false);
@@ -3814,7 +4097,7 @@ public class TCPCommandServer {
     }
 
     private UndoFrame captureBranchFrame(String branchId, ImagePlus image) {
-        String csv = stateInspector == null ? "" : stateInspector.getResultsTableCSV();
+        String csv = boundedExactResultsCsvForUndo();
         UndoFrame frame = UndoFrame.capture(
                 "checkpoint-" + branchId + "-" + nextCallId(), image,
                 RoiManager.getRawInstance(), csv, false);
@@ -3838,7 +4121,7 @@ public class TCPCommandServer {
     private void restoreBranchCheckpointAtomically(String branchId) throws Exception {
         List<UndoFrame> checkpoint = sessionUndo.branchCheckpoint(branchId);
         List<BranchRestoreEntry> entries = new ArrayList<BranchRestoreEntry>();
-        String csv = stateInspector == null ? "" : stateInspector.getResultsTableCSV();
+        String csv = boundedExactResultsCsvForUndo();
         for (UndoFrame frame : checkpoint) {
             ImagePlus image = resolveUndoTarget(frame);
             if (image == null) {
@@ -3941,11 +4224,8 @@ public class TCPCommandServer {
         try {
             ImagePlus imp = WindowManager.getCurrentImage();
             if (imp == null) return null;
-            String csv = null;
-            try {
-                csv = stateInspector != null
-                        ? stateInspector.getResultsTableCSV() : null;
-            } catch (Throwable ignore) {}
+            String csv = stateInspector != null
+                    ? boundedExactResultsCsvForUndo() : null;
             RoiManager rm = RoiManager.getRawInstance();
             boolean diskWrite = UndoFrame.macroHasDiskWrites(macroSrc);
             UndoFrame f = UndoFrame.capture(callId, imp, rm, csv, diskWrite);
@@ -4302,12 +4582,13 @@ public class TCPCommandServer {
         // dialog-pause" apart from "dialog-pause on the very first line,
         // nothing happened". Without this, mirroring the success-path snapshot
         // on failure would always report stale state as a side effect.
-        int preResultsLen = 0;
+        long preResultsLen = 0L;
         final List<ImageGraph.ImageRef> preOpenImages =
                 ImageGraph.captureOpenImages();
         try {
-            String preCsv = stateInspector.getResultsTableCSV();
-            preResultsLen = preCsv != null ? preCsv.length() : 0;
+            StateInspector.BoundedCsv preCsv = stateInspector
+                    .getResultsTableCSVBounded((int) MAX_RESULTS_TABLE_BYTES);
+            preResultsLen = preCsv.originalBytes();
         } catch (Throwable ignore) {}
 
         // Step 09: snapshot the active image's intensity distribution BEFORE
@@ -4497,9 +4778,10 @@ public class TCPCommandServer {
                 if (!opened.isEmpty()) {
                     delta.newImages = imageTitles(opened);
                 }
-                String csv = stateInspector.getResultsTableCSV();
-                if (csv != null && !csv.isEmpty()) {
-                    delta.resultsTable = csv;
+                StateInspector.BoundedCsv csv = stateInspector
+                        .getResultsTableCSVBounded((int) MAX_RESULTS_TABLE_BYTES);
+                if (!csv.text().isEmpty()) {
+                    delta.setResultsTable(csv);
                 }
                 stateInspector.checkResultsTableChange();
             } catch (Exception ignore) {
@@ -4536,10 +4818,11 @@ public class TCPCommandServer {
                     sideEffectsObj.add("newImages", imageTitles(opened));
                     sideEffectsLanded = true;
                 }
-                String csv = stateInspector.getResultsTableCSV();
-                int postLen = csv != null ? csv.length() : 0;
-                if (csv != null && !csv.isEmpty() && postLen != preResultsLen) {
-                    delta.resultsTable = csv;
+                StateInspector.BoundedCsv csv = stateInspector
+                        .getResultsTableCSVBounded((int) MAX_RESULTS_TABLE_BYTES);
+                long postLen = csv.originalBytes();
+                if (!csv.text().isEmpty() && postLen != preResultsLen) {
+                    delta.setResultsTable(csv);
                     sideEffectsObj.addProperty("resultsChanged", true);
                     sideEffectsLanded = true;
                 }
@@ -4716,6 +4999,17 @@ public class TCPCommandServer {
                 && caps.safeMode
                 && caps.safeModeOptions != null
                 && caps.safeModeOptions.scientificIntegrityScan;
+    }
+
+    private String boundedExactResultsCsvForUndo() {
+        if (stateInspector == null) return "";
+        StateInspector.BoundedCsv csv = stateInspector
+                .getResultsTableCSVBounded((int) MAX_RESULTS_TABLE_BYTES);
+        if (csv.truncated()) {
+            throw new IllegalStateException("Results table exceeds the exact undo "
+                    + "snapshot limit of " + MAX_RESULTS_TABLE_BYTES + " bytes");
+        }
+        return csv.text();
     }
 
     private static final class DestructiveMacroException
@@ -5835,7 +6129,9 @@ public class TCPCommandServer {
                     state.add("allImages", imagesArray);
 
                     // Results table
-                    state.addProperty("resultsTable", stateInspector.getResultsTableCSV());
+                    StateInspector.BoundedCsv resultsCsv = stateInspector
+                            .getResultsTableCSVBounded((int) MAX_RESULTS_TABLE_BYTES);
+                    addBoundedResultsCsv(state, resultsCsv);
 
                     // Memory
                     MemoryInfo mem = stateInspector.getMemoryInfo();
@@ -5924,7 +6220,8 @@ public class TCPCommandServer {
             @Override
             public void run() {
                 try {
-                    holder[0] = stateInspector.getResultsTableCSV();
+                    holder[0] = stateInspector.getResultsTableCSVBounded(
+                            (int) MAX_RESULTS_TABLE_BYTES);
                 } catch (Exception e) {
                     holder[0] = e;
                 } finally {
@@ -5947,21 +6244,41 @@ public class TCPCommandServer {
         if (holder[0] instanceof Exception) {
             return errorResponse("Error: " + ((Exception) holder[0]).getMessage());
         }
-        return successResponse(new JsonPrimitive((String) holder[0]));
+        StateInspector.BoundedCsv csv = (StateInspector.BoundedCsv) holder[0];
+        if (csv.truncated()) {
+            JsonObject tooLarge = errorResponse("Results table is "
+                    + csv.originalBytes()
+                    + " UTF-8 bytes; direct TCP return is limited to "
+                    + MAX_RESULTS_TABLE_BYTES + " bytes. Export it to AI_Exports instead.");
+            tooLarge.addProperty("actual_bytes", csv.originalBytes());
+            tooLarge.addProperty("limit_bytes", MAX_RESULTS_TABLE_BYTES);
+            tooLarge.addProperty("total_rows", csv.totalRows());
+            tooLarge.addProperty("returned_rows", 0);
+            return tooLarge;
+        }
+        return successResponse(new JsonPrimitive(csv.text()));
     }
 
     private JsonObject handleCaptureImage(JsonObject request, AgentCaps caps, Socket sock) {
+        final long responseBudget = compoundResponseBudget.get().longValue();
+        final int capturePngLimit = maxBinaryBytesForCompoundBudget(
+                responseBudget, MAX_CAPTURE_PNG_BYTES);
+        if (capturePngLimit <= 0) {
+            return compoundBudgetError("capture_image", responseBudget);
+        }
         JsonElement maxSizeElement = request.get("maxSize");
-        int requestedMaxSize = (maxSizeElement != null && maxSizeElement.isJsonPrimitive())
-                ? maxSizeElement.getAsInt()
-                : Constants.MAX_THUMBNAIL_SIZE;
+        final int requestedMaxSize;
+        try {
+            requestedMaxSize = (maxSizeElement != null && maxSizeElement.isJsonPrimitive())
+                    ? maxSizeElement.getAsInt()
+                    : Constants.MAX_THUMBNAIL_SIZE;
+        } catch (RuntimeException invalidSize) {
+            return errorResponse("capture_image maxSize must be an integer");
+        }
         final CaptureSource source = CaptureSource.from(
                 request.has("source") ? request.get("source").getAsString() : null);
-        PrivacyPosture posture = PostureController.getInstance().current();
-        boolean fullResolutionOverride = posture == PrivacyPosture.PSEUDONYMISED
-                && source == CaptureSource.ACTIVE_IMAGE_CONTENT
-                && VisualOverrideRegistry.getInstance().hasGrant(sessionKey(caps, sock));
-        final int maxSize = fullResolutionOverride ? Integer.MAX_VALUE : requestedMaxSize;
+        final PrivacyPosture posture = PostureController.getInstance().current();
+        final String visualSession = sessionKey(caps, sock);
 
         if (source.isRefusedScreenshot()) {
             JsonObject result = new JsonObject();
@@ -5981,17 +6298,36 @@ public class TCPCommandServer {
                     if (imp == null) {
                         holder[0] = "NO_IMAGE";
                     } else {
+                        String imageToken = visualImageToken(imp);
+                        boolean fullResolutionOverride =
+                                posture == PrivacyPosture.PSEUDONYMISED
+                                && source == CaptureSource.ACTIVE_IMAGE_CONTENT
+                                && VisualOverrideRegistry.getInstance().hasGrant(
+                                        visualSession, imageToken);
+                        int maxSize = Math.max(1, Math.min(MAX_CAPTURE_DIMENSION,
+                                fullResolutionOverride
+                                        ? MAX_CAPTURE_DIMENSION : requestedMaxSize));
                         byte[] png = source == CaptureSource.ACTIVE_IMAGE_WITH_OVERLAY
-                                ? ImageCapture.captureWithOverlays(imp, maxSize)
-                                : ImageCapture.captureImage(imp, maxSize);
+                                ? ImageCapture.captureWithOverlays(
+                                        imp, maxSize, capturePngLimit)
+                                : ImageCapture.captureImage(
+                                        imp, maxSize, capturePngLimit);
                         if (png == null) {
                             holder[0] = "CAPTURE_FAILED";
+                        } else if (png.length > capturePngLimit) {
+                            holder[0] = "CAPTURE_TOO_LARGE:" + png.length;
                         } else {
                             JsonObject result = new JsonObject();
                             result.addProperty("base64", base64Encode(png));
                             result.addProperty("width", imp.getWidth());
                             result.addProperty("height", imp.getHeight());
                             result.addProperty("source", source.name());
+                            if (posture == PrivacyPosture.PSEUDONYMISED
+                                    && source == CaptureSource.ACTIVE_IMAGE_CONTENT) {
+                                // Internal hand-off: CaptureHandler removes this
+                                // after atomically consuming the exact image grant.
+                                result.addProperty("_visual_image_token", imageToken);
+                            }
                             holder[0] = result;
                         }
                     }
@@ -6015,6 +6351,13 @@ public class TCPCommandServer {
         }
 
         if (holder[0] instanceof Exception) {
+            if (holder[0] instanceof ImageCapture.CaptureTooLargeException) {
+                if (capturePngLimit < MAX_CAPTURE_PNG_BYTES) {
+                    return compoundBudgetError("capture_image", responseBudget);
+                }
+                return errorResponse("Captured PNG exceeds " + capturePngLimit
+                        + " bytes; crop or reduce maxSize.");
+            }
             return errorResponse("Capture error: " + ((Exception) holder[0]).getMessage());
         }
         if ("NO_IMAGE".equals(holder[0])) {
@@ -6022,6 +6365,14 @@ public class TCPCommandServer {
         }
         if ("CAPTURE_FAILED".equals(holder[0])) {
             return errorResponse("Failed to capture image");
+        }
+        if (holder[0] instanceof String
+                && ((String) holder[0]).startsWith("CAPTURE_TOO_LARGE:")) {
+            if (capturePngLimit < MAX_CAPTURE_PNG_BYTES) {
+                return compoundBudgetError("capture_image", responseBudget);
+            }
+            return errorResponse("Captured PNG exceeds " + capturePngLimit
+                    + " bytes; crop or reduce maxSize.");
         }
         return successResponse((JsonObject) holder[0]);
     }
@@ -6042,18 +6393,44 @@ public class TCPCommandServer {
                 ? request.get("reason").getAsString()
                 : "";
         String session = sessionKey(caps, sock);
+        ImagePlus requestedImage = currentImage();
+        String imageToken = visualImageToken(requestedImage);
         VisualOverrideRegistry.PendingRequest pending =
-                VisualOverrideRegistry.getInstance().request(session, reason);
+                VisualOverrideRegistry.getInstance().request(session, reason, imageToken);
         JsonObject event = new JsonObject();
         event.addProperty("session", session);
         event.addProperty("request_id", pending.requestId);
         event.addProperty("reason", reason);
+        event.addProperty("image_token", imageToken);
+        event.addProperty("image_display_token", visualImageDisplayToken(requestedImage));
         eventBus.publish("data_governance.visual.requested", event);
 
         result.addProperty("status", "pending_user_consent");
         result.addProperty("request_id", pending.requestId);
         result.addProperty("expires_in_seconds", 60);
         return successResponse(result);
+    }
+
+    /** Stable, process-local scope for the exact image a visual request covers. */
+    static String visualImageToken(ImagePlus image) {
+        String identity = ImageGraph.stableIdentity(image);
+        return identity == null ? "" : identity;
+    }
+
+    /** Pseudonymous path/title label for display and audit only, never grants. */
+    private static String visualImageDisplayToken(ImagePlus image) {
+        if (image == null) return "";
+        try {
+            ij.io.FileInfo info = image.getOriginalFileInfo();
+            if (info != null && info.directory != null && info.fileName != null) {
+                return PathTokenMap.getInstance().tokenForPath(
+                        Paths.get(info.directory, info.fileName));
+            }
+            return PathTokenMap.getInstance().tokenForSensitiveText(
+                    image.getTitle() == null ? "" : image.getTitle(), "image");
+        } catch (Throwable tokenFailure) {
+            return "image";
+        }
     }
 
     private JsonObject handleOpenImage(JsonObject request, boolean tokenOnly) {
@@ -6816,19 +7193,27 @@ public class TCPCommandServer {
             ProcessBuilder pb = new ProcessBuilder(command);
             pb.redirectErrorStream(true);
             Process proc = pb.start();
-            StringBuilder sb = new StringBuilder();
-            try (BufferedReader rdr = new BufferedReader(new InputStreamReader(
-                    proc.getInputStream(), StandardCharsets.UTF_8))) {
-                String line;
-                while ((line = rdr.readLine()) != null) {
-                    sb.append(line).append('\n');
+            ByteArrayOutputStream retained = new ByteArrayOutputStream(8192);
+            long totalOutputBytes = 0L;
+            try (InputStream processOutput = proc.getInputStream()) {
+                byte[] buffer = new byte[8192];
+                int read;
+                while ((read = processOutput.read(buffer)) != -1) {
+                    totalOutputBytes += read;
+                    int remaining = MAX_PROCESS_OUTPUT_BYTES - retained.size();
+                    if (remaining > 0) {
+                        retained.write(buffer, 0, Math.min(remaining, read));
+                    }
                 }
             }
             int exit = proc.waitFor();
-            String output = sb.toString();
+            String output = new String(retained.toByteArray(), StandardCharsets.UTF_8);
+            boolean outputTruncated = totalOutputBytes > MAX_PROCESS_OUTPUT_BYTES;
             if (exit != 0) {
                 return errorResponse("methods_table.py exited " + exit + ": "
-                        + output.trim());
+                        + output.trim() + (outputTruncated
+                        ? " [output truncated at " + MAX_PROCESS_OUTPUT_BYTES + " bytes]"
+                        : ""));
             }
             // stdout looks like:
             //   "emitted methods.md: 21/33 WG11 fields populated, 12 marked [unknown] -> /path/methods.md"
@@ -6851,6 +7236,8 @@ public class TCPCommandServer {
                 result.addProperty("datasetHash", initiatingDataset.hash);
             }
             result.addProperty("output", output.trim());
+            result.addProperty("output_truncated", outputTruncated);
+            result.addProperty("output_total_bytes", totalOutputBytes);
             return successResponse(result);
         } catch (IOException | InterruptedException e) {
             if (e instanceof InterruptedException) {
@@ -6867,19 +7254,49 @@ public class TCPCommandServer {
         }
 
         JsonArray commands = commandsElement.getAsJsonArray();
+        if (commands.size() > MAX_BATCH_COMMANDS) {
+            return errorResponse("Batch command count " + commands.size()
+                    + " exceeds max " + MAX_BATCH_COMMANDS);
+        }
+        int parentDepth = batchDepth.get().intValue();
+        if (parentDepth >= MAX_BATCH_DEPTH) {
+            return errorResponse("Batch nesting depth exceeds max " + MAX_BATCH_DEPTH);
+        }
+        CompoundWorkBudget workBudget = compoundWorkBudget.get();
+        boolean ownsWorkBudget = workBudget == null;
+        if (ownsWorkBudget) {
+            workBudget = new CompoundWorkBudget();
+            compoundWorkBudget.set(workBudget);
+        }
+        final CompoundWorkBudget sharedWorkBudget = workBudget;
+        final int workAtEntry = sharedWorkBudget.consumed;
+        batchDepth.set(Integer.valueOf(parentDepth + 1));
+        try {
         JsonArray results = new JsonArray();
         boolean haltOnError = request.has("halt_on_error")
                 && request.get("halt_on_error").isJsonPrimitive()
                 && request.get("halt_on_error").getAsBoolean();
         int firstFailureIndex = -1;
         boolean halted = false;
+        long retainedBytes = 0L;
+        boolean responseTruncated = false;
+        int executedCount = 0;
+        int budgetExhaustedAtIndex = -1;
 
         for (int i = 0; i < commands.size(); i++) {
+            // Admission is charged before validation/dispatch so malformed or
+            // throwing children cannot bypass the shared nested-work cap.
+            if (!sharedWorkBudget.tryConsume()) {
+                halted = true;
+                budgetExhaustedAtIndex = i;
+                break;
+            }
             JsonElement elem = commands.get(i);
             JsonObject subResult;
             if (elem.isJsonObject()) {
                 try {
-                    subResult = dispatch(elem.getAsJsonObject(), caps);
+                    subResult = dispatchWithCompoundBudget(
+                            elem.getAsJsonObject(), caps, retainedBytes);
                 } catch (Throwable failure) {
                     String detail = failure.getMessage();
                     if (detail == null || detail.trim().isEmpty()) {
@@ -6891,10 +7308,19 @@ public class TCPCommandServer {
             } else {
                 subResult = errorResponse("Invalid batch command at index " + i);
             }
+            executedCount++;
             JsonObject indexed = new JsonObject();
             indexed.addProperty("index", i);
             indexed.add("response", subResult);
+            long responseBytes = utf8Length(GSON.toJson(indexed));
+            if (retainedBytes + responseBytes > MAX_BATCH_RESPONSE_BYTES) {
+                responseTruncated = true;
+                halted = true;
+                if (firstFailureIndex < 0) firstFailureIndex = i;
+                break;
+            }
             results.add(indexed);
+            retainedBytes += responseBytes;
             if (isFailure(subResult) && firstFailureIndex < 0) {
                 firstFailureIndex = i;
                 if (haltOnError) {
@@ -6902,17 +7328,40 @@ public class TCPCommandServer {
                     break;
                 }
             }
+            if (sharedWorkBudget.exhausted) {
+                halted = true;
+                budgetExhaustedAtIndex = Math.min(i + 1, commands.size());
+                break;
+            }
         }
 
         JsonObject result = new JsonObject();
         result.add("results", results);
-        result.addProperty("executed", results.size());
+        result.addProperty("executed", executedCount);
+        result.addProperty("retained_responses", results.size());
+        result.addProperty("omitted_responses", executedCount - results.size());
+        result.addProperty("omitted_commands", commands.size() - executedCount);
         result.addProperty("total", commands.size());
         result.addProperty("halted", halted);
+        result.addProperty("response_truncated", responseTruncated);
+        result.addProperty("retained_response_bytes", retainedBytes);
+        result.addProperty("max_response_bytes", MAX_BATCH_RESPONSE_BYTES);
+        result.addProperty("work_executed",
+                sharedWorkBudget.consumed - workAtEntry);
+        result.addProperty("work_budget_remaining", sharedWorkBudget.remaining());
+        result.addProperty("max_work", MAX_COMPOUND_WORK);
+        result.addProperty("work_budget_exhausted", sharedWorkBudget.exhausted);
+        if (budgetExhaustedAtIndex >= 0) {
+            result.addProperty("budget_exhausted_at_index", budgetExhaustedAtIndex);
+        }
         if (firstFailureIndex >= 0) {
             result.addProperty("firstFailureIndex", firstFailureIndex);
         }
         return successResponse(result);
+        } finally {
+            batchDepth.set(Integer.valueOf(parentDepth));
+            if (ownsWorkBudget) compoundWorkBudget.remove();
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -6949,7 +7398,8 @@ public class TCPCommandServer {
 
         List<JsonObject> segments;
         try {
-            segments = BatchParser.parse(chainEl.getAsString());
+            segments = BatchParser.parse(
+                    chainEl.getAsString(), MAX_BATCH_COMMANDS);
         } catch (Exception e) {
             return errorResponse("Chain parse error: " + e.getMessage());
         }
@@ -6966,14 +7416,43 @@ public class TCPCommandServer {
             return successResponse(empty);
         }
 
+        CompoundWorkBudget workBudget = compoundWorkBudget.get();
+        boolean ownsWorkBudget = workBudget == null;
+        if (ownsWorkBudget) {
+            workBudget = new CompoundWorkBudget();
+            compoundWorkBudget.set(workBudget);
+        }
+        final CompoundWorkBudget sharedWorkBudget = workBudget;
+        final int workAtEntry = sharedWorkBudget.consumed;
+        try {
+
         JsonArray results = new JsonArray();
         boolean halted = false;
         int firstFailureIdx = -1;
+        long retainedBytes = 0L;
+        int executedCount = 0;
+        boolean responseTruncated = false;
+        int budgetExhaustedAtIndex = -1;
 
         for (int i = 0; i < segments.size(); i++) {
+            if (!sharedWorkBudget.tryConsume()) {
+                halted = true;
+                budgetExhaustedAtIndex = i;
+                break;
+            }
             JsonObject subReq = segments.get(i);
-            JsonObject subResp = dispatch(subReq, caps);
+            JsonObject subResp = dispatchWithCompoundBudget(
+                    subReq, caps, retainedBytes);
+            executedCount++;
+            long responseBytes = utf8Length(GSON.toJson(subResp));
+            if (retainedBytes + responseBytes > MAX_BATCH_RESPONSE_BYTES) {
+                responseTruncated = true;
+                halted = true;
+                if (firstFailureIdx < 0) firstFailureIdx = i;
+                break;
+            }
             results.add(subResp);
+            retainedBytes += responseBytes;
 
             boolean failed = isFailure(subResp);
             if (failed && firstFailureIdx < 0) firstFailureIdx = i;
@@ -6981,17 +7460,53 @@ public class TCPCommandServer {
                 halted = true;
                 break;
             }
+            if (sharedWorkBudget.exhausted) {
+                halted = true;
+                budgetExhaustedAtIndex = Math.min(i + 1, segments.size());
+                break;
+            }
         }
 
         JsonObject out = new JsonObject();
         out.add("results", results);
-        out.addProperty("executed", results.size());
+        out.addProperty("executed", executedCount);
+        out.addProperty("retained_responses", results.size());
+        out.addProperty("omitted_responses", executedCount - results.size());
+        out.addProperty("omitted_commands", segments.size() - executedCount);
         out.addProperty("total", segments.size());
         out.addProperty("halted", halted);
+        out.addProperty("response_truncated", responseTruncated);
+        out.addProperty("retained_response_bytes", retainedBytes);
+        out.addProperty("max_response_bytes", MAX_BATCH_RESPONSE_BYTES);
+        out.addProperty("work_executed",
+                sharedWorkBudget.consumed - workAtEntry);
+        out.addProperty("work_budget_remaining", sharedWorkBudget.remaining());
+        out.addProperty("max_work", MAX_COMPOUND_WORK);
+        out.addProperty("work_budget_exhausted", sharedWorkBudget.exhausted);
+        if (budgetExhaustedAtIndex >= 0) {
+            out.addProperty("budget_exhausted_at_index", budgetExhaustedAtIndex);
+        }
         if (firstFailureIdx >= 0) {
             out.addProperty("firstFailureIndex", firstFailureIdx);
         }
         return successResponse(out);
+        } finally {
+            if (ownsWorkBudget) compoundWorkBudget.remove();
+        }
+    }
+
+    private JsonObject dispatchWithCompoundBudget(JsonObject request,
+                                                   AgentCaps caps,
+                                                   long retainedBytes) {
+        long prior = compoundResponseBudget.get().longValue();
+        long localRemaining = Math.max(0L,
+                MAX_BATCH_RESPONSE_BYTES - Math.max(0L, retainedBytes));
+        compoundResponseBudget.set(Long.valueOf(Math.min(prior, localRemaining)));
+        try {
+            return dispatch(request, caps);
+        } finally {
+            compoundResponseBudget.set(Long.valueOf(prior));
+        }
     }
 
     private boolean isFailure(JsonObject resp) {
@@ -7230,7 +7745,7 @@ public class TCPCommandServer {
         if (owner == null) return errorResponse("job_list requires a durable session");
         List<JobRegistry.Job> all = jobRegistry.list(owner);
         JsonArray arr = new JsonArray();
-        for (JobRegistry.Job j : all) arr.add(jobRegistry.toJson(j));
+        for (JobRegistry.Job j : all) arr.add(jobRegistry.toSummaryJson(j));
         JsonObject result = new JsonObject();
         result.addProperty("count", arr.size());
         result.add("jobs", arr);
@@ -7412,18 +7927,90 @@ public class TCPCommandServer {
         JsonObject json = new JsonObject();
         json.addProperty("success", result.isSuccess());
         if (result.isSuccess()) {
-            json.addProperty("output", result.getOutput() != null ? result.getOutput() : "");
-            json.addProperty("resultsTable", result.getResultsTable() != null ? result.getResultsTable() : "");
+            addBoundedUtf8Property(json, "output",
+                    result.getOutput() != null ? result.getOutput() : "",
+                    MAX_RESULTS_TABLE_BYTES);
+            addBoundedUtf8Property(json, "resultsTable",
+                    result.getResultsTable() != null ? result.getResultsTable() : "",
+                    MAX_RESULTS_TABLE_BYTES);
+            if (result.isResultsTableTruncated()) {
+                json.addProperty("resultsTable_truncated", true);
+                json.addProperty("resultsTable_original_bytes",
+                        result.getResultsTableOriginalBytes());
+                json.addProperty("resultsTable_returned_bytes",
+                        utf8Length(json.get("resultsTable").getAsString()));
+                json.addProperty("resultsTable_total_rows",
+                        result.getResultsTableTotalRows());
+                json.addProperty("resultsTable_returned_rows",
+                        result.getResultsTableReturnedRows());
+            }
             JsonArray newImages = new JsonArray();
-            for (String img : result.getNewImages()) {
+            List<String> images = result.getNewImages() == null
+                    ? Collections.<String>emptyList() : result.getNewImages();
+            int retained = Math.min(images.size(), JobRegistry.MAX_RESULT_IMAGES);
+            for (int i = 0; i < retained; i++) {
+                String img = images.get(i) == null ? "" : images.get(i);
+                if (img.length() > JobRegistry.MAX_IMAGE_NAME_CHARS) {
+                    img = img.substring(0, JobRegistry.MAX_IMAGE_NAME_CHARS);
+                }
                 newImages.add(new JsonPrimitive(img));
             }
             json.add("newImages", newImages);
+            json.addProperty("newImages_truncated", images.size() > retained);
+            json.addProperty("newImages_total", images.size());
             json.addProperty("executionTimeMs", result.getExecutionTimeMs());
         } else {
             json.addProperty("error", result.getError() != null ? result.getError() : "Unknown error");
         }
         return json;
+    }
+
+    static long utf8Length(String value) {
+        if (value == null || value.isEmpty()) return 0L;
+        long bytes = 0L;
+        for (int i = 0; i < value.length();) {
+            int cp = value.codePointAt(i);
+            bytes += cp <= 0x7f ? 1 : cp <= 0x7ff ? 2 : cp <= 0xffff ? 3 : 4;
+            i += Character.charCount(cp);
+        }
+        return bytes;
+    }
+
+    static void addBoundedUtf8Property(JsonObject target, String key,
+                                       String value, long maxBytes) {
+        String safe = value == null ? "" : value;
+        long originalBytes = utf8Length(safe);
+        if (originalBytes <= maxBytes) {
+            target.addProperty(key, safe);
+            target.addProperty(key + "_truncated", false);
+            target.addProperty(key + "_original_bytes", originalBytes);
+            return;
+        }
+        int chars = 0;
+        long returnedBytes = 0L;
+        while (chars < safe.length()) {
+            int cp = safe.codePointAt(chars);
+            int cpBytes = cp <= 0x7f ? 1 : cp <= 0x7ff ? 2 : cp <= 0xffff ? 3 : 4;
+            if (returnedBytes + cpBytes > maxBytes) break;
+            returnedBytes += cpBytes;
+            chars += Character.charCount(cp);
+        }
+        target.addProperty(key, safe.substring(0, chars));
+        target.addProperty(key + "_truncated", true);
+        target.addProperty(key + "_original_bytes", originalBytes);
+        target.addProperty(key + "_returned_bytes", returnedBytes);
+    }
+
+    static void addBoundedResultsCsv(JsonObject target,
+                                     StateInspector.BoundedCsv csv) {
+        StateInspector.BoundedCsv safe = csv == null
+                ? new StateInspector.BoundedCsv("", 0L, 0, 0, 0) : csv;
+        target.addProperty("resultsTable", safe.text());
+        target.addProperty("resultsTable_truncated", safe.truncated());
+        target.addProperty("resultsTable_original_bytes", safe.originalBytes());
+        target.addProperty("resultsTable_returned_bytes", safe.returnedBytes());
+        target.addProperty("resultsTable_total_rows", safe.totalRows());
+        target.addProperty("resultsTable_returned_rows", safe.returnedRows());
     }
 
     private JsonObject imageInfoToJson(ImageInfo info) {
@@ -7450,6 +8037,29 @@ public class TCPCommandServer {
         return java.util.Base64.getEncoder().encodeToString(data);
     }
 
+    /** Maximum raw bytes whose base64 JSON representation can fit the budget. */
+    static int maxBinaryBytesForCompoundBudget(long remainingBytes, int absoluteMax) {
+        if (absoluteMax <= 0) return 0;
+        if (remainingBytes == Long.MAX_VALUE) return absoluteMax;
+        long usable = remainingBytes - COMPOUND_RESPONSE_OVERHEAD_BYTES;
+        if (usable < 4L) return 0;
+        long raw = (usable / 4L) * 3L;
+        return (int) Math.min((long) absoluteMax, Math.min(raw, Integer.MAX_VALUE));
+    }
+
+    private static long base64EncodedLength(long rawBytes) {
+        if (rawBytes <= 0L) return 0L;
+        return 4L * ((rawBytes + 2L) / 3L);
+    }
+
+    private JsonObject compoundBudgetError(String command, long remainingBytes) {
+        JsonObject error = errorResponse("compound_response_budget: " + command
+                + " output cannot fit the remaining compound response budget");
+        error.addProperty("error_code", "compound_response_budget");
+        error.addProperty("remaining_response_bytes", Math.max(0L, remainingBytes));
+        return error;
+    }
+
     /**
      * Return raw pixel data for the active image (or a region of it).
      * Supports optional parameters: x, y, width, height, slice.
@@ -7463,6 +8073,7 @@ public class TCPCommandServer {
      *   {"command": "get_pixels", "allSlices": true}           — entire stack
      */
     private JsonObject handleGetPixels(JsonObject request) {
+        final long responseBudget = compoundResponseBudget.get().longValue();
         final int reqX;
         final int reqY;
         final int reqW;
@@ -7545,6 +8156,12 @@ public class TCPCommandServer {
                                 + " pixels. Max 4M. Use x/y/width/height to crop.");
                         return;
                     }
+                    if (responseBudget != Long.MAX_VALUE
+                            && base64EncodedLength(rawByteCount)
+                            + COMPOUND_RESPONSE_OVERHEAD_BYTES > responseBudget) {
+                        holder[0] = "COMPOUND_BUDGET";
+                        return;
+                    }
 
                     // Allocate only after all dimensions and byte arithmetic
                     // have been bounded. Read processors directly from the
@@ -7610,6 +8227,9 @@ public class TCPCommandServer {
         }
         if ("NO_IMAGE".equals(holder[0])) {
             return errorResponse("No active image");
+        }
+        if ("COMPOUND_BUDGET".equals(holder[0])) {
+            return compoundBudgetError("get_pixels", responseBudget);
         }
         return successResponse((JsonObject) holder[0]);
     }

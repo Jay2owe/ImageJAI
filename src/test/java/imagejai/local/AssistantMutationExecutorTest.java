@@ -3,6 +3,7 @@ package imagejai.local;
 import ij.ImagePlus;
 import ij.WindowManager;
 import ij.process.ByteProcessor;
+import ij.measure.ResultsTable;
 import imagejai.config.Settings;
 import imagejai.engine.ExecutionResult;
 import imagejai.engine.CommandEngine;
@@ -23,6 +24,7 @@ public class AssistantMutationExecutorTest {
     @After
     public void clearImage() {
         WindowManager.setTempCurrentImage(null);
+        ResultsTable.getResultsTable().reset();
     }
 
     @Test
@@ -96,6 +98,36 @@ public class AssistantMutationExecutorTest {
         assertTrue(result.isSuccess());
         assertTrue(executor.undoForTest().totalFrames() == 1);
         executor.close();
+    }
+
+    @Test
+    public void oversizedExactResultsUndoRejectsBeforeOperation() {
+        Settings settings = new Settings();
+        settings.safeModeEnabled = false;
+        ImagePlus image = new ImagePlus("assistant-large-results",
+                new ByteProcessor(2, 2));
+        WindowManager.setTempCurrentImage(image);
+        ResultsTable table = ResultsTable.getResultsTable();
+        table.reset();
+        table.incrementCounter();
+        table.addValue("Payload", repeat('x',
+                imagejai.engine.StateInspector.DEFAULT_RESULTS_CSV_LIMIT_BYTES + 100));
+        AssistantMutationExecutor executor =
+                new AssistantMutationExecutor(settings, "test", "assistant-test");
+        AtomicBoolean ran = new AtomicBoolean();
+        try {
+            ExecutionResult result = executor.executeMacro(
+                    "setMinAndMax(0, 255);", () -> {
+                        ran.set(true);
+                        return success();
+                    });
+
+            assertFalse(result.isSuccess());
+            assertTrue(result.getError().contains("ResultsTable undo snapshot"));
+            assertFalse(ran.get());
+        } finally {
+            executor.close();
+        }
     }
 
     @Test
@@ -183,6 +215,12 @@ public class AssistantMutationExecutorTest {
     private static ExecutionResult success() {
         return ExecutionResult.success("", null,
                 Collections.<String>emptyList(), 1L);
+    }
+
+    private static String repeat(char value, int count) {
+        StringBuilder out = new StringBuilder(count);
+        for (int i = 0; i < count; i++) out.append(value);
+        return out.toString();
     }
 
     private static final class RecordingCommandEngine extends CommandEngine {

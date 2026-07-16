@@ -11,7 +11,8 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
-import java.util.IdentityHashMap;
+import java.lang.ref.ReferenceQueue;
+import java.lang.ref.WeakReference;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -75,8 +76,28 @@ public final class ImageGraph {
     }
 
     private static final Object IDENTITY_LOCK = new Object();
-    private static final IdentityHashMap<ImagePlus, String> IMAGE_IDENTITIES =
-            new IdentityHashMap<ImagePlus, String>();
+    private static final ReferenceQueue<ImagePlus> IMAGE_IDENTITY_QUEUE =
+            new ReferenceQueue<ImagePlus>();
+    private static final Map<WeakImageKey, String> IMAGE_IDENTITIES =
+            new HashMap<WeakImageKey, String>();
+
+    private static final class WeakImageKey extends WeakReference<ImagePlus> {
+        private final int identityHash;
+
+        WeakImageKey(ImagePlus image, ReferenceQueue<ImagePlus> queue) {
+            super(image, queue);
+            identityHash = System.identityHashCode(image);
+        }
+
+        @Override public int hashCode() { return identityHash; }
+
+        @Override public boolean equals(Object other) {
+            if (this == other) return true;
+            if (!(other instanceof WeakImageKey)) return false;
+            ImagePlus mine = get();
+            return mine != null && mine == ((WeakImageKey) other).get();
+        }
+    }
 
     /** Immutable node snapshot. {@link #closed} is mutable state set via
      *  {@link ImageGraph#markClosedByTitle(String)}; all other fields are
@@ -601,12 +622,28 @@ public final class ImageGraph {
     public static String stableIdentity(ImagePlus imp) {
         if (imp == null) return null;
         synchronized (IDENTITY_LOCK) {
-            String identity = IMAGE_IDENTITIES.get(imp);
+            drainCollectedImageIdentities();
+            WeakImageKey lookup = new WeakImageKey(imp, null);
+            String identity = IMAGE_IDENTITIES.get(lookup);
             if (identity == null) {
                 identity = "img-" + UUID.randomUUID().toString();
-                IMAGE_IDENTITIES.put(imp, identity);
+                IMAGE_IDENTITIES.put(new WeakImageKey(imp, IMAGE_IDENTITY_QUEUE), identity);
             }
             return identity;
+        }
+    }
+
+    private static void drainCollectedImageIdentities() {
+        WeakImageKey collected;
+        while ((collected = (WeakImageKey) IMAGE_IDENTITY_QUEUE.poll()) != null) {
+            IMAGE_IDENTITIES.remove(collected);
+        }
+    }
+
+    static int stableIdentityEntryCountForTest() {
+        synchronized (IDENTITY_LOCK) {
+            drainCollectedImageIdentities();
+            return IMAGE_IDENTITIES.size();
         }
     }
 

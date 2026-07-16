@@ -1,5 +1,8 @@
 package imagejai.engine.security;
 
+import ij.ImagePlus;
+import ij.io.FileInfo;
+import ij.process.ByteProcessor;
 import org.junit.Test;
 
 import java.util.ArrayList;
@@ -9,6 +12,7 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
@@ -120,5 +124,31 @@ public class VisualOverrideRegistryTest {
         } finally {
             pool.shutdownNow();
         }
+    }
+
+    @Test
+    public void compatibilityOverloadsDistinguishDuplicateTitlesAndPaths() {
+        ImagePlus first = image("duplicate.tif");
+        ImagePlus second = image("duplicate.tif");
+        FileInfo path = new FileInfo();
+        path.directory = "C:\\same\\";
+        path.fileName = "duplicate.tif";
+        first.setFileInfo(path);
+        second.setFileInfo(path);
+        AtomicReference<ImagePlus> active = new AtomicReference<ImagePlus>(first);
+        VisualOverrideRegistry registry = new VisualOverrideRegistry(active::get);
+
+        VisualOverrideRegistry.PendingRequest pending =
+                registry.request("session", "inspect");
+        assertTrue(registry.grant("session", pending.requestId, "inspect"));
+        active.set(second);
+        assertFalse(registry.hasGrant("session"));
+        assertFalse(registry.consumeIfPresent("session"));
+        active.set(first);
+        assertTrue(registry.hasGrant("session"));
+    }
+
+    private static ImagePlus image(String title) {
+        return new ImagePlus(title, new ByteProcessor(2, 2));
     }
 }

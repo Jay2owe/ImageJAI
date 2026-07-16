@@ -13,6 +13,7 @@ import java.nio.file.Files;
 import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
+import java.nio.file.attribute.BasicFileAttributes;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.format.DateTimeParseException;
@@ -53,6 +54,10 @@ public final class ModelsCache {
         InputStream open(Path path) throws IOException;
     }
 
+    interface PathProbe {
+        BasicFileAttributes readAttributes(Path path) throws IOException;
+    }
+
     /** One provider's cache slot — loaded snapshot. */
     public static final class Snapshot {
         private final String providerId;
@@ -74,14 +79,20 @@ public final class ModelsCache {
 
     private final Path rootDir;
     private final InputOpener inputOpener;
+    private final PathProbe pathProbe;
 
     public ModelsCache(Path rootDir) {
-        this(rootDir, Files::newInputStream);
+        this(rootDir, Files::newInputStream, ModelsCache::readAttributes);
     }
 
     ModelsCache(Path rootDir, InputOpener inputOpener) {
+        this(rootDir, inputOpener, ModelsCache::readAttributes);
+    }
+
+    ModelsCache(Path rootDir, InputOpener inputOpener, PathProbe pathProbe) {
         this.rootDir = Objects.requireNonNull(rootDir, "rootDir");
         this.inputOpener = Objects.requireNonNull(inputOpener, "inputOpener");
+        this.pathProbe = Objects.requireNonNull(pathProbe, "pathProbe");
     }
 
     public Path rootDir() {
@@ -93,7 +104,20 @@ public final class ModelsCache {
     }
 
     public boolean has(String providerId) {
-        return Files.exists(pathFor(providerId));
+        Path path = pathFor(providerId);
+        try {
+            BasicFileAttributes attributes = pathProbe.readAttributes(path);
+            if (!attributes.isRegularFile()) {
+                throw new CacheReadException("not_regular", path,
+                        "Model cache is not a regular file.");
+            }
+            return true;
+        } catch (NoSuchFileException ex) {
+            return false;
+        } catch (IOException ex) {
+            throw new CacheReadException("unreadable", path,
+                    "Could not inspect model cache: " + message(ex), ex);
+        }
     }
 
     /** Return {@code true} iff a snapshot exists and is younger than {@link #TTL}. */
@@ -108,8 +132,17 @@ public final class ModelsCache {
     /** Read the cached snapshot for one provider, or {@code null} when absent. */
     public Snapshot read(String providerId) {
         Path path = pathFor(providerId);
-        if (!Files.exists(path)) {
+        try {
+            BasicFileAttributes attributes = pathProbe.readAttributes(path);
+            if (!attributes.isRegularFile()) {
+                throw new CacheReadException("not_regular", path,
+                        "Model cache is not a regular file.");
+            }
+        } catch (NoSuchFileException ex) {
             return null;
+        } catch (IOException ex) {
+            throw new CacheReadException("unreadable", path,
+                    "Could not inspect model cache: " + message(ex), ex);
         }
         try (InputStream in = inputOpener.open(path)) {
             byte[] bytes = readBounded(in, path);
@@ -144,9 +177,7 @@ public final class ModelsCache {
                       String endpoint,
                       Set<String> modelIds) throws IOException {
         providerId = LaunchPolicy.requireProviderId(providerId);
-        if (!Files.exists(rootDir)) {
-            Files.createDirectories(rootDir);
-        }
+        Files.createDirectories(rootDir);
         Path target = pathFor(providerId);
         Path tmp = Files.createTempFile(rootDir, providerId + "-", ".tmp");
         Set<String> ids = new LinkedHashSet<String>();
@@ -279,6 +310,10 @@ public final class ModelsCache {
         return value == null || value.trim().isEmpty()
                 ? e.getClass().getSimpleName()
                 : value;
+    }
+
+    private static BasicFileAttributes readAttributes(Path path) throws IOException {
+        return Files.readAttributes(path, BasicFileAttributes.class);
     }
 
     public static final class CacheReadException extends IllegalStateException {

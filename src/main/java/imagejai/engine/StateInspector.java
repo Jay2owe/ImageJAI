@@ -21,6 +21,32 @@ import java.util.List;
  */
 public class StateInspector {
 
+    public static final int DEFAULT_RESULTS_CSV_LIMIT_BYTES = 2 * 1024 * 1024;
+
+    public static final class BoundedCsv {
+        private final String text;
+        private final long originalBytes;
+        private final int returnedBytes;
+        private final int totalRows;
+        private final int returnedRows;
+
+        BoundedCsv(String text, long originalBytes, int returnedBytes,
+                   int totalRows, int returnedRows) {
+            this.text = text;
+            this.originalBytes = originalBytes;
+            this.returnedBytes = returnedBytes;
+            this.totalRows = totalRows;
+            this.returnedRows = returnedRows;
+        }
+
+        public String text() { return text; }
+        public long originalBytes() { return originalBytes; }
+        public int returnedBytes() { return returnedBytes; }
+        public int totalRows() { return totalRows; }
+        public int returnedRows() { return returnedRows; }
+        public boolean truncated() { return originalBytes > returnedBytes; }
+    }
+
     private final EventBus bus = EventBus.getInstance();
     // Last-known row count for results.changed edge detection. Shared across
     // callers; mutations are serialised via the synchronized check method.
@@ -87,6 +113,7 @@ public class StateInspector {
      * @return CSV string, or empty string if no results table exists
      */
     public String getResultsTableCSV() {
+        // Legacy exact API retained for undo/provenance callers.
         ResultsTable rt = ResultsTable.getResultsTable();
         if (rt == null || rt.getCounter() == 0) {
             return "";
@@ -136,6 +163,109 @@ public class StateInspector {
             sb.append("  ... and ").append(roiCount - 20).append(" more\n");
         }
         return sb.toString();
+    }
+
+    /**
+     * Build a complete-row CSV prefix under a UTF-8 byte budget while still
+     * scanning cells to disclose the exact original byte/row counts. No
+     * unbounded aggregate String is allocated.
+     */
+    public BoundedCsv getResultsTableCSVBounded(int maxUtf8Bytes) {
+        if (maxUtf8Bytes < 0) throw new IllegalArgumentException("maxUtf8Bytes < 0");
+        ResultsTable rt = ResultsTable.getResultsTable();
+        if (rt == null || rt.getCounter() == 0) {
+            return new BoundedCsv("", 0L, 0, 0, 0);
+        }
+        String[] headings = rt.getHeadings();
+        int rowCount = rt.getCounter();
+        StringBuilder retained = new StringBuilder(Math.min(maxUtf8Bytes, 8192));
+        long originalBytes = csvRowBytes(headings);
+        boolean retainMore = originalBytes <= maxUtf8Bytes;
+        if (retainMore) appendCsvRow(retained, headings);
+        int returnedRows = 0;
+
+        for (int row = 0; row < rowCount; row++) {
+            long rowBytes = 1L; // newline
+            for (int col = 0; col < headings.length; col++) {
+                if (col > 0) rowBytes++;
+                rowBytes = saturatedAdd(rowBytes,
+                        escapedCsvUtf8Bytes(rt.getStringValue(headings[col], row)));
+            }
+            originalBytes = saturatedAdd(originalBytes, rowBytes);
+            if (retainMore && originalBytes <= maxUtf8Bytes) {
+                for (int col = 0; col < headings.length; col++) {
+                    if (col > 0) retained.append(',');
+                    appendEscapedCsv(retained,
+                            rt.getStringValue(headings[col], row));
+                }
+                retained.append('\n');
+                returnedRows++;
+            } else {
+                retainMore = false;
+            }
+        }
+        int returnedBytes = utf8Bytes(retained);
+        return new BoundedCsv(retained.toString(), originalBytes, returnedBytes,
+                rowCount, returnedRows);
+    }
+
+    private static long csvRowBytes(String[] values) {
+        long bytes = 1L;
+        for (int i = 0; i < values.length; i++) {
+            if (i > 0) bytes++;
+            bytes = saturatedAdd(bytes, escapedCsvUtf8Bytes(values[i]));
+        }
+        return bytes;
+    }
+
+    private static void appendCsvRow(StringBuilder out, String[] values) {
+        for (int i = 0; i < values.length; i++) {
+            if (i > 0) out.append(',');
+            appendEscapedCsv(out, values[i]);
+        }
+        out.append('\n');
+    }
+
+    private static long escapedCsvUtf8Bytes(String value) {
+        String safe = value == null ? "" : value;
+        boolean quoted = safe.indexOf(',') >= 0 || safe.indexOf('"') >= 0
+                || safe.indexOf('\n') >= 0;
+        long bytes = quoted ? 2L : 0L;
+        for (int i = 0; i < safe.length();) {
+            int cp = safe.codePointAt(i);
+            bytes = saturatedAdd(bytes,
+                    cp <= 0x7f ? 1L : cp <= 0x7ff ? 2L : cp <= 0xffff ? 3L : 4L);
+            if (quoted && cp == '"') bytes = saturatedAdd(bytes, 1L);
+            i += Character.charCount(cp);
+        }
+        return bytes;
+    }
+
+    private static void appendEscapedCsv(StringBuilder out, String value) {
+        String safe = value == null ? "" : value;
+        boolean quoted = safe.indexOf(',') >= 0 || safe.indexOf('"') >= 0
+                || safe.indexOf('\n') >= 0;
+        if (quoted) out.append('"');
+        for (int i = 0; i < safe.length(); i++) {
+            char c = safe.charAt(i);
+            if (quoted && c == '"') out.append('"');
+            out.append(c);
+        }
+        if (quoted) out.append('"');
+    }
+
+    private static int utf8Bytes(CharSequence value) {
+        long bytes = 0L;
+        for (int i = 0; i < value.length();) {
+            int cp = Character.codePointAt(value, i);
+            bytes += cp <= 0x7f ? 1 : cp <= 0x7ff ? 2 : cp <= 0xffff ? 3 : 4;
+            i += Character.charCount(cp);
+        }
+        return (int) Math.min(Integer.MAX_VALUE, bytes);
+    }
+
+    private static long saturatedAdd(long left, long right) {
+        return Long.MAX_VALUE - left < right ? Long.MAX_VALUE : left + right;
     }
 
     /**
