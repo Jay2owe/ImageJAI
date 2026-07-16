@@ -8,12 +8,12 @@ run rather than inferred from the headless gates.
 
 | Item | Recorded value |
 |---|---|
-| Git revision | `2535e686fd9e6f67845768f69d05f154287de568` |
-| Verification timestamp and timezone | 2026-07-16T16:14:01+01:00 (Europe/London) |
+| Verified code revision | `c2ebfe9229c7a59aed16b6628508c538a8671cbc` |
+| Verification timestamp and timezone | 2026-07-17T00:09:29+01:00 (Europe/London) |
 | Operating system | Microsoft Windows 11 Home, amd64, NT 10.0.26200 |
 | Java and Maven versions | Oracle JDK 25.0.2; Apache Maven 3.9.9 |
 | Python version | CPython 3.13.14 |
-| Working tree clean before gate | Code/tests clean at the recorded revision; this verification file was intentionally untracked while results were recorded |
+| Working tree clean before gate | Yes, at the recorded code revision; this evidence-only document update followed the completed gates |
 
 Record the environment with:
 
@@ -29,20 +29,21 @@ python --version
 
 | Gate | Result | Count, hash, or evidence |
 |---|---|---|
-| Java unit suite and main JAR | PASS | 1,171 tests in 150 suites; 0 failures/errors/skips; exact main JAR built; no uncaught test-thread exceptions |
+| Java unit suite and main JAR | PASS | 1,185 tests in 150 suites; 0 failures/errors/skips in the final clean builds; exact main JAR built |
 | Java integration profile | PASS | 3 tests in 2 suites; 0 failures/errors/skips |
-| Direct lifecycle suite | PASS | 37 tests; 0 failures/errors/skips |
-| Offline Python and build/install suite | PASS | 706 tests |
+| Direct lifecycle suite | PASS | 40 tests in 6 suites; 0 failures/errors/skips |
+| Offline Python and build/install suite | PASS | 832 tests; 0 failures/skips |
 | Real `ij.py`/`imagej-use-auto` loopback tests | PASS | 79 tests, including authenticated operation polling, snapshot binding, and confirmation race/cleanup coverage |
 | Recipe contract | PASS | 8 tests |
 | Context, manifest, and generated docs | PASS | 134 tests; both generators byte-current |
-| Pixel and scientific regressions | PASS | 49 tests; exact C/Z/T, image/content/display revisions, value domains, geometry, finite values, and artifact limits covered |
-| Graphify hook tests and rebuild | PASS | 16 tests; the final incremental event and post-build public full-update event exited 0, drained all queue/lock/handoff state, and produced 29,171 nodes, 51,792 edges, 2,060 communities, and 15 hyperedges at the exact code commit; all 47 checked changed identities occur exactly once at current locations with no stale-node resurrection |
+| Pixel, scientific, and transport regressions | PASS | Final focused 90-test integration pass plus the authoritative 832-test suite; exact ImageJ Triangle behavior, RGB scalarization, C/Z/T provenance, crop identity, and little-endian pixel encoding are covered |
+| Graphify hook tests and rebuild | PASS | 18 tests; the post-build public full-update exited 0 at the exact code revision, drained pending requests, handoffs, worker claim, writer lock, and temporary files, and produced 29,321 nodes, 52,561 edges, 2,070 communities, and 15 hyperedges |
 | Build and simulated-install tests | PASS | 3 pytest build/install tests and 13 Pester bundle transaction tests |
-| Tested non-deploy build script | PASS | Git for Windows `build.sh --no-deploy`; 1,171 tests; JAR hash matched the reproducibility pair; output explicitly disabled deployment; Graphify hook exited 0 |
-| Two-build JAR reproducibility | PASS | build 1: `B0DA1775FDD4153742B24A009944E785877B1C75D366BF5F3862FEC58FFCCAC0`; build 2 and `build.sh`: same |
-| JAR content/policy inspection | PASS | 14,862,985 bytes and 5,667 entries; 0 `META-INF/maven/**`; exactly 1 packaged command manifest; source/package manifest SHA-256 `1B97C068259E89CFC2AAB081863AD96DA188B3ADDC8637E40E2942B2D6C99114` |
-| Temporary-root lab-bundle inspection | PASS | 186 allowlisted agent files; exactly 190 unique ZIP members with 0 exact/case-insensitive duplicates; 0 secret warnings; 15,256,189-byte ZIP SHA-256 `D192F599DC08234886622F78DC3B35F5334E69285E11212B6289908490175D9B`; source/shared/ZIP-contained JAR hashes matched; 5 shared files, local Fiji publication deliberately skipped, staging/transaction residue 0; temporary root removed |
+| Tested non-deploy build script | PASS | Git for Windows `build.sh --no-deploy`; 1,185 tests; JAR hash matched the reproducibility pair; output explicitly disabled deployment; Graphify hook exited 0 |
+| Two-build JAR reproducibility | PASS | consecutive clean builds and `build.sh --no-deploy` all produced `BF9CD1C40164AE28877628C5B13DB4AA04C639C3912789D35758802924D83E1F` |
+| JAR content/policy inspection | PASS | 14,866,401 bytes and 5,668 entries; 0 `META-INF/maven/**`; exactly 1 packaged command manifest; source/package manifest SHA-256 `C742CA932545BE93543C77C78E50D94E6F963B53B9A436A8DA1B4C519E18CB32` |
+| Temporary-root lab-bundle inspection | PASS | 186 allowlisted agent files; exactly 190 ZIP members with 0 exact/case-insensitive duplicates; secret/path scan passed; 15,274,059-byte ZIP SHA-256 `361041F099A844D9095B69B0BFCDEC86154DC6DD0E2D910E1D945CFEA34A66CA`; source/shared/disposable-local/ZIP JAR hashes matched; 5 shared files, 1 disposable local JAR, staging residue 0; temporary root removed; real Fiji and lab share untouched |
+| Undo calibration anomaly investigation | PASS / NOT REPRODUCIBLE | One early clean-package run reported `0.42` restored as `1.0`; production and ImageJ bytecode traces found no path, then 100 fresh JVM runs (1,200 tests), 30 predecessor-order JVM runs (510 tests), a full 1,185-test suite, and all later clean builds passed |
 | Live Fiji doctor/smoke test | NOT RUN | Run only when explicitly authorized |
 
 ## Exact verification commands
@@ -64,7 +65,7 @@ integration profile is not interchangeable with the default unit suite.
 
 ```powershell
 python -m pytest agent scripts/tests -q
-python -m pytest agent/test_ij_api.py agent/test_imagej_use.py -q
+python -m pytest agent/test_ij_api.py agent/test_imagej_use.py agent/test_gui_confirm.py -q
 python -m pytest agent/test_recipe_contract.py -q
 python -m pytest agent/contexts/test_contexts.py agent/test_command_manifest.py agent/test_docs_generation.py -q
 python -m pytest agent/test_graphify_hook.py -q
@@ -102,8 +103,11 @@ if ($first -ne $second) { throw "Non-reproducible JAR: $first != $second" }
 $main = @(Get-ChildItem -LiteralPath target -File -Filter "imagej-ai-*.jar" |
     Where-Object { $_.Name -notmatch "(-sources|-tests|^original-)" })
 if ($main.Count -ne 1) { throw "Expected one main JAR, found $($main.Count)" }
-$javaHomeLine = (& mvn -version | Select-String '^Java home:').Line
-$javaHome = $javaHomeLine.Substring($javaHomeLine.IndexOf(':') + 1).Trim()
+$javaVersionLine = (& mvn -version | Select-String '^Java version:').Line
+if ($javaVersionLine -notmatch 'runtime:\s*(.+)$') {
+    throw "Could not resolve the Maven Java runtime"
+}
+$javaHome = $Matches[1].Trim()
 $jarTool = Join-Path $javaHome 'bin\jar.exe'
 $entries = @(& $jarTool tf $main[0].FullName)
 if ($LASTEXITCODE -ne 0) { throw "jar inspection failed" }
@@ -134,10 +138,12 @@ must not point at the shared lab folder or a real Fiji installation:
 $gateRoot = Join-Path ([IO.Path]::GetTempPath()) ("imagejai-release-gate-" + [guid]::NewGuid())
 $shared = Join-Path $gateRoot "shared"
 $fakeFiji = Join-Path $gateRoot "Fiji.app/plugins"
-New-Item -ItemType Directory -Force -Path $shared, $fakeFiji | Out-Null
+$staging = Join-Path $gateRoot "staging"
+New-Item -ItemType Directory -Force -Path $shared, $fakeFiji, $staging | Out-Null
 try {
     powershell -ExecutionPolicy Bypass -File scripts/make_lab_bundle.ps1 `
-        -Version 0.3.0 -SharedRoot $shared -LocalFijiPlugins $fakeFiji
+        -Version 0.3.0 -SharedRoot $shared -LocalFijiPlugins $fakeFiji `
+        -StagingParent $staging
     if ($LASTEXITCODE -ne 0) { throw "temporary-root bundle gate failed" }
 } finally {
     if (Test-Path -LiteralPath $gateRoot) {
@@ -171,4 +177,4 @@ the result `NOT RUN`; do not write `PASS`.
 - Release gate decision: PASS for offline/private lab-distribution gates
 - Blocking failures: none
 - Explicitly unrun optional checks: live Fiji doctor/smoke test
-- Verifier: root coordinator plus sequential verifier iterations 1 through 8; fresh iteration 9 follows this record
+- Verifier: root coordinator plus fresh sequential verifier passes through iteration 15; iteration 15 converged with 0 accepted and 0 uncertain findings
