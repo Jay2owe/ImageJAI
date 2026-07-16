@@ -29,6 +29,11 @@ from .registry import send, tool
 _MAX_LONG_EDGE = 2048
 _SERVER_PIXEL_CAP = 4_000_000
 _MAX_SERVER_CROP_SIDE = int(math.isqrt(_SERVER_PIXEL_CAP))
+# Keep the successful 2D-list result below the chat loop's 32,000-character
+# pixel-result budget even for long float32 spellings. Larger requests are
+# rejected before get_pixels, so they cannot expand into millions of Python
+# float objects merely to be truncated after JSON serialisation.
+_MAX_RAW_PIXEL_VALUES = 1_024
 
 
 def _error(msg) -> dict:
@@ -76,11 +81,8 @@ def _get_image_info() -> dict:
     return result
 
 
-def _validate_region(x: int, y: int, width: int, height: int):
-    """Validate one zero-based rectangle against the current image bounds."""
-    info = _get_image_info()
-    if "error" in info:
-        return info
+def _validate_region_against_info(info: dict, x: int, y: int, width: int, height: int):
+    """Validate one zero-based rectangle against one image-info snapshot."""
     image_width = int(info.get("width", 0))
     image_height = int(info.get("height", 0))
     if image_width <= 0 or image_height <= 0:
@@ -94,6 +96,14 @@ def _validate_region(x: int, y: int, width: int, height: int):
     return None
 
 
+def _validate_region(x: int, y: int, width: int, height: int):
+    """Validate one zero-based rectangle against the current image bounds."""
+    info = _get_image_info()
+    if "error" in info:
+        return info
+    return _validate_region_against_info(info, x, y, width, height)
+
+
 def _geometry_matches(meta: dict, x: int, y: int, width: int, height: int) -> bool:
     """Return whether Fiji returned exactly the requested pixel rectangle."""
     return all(
@@ -105,6 +115,29 @@ def _geometry_matches(meta: dict, x: int, y: int, width: int, height: int) -> bo
             ("height", height),
         )
     )
+
+
+def _slice_matches(meta: dict, requested_slice: int) -> bool:
+    """Return whether Fiji supplied exactly one requested/current plane."""
+    start = int(meta.get("slice_start", 0))
+    end = int(meta.get("slice_end", 0))
+    count = int(meta.get("slice_count", 0))
+    if requested_slice > 0:
+        return start == requested_slice and end == requested_slice and count == 1
+    return start >= 1 and end == start and count == 1
+
+
+def _raw_pixel_limit_error(requested_values: int) -> dict:
+    """Return a small, actionable result without fetching an oversized array."""
+    return {
+        "error": (
+            "raw pixel request contains {} values; maximum is {}. "
+            "Request a smaller region, or use region_stats, histogram_summary, "
+            "or line_profile for a bounded result."
+        ).format(requested_values, _MAX_RAW_PIXEL_VALUES),
+        "requested_values": int(requested_values),
+        "max_values": _MAX_RAW_PIXEL_VALUES,
+    }
 
 
 def _decode_pixels(resp):
@@ -324,19 +357,45 @@ def _count_components_4(mask, min_size: int = 1) -> int:
 
 @tool
 def get_pixels_array(slice: int, region: list) -> list:
-    """Pull raw pixel values from the active image as a 2D list of floats.
+    """Pull at most 1024 raw pixel values from the active image as a 2D list of floats.
 
     Args:
         slice: Z-slice index, 1-based; use 0 for the currently displayed slice.
         region: Rectangle as [x, y, width, height], or empty list for the whole image.
     """
-    kwargs: dict = {}
     try:
         slice_val = int(slice)
     except (TypeError, ValueError):
-        slice_val = 0
+        return _error("slice must be a 1-based integer, or 0 for the current slice")
+    if slice_val < 0:
+        return _error("slice must be a 1-based integer, or 0 for the current slice")
+
+    info = _get_image_info()
+    if "error" in info:
+        return info
+    image_width = int(info.get("width", 0))
+    image_height = int(info.get("height", 0))
+    if image_width <= 0 or image_height <= 0:
+        return _error("active image has zero size")
+
+    if slice_val > 0:
+        slice_count = int(info.get("slices", 0))
+        if slice_count <= 0:
+            return _error("active image reported an invalid Z-slice count")
+        if slice_val > slice_count:
+            return _error(
+                "requested Z-slice {} is outside active image range 1..{}".format(
+                    slice_val, slice_count
+                )
+            )
+
+    kwargs: dict = {}
     if slice_val > 0:
         kwargs["slice"] = slice_val
+    expected_x = 0
+    expected_y = 0
+    expected_width = image_width
+    expected_height = image_height
     if isinstance(region, list) and len(region) == 4:
         try:
             rx, ry, rw, rh = (int(v) for v in region)
@@ -344,22 +403,33 @@ def get_pixels_array(slice: int, region: list) -> list:
             return _error("region must be [x, y, width, height] with integer values")
         if rw <= 0 or rh <= 0:
             return _error("region width and height must be positive")
-        bounds_error = _validate_region(rx, ry, rw, rh)
+        bounds_error = _validate_region_against_info(info, rx, ry, rw, rh)
         if bounds_error is not None:
             return bounds_error
         kwargs["x"] = rx
         kwargs["y"] = ry
         kwargs["width"] = rw
         kwargs["height"] = rh
+        expected_x, expected_y = rx, ry
+        expected_width, expected_height = rw, rh
     elif isinstance(region, list) and len(region) != 0:
         return _error("region must be [x, y, width, height] or an empty list")
+    elif not isinstance(region, list):
+        return _error("region must be [x, y, width, height] or an empty list")
+
+    requested_values = expected_width * expected_height
+    if requested_values > _MAX_RAW_PIXEL_VALUES:
+        return _raw_pixel_limit_error(requested_values)
+
     arr, meta = _decode_pixels(_safe_send("get_pixels", **kwargs))
     if arr is None:
         return meta
-    if "x" in kwargs and not _geometry_matches(
-        meta, kwargs["x"], kwargs["y"], kwargs["width"], kwargs["height"]
+    if not _geometry_matches(
+        meta, expected_x, expected_y, expected_width, expected_height
     ):
         return _error("Fiji returned clamped pixel geometry; image state changed")
+    if not _slice_matches(meta, slice_val):
+        return _error("Fiji returned a different pixel slice; image state changed")
     return arr.tolist()
 
 

@@ -440,34 +440,207 @@ def test_read_cache_never_resolves_an_unrelated_explicit_hash(
 
 
 def test_read_cache_persistence_is_versioned_and_round_trips(
-        isolated_read_cache):
+        monkeypatch, isolated_read_cache):
+    monkeypatch.setattr(ij, "_cache_now", lambda: 1000.0)
     key = ij._readonly_cache_key(
         "server", 8001, {"command": "job_status", "job_id": "job-a"})
-    ij._READONLY_CACHE[key] = ("job-hash", {"state": "running"})
-    ij._READONLY_CACHE_DIRTY = True
+    assert ij._cache_store(key, "job-hash", {"state": "running"}) is True
 
     ij._flush_cache()
 
     payload = json.loads(Path(ij._CACHE_FILE).read_text(encoding="utf-8"))
+    assert not Path(ij._CACHE_FILE + ".tmp").exists()
     assert payload["version"] == ij._CACHE_SCHEMA_VERSION
     assert payload["entries"] == {
-        key: ["job-hash", {"state": "running"}]
+        key: {
+            "hash": "job-hash",
+            "result": {"state": "running"},
+            "stored_at": 1000.0,
+            "accessed_at": 1000.0,
+        }
     }
     assert ij._load_cache_from_disk() == {
-        key: ("job-hash", {"state": "running"})
+        key: {
+            "hash": "job-hash",
+            "result": {"state": "running"},
+            "stored_at": 1000.0,
+            "accessed_at": 1000.0,
+        }
     }
 
 
 @pytest.mark.parametrize("payload", [
     {"job_status": ["old-hash", {"state": "completed"}]},
     {"version": 1, "entries": {}},
+    {"version": 2, "entries": {}},
     {"version": 999, "entries": {}},
+    {"version": 3, "entries": {"not-a-canonical-key": {}}},
+    {"version": 3, "entries": {}, "unexpected": True},
     {"version": 2, "entries": {"not-a-canonical-key": ["hash", {}]}},
     {"version": 2, "entries": {}, "unexpected": True},
 ])
 def test_read_cache_rejects_legacy_unknown_or_malformed_schemas(
         isolated_read_cache, payload):
     Path(ij._CACHE_FILE).write_text(json.dumps(payload), encoding="utf-8")
+
+    assert ij._load_cache_from_disk() == {}
+
+
+def test_read_cache_rejects_oversized_file_before_and_during_parse(
+        monkeypatch, isolated_read_cache):
+    monkeypatch.setattr(ij, "_CACHE_MAX_FILE_BYTES", 128)
+    Path(ij._CACHE_FILE).write_bytes(b"{" + b" " * 128)
+    # Simulate the file growing after the pre-read size check. The bounded
+    # binary read must still reject it before JSON decoding/parsing.
+    monkeypatch.setattr(ij.os.path, "getsize", lambda path: 128)
+    monkeypatch.setattr(
+        ij.json, "loads",
+        lambda raw, **kwargs: pytest.fail("oversized cache reached JSON parse"),
+    )
+
+    assert ij._load_cache_from_disk() == {}
+
+
+def test_read_cache_bounds_two_thousand_distinct_endpoint_argument_calls(
+        monkeypatch, isolated_read_cache):
+    class GeneratedSession:
+        def __init__(self):
+            self.count = 0
+
+        def request(self, command, timeout=None):
+            self.count += 1
+            job_id = command["job_id"]
+            return {
+                "ok": True,
+                "hash": "hash-" + job_id,
+                "result": {"job_id": job_id, "state": "running"},
+            }
+
+    session = GeneratedSession()
+    clock = [1000.0]
+    monkeypatch.setattr(ij, "_cache_now", lambda: clock[0])
+    monkeypatch.setattr(ij, "_session_for", lambda host, port: session)
+
+    for index in range(2000):
+        clock[0] += 1.0
+        ij.imagej_command(
+            {"command": "job_status", "job_id": "job-%04d" % index},
+            host="server-%02d" % (index % 20),
+            port=8000 + (index % 10),
+        )
+
+    assert session.count == 2000
+    assert len(ij._READONLY_CACHE) <= ij._CACHE_MAX_ENTRIES
+    assert ij._cache_retained_bytes(
+        ij._READONLY_CACHE) <= ij._CACHE_MAX_RETAINED_BYTES
+
+    ij._flush_cache()
+    cache_path = Path(ij._CACHE_FILE)
+    payload = json.loads(cache_path.read_text(encoding="utf-8"))
+    assert len(payload["entries"]) <= ij._CACHE_MAX_ENTRIES
+    assert cache_path.stat().st_size <= ij._CACHE_MAX_FILE_BYTES
+
+
+def test_read_cache_lru_and_ttl_eviction_are_deterministic(
+        monkeypatch, isolated_read_cache):
+    monkeypatch.setattr(ij, "_CACHE_MAX_ENTRIES", 2)
+    monkeypatch.setattr(ij, "_CACHE_TTL_SECONDS", 5)
+    clock = [1000.0]
+    monkeypatch.setattr(ij, "_cache_now", lambda: clock[0])
+    session = ScriptedSession(responses=[
+        {"ok": True, "hash": "hash-a", "result": {"value": "a"}},
+        {"ok": True, "hash": "hash-b", "result": {"value": "b"}},
+        {"ok": True, "unchanged": True},
+        {"ok": True, "hash": "hash-c", "result": {"value": "c"}},
+    ])
+    monkeypatch.setattr(ij, "_session_for", lambda host, port: session)
+
+    def call(name):
+        return ij.imagej_command(
+            {"command": "job_status", "job_id": name},
+            host="server", port=8001)
+
+    call("a")
+    clock[0] += 1
+    call("b")
+    clock[0] += 1
+    assert call("a")["cached"] is True  # refresh A's LRU age
+    clock[0] += 1
+    call("c")
+
+    key_a = ij._readonly_cache_key(
+        "server", 8001, {"command": "job_status", "job_id": "a"})
+    key_b = ij._readonly_cache_key(
+        "server", 8001, {"command": "job_status", "job_id": "b"})
+    key_c = ij._readonly_cache_key(
+        "server", 8001, {"command": "job_status", "job_id": "c"})
+    assert set(ij._READONLY_CACHE) == {key_a, key_c}
+    assert key_b not in ij._READONLY_CACHE
+
+    clock[0] = 1007.9
+    assert ij._prune_cache(ij._READONLY_CACHE, now=clock[0]) is True
+    assert set(ij._READONLY_CACHE) == {key_c}
+    clock[0] = 1008.0
+    assert ij._prune_cache(ij._READONLY_CACHE, now=clock[0]) is True
+    assert ij._READONLY_CACHE == {}
+
+
+def test_read_cache_load_removes_expired_entries_from_disk(
+        monkeypatch, isolated_read_cache):
+    monkeypatch.setattr(ij, "_CACHE_TTL_SECONDS", 5)
+    monkeypatch.setattr(ij, "_cache_now", lambda: 1008.0)
+    key = ij._readonly_cache_key(
+        "server", 8001, {"command": "job_status", "job_id": "expired"})
+    payload = {
+        "version": ij._CACHE_SCHEMA_VERSION,
+        "entries": {
+            key: {
+                "hash": "expired-hash",
+                "result": {"state": "running"},
+                "stored_at": 1000.0,
+                "accessed_at": 1001.0,
+            }
+        },
+    }
+    Path(ij._CACHE_FILE).write_text(json.dumps(payload), encoding="utf-8")
+
+    assert ij._load_cache_from_disk() == {}
+    rewritten = json.loads(Path(ij._CACHE_FILE).read_text(encoding="utf-8"))
+    assert rewritten == {"version": ij._CACHE_SCHEMA_VERSION, "entries": {}}
+
+
+def test_read_cache_rejects_single_entry_over_retained_byte_limit(
+        monkeypatch, isolated_read_cache):
+    monkeypatch.setattr(ij, "_CACHE_MAX_RETAINED_BYTES", 256)
+    key = ij._readonly_cache_key(
+        "server", 8001, {"command": "get_console", "tail": 100})
+
+    assert ij._cache_store(key, "large-hash", {"text": "x" * 1024}) is False
+    assert ij._READONLY_CACHE == {}
+    assert ij._cache_retained_bytes(ij._READONLY_CACHE) == 0
+
+
+def test_read_cache_does_not_retain_caller_mutations(
+        monkeypatch, isolated_read_cache):
+    session = ScriptedSession(responses=[
+        {"ok": True, "hash": "state-hash", "result": {"items": ["safe"]}},
+        {"ok": True, "unchanged": True},
+    ])
+    monkeypatch.setattr(ij, "_session_for", lambda host, port: session)
+
+    first = ij.imagej_command(
+        {"command": "get_state"}, host="server", port=8001)
+    first["result"]["items"].append("caller-owned")
+    replay = ij.imagej_command(
+        {"command": "get_state"}, host="server", port=8001)
+
+    assert replay["result"] == {"items": ["safe"]}
+
+
+def test_read_cache_rejects_duplicate_json_keys(
+        isolated_read_cache):
+    Path(ij._CACHE_FILE).write_text(
+        '{"version":3,"version":3,"entries":{}}', encoding="utf-8")
 
     assert ij._load_cache_from_disk() == {}
 

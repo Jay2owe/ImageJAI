@@ -55,6 +55,24 @@ function Get-TestHash {
     return (Get-FileHash -Algorithm SHA256 -LiteralPath $Path).Hash
 }
 
+function Get-TreeFingerprint {
+    param([string]$Root)
+    if (-not (Test-Path -LiteralPath $Root)) { return "<absent>" }
+    $fullRoot = [System.IO.Path]::GetFullPath($Root).TrimEnd('\', '/')
+    $entries = [System.Collections.Generic.List[string]]::new()
+    [void]$entries.Add("D:.")
+    foreach ($item in Get-ChildItem -LiteralPath $fullRoot -Force -Recurse |
+            Sort-Object FullName) {
+        $relative = $item.FullName.Substring($fullRoot.Length + 1).Replace('\', '/')
+        if ($item.PSIsContainer) {
+            [void]$entries.Add("D:$relative")
+        } else {
+            [void]$entries.Add("F:${relative}:$($item.Length):$(Get-TestHash $item.FullName)")
+        }
+    }
+    return $entries -join "`n"
+}
+
 function Invoke-FixtureBundle {
     param(
         [object]$Fixture,
@@ -235,7 +253,7 @@ Describe "make_lab_bundle verify-first distribution" {
         }
     }
 
-    It "setup restores the old agent when import validation fails after every install step" {
+    It "setup restores the old agent and venv when validation fails after every install step" {
         $fixture = New-BundleFixture
         try {
             $null = Invoke-FixtureBundle -Fixture $fixture
@@ -248,7 +266,20 @@ Describe "make_lab_bundle verify-first distribution" {
             $setupTarget = Join-Path $fixture.Root "setup-target"
             $oldAgent = Join-Path $setupTarget "agent"
             Write-FixtureText -Path (Join-Path $oldAgent "old-marker.txt") -Text "preserve me"
-            $state = @{ PipSteps = 0; PipCommands = @(); BackupSeenAtValidation = $false }
+            $oldVenv = Join-Path $setupTarget ".venv"
+            Write-FixtureText -Path (Join-Path $oldVenv "Scripts\python.exe") -Text "old python"
+            Write-FixtureText -Path (Join-Path $oldVenv "Lib\site-packages\old-package.txt") -Text "old package bytes"
+            New-Item -ItemType Directory -Force -Path (Join-Path $oldVenv "empty-dir") | Out-Null
+            $beforeTree = Get-TreeFingerprint $setupTarget
+            $beforeProcessPython = $env:IMAGEJAI_PYTHON
+            $beforeUserPython = [Environment]::GetEnvironmentVariable(
+                "IMAGEJAI_PYTHON", "User")
+            $state = @{
+                PipSteps = 0
+                PipCommands = @()
+                AgentBackupSeenAtValidation = $false
+                VenvBackupSeenAtValidation = $false
+            }
             $runProcess = {
                 param($command, $arguments)
                 $arguments = @($arguments)
@@ -264,8 +295,11 @@ Describe "make_lab_bundle verify-first distribution" {
                 }
                 $pythonCode = if ($arguments.Count -gt 0) { [string]$arguments[-1] } else { "" }
                 if ($pythonCode -like '*agent.providers.agent_cli*') {
-                    $state.BackupSeenAtValidation = @(
+                    $state.AgentBackupSeenAtValidation = @(
                         Get-ChildItem -LiteralPath $setupTarget -Directory -Filter '.agent-backup-*'
+                    ).Count -eq 1
+                    $state.VenvBackupSeenAtValidation = @(
+                        Get-ChildItem -LiteralPath $setupTarget -Directory -Filter '.venv-backup-*'
                     ).Count -eq 1
                     return [PSCustomObject]@{ ExitCode = 7; Output = @("simulated import failure") }
                 }
@@ -280,12 +314,126 @@ Describe "make_lab_bundle verify-first distribution" {
             $state.PipCommands[1] | Should Match '^-m pip install -r .+providers\\requirements\.txt$'
             $state.PipCommands[2] | Should Match '^-m pip install -e .+setup-target\\agent$'
             $state.PipCommands[3] | Should Match '^-m pip install -e .+setup-target\\agent\\gemma4_31b$'
-            $state.BackupSeenAtValidation | Should Be $true
+            $state.AgentBackupSeenAtValidation | Should Be $true
+            $state.VenvBackupSeenAtValidation | Should Be $true
             (Get-Content -LiteralPath (Join-Path $oldAgent "old-marker.txt") -Raw) | Should Be "preserve me"
             (Test-Path -LiteralPath (Join-Path $oldAgent "ij.py")) | Should Be $false
+            (Get-TreeFingerprint $setupTarget) | Should Be $beforeTree
+            $env:IMAGEJAI_PYTHON | Should Be $beforeProcessPython
+            [Environment]::GetEnvironmentVariable(
+                "IMAGEJAI_PYTHON", "User") | Should Be $beforeUserPython
             @(Get-ChildItem -LiteralPath $setupTarget -Directory -Filter '.agent-backup-*').Count | Should Be 0
             @(Get-ChildItem -LiteralPath $setupTarget -Directory -Filter '.agent-incoming-*').Count | Should Be 0
+            @(Get-ChildItem -LiteralPath $setupTarget -Directory -Filter '.venv-backup-*').Count | Should Be 0
         } finally {
+            Remove-BundleFixture $fixture
+        }
+    }
+
+    It "setup removes a newly created virtual environment when validation fails" {
+        $fixture = New-BundleFixture
+        try {
+            $null = Invoke-FixtureBundle -Fixture $fixture
+            Add-Type -AssemblyName System.IO.Compression.FileSystem
+            $extractRoot = Join-Path $fixture.Root "extracted-new-venv"
+            [System.IO.Compression.ZipFile]::ExtractToDirectory(
+                (Join-Path $fixture.Shared "ImageJAI-lab-0.3.0.zip"), $extractRoot)
+            $bundleRoot = Join-Path $extractRoot "ImageJAI-lab-0.3.0"
+            $setup = Join-Path $bundleRoot "setup-python.ps1"
+            $setupTarget = Join-Path $fixture.Root "setup-new-venv-target"
+            Write-FixtureText -Path (Join-Path $setupTarget "agent\old-marker.txt") -Text "preserve me"
+            $beforeTree = Get-TreeFingerprint $setupTarget
+            $beforeProcessPython = $env:IMAGEJAI_PYTHON
+            $beforeUserPython = [Environment]::GetEnvironmentVariable(
+                "IMAGEJAI_PYTHON", "User")
+            $state = @{ PipSteps = 0; PartialVenvSeen = $false }
+            $runProcess = {
+                param($command, $arguments)
+                $arguments = @($arguments)
+                if ($arguments -contains "venv") {
+                    $createdVenv = $arguments[$arguments.Count - 1]
+                    Write-FixtureText -Path (Join-Path $createdVenv "Scripts\python.exe") -Text "new python"
+                    Write-FixtureText -Path (Join-Path $createdVenv "Lib\site-packages\partial.txt") -Text "partial package"
+                    return [PSCustomObject]@{ ExitCode = 0; Output = @() }
+                }
+                if ($arguments -contains "pip") {
+                    $state.PipSteps++
+                    return [PSCustomObject]@{ ExitCode = 0; Output = @("pip ok") }
+                }
+                $pythonCode = if ($arguments.Count -gt 0) { [string]$arguments[-1] } else { "" }
+                if ($pythonCode -like '*agent.providers.agent_cli*') {
+                    $state.PartialVenvSeen = Test-Path -LiteralPath (
+                        Join-Path $setupTarget ".venv\Lib\site-packages\partial.txt")
+                    return [PSCustomObject]@{ ExitCode = 7; Output = @("simulated import failure") }
+                }
+                return [PSCustomObject]@{ ExitCode = 0; Output = @("3.11") }
+            }
+
+            { & $setup -TargetRoot $setupTarget -TestHooks @{ RunProcess = $runProcess } } |
+                Should Throw "dependency validation failed"
+
+            $state.PipSteps | Should Be 4
+            $state.PartialVenvSeen | Should Be $true
+            (Get-TreeFingerprint $setupTarget) | Should Be $beforeTree
+            (Test-Path -LiteralPath (Join-Path $setupTarget ".venv")) | Should Be $false
+            $env:IMAGEJAI_PYTHON | Should Be $beforeProcessPython
+            [Environment]::GetEnvironmentVariable(
+                "IMAGEJAI_PYTHON", "User") | Should Be $beforeUserPython
+            @(Get-ChildItem -LiteralPath $setupTarget -Directory -Force |
+                Where-Object { $_.Name -match '^\.(?:agent|venv)-(?:backup|incoming)-' }).Count | Should Be 0
+        } finally {
+            Remove-BundleFixture $fixture
+        }
+    }
+
+    It "setup refuses an in-use virtual environment before mutating it" {
+        $fixture = New-BundleFixture
+        $lock = $null
+        try {
+            $null = Invoke-FixtureBundle -Fixture $fixture
+            Add-Type -AssemblyName System.IO.Compression.FileSystem
+            $extractRoot = Join-Path $fixture.Root "extracted-locked-venv"
+            [System.IO.Compression.ZipFile]::ExtractToDirectory(
+                (Join-Path $fixture.Shared "ImageJAI-lab-0.3.0.zip"), $extractRoot)
+            $bundleRoot = Join-Path $extractRoot "ImageJAI-lab-0.3.0"
+            $setup = Join-Path $bundleRoot "setup-python.ps1"
+            $setupTarget = Join-Path $fixture.Root "setup-locked-venv-target"
+            Write-FixtureText -Path (Join-Path $setupTarget "agent\old-marker.txt") -Text "preserve me"
+            $venvPython = Join-Path $setupTarget ".venv\Scripts\python.exe"
+            Write-FixtureText -Path $venvPython -Text "running python"
+            Write-FixtureText -Path (Join-Path $setupTarget ".venv\Lib\old-package.txt") -Text "preserve package"
+            $beforeTree = Get-TreeFingerprint $setupTarget
+            $beforeProcessPython = $env:IMAGEJAI_PYTHON
+            $beforeUserPython = [Environment]::GetEnvironmentVariable(
+                "IMAGEJAI_PYTHON", "User")
+            $state = @{ ProcessCalls = 0 }
+            $runProcess = {
+                param($command, $arguments)
+                $state.ProcessCalls++
+                return [PSCustomObject]@{ ExitCode = 0; Output = @("3.11") }
+            }
+            $lock = [System.IO.File]::Open(
+                $venvPython,
+                [System.IO.FileMode]::Open,
+                [System.IO.FileAccess]::Read,
+                [System.IO.FileShare]::None)
+            try {
+                { & $setup -TargetRoot $setupTarget -TestHooks @{ RunProcess = $runProcess } } |
+                    Should Throw "virtual environment is in use"
+            } finally {
+                $lock.Dispose()
+                $lock = $null
+            }
+
+            $state.ProcessCalls | Should BeGreaterThan 0
+            (Get-TreeFingerprint $setupTarget) | Should Be $beforeTree
+            $env:IMAGEJAI_PYTHON | Should Be $beforeProcessPython
+            [Environment]::GetEnvironmentVariable(
+                "IMAGEJAI_PYTHON", "User") | Should Be $beforeUserPython
+            @(Get-ChildItem -LiteralPath $setupTarget -Directory -Force |
+                Where-Object { $_.Name -match '^\.(?:agent|venv)-(?:backup|incoming)-' }).Count | Should Be 0
+        } finally {
+            if ($null -ne $lock) { $lock.Dispose() }
             Remove-BundleFixture $fixture
         }
     }

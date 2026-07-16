@@ -80,7 +80,9 @@ import sys
 import os
 import base64
 import copy
+import math
 import threading
+import time
 
 HOST = os.environ.get("IMAGEJAI_TCP_HOST", "localhost")
 try:
@@ -248,7 +250,12 @@ READONLY_COMMANDS = frozenset(
 # the in-memory layer is authoritative during a single run.
 _CACHE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".tmp")
 _CACHE_FILE = os.path.join(_CACHE_DIR, "ij_client_cache.json")
-_CACHE_SCHEMA_VERSION = 2
+_CACHE_SCHEMA_VERSION = 3
+_CACHE_MAX_ENTRIES = 256
+_CACHE_MAX_RETAINED_BYTES = 6 * 1024 * 1024
+_CACHE_MAX_FILE_BYTES = 8 * 1024 * 1024
+_CACHE_TTL_SECONDS = 24 * 60 * 60
+_CACHE_FUTURE_SKEW_SECONDS = 5 * 60
 _CACHE_FRAMING_FIELDS = frozenset((
     "if_none_match",
     "session_id",
@@ -326,50 +333,238 @@ def _valid_cache_key(key):
     return key == canonical
 
 
+def _cache_now():
+    """Wall-clock time is required because cache ages cross processes."""
+    return time.time()
+
+
+def _valid_cache_timestamp(value, now):
+    return (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and math.isfinite(value)
+        and value >= 0
+        and value <= now + _CACHE_FUTURE_SKEW_SECONDS
+    )
+
+
+def _valid_cache_entry(entry, now):
+    if not isinstance(entry, dict) or set(entry) != {
+            "hash", "result", "stored_at", "accessed_at"}:
+        return False
+    stored_at = entry.get("stored_at")
+    accessed_at = entry.get("accessed_at")
+    return (
+        isinstance(entry.get("hash"), str)
+        and bool(entry.get("hash"))
+        and _valid_cache_timestamp(stored_at, now)
+        and _valid_cache_timestamp(accessed_at, now)
+        and accessed_at >= stored_at
+    )
+
+
+def _cache_entry_bytes(key, entry):
+    try:
+        encoded = json.dumps(
+            [key, entry], sort_keys=True, separators=(",", ":"),
+            ensure_ascii=True, allow_nan=False).encode("utf-8")
+    except (TypeError, ValueError, OverflowError, UnicodeError):
+        return None
+    return len(encoded)
+
+
+def _cache_retained_bytes(cache):
+    total = 0
+    for key, entry in cache.items():
+        size = _cache_entry_bytes(key, entry)
+        if size is None:
+            return _CACHE_MAX_RETAINED_BYTES + 1
+        total += size
+    return total
+
+
+def _cache_expired(entry, now):
+    return now - entry["stored_at"] >= _CACHE_TTL_SECONDS
+
+
+def _cache_victim_order(cache):
+    """Least-recently-used first, with stable tie-breaking."""
+    return sorted(
+        cache,
+        key=lambda key: (
+            cache[key]["accessed_at"], cache[key]["stored_at"], key),
+    )
+
+
+def _prune_cache(cache, now=None):
+    """Apply TTL, count, and retained-byte bounds in-place."""
+    if now is None:
+        now = _cache_now()
+    changed = False
+    for key in list(cache):
+        entry = cache[key]
+        if (not _valid_cache_key(key)
+                or not _valid_cache_entry(entry, now)
+                or _cache_expired(entry, now)
+                or _cache_entry_bytes(key, entry) is None):
+            del cache[key]
+            changed = True
+
+    total = _cache_retained_bytes(cache)
+    victims = iter(_cache_victim_order(cache))
+    while (len(cache) > _CACHE_MAX_ENTRIES
+           or total > _CACHE_MAX_RETAINED_BYTES):
+        try:
+            victim = next(victims)
+        except StopIteration:
+            break
+        size = _cache_entry_bytes(victim, cache[victim]) or 0
+        del cache[victim]
+        total = max(0, total - size)
+        changed = True
+    return changed
+
+
+def _cache_payload_bytes(cache):
+    payload = {"version": _CACHE_SCHEMA_VERSION, "entries": cache}
+    return json.dumps(
+        payload, sort_keys=True, separators=(",", ":"),
+        ensure_ascii=True, allow_nan=False).encode("utf-8")
+
+
+def _cache_json_object(pairs):
+    obj = {}
+    for key, value in pairs:
+        if key in obj:
+            raise ValueError("duplicate cache JSON key")
+        obj[key] = value
+    return obj
+
+
 def _load_cache_from_disk():
     try:
-        with open(_CACHE_FILE, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        # Version 1 keyed only by command name. It cannot be migrated without
-        # risking cross-server or cross-argument replay, so invalidate it.
+        # Bound the byte stream before and during parsing. The stat is an early
+        # rejection; the limited binary read closes the grow-after-stat race.
+        if os.path.getsize(_CACHE_FILE) > _CACHE_MAX_FILE_BYTES:
+            return {}
+        with open(_CACHE_FILE, "rb") as f:
+            raw = f.read(_CACHE_MAX_FILE_BYTES + 1)
+        if len(raw) > _CACHE_MAX_FILE_BYTES:
+            return {}
+        data = json.loads(
+            raw.decode("utf-8"), object_pairs_hook=_cache_json_object)
+        # Older schemas lack safe endpoint/argument or age metadata. They
+        # cannot be migrated without replay risk, so invalidate them.
         if (not isinstance(data, dict)
                 or set(data) != {"version", "entries"}
                 or data.get("version") != _CACHE_SCHEMA_VERSION
                 or not isinstance(data.get("entries"), dict)):
             return {}
+        now = _cache_now()
         out = {}
         for k, v in data["entries"].items():
             if (not _valid_cache_key(k)
-                    or not isinstance(v, list)
-                    or len(v) != 2
-                    or not isinstance(v[0], str)
-                    or not v[0]):
+                    or not _valid_cache_entry(v, now)
+                    or _cache_entry_bytes(k, v) is None):
                 return {}
-            out[k] = (v[0], v[1])
+            out[k] = v
+        if _prune_cache(out, now=now):
+            # Expired or over-limit entries should not remain on disk merely
+            # because this process never performs another cacheable request.
+            _save_cache_to_disk(out)
         return out
-    except (IOError, OSError, ValueError):
+    except (IOError, OSError, ValueError, UnicodeError, TypeError,
+            RecursionError):
         return {}
 
 
 def _save_cache_to_disk(cache):
     try:
+        _prune_cache(cache)
+        encoded = _cache_payload_bytes(cache)
+        # The retained-byte ceiling leaves headroom for schema framing, but
+        # enforce the actual file limit too if constants are tightened.
+        while len(encoded) > _CACHE_MAX_FILE_BYTES and cache:
+            del cache[_cache_victim_order(cache)[0]]
+            encoded = _cache_payload_bytes(cache)
+        if len(encoded) > _CACHE_MAX_FILE_BYTES:
+            return False
         os.makedirs(_CACHE_DIR, exist_ok=True)
         tmp = _CACHE_FILE + ".tmp"
-        serial = {k: [v[0], v[1]] for k, v in cache.items()}
-        payload = {"version": _CACHE_SCHEMA_VERSION, "entries": serial}
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(payload, f, sort_keys=True, separators=(",", ":"),
-                      allow_nan=False)
+        with open(tmp, "wb") as f:
+            f.write(encoded)
         os.replace(tmp, _CACHE_FILE)
-    except (IOError, OSError, TypeError, ValueError):
-        pass
+        return True
+    except (IOError, OSError, TypeError, ValueError, UnicodeError,
+            RecursionError):
+        return False
 
 
-# In-memory cache: canonical endpoint/request key -> (hash, result). Seeded
+# In-memory cache: canonical endpoint/request key -> bounded metadata record.
+# Seeded
 # from disk so a fresh subprocess can reuse a previous call on its first
 # request without crossing servers or semantic argument sets.
+_CACHE_LOCK = threading.RLock()
 _READONLY_CACHE = _load_cache_from_disk()
 _READONLY_CACHE_DIRTY = False
+
+
+def _cache_lookup(key):
+    global _READONLY_CACHE_DIRTY
+    now = _cache_now()
+    with _CACHE_LOCK:
+        entry = _READONLY_CACHE.get(key)
+        if entry is None:
+            return None
+        if (not _valid_cache_entry(entry, now)
+                or _cache_expired(entry, now)):
+            del _READONLY_CACHE[key]
+            _READONLY_CACHE_DIRTY = True
+            return None
+        touched_at = max(now, entry["stored_at"])
+        if touched_at != entry["accessed_at"]:
+            entry["accessed_at"] = touched_at
+            _READONLY_CACHE_DIRTY = True
+        # A longer timestamp can increase serialized size at the boundary.
+        # Reapply every bound before exposing the entry.
+        if _prune_cache(_READONLY_CACHE, now=now):
+            _READONLY_CACHE_DIRTY = True
+        entry = _READONLY_CACHE.get(key)
+        if entry is None:
+            return None
+        try:
+            result = copy.deepcopy(entry["result"])
+        except (TypeError, ValueError, RecursionError):
+            del _READONLY_CACHE[key]
+            _READONLY_CACHE_DIRTY = True
+            return None
+        return entry["hash"], result
+
+
+def _cache_store(key, response_hash, result):
+    global _READONLY_CACHE_DIRTY
+    now = _cache_now()
+    try:
+        retained_result = copy.deepcopy(result)
+    except (TypeError, ValueError, RecursionError):
+        return False
+    entry = {
+        "hash": response_hash,
+        "result": retained_result,
+        "stored_at": now,
+        "accessed_at": now,
+    }
+    size = _cache_entry_bytes(key, entry)
+    with _CACHE_LOCK:
+        if size is None or size > _CACHE_MAX_RETAINED_BYTES:
+            if key in _READONLY_CACHE:
+                del _READONLY_CACHE[key]
+                _READONLY_CACHE_DIRTY = True
+            return False
+        _READONLY_CACHE[key] = entry
+        _prune_cache(_READONLY_CACHE, now=now)
+        _READONLY_CACHE_DIRTY = True
+        return key in _READONLY_CACHE
 
 
 def imagej_command(cmd, host=HOST, port=PORT, timeout=TIMEOUT):
@@ -387,7 +582,7 @@ def imagej_command(cmd, host=HOST, port=PORT, timeout=TIMEOUT):
     # already carry an explicit if_none_match (respect caller override).
     cache_key = _readonly_cache_key(host, port, cmd)
     if cache_key is not None and "if_none_match" not in cmd:
-        cached = _READONLY_CACHE.get(cache_key)
+        cached = _cache_lookup(cache_key)
         if cached is not None:
             cmd = dict(cmd)  # don't mutate caller's dict
             cmd["if_none_match"] = cached[0]
@@ -395,10 +590,9 @@ def imagej_command(cmd, host=HOST, port=PORT, timeout=TIMEOUT):
     resp = _session_for(host, port).request(cmd, timeout=timeout)
 
     # Phase 1: resolve unchanged responses from cache; refresh cache on hash.
-    global _READONLY_CACHE_DIRTY
     if cache_key is not None and isinstance(resp, dict) and resp.get("ok"):
         if resp.get("unchanged"):
-            cached = _READONLY_CACHE.get(cache_key)
+            cached = _cache_lookup(cache_key)
             if cached is not None and cmd.get("if_none_match") == cached[0]:
                 return {
                     "ok": True,
@@ -419,10 +613,7 @@ def imagej_command(cmd, host=HOST, port=PORT, timeout=TIMEOUT):
                 return resp
         h = resp.get("hash")
         if isinstance(h, str) and h:
-            prev = _READONLY_CACHE.get(cache_key)
-            if prev is None or prev[0] != h:
-                _READONLY_CACHE[cache_key] = (h, resp.get("result"))
-                _READONLY_CACHE_DIRTY = True
+            _cache_store(cache_key, h, resp.get("result"))
 
     return resp
 
@@ -430,9 +621,10 @@ def imagej_command(cmd, host=HOST, port=PORT, timeout=TIMEOUT):
 def _flush_cache():
     """Persist in-memory cache mutations to disk. Safe to call multiple times."""
     global _READONLY_CACHE_DIRTY
-    if _READONLY_CACHE_DIRTY:
-        _save_cache_to_disk(_READONLY_CACHE)
-        _READONLY_CACHE_DIRTY = False
+    with _CACHE_LOCK:
+        if (_READONLY_CACHE_DIRTY
+                and _save_cache_to_disk(_READONLY_CACHE)):
+            _READONLY_CACHE_DIRTY = False
 
 
 # Flush on interpreter exit so long-running imports persist too.

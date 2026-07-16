@@ -489,6 +489,11 @@ $targetRoot = [System.IO.Path]::GetFullPath($TargetRoot)
 $targetAgent = Join-Path $targetRoot "agent"
 $venvRoot = Join-Path $targetRoot ".venv"
 $venvPython = Join-Path $venvRoot "Scripts\python.exe"
+$setupTransactionId = [Guid]::NewGuid().ToString("N")
+$backupVenv = Join-Path $targetRoot (".venv-backup-" + $setupTransactionId)
+$hadOriginalVenv = Test-Path -LiteralPath $venvRoot
+$venvMovedToBackup = $false
+$venvReplacementStarted = $false
 
 if (-not (Test-Path -LiteralPath (Join-Path $sourceAgent "ij.py") -PathType Leaf)) {
     throw "Run this script from the extracted ImageJAI lab bundle folder."
@@ -534,26 +539,92 @@ function Get-SupportedPython {
     throw "ImageJAI requires Python 3.10, 3.11, 3.12, or 3.13. Install one of those versions and rerun setup."
 }
 
+function Assert-VenvNotInUse {
+    param([string]$Path)
+    if (-not (Test-Path -LiteralPath $Path)) { return }
+    if (-not (Test-Path -LiteralPath $Path -PathType Container)) {
+        throw "The existing ImageJAI virtual environment path is not a directory: $Path"
+    }
+    # Never copy an existing environment: venv launchers and package metadata
+    # contain absolute paths. Before the atomic directory rename, verify that
+    # Windows can take exclusive handles on binaries which may be loaded by an
+    # active agent. This makes an in-use environment fail before mutation.
+    $loadedExtensions = @(".exe", ".dll", ".pyd")
+    foreach ($item in Get-ChildItem -LiteralPath $Path -File -Recurse -Force) {
+        if ($loadedExtensions -notcontains $item.Extension.ToLowerInvariant()) { continue }
+        $stream = $null
+        try {
+            $stream = [System.IO.File]::Open(
+                $item.FullName,
+                [System.IO.FileMode]::Open,
+                [System.IO.FileAccess]::Read,
+                [System.IO.FileShare]::None)
+        } catch {
+            throw "The existing ImageJAI virtual environment is in use. Close ImageJAI agent terminals and rerun setup: $($item.FullName)"
+        } finally {
+            if ($null -ne $stream) { $stream.Dispose() }
+        }
+    }
+}
+
+function Remove-SetupTree {
+    param([string]$Path, [string]$Description)
+    if (-not (Test-Path -LiteralPath $Path)) { return }
+    $lastFailure = $null
+    for ($attempt = 0; $attempt -lt 5; $attempt++) {
+        try {
+            Remove-Item -LiteralPath $Path -Recurse -Force
+            if (-not (Test-Path -LiteralPath $Path)) { return }
+        } catch {
+            $lastFailure = $_
+        }
+        [GC]::Collect()
+        [GC]::WaitForPendingFinalizers()
+        Start-Sleep -Milliseconds 200
+    }
+    $detail = if ($null -eq $lastFailure) { "path still exists" } else { $lastFailure.Exception.Message }
+    throw "Could not remove $Description at $Path during setup rollback: $detail"
+}
+
 New-Item -ItemType Directory -Force -Path $targetRoot | Out-Null
 $incomingAgent = Join-Path $targetRoot (".agent-incoming-" + [Guid]::NewGuid().ToString("N"))
 $backupAgent = Join-Path $targetRoot (".agent-backup-" + [Guid]::NewGuid().ToString("N"))
+$hadOriginalAgent = Test-Path -LiteralPath $targetAgent
+$agentMovedToBackup = $false
+$agentReplacementPublished = $false
 Copy-Item -LiteralPath $sourceAgent -Destination $incomingAgent -Recurse
 if (-not (Test-Path -LiteralPath (Join-Path $incomingAgent "ij.py") -PathType Leaf)) {
     throw "The staged agent workspace copy is incomplete."
 }
 try {
-    if (Test-Path -LiteralPath $targetAgent) {
+    $basePython = Get-SupportedPython
+    if ($hadOriginalVenv) {
+        Assert-VenvNotInUse -Path $venvRoot
+    }
+    if ($hadOriginalAgent) {
         Move-Item -LiteralPath $targetAgent -Destination $backupAgent
+        $agentMovedToBackup = $true
     }
     Move-Item -LiteralPath $incomingAgent -Destination $targetAgent
+    $agentReplacementPublished = $true
 
-    $basePython = Get-SupportedPython
-    if (-not (Test-Path -LiteralPath $venvPython -PathType Leaf)) {
-        $venvArguments = @($basePython.Prefix) + @("-m", "venv", $venvRoot)
-        $venvCreate = Invoke-SetupProcess -Command $basePython.Command -Arguments $venvArguments
-        if ($venvCreate.ExitCode -ne 0) {
-            throw "Python failed to create the dedicated ImageJAI virtual environment."
+    # Preserve the old environment byte-for-byte under an atomic same-volume
+    # directory rename. Build the replacement at the final path so Windows
+    # venv launchers retain valid absolute paths. Any failure removes the new
+    # tree before the original directory is renamed back.
+    if ($hadOriginalVenv) {
+        if (Test-Path -LiteralPath $backupVenv) {
+            throw "Refusing to reuse virtual environment backup: $backupVenv"
         }
+        Move-Item -LiteralPath $venvRoot -Destination $backupVenv
+        $venvMovedToBackup = $true
+    }
+    $venvReplacementStarted = $true
+    $venvArguments = @($basePython.Prefix) + @("-m", "venv", $venvRoot)
+    $venvCreate = Invoke-SetupProcess -Command $basePython.Command -Arguments $venvArguments
+    if ($venvCreate.ExitCode -ne 0 -or
+        -not (Test-Path -LiteralPath $venvPython -PathType Leaf)) {
+        throw "Python failed to create the dedicated ImageJAI virtual environment."
     }
     $versionProbe = Invoke-SetupProcess -Command $venvPython -Arguments @(
         "-c", "import sys; print('%d.%d' % sys.version_info[:2])")
@@ -603,24 +674,59 @@ try {
     $env:IMAGEJAI_PYTHON = $venvPython
 } catch {
     $failure = $_
+    $rollbackFailures = [System.Collections.Generic.List[string]]::new()
     if (Test-Path -LiteralPath $incomingAgent) {
         Remove-Item -LiteralPath $incomingAgent -Recurse -Force -ErrorAction SilentlyContinue
     }
-    if (Test-Path -LiteralPath $backupAgent) {
-        if (Test-Path -LiteralPath $targetAgent) {
+    try {
+        if ($agentMovedToBackup) {
+            if ($agentReplacementPublished -and (Test-Path -LiteralPath $targetAgent)) {
+                Remove-Item -LiteralPath $targetAgent -Recurse -Force
+            }
+            Move-Item -LiteralPath $backupAgent -Destination $targetAgent
+            $agentMovedToBackup = $false
+            $agentReplacementPublished = $false
+        } elseif ($agentReplacementPublished -and (Test-Path -LiteralPath $targetAgent)) {
             Remove-Item -LiteralPath $targetAgent -Recurse -Force
+            $agentReplacementPublished = $false
         }
-        Move-Item -LiteralPath $backupAgent -Destination $targetAgent
-    } elseif (Test-Path -LiteralPath $targetAgent) {
-        Remove-Item -LiteralPath $targetAgent -Recurse -Force
+    } catch {
+        [void]$rollbackFailures.Add("agent workspace: " + $_.Exception.Message)
+    }
+    try {
+        if ($venvReplacementStarted -and (Test-Path -LiteralPath $venvRoot)) {
+            Remove-SetupTree -Path $venvRoot -Description "failed replacement virtual environment"
+        }
+        if ($venvMovedToBackup) {
+            if (Test-Path -LiteralPath $venvRoot) {
+                throw "replacement virtual environment still occupies $venvRoot"
+            }
+            Move-Item -LiteralPath $backupVenv -Destination $venvRoot
+            $venvMovedToBackup = $false
+        }
+    } catch {
+        [void]$rollbackFailures.Add("virtual environment: " + $_.Exception.Message)
+    }
+    if ($rollbackFailures.Count -gt 0) {
+        throw "ImageJAI setup failed ($($failure.Exception.Message)); rollback also failed: $($rollbackFailures -join '; ')"
     }
     throw $failure
 }
 
-# Commit the workspace replacement only after venv creation, every pip step,
-# import validation, and environment configuration have all succeeded.
+# Commit replacements only after venv creation, every pip step, import
+# validation, and environment configuration have all succeeded.
 if (Test-Path -LiteralPath $backupAgent) {
     Remove-Item -LiteralPath $backupAgent -Recurse -Force
+}
+if ($venvMovedToBackup -and (Test-Path -LiteralPath $backupVenv)) {
+    try {
+        Remove-SetupTree -Path $backupVenv -Description "superseded virtual environment"
+        $venvMovedToBackup = $false
+    } catch {
+        # The validated replacement is already live at the stable .venv path.
+        # Preserve rather than partially deleting a backup that Windows locks.
+        Write-Warning $_.Exception.Message
+    }
 }
 
 Write-Host ""
