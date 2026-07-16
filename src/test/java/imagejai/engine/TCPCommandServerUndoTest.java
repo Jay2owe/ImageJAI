@@ -3,6 +3,13 @@ package imagejai.engine;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
+import ij.ImagePlus;
+import ij.WindowManager;
+import ij.plugin.filter.Analyzer;
+import ij.plugin.frame.RoiManager;
+import ij.process.ByteProcessor;
+import org.junit.After;
+import org.junit.Before;
 import org.junit.Test;
 
 import java.util.Collections;
@@ -19,6 +26,34 @@ import static org.junit.Assert.assertTrue;
  * envelope. Per plan: docs/tcp_upgrade/15_undo_stack_api.md.
  */
 public class TCPCommandServerUndoTest {
+
+    @Before
+    public void isolateImageJGlobals() {
+        clearImageJGlobals();
+    }
+
+    @After
+    public void clearImageJGlobals() {
+        WindowManager.setTempCurrentImage(null);
+        int[] ids = WindowManager.getIDList();
+        if (ids != null) {
+            for (int id : ids) {
+                ImagePlus image = WindowManager.getImage(id);
+                if (image != null) {
+                    image.changes = false;
+                    image.close();
+                }
+            }
+        }
+        Analyzer.setResultsTable(null);
+        Analyzer.setMeasurements(0);
+        Analyzer.setPrecision(3);
+        RoiManager manager = RoiManager.getRawInstance();
+        if (manager != null) {
+            manager.reset();
+            manager.close();
+        }
+    }
 
     private static TCPCommandServer newServer() {
         return new TCPCommandServer(0, null, null, null, null);
@@ -56,6 +91,20 @@ public class TCPCommandServerUndoTest {
         // cleanly.
         c.structuredErrors = true;
         return c;
+    }
+
+    private static ImagePlus currentImage(String title, int value) {
+        byte[] pixels = new byte[16];
+        java.util.Arrays.fill(pixels, (byte) value);
+        ImagePlus image = new ImagePlus(title,
+                new ByteProcessor(4, 4, pixels, null));
+        WindowManager.setTempCurrentImage(image);
+        return image;
+    }
+
+    private static UndoFrame liveFrame(String callId, ImagePlus image,
+                                       boolean diskWrite) {
+        return UndoFrame.capture(callId, image, null, "", diskWrite);
     }
 
     // -------------------------------------------------------------------
@@ -142,7 +191,7 @@ public class TCPCommandServerUndoTest {
     // -------------------------------------------------------------------
 
     @Test
-    public void rewindByCallIdConsumesFrameAndReportsRewoundCount() {
+    public void rewindClosedImageReturnsTypedErrorAndRetainsFrame() {
         TCPCommandServer server = newServer();
         server.sessionUndo.pushFrame(syntheticFrame("c-1", "img.tif"));
         server.sessionUndo.pushFrame(syntheticFrame("c-2", "img.tif"));
@@ -152,11 +201,27 @@ public class TCPCommandServerUndoTest {
                 capsWithUndo(true));
         JsonObject result = resp.getAsJsonObject("result");
         assertNotNull(result);
-        // 1 frame popped (only c-2; c-1 stays). pixelsRestored is false in
-        // the test environment because no real ImagePlus is open.
+        assertFalse(result.get("success").getAsBoolean());
+        assertEquals("UNDO_IMAGE_CLOSED",
+                result.getAsJsonObject("error").get("code").getAsString());
+        assertEquals(2, server.sessionUndo.totalFrames());
+    }
+
+    @Test
+    public void rewindLiveImageRestoresPixelsAndConsumesOnlyAfterSuccess() {
+        TCPCommandServer server = newServer();
+        ImagePlus image = currentImage("img.tif", 7);
+        server.sessionUndo.pushFrame(liveFrame("c-1", image, false));
+        java.util.Arrays.fill((byte[]) image.getProcessor().getPixels(), (byte) 99);
+
+        JsonObject resp = server.handleRewind(
+                parse("{\"command\":\"rewind\",\"to_call_id\":\"c-1\"}"),
+                capsWithUndo(true));
+        JsonObject result = resp.getAsJsonObject("result");
         assertEquals(1, result.get("rewound").getAsInt());
-        assertEquals("img.tif", result.get("activeImage").getAsString());
-        assertEquals(1, result.get("framesRemaining").getAsInt());
+        assertTrue(result.get("pixelsRestored").getAsBoolean());
+        assertEquals(7, ((byte[]) image.getProcessor().getPixels())[0] & 0xff);
+        assertEquals(0, server.sessionUndo.totalFrames());
     }
 
     @Test
@@ -184,15 +249,9 @@ public class TCPCommandServerUndoTest {
     @Test
     public void rewindAttachesDiskSideEffectWarningWhenFrameContainsDiskWrite() {
         TCPCommandServer server = newServer();
-        byte[] compressed = new byte[16];
-        UndoFrame f = new UndoFrame("c-1", "img.tif",
-                4, 4, 1, 1, 1, 8,
-                compressed, compressed.length,
-                Collections.<UndoFrame.RoiSnapshot>emptyList(),
-                "",
-                System.currentTimeMillis(),
-                /* diskSideEffect = */ true);
-        server.sessionUndo.pushFrame(f);
+        ImagePlus image = currentImage("img.tif", 3);
+        server.sessionUndo.pushFrame(liveFrame("c-1", image, true));
+        java.util.Arrays.fill((byte[]) image.getProcessor().getPixels(), (byte) 4);
 
         JsonObject resp = server.handleRewind(
                 parse("{\"command\":\"rewind\",\"image_title\":\"img.tif\","
@@ -210,6 +269,9 @@ public class TCPCommandServerUndoTest {
     @Test
     public void branchCreatesNewBranchAndSwitchesActive() {
         TCPCommandServer server = newServer();
+        ImagePlus image = currentImage("img.tif", 12);
+        server.sessionUndo.pushFrame(liveFrame("c-1", image, false));
+        java.util.Arrays.fill((byte[]) image.getProcessor().getPixels(), (byte) 88);
         JsonObject resp = server.handleBranch(
                 parse("{\"command\":\"branch\",\"from_call_id\":\"c-1\"}"),
                 capsWithUndo(true));
@@ -218,6 +280,21 @@ public class TCPCommandServerUndoTest {
         assertTrue(branchId.startsWith("b-"));
         assertEquals(branchId, result.get("activeBranch").getAsString());
         assertEquals(2, result.get("totalBranches").getAsInt());
+        assertEquals(12, ((byte[]) image.getProcessor().getPixels())[0] & 0xff);
+    }
+
+    @Test
+    public void branchRejectsUnknownFromCallIdWithoutChangingActiveBranch() {
+        TCPCommandServer server = newServer();
+        currentImage("img.tif", 1);
+        JsonObject response = server.handleBranch(
+                parse("{\"command\":\"branch\",\"from_call_id\":\"missing\"}"),
+                capsWithUndo(true));
+        JsonObject result = response.getAsJsonObject("result");
+        assertEquals("UNDO_NOT_FOUND",
+                result.getAsJsonObject("error").get("code").getAsString());
+        assertEquals(SessionUndo.MAIN_BRANCH, server.sessionUndo.activeBranchId());
+        assertEquals(1, server.sessionUndo.listBranches().size());
     }
 
     @Test
@@ -228,6 +305,31 @@ public class TCPCommandServerUndoTest {
                 capsWithUndo(true));
         JsonObject err = resp.getAsJsonObject("result").getAsJsonObject("error");
         assertEquals("UNDO_NOT_FOUND", err.get("code").getAsString());
+    }
+
+    @Test
+    public void branchSwitchRestoresBothCheckpoints() {
+        TCPCommandServer server = newServer();
+        ImagePlus image = currentImage("img.tif", 10);
+        JsonObject created = server.handleBranch(
+                parse("{\"command\":\"branch\"}"), capsWithUndo(true));
+        String branch = created.getAsJsonObject("result")
+                .get("branchId").getAsString();
+
+        java.util.Arrays.fill((byte[]) image.getProcessor().getPixels(), (byte) 80);
+        JsonObject toMain = server.handleBranchSwitch(
+                parse("{\"command\":\"branch_switch\",\"branch_id\":\"main\"}"),
+                capsWithUndo(true));
+        assertEquals("main", toMain.getAsJsonObject("result")
+                .get("activeBranch").getAsString());
+        assertEquals(10, ((byte[]) image.getProcessor().getPixels())[0] & 0xff);
+
+        JsonObject toBranch = server.handleBranchSwitch(
+                parse("{\"command\":\"branch_switch\",\"branch_id\":\""
+                        + branch + "\"}"), capsWithUndo(true));
+        assertEquals(branch, toBranch.getAsJsonObject("result")
+                .get("activeBranch").getAsString());
+        assertEquals(80, ((byte[]) image.getProcessor().getPixels())[0] & 0xff);
     }
 
     @Test
@@ -243,10 +345,11 @@ public class TCPCommandServerUndoTest {
     @Test
     public void rewindRefusesToCrossScriptBoundary() {
         TCPCommandServer server = newServer();
+        ImagePlus image = currentImage("img.tif", 2);
         // c-1 macro frame, then a script-boundary, then c-2 macro frame.
-        server.sessionUndo.pushFrame(syntheticFrame("c-1", "img.tif"));
+        server.sessionUndo.pushFrame(liveFrame("c-1", image, false));
         server.sessionUndo.pushBoundary("img.tif", "boundary-1");
-        server.sessionUndo.pushFrame(syntheticFrame("c-2", "img.tif"));
+        server.sessionUndo.pushFrame(liveFrame("c-2", image, false));
 
         // n=1 lands on c-2, no boundary in range → succeeds.
         JsonObject ok = server.handleRewind(

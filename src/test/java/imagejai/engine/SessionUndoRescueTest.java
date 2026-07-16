@@ -137,4 +137,22 @@ public class SessionUndoRescueTest {
         assertEquals("img.tif", rf.imageTitle);
         assertEquals("rescue-c-1", rf.frame.callId);
     }
+
+    @Test
+    public void committedRescueFrameSurvivesFailedAtomicRestore() {
+        SessionUndo session = new SessionUndo();
+        SessionUndo.RescueHandle handle = session.wrapRescueFrame(
+                frame("rescue-c-1", "img.tif"));
+        handle.commit();
+        try {
+            session.rewindByCallIdAtomic("img.tif", "rescue-c-1", target -> {
+                throw new IllegalArgumentException("replacement image mismatch");
+            });
+            org.junit.Assert.fail("Expected restore failure");
+        } catch (Exception expected) {
+            assertTrue(expected.getMessage().contains("mismatch"));
+        }
+        assertEquals(1, session.totalFrames());
+        assertNotNull(session.resolveByCallId("rescue-c-1"));
+    }
 }

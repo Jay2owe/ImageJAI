@@ -19,13 +19,18 @@ import static org.junit.Assert.assertTrue;
 public class SessionUndoTest {
 
     private static UndoFrame frame(String callId, String title, long sizeBytes) {
+        return frameAt(callId, title, sizeBytes, System.currentTimeMillis());
+    }
+
+    private static UndoFrame frameAt(String callId, String title, long sizeBytes,
+                                     long timestamp) {
         byte[] compressed = new byte[(int) Math.max(0, sizeBytes)];
         return new UndoFrame(callId, title,
                 4, 4, 1, 1, 1, 8,
                 compressed, compressed.length,
                 Collections.<UndoFrame.RoiSnapshot>emptyList(),
                 "",
-                System.currentTimeMillis(), false);
+                timestamp, false);
     }
 
     @Test
@@ -203,5 +208,47 @@ public class SessionUndoTest {
                     e.toLowerCase().contains("evict"));
         }
         assertTrue(s.globalEvictionCount() >= 1L);
+    }
+
+    @Test
+    public void failedAtomicRewindRetainsActiveBranchFrames() {
+        SessionUndo session = new SessionUndo();
+        session.pushFrame(frame("a", "img.tif", 10));
+        session.pushFrame(frame("b", "img.tif", 10));
+        try {
+            session.rewindByCountAtomic("img.tif", 2, target -> {
+                throw new IllegalArgumentException("target closed");
+            });
+            org.junit.Assert.fail("Expected restore failure");
+        } catch (Exception expected) {
+            assertTrue(expected.getMessage().contains("closed"));
+        }
+        assertEquals(2, session.totalFrames());
+        assertEquals("b", session.resolveByCallId("b").frame.callId);
+        assertEquals("a", session.resolveByCallId("a").frame.callId);
+    }
+
+    @Test
+    public void fromCallIdTruncatesEveryCopiedHistoryAtOneTimestamp() {
+        SessionUndo session = new SessionUndo();
+        session.pushFrame(frameAt("other-old", "other.tif", 10, 100));
+        session.pushFrame(frameAt("c-1", "img.tif", 10, 200));
+        session.pushFrame(frameAt("c-2", "img.tif", 10, 300));
+        session.pushFrame(frameAt("other-new", "other.tif", 10, 350));
+        session.pushFrame(frameAt("c-3", "img.tif", 10, 400));
+
+        SessionUndo.Branch branch = session.createBranch("c-2");
+        assertNotNull(branch.byImageTitle.get("img.tif").findByCallId("c-2"));
+        assertNull(branch.byImageTitle.get("img.tif").findByCallId("c-3"));
+        assertNotNull(branch.byImageTitle.get("other.tif").findByCallId("other-old"));
+        assertNull(branch.byImageTitle.get("other.tif").findByCallId("other-new"));
+        assertEquals(2, branch.checkpointFrames().size());
+    }
+
+    @Test(expected = IllegalArgumentException.class)
+    public void unknownFromCallIdDoesNotCreateLabelOnlyBranch() {
+        SessionUndo session = new SessionUndo();
+        session.pushFrame(frame("c-1", "img.tif", 10));
+        session.createBranch("missing");
     }
 }

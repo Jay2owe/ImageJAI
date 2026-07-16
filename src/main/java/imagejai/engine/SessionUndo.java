@@ -53,6 +53,8 @@ public final class SessionUndo {
         // LinkedHashMap so {@link #framesSnapshot} returns titles in the order
         // they were first pushed onto the branch.
         final Map<String, UndoStack> byImageTitle = new LinkedHashMap<String, UndoStack>();
+        final Map<String, UndoFrame> checkpointByImageTitle =
+                new LinkedHashMap<String, UndoFrame>();
 
         Branch(String id, String baseCallId) {
             this.id = id;
@@ -74,6 +76,10 @@ public final class SessionUndo {
 
         public synchronized List<String> imageTitles() {
             return new ArrayList<String>(byImageTitle.keySet());
+        }
+
+        public synchronized List<UndoFrame> checkpointFrames() {
+            return new ArrayList<UndoFrame>(checkpointByImageTitle.values());
         }
     }
 
@@ -146,8 +152,35 @@ public final class SessionUndo {
             Branch source = branches.get(activeBranchId);
             Branch fresh = new Branch(id, fromCallId);
             if (source != null) {
+                UndoFrame base = null;
+                String baseTitle = null;
+                if (fromCallId != null && !fromCallId.isEmpty()) {
+                    for (Map.Entry<String, UndoStack> entry
+                            : source.byImageTitle.entrySet()) {
+                        UndoFrame candidate = entry.getValue().findByCallId(fromCallId);
+                        if (candidate != null) {
+                            base = candidate;
+                            baseTitle = entry.getKey();
+                            break;
+                        }
+                    }
+                    if (base == null) {
+                        throw new IllegalArgumentException(
+                                "from_call_id '" + fromCallId
+                                + "' is not present on the active branch");
+                    }
+                }
+                long checkpointTime = base == null ? Long.MAX_VALUE : base.timestampMs;
                 for (Map.Entry<String, UndoStack> e : source.byImageTitle.entrySet()) {
-                    fresh.byImageTitle.put(e.getKey(), e.getValue().copy());
+                    String required = e.getKey().equals(baseTitle) ? fromCallId : null;
+                    UndoStack copied = base == null ? e.getValue().copy()
+                            : e.getValue().copyAtCheckpoint(checkpointTime, required);
+                    if (!copied.isEmpty()) {
+                        fresh.byImageTitle.put(e.getKey(), copied);
+                        UndoFrame checkpoint = copied.peek(0);
+                        fresh.checkpointByImageTitle.put(
+                                checkpointKey(checkpoint), checkpoint);
+                    }
                 }
             }
             branches.put(id, fresh);
@@ -162,6 +195,35 @@ public final class SessionUndo {
             activeBranchId = id;
             return true;
         }
+    }
+
+    /** Replace a branch's restorable checkpoint with simultaneous live frames. */
+    public void setBranchCheckpoint(String id, Collection<UndoFrame> frames) {
+        synchronized (lock) {
+            Branch branch = branches.get(id);
+            if (branch == null) throw new IllegalArgumentException("unknown branch " + id);
+            branch.checkpointByImageTitle.clear();
+            if (frames == null) return;
+            for (UndoFrame frame : frames) {
+                if (frame != null && frame.imageTitle != null) {
+                    branch.checkpointByImageTitle.put(checkpointKey(frame), frame);
+                }
+            }
+        }
+    }
+
+    public List<UndoFrame> branchCheckpoint(String id) {
+        synchronized (lock) {
+            Branch branch = branches.get(id);
+            return branch == null ? new ArrayList<UndoFrame>()
+                    : branch.checkpointFrames();
+        }
+    }
+
+    private static String checkpointKey(UndoFrame frame) {
+        return frame.imageId == Integer.MIN_VALUE
+                ? "title:" + frame.imageTitle
+                : "id:" + frame.imageId;
     }
 
     /** Drop a branch. The {@link #MAIN_BRANCH} cannot be deleted. Switches
@@ -284,6 +346,31 @@ public final class SessionUndo {
             UndoStack stack = b.byImageTitle.get(imageTitle);
             if (stack == null) return new ArrayList<UndoFrame>();
             return stack.rewindByCallId(callId);
+        }
+    }
+
+    /** Restore first, then consume frames. Failure leaves the stack intact. */
+    public List<UndoFrame> rewindByCountAtomic(
+            String imageTitle, int n, UndoStack.RestoreAction restore) throws Exception {
+        synchronized (lock) {
+            Branch branch = branches.get(activeBranchId);
+            if (branch == null) return new ArrayList<UndoFrame>();
+            UndoStack stack = branch.byImageTitle.get(imageTitle);
+            if (stack == null) return new ArrayList<UndoFrame>();
+            return stack.restoreAndPopN(n, restore);
+        }
+    }
+
+    /** Call-id variant of {@link #rewindByCountAtomic}. */
+    public List<UndoFrame> rewindByCallIdAtomic(
+            String imageTitle, String callId,
+            UndoStack.RestoreAction restore) throws Exception {
+        synchronized (lock) {
+            Branch branch = branches.get(activeBranchId);
+            if (branch == null) return new ArrayList<UndoFrame>();
+            UndoStack stack = branch.byImageTitle.get(imageTitle);
+            if (stack == null) return new ArrayList<UndoFrame>();
+            return stack.restoreAndDropTo(callId, restore);
         }
     }
 

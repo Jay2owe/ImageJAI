@@ -48,7 +48,7 @@ Conflict watchlist:
 | 10 | completed | `1c6684d` | Focused Stage 10 tests and the full Maven suite passed; assistant mutations now share the coordinator, launch policy is enforced, settings save/cancel is transactional, and clear/listener lifecycle races are covered |
 | 11 | pending | - | - |
 | 12 | pending | - | - |
-| 13 | pending | - | - |
+| 13 | completed | `b0a5617` | 37/37 focused reactive, event-bus, and stable duplicate-title identity tests passed; admission/deadlines, policy/coordinator/provenance, capture containment, quarantine, retention, diagnostics, and stable image/dialog lifecycles are implemented |
 | 14 | pending | - | - |
 | 15 | completed | `ff6bf39` | 16 contract/legacy tests passed; all 28 recipes validate and whole-directory dry-run; unsafe file traversal/symlink escapes and unsupported later steps block before Fiji mutation |
 | 16 | completed | `6ad41c7` | 37 helper regressions passed; compact 4M-pixel buffer and randomized exact-median check passed |

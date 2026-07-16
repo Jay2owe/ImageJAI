@@ -68,6 +68,15 @@ public class CommandEngine {
     }
 
     /**
+     * Execute a macro with an exact, unshown image as the current image on the
+     * coordinator worker. This avoids title-based selection and lets callers
+     * safely operate on private duplicates.
+     */
+    ExecutionResult executeMacroOnImage(String macroCode, ImagePlus image) {
+        return executeMacroWithTarget(macroCode, Constants.MACRO_TIMEOUT_MS, image);
+    }
+
+    /**
      * Execute an ImageJ macro with a specified timeout.
      *
      * @param macroCode the ImageJ macro code to execute
@@ -75,6 +84,11 @@ public class CommandEngine {
      * @return structured execution result
      */
     public ExecutionResult executeMacroWithTimeout(String macroCode, long timeoutMs) {
+        return executeMacroWithTarget(macroCode, timeoutMs, null);
+    }
+
+    private ExecutionResult executeMacroWithTarget(String macroCode, long timeoutMs,
+                                                   final ImagePlus targetImage) {
         if (macroCode == null || macroCode.trim().isEmpty()) {
             return ExecutionResult.failure("Empty macro code", 0);
         }
@@ -90,7 +104,16 @@ public class CommandEngine {
                             .timeoutMs(timeoutMs)
                             .operation(new MutationCoordinator.Operation<ExecutionResult>() {
                                 @Override public ExecutionResult run() {
-                                    return executeMacroOnCurrentThread(code, null);
+                                    if (targetImage == null) {
+                                        return executeMacroOnCurrentThread(code, null);
+                                    }
+                                    ImagePlus previous = WindowManager.getCurrentImage();
+                                    WindowManager.setTempCurrentImage(targetImage);
+                                    try {
+                                        return executeMacroOnCurrentThread(code, null);
+                                    } finally {
+                                        WindowManager.setTempCurrentImage(previous);
+                                    }
                                 }
                             })
                             .cancellationAction(new MutationCoordinator.CancellationAction() {

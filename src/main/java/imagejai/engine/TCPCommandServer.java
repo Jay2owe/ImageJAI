@@ -3343,6 +3343,7 @@ public class TCPCommandServer {
         String toCallId = rewindToCallId;
         int n = rewindCount;
         List<UndoFrame> popped;
+        final UndoRestoreSummary undoRestore = new UndoRestoreSummary();
         if (toCallId != null && !toCallId.isEmpty()) {
             String resolvedTitle = imageTitle;
             if (resolvedTitle == null) {
@@ -3368,7 +3369,15 @@ public class TCPCommandServer {
                       + " rewind; create a branch before run_script if you"
                       + " need to explore.", caps);
             }
-            popped = sessionUndo.rewindByCallId(resolvedTitle, toCallId);
+            try {
+                popped = sessionUndo.rewindByCallIdAtomic(resolvedTitle, toCallId,
+                        target -> restoreUndoFrameAtomically(target, undoRestore));
+            } catch (IllegalArgumentException e) {
+                return undoRestoreError(e, caps);
+            } catch (Exception e) {
+                return undoErrorResponse("UNDO_RESTORE_FAILED",
+                        "Restore failed: " + String.valueOf(e.getMessage()), caps);
+            }
             imageTitle = resolvedTitle;
             if (popped.isEmpty()) {
                 return undoErrorResponse("UNDO_NOT_FOUND",
@@ -3385,7 +3394,15 @@ public class TCPCommandServer {
                       + "'. Reduce n or use branch_switch to a branch that"
                       + " did not run a script.", caps);
             }
-            popped = sessionUndo.rewindByCount(imageTitle, n);
+            try {
+                popped = sessionUndo.rewindByCountAtomic(imageTitle, n,
+                        target -> restoreUndoFrameAtomically(target, undoRestore));
+            } catch (IllegalArgumentException e) {
+                return undoRestoreError(e, caps);
+            } catch (Exception e) {
+                return undoErrorResponse("UNDO_RESTORE_FAILED",
+                        "Restore failed: " + String.valueOf(e.getMessage()), caps);
+            }
             if (popped.isEmpty()) {
                 return undoErrorResponse("UNDO_NOT_FOUND",
                         "No undo frames on stack for image '" + imageTitle
@@ -3396,11 +3413,11 @@ public class TCPCommandServer {
         // The frame we restore from is the LAST one popped. Earlier ones
         // are intermediate states the agent walked past — discarded.
         UndoFrame target = popped.get(popped.size() - 1);
-        boolean restored = false;
-        int restoredSlices = 0;
+        boolean restored = undoRestore.applied;
+        int restoredSlices = undoRestore.restoredPlanes;
         String restoreError = null;
         String restoreErrorCode = null;
-        try {
+        if (!undoRestore.applied) try {
             ImagePlus imp = WindowManager.getImage(target.imageTitle);
             if (imp == null) {
                 // Image was closed since the frame was captured — this is a
@@ -3430,8 +3447,8 @@ public class TCPCommandServer {
         // ROI restoration is best-effort and bounded — we replay the names
         // and bounding boxes only. Pixel-precise Roi geometry is a future
         // refinement.
-        int restoredRois = 0;
-        try {
+        int restoredRois = undoRestore.restoredRois;
+        if (!undoRestore.applied) try {
             RoiManager rm = RoiManager.getInstance2();
             if (rm != null && !target.rois.isEmpty()) {
                 rm.reset();
@@ -3452,8 +3469,8 @@ public class TCPCommandServer {
         // Results CSV restoration — wipe + replay. Fiji has no public CSV
         // import on ResultsTable; a future refinement could rebuild the
         // table from the captured CSV. v1 reports the byte count restored.
-        int restoredResultsRows = 0;
-        try {
+        int restoredResultsRows = undoRestore.restoredResultsRows;
+        if (!undoRestore.applied) try {
             if (target.resultsCsv != null && !target.resultsCsv.isEmpty()) {
                 // Count rows = newlines - 1 (header).
                 int nl = 0;
@@ -3518,6 +3535,78 @@ public class TCPCommandServer {
         return s == null ? 0 : s.size();
     }
 
+    private static final class UndoRestoreSummary {
+        boolean applied;
+        int restoredPlanes;
+        int restoredRois;
+        int restoredResultsRows;
+    }
+
+    private void restoreUndoFrameAtomically(UndoFrame target,
+                                            UndoRestoreSummary summary) throws Exception {
+        ImagePlus image = resolveUndoTarget(target);
+        if (image == null) {
+            throw new IllegalArgumentException(
+                    "target image is closed: " + target.imageTitle);
+        }
+        UndoFrame.RestorePlan targetPlan = target.prepareRestore(image);
+        String currentCsv = stateInspector == null
+                ? "" : stateInspector.getResultsTableCSV();
+        UndoFrame rollbackFrame = UndoFrame.capture(
+                "rollback-" + target.callId, image, RoiManager.getRawInstance(),
+                currentCsv, false);
+        if (rollbackFrame == null) {
+            throw new IllegalArgumentException("could not capture rollback snapshot");
+        }
+        UndoFrame.RestorePlan rollbackPlan = rollbackFrame.prepareRestore(image);
+        try {
+            int planes = targetPlan.applyPixelsAndCalibration();
+            int rois = targetPlan.applySideState();
+            summary.restoredPlanes = planes;
+            summary.restoredRois = rois;
+            summary.restoredResultsRows = targetPlan.restoredResultsRows();
+            summary.applied = true;
+        } catch (Throwable failure) {
+            try {
+                rollbackPlan.applyPixelsAndCalibration();
+                rollbackPlan.applySideState();
+            } catch (Throwable rollbackFailure) {
+                failure.addSuppressed(rollbackFailure);
+            }
+            if (failure instanceof Exception) throw (Exception) failure;
+            throw new RuntimeException(failure);
+        }
+    }
+
+    private ImagePlus resolveUndoTarget(UndoFrame target) {
+        ImagePlus image = target.imageId == Integer.MIN_VALUE
+                ? WindowManager.getImage(target.imageTitle)
+                : WindowManager.getImage(target.imageId);
+        if (image == null) {
+            ImagePlus current = WindowManager.getCurrentImage();
+            if (current != null && (target.imageId == Integer.MIN_VALUE
+                    ? target.imageTitle.equals(current.getTitle())
+                    : target.imageId == current.getID())) {
+                image = current;
+            }
+        }
+        if (image == null) image = target.capturedImageFallback();
+        return image;
+    }
+
+    private JsonObject undoRestoreError(IllegalArgumentException error,
+                                        AgentCaps caps) {
+        String message = String.valueOf(error.getMessage());
+        String lower = message.toLowerCase(java.util.Locale.ROOT);
+        String code = lower.contains("closed") ? "UNDO_IMAGE_CLOSED"
+                : lower.contains("identity") || lower.contains("title")
+                ? "UNDO_IDENTITY_MISMATCH"
+                : lower.contains("type") ? "UNDO_TYPE_MISMATCH"
+                : lower.contains("raw") || lower.contains("snapshot")
+                ? "UNDO_SNAPSHOT_INVALID" : "UNDO_GEOMETRY_MISMATCH";
+        return undoErrorResponse(code, message, caps);
+    }
+
     /**
      * {@code branch}: deep-copy the active branch's per-image stacks and
      * register the copy as a new branch. {@code from_call_id} is recorded
@@ -3529,21 +3618,64 @@ public class TCPCommandServer {
             return undoErrorResponse("UNDO_DISABLED",
                     "Undo is off for this connection.", caps);
         }
-        String fromCallId = optString(request, "from_call_id", null);
+        final String fromCallId = optString(request, "from_call_id", null);
+        final ImagePlus currentHint = WindowManager.getCurrentImage();
         try {
-            SessionUndo.Branch fresh = sessionUndo.createBranch(fromCallId);
-            sessionUndo.switchBranch(fresh.id);
-            JsonObject result = new JsonObject();
-            result.addProperty("branchId", fresh.id);
-            result.addProperty("baseCallId",
-                    fresh.baseCallId == null ? "" : fresh.baseCallId);
-            result.addProperty("activeBranch", sessionUndo.activeBranchId());
-            result.addProperty("totalBranches",
-                    sessionUndo.listBranches().size());
-            return successResponse(result);
-        } catch (IllegalStateException ise) {
-            return undoErrorResponse("UNDO_BRANCH_CAP",
-                    ise.getMessage(), caps);
+            MutationCoordinator.Handle<JsonObject> handle = mutationCoordinator.submit(
+                    MutationCoordinator.Request.<JsonObject>builder()
+                            .ownerSession(mutationOwnerOrInternal(caps))
+                            .sourceKind("branch")
+                            .code(request.toString())
+                            .timeoutMs(resolveTimeoutMs(request, MACRO_TIMEOUT_MS))
+                            .operation(new MutationCoordinator.Operation<JsonObject>() {
+                                @Override public JsonObject run() {
+                                    String sourceId = sessionUndo.activeBranchId();
+                                    List<UndoFrame> live;
+                                    try {
+                                        live = captureLiveBranchCheckpoint(sourceId, currentHint);
+                                        sessionUndo.setBranchCheckpoint(sourceId, live);
+                                    } catch (Exception e) {
+                                        return undoErrorResponse("UNDO_SNAPSHOT_INVALID",
+                                                "Could not capture branch checkpoint: "
+                                                        + String.valueOf(e.getMessage()), caps);
+                                    }
+                                    SessionUndo.Branch fresh;
+                                    try {
+                                        fresh = sessionUndo.createBranch(fromCallId);
+                                    } catch (IllegalArgumentException e) {
+                                        return undoErrorResponse("UNDO_NOT_FOUND", e.getMessage(), caps);
+                                    } catch (IllegalStateException e) {
+                                        return undoErrorResponse("UNDO_BRANCH_CAP", e.getMessage(), caps);
+                                    }
+                                    try {
+                                        if (fromCallId == null || fromCallId.isEmpty()) {
+                                            sessionUndo.setBranchCheckpoint(fresh.id, live);
+                                        } else {
+                                            restoreBranchCheckpointAtomically(fresh.id);
+                                        }
+                                        if (!sessionUndo.switchBranch(fresh.id)) {
+                                            throw new IllegalStateException(
+                                                    "new branch disappeared before checkout");
+                                        }
+                                    } catch (Exception e) {
+                                        sessionUndo.deleteBranch(fresh.id);
+                                        return undoRestoreErrorForBranch(e, caps);
+                                    }
+                                    JsonObject result = new JsonObject();
+                                    result.addProperty("branchId", fresh.id);
+                                    result.addProperty("baseCallId",
+                                            fresh.baseCallId == null ? "" : fresh.baseCallId);
+                                    result.addProperty("activeBranch", sessionUndo.activeBranchId());
+                                    result.addProperty("checkpointFrames",
+                                            sessionUndo.branchCheckpoint(fresh.id).size());
+                                    result.addProperty("totalBranches",
+                                            sessionUndo.listBranches().size());
+                                    return successResponse(result);
+                                }
+                            }).build());
+            return awaitBranchMutation(handle, caps);
+        } catch (IllegalArgumentException | java.util.concurrent.RejectedExecutionException e) {
+            return errorResponse("Mutation admission rejected: " + e.getMessage());
         }
     }
 
@@ -3565,6 +3697,7 @@ public class TCPCommandServer {
             o.addProperty("createdMs", b.createdMs);
             o.addProperty("frames", b.totalFrames());
             o.addProperty("bytes", b.totalBytes());
+            o.addProperty("checkpointFrames", b.checkpointFrames().size());
             JsonArray titles = new JsonArray();
             for (String t : b.imageTitles()) titles.add(new JsonPrimitive(t));
             o.add("imageTitles", titles);
@@ -3581,19 +3714,178 @@ public class TCPCommandServer {
             return undoErrorResponse("UNDO_DISABLED",
                     "Undo is off for this connection.", caps);
         }
-        String id = optString(request, "branch_id", "");
+        final String id = optString(request, "branch_id", "");
+        final ImagePlus currentHint = WindowManager.getCurrentImage();
         if (id == null || id.isEmpty()) {
             return undoErrorResponse("UNDO_BAD_REQUEST",
                     "branch_switch requires branch_id.", caps);
         }
-        boolean ok = sessionUndo.switchBranch(id);
-        if (!ok) {
+        if (sessionUndo.getBranch(id) == null) {
             return undoErrorResponse("UNDO_NOT_FOUND",
                     "No branch with id '" + id + "'.", caps);
         }
-        JsonObject result = new JsonObject();
-        result.addProperty("activeBranch", sessionUndo.activeBranchId());
-        return successResponse(result);
+        if (id.equals(sessionUndo.activeBranchId())) {
+            JsonObject result = new JsonObject();
+            result.addProperty("activeBranch", id);
+            return successResponse(result);
+        }
+        try {
+            MutationCoordinator.Handle<JsonObject> handle = mutationCoordinator.submit(
+                    MutationCoordinator.Request.<JsonObject>builder()
+                            .ownerSession(mutationOwnerOrInternal(caps))
+                            .sourceKind("branch_switch")
+                            .code(request.toString())
+                            .timeoutMs(resolveTimeoutMs(request, MACRO_TIMEOUT_MS))
+                            .operation(new MutationCoordinator.Operation<JsonObject>() {
+                                @Override public JsonObject run() {
+                                    String sourceId = sessionUndo.activeBranchId();
+                                    try {
+                                        List<UndoFrame> live = captureLiveBranchCheckpoint(
+                                                sourceId, currentHint);
+                                        sessionUndo.setBranchCheckpoint(sourceId, live);
+                                        restoreBranchCheckpointAtomically(id);
+                                        if (!sessionUndo.switchBranch(id)) {
+                                            throw new IllegalStateException(
+                                                    "branch disappeared before checkout");
+                                        }
+                                    } catch (Exception e) {
+                                        return undoRestoreErrorForBranch(e, caps);
+                                    }
+                                    JsonObject result = new JsonObject();
+                                    result.addProperty("activeBranch", sessionUndo.activeBranchId());
+                                    result.addProperty("checkpointFrames",
+                                            sessionUndo.branchCheckpoint(id).size());
+                                    return successResponse(result);
+                                }
+                            }).build());
+            return awaitBranchMutation(handle, caps);
+        } catch (IllegalArgumentException | java.util.concurrent.RejectedExecutionException e) {
+            return errorResponse("Mutation admission rejected: " + e.getMessage());
+        }
+    }
+
+    private JsonObject awaitBranchMutation(MutationCoordinator.Handle<JsonObject> handle,
+                                           AgentCaps caps) {
+        try {
+            MutationCoordinator.Completion<JsonObject> completion = handle.awaitCompletion();
+            if (completion.state() == MutationCoordinator.State.SUCCEEDED
+                    && completion.result() != null) {
+                return completion.result();
+            }
+            Throwable error = completion.error();
+            return undoErrorResponse("UNDO_RESTORE_FAILED",
+                    error == null ? "Branch mutation did not complete"
+                            : String.valueOf(error.getMessage()), caps);
+        } catch (InterruptedException e) {
+            handle.cancel();
+            Thread.currentThread().interrupt();
+            return undoErrorResponse("UNDO_RESTORE_FAILED",
+                    "Branch mutation interrupted", caps);
+        }
+    }
+
+    private List<UndoFrame> captureLiveBranchCheckpoint(String branchId,
+                                                        ImagePlus currentHint) {
+        List<UndoFrame> frames = new ArrayList<UndoFrame>();
+        java.util.HashSet<Integer> capturedIds = new java.util.HashSet<Integer>();
+        int[] ids = WindowManager.getIDList();
+        if (ids != null) {
+            for (int id : ids) {
+                ImagePlus image = WindowManager.getImage(id);
+                if (image != null && capturedIds.add(image.getID())) {
+                    frames.add(captureBranchFrame(branchId, image));
+                }
+            }
+        }
+        ImagePlus current = WindowManager.getCurrentImage();
+        if (current != null && capturedIds.add(current.getID())) {
+            frames.add(captureBranchFrame(branchId, current));
+        }
+        if (currentHint != null && capturedIds.add(currentHint.getID())) {
+            frames.add(captureBranchFrame(branchId, currentHint));
+        }
+        return frames;
+    }
+
+    private UndoFrame captureBranchFrame(String branchId, ImagePlus image) {
+        String csv = stateInspector == null ? "" : stateInspector.getResultsTableCSV();
+        UndoFrame frame = UndoFrame.capture(
+                "checkpoint-" + branchId + "-" + nextCallId(), image,
+                RoiManager.getRawInstance(), csv, false);
+        if (frame == null) {
+            throw new IllegalArgumentException("could not snapshot " + image.getTitle());
+        }
+        return frame;
+    }
+
+    private static final class BranchRestoreEntry {
+        final UndoFrame.RestorePlan target;
+        final UndoFrame.RestorePlan rollback;
+
+        BranchRestoreEntry(UndoFrame.RestorePlan target,
+                           UndoFrame.RestorePlan rollback) {
+            this.target = target;
+            this.rollback = rollback;
+        }
+    }
+
+    private void restoreBranchCheckpointAtomically(String branchId) throws Exception {
+        List<UndoFrame> checkpoint = sessionUndo.branchCheckpoint(branchId);
+        List<BranchRestoreEntry> entries = new ArrayList<BranchRestoreEntry>();
+        String csv = stateInspector == null ? "" : stateInspector.getResultsTableCSV();
+        for (UndoFrame frame : checkpoint) {
+            ImagePlus image = resolveUndoTarget(frame);
+            if (image == null) {
+                throw new IllegalArgumentException(
+                        "target image is closed: " + frame.imageTitle);
+            }
+            UndoFrame.RestorePlan target = frame.prepareRestore(image);
+            UndoFrame rollbackFrame = UndoFrame.capture(
+                    "branch-rollback-" + nextCallId(), image,
+                    RoiManager.getRawInstance(), csv, false);
+            if (rollbackFrame == null) {
+                throw new IllegalArgumentException("could not capture rollback snapshot");
+            }
+            entries.add(new BranchRestoreEntry(
+                    target, rollbackFrame.prepareRestore(image)));
+        }
+
+        try {
+            for (BranchRestoreEntry entry : entries) {
+                entry.target.applyPixelsAndCalibration();
+            }
+            if (!entries.isEmpty()) entries.get(0).target.applySideState();
+        } catch (Throwable failure) {
+            for (BranchRestoreEntry entry : entries) {
+                try {
+                    entry.rollback.applyPixelsAndCalibration();
+                } catch (Throwable rollbackFailure) {
+                    failure.addSuppressed(rollbackFailure);
+                }
+            }
+            if (!entries.isEmpty()) {
+                try {
+                    entries.get(0).rollback.applySideState();
+                } catch (Throwable rollbackFailure) {
+                    failure.addSuppressed(rollbackFailure);
+                }
+            }
+            if (failure instanceof Exception) throw (Exception) failure;
+            throw new RuntimeException(failure);
+        }
+    }
+
+    private JsonObject undoRestoreErrorForBranch(Exception error, AgentCaps caps) {
+        if (error instanceof IllegalArgumentException) {
+            JsonObject response = undoRestoreError((IllegalArgumentException) error, caps);
+            JsonObject result = response.getAsJsonObject("result");
+            if (result != null) {
+                result.addProperty("activeBranch", sessionUndo.activeBranchId());
+            }
+            return response;
+        }
+        return undoErrorResponse("UNDO_RESTORE_FAILED",
+                "Branch checkout failed: " + String.valueOf(error.getMessage()), caps);
     }
 
     /** {@code branch_delete}: discard a branch's state. {@link
@@ -3648,19 +3940,18 @@ public class TCPCommandServer {
                 csv = stateInspector != null
                         ? stateInspector.getResultsTableCSV() : null;
             } catch (Throwable ignore) {}
-            RoiManager rm = RoiManager.getInstance();
+            RoiManager rm = RoiManager.getRawInstance();
             boolean diskWrite = UndoFrame.macroHasDiskWrites(macroSrc);
             UndoFrame f = UndoFrame.capture(callId, imp, rm, csv, diskWrite);
             if (f != null) sessionUndo.pushFrame(f);
             return f;
         } catch (Throwable t) {
-            // Snapshot failure is non-fatal. Log and move on so the macro
-            // path is unaffected.
             try {
-                IJ.log("[ImageJAI-Undo] capture skipped: "
+                IJ.log("[ImageJAI-Undo] capture failed; mutation rejected: "
                         + String.valueOf(t.getMessage()));
             } catch (Throwable ignore) {}
-            return null;
+            throw new IllegalStateException(
+                    "Undo snapshot failed; mutation was not started", t);
         }
     }
 

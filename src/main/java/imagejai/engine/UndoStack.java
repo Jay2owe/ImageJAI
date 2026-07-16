@@ -26,6 +26,11 @@ import java.util.List;
  */
 public final class UndoStack {
 
+    @FunctionalInterface
+    public interface RestoreAction {
+        void restore(UndoFrame target) throws Exception;
+    }
+
     /** Per-image frame count cap. Plan §Memory management: 5 frames. */
     public static final int MAX_FRAMES = 5;
 
@@ -118,6 +123,64 @@ public final class UndoStack {
         return dropDownTo(callId);
     }
 
+    /**
+     * Validate/apply a rewind before consuming any frames. If restoration
+     * throws, the deque and byte accounting remain unchanged.
+     */
+    public synchronized List<UndoFrame> restoreAndPopN(
+            int n, RestoreAction restore) throws Exception {
+        List<UndoFrame> selected = peekN(n);
+        if (selected.isEmpty()) return selected;
+        if (restore == null) throw new IllegalArgumentException("restore action is required");
+        restore.restore(selected.get(selected.size() - 1));
+        removeSelected(selected);
+        return selected;
+    }
+
+    /** Atomic call-id variant of {@link #restoreAndPopN}. */
+    public synchronized List<UndoFrame> restoreAndDropTo(
+            String callId, RestoreAction restore) throws Exception {
+        List<UndoFrame> selected = peekToCallId(callId);
+        if (selected.isEmpty()) return selected;
+        if (restore == null) throw new IllegalArgumentException("restore action is required");
+        restore.restore(selected.get(selected.size() - 1));
+        removeSelected(selected);
+        return selected;
+    }
+
+    public synchronized List<UndoFrame> peekN(int n) {
+        List<UndoFrame> selected = new ArrayList<UndoFrame>();
+        if (n <= 0) return selected;
+        Iterator<UndoFrame> iterator = frames.iterator();
+        while (iterator.hasNext() && selected.size() < n) {
+            selected.add(iterator.next());
+        }
+        return selected;
+    }
+
+    public synchronized List<UndoFrame> peekToCallId(String callId) {
+        List<UndoFrame> selected = new ArrayList<UndoFrame>();
+        if (callId == null) return selected;
+        for (UndoFrame frame : frames) {
+            selected.add(frame);
+            if (callId.equals(frame.callId)) return selected;
+        }
+        selected.clear();
+        return selected;
+    }
+
+    private void removeSelected(List<UndoFrame> selected) {
+        for (UndoFrame expected : selected) {
+            UndoFrame actual = frames.peekFirst();
+            if (actual != expected) {
+                throw new IllegalStateException("undo stack changed during restore");
+            }
+            frames.removeFirst();
+            currentBytes -= actual.sizeBytes;
+        }
+        if (currentBytes < 0) currentBytes = 0;
+    }
+
     public synchronized int size() { return frames.size(); }
     public synchronized boolean isEmpty() { return frames.isEmpty(); }
     public synchronized long bytes() { return currentBytes; }
@@ -153,6 +216,31 @@ public final class UndoStack {
             UndoFrame f = it.next();
             out.frames.addLast(f);
             out.currentBytes += f.sizeBytes;
+        }
+        return out;
+    }
+
+    /** Copy history as it existed at or before a checkpoint timestamp. */
+    public synchronized UndoStack copyAtCheckpoint(long timestampMs,
+                                                   String requiredCallId) {
+        UndoStack out = new UndoStack();
+        boolean requiredSeen = requiredCallId == null;
+        for (UndoFrame frame : frames) {
+            if (!requiredSeen) {
+                if (!requiredCallId.equals(frame.callId)) continue;
+                requiredSeen = true;
+            } else if (frame.timestampMs > timestampMs) {
+                continue;
+            }
+            if (frame.timestampMs <= timestampMs
+                    || requiredCallId != null && requiredCallId.equals(frame.callId)) {
+                out.frames.addLast(frame);
+                out.currentBytes += frame.sizeBytes;
+            }
+        }
+        if (!requiredSeen) {
+            throw new IllegalArgumentException(
+                    "from_call_id is not present on the source stack");
         }
         return out;
     }
