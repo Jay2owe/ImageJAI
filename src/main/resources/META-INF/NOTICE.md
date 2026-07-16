@@ -1,38 +1,43 @@
-# ImageJAI — Third-party NOTICE
+# ImageJAI — Third-party notice
 
-This plugin bundles the following third-party components for the
-embedded terminal renderer and PTY backend.
+ImageJAI is distributed under the BSD 3-Clause License. Its release JAR
+contains the following third-party software and font resources. Versions below
+are the versions embedded by `pom.xml`; source and license texts are available
+from the linked upstream projects.
 
-## JediTerm (LGPL-3.0)
+## Embedded terminal and native-process support
 
-- Source: https://github.com/JetBrains/jediterm
-- Upstream artifacts: `org.jetbrains.jediterm:jediterm-core`,
-  `jediterm-ui`, published to the JetBrains
-  `intellij-dependencies` Maven repo.
-- LGPL-3.0: users may replace the bundled JediTerm with a modified
-  version by dropping it into the Fiji plugins folder. This plugin
-  links against JediTerm dynamically via the standard Java
-  classloader, satisfying the LGPL linking clause.
+- **JediTerm core and UI 3.66** — LGPL-3.0.
+  Source: https://github.com/JetBrains/jediterm
+- **pty4j 0.13.12** — EPL-1.0.
+  Source: https://github.com/JetBrains/pty4j
+- **Java Native Access (JNA and JNA Platform) 5.13.0** — available under
+  LGPL-2.1-or-later or Apache-2.0.
+  Source: https://github.com/java-native-access/jna
+- **Kotlin standard library 2.1.21** — Apache-2.0.
+  Source: https://github.com/JetBrains/kotlin
+- **JetBrains Java annotations 24.0.1** — Apache-2.0.
+  Source: https://github.com/JetBrains/java-annotations
+- **SLF4J API 1.7.36** — MIT.
+  Source: https://github.com/qos-ch/slf4j
 
-## pty4j (EPL-1.0)
+## Configuration and document support
 
-- Source: https://github.com/JetBrains/pty4j
-- Upstream artifact: `org.jetbrains.pty4j:pty4j`, published to
-  Maven Central.
-- EPL-1.0: source available at the upstream repository above.
+- **SnakeYAML 2.2** — Apache-2.0.
+  Source: https://bitbucket.org/snakeyaml/snakeyaml
+- **Apache PDFBox, PDFBox IO, and FontBox 3.0.2** — Apache-2.0.
+  Source: https://github.com/apache/pdfbox
+- **Apache Commons Logging 1.2** — Apache-2.0.
+  Source: https://github.com/apache/commons-logging
 
-## JetBrains Mono (Apache-2.0)
+The shaded JAR also retains Apache PDFBox's upstream `META-INF/NOTICE`, which
+attributes the data and code incorporated by PDFBox, including Adobe glyph
+lists, Unicode data, TwelveMonkeys ImageIO portions, and the bundled ICC
+profile.
 
-- Source: https://github.com/JetBrains/JetBrainsMono
-- Bundled as `src/main/resources/fonts/JetBrainsMono-Regular.ttf`.
+## Font resources
 
-## Noto Emoji monochrome (SIL OFL 1.1)
-
-- Source: https://github.com/googlefonts/noto-emoji
-- Bundled as `src/main/resources/fonts/NotoEmoji-Regular.ttf`.
-
-## Kotlin stdlib (Apache-2.0) — TRANSITIVE DEP
-
-- Source: https://github.com/JetBrains/kotlin
-- Pulled in as a transitive dependency of pty4j / JediTerm. Pinned
-  via `pom.xml` `<kotlin.version>` in stage 05.
+- **JetBrains Mono Regular** — Apache-2.0.
+  Source: https://github.com/JetBrains/JetBrainsMono
+- **Noto Emoji Regular (monochrome)** — SIL Open Font License 1.1.
+  Source: https://github.com/googlefonts/noto-emoji

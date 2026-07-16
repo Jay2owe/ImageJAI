@@ -6,6 +6,7 @@ import imagejai.terminal.ApprovalPolicy;
 import imagejai.terminal.PromptWatcher;
 import org.junit.Test;
 
+import javax.swing.SwingUtilities;
 import java.io.File;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
@@ -83,6 +84,39 @@ public class TerminalReliabilityTest {
         assertEquals(1, confirmed.get());
         assertEquals(1, running.get());
         assertEquals(1, stopped.get());
+        assertEquals(PromptWatcher.State.STOPPED, watcher.state());
+    }
+
+    @Test
+    public void watcherStartStopIsIdempotentAndStoppedPollingIsInert()
+            throws Exception {
+        AtomicInteger reads = new AtomicInteger();
+        AtomicInteger running = new AtomicInteger();
+        AtomicInteger stopped = new AtomicInteger();
+        final PromptWatcher watcher = new PromptWatcher(
+                limit -> {
+                    reads.incrementAndGet();
+                    return "Proceed?";
+                }, null, text -> { }, new ListenerAdapter() {
+                    @Override public void onWatcherState(PromptWatcher.State state) {
+                        if (state == PromptWatcher.State.RUNNING) running.incrementAndGet();
+                        if (state == PromptWatcher.State.STOPPED) stopped.incrementAndGet();
+                    }
+                });
+
+        SwingUtilities.invokeAndWait(new Runnable() {
+            @Override public void run() {
+                watcher.start();
+                watcher.start();
+                watcher.stop();
+                watcher.stop();
+            }
+        });
+        watcher.pollNow();
+
+        assertEquals(1, running.get());
+        assertEquals(1, stopped.get());
+        assertEquals(0, reads.get());
         assertEquals(PromptWatcher.State.STOPPED, watcher.state());
     }
 

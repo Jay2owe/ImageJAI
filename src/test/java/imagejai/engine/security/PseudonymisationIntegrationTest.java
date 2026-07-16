@@ -119,23 +119,34 @@ public class PseudonymisationIntegrationTest {
                     boundPort.get() > 0);
 
             List<String> rawResponses = new ArrayList<String>();
+            String helloRaw = send(boundPort.get(), requestFor("hello",
+                    rawImagePath, sensitiveFolder, "stage08-session"));
+            JsonObject helloResponse = new JsonParser().parse(helloRaw)
+                    .getAsJsonObject();
+            assertTrue("hello failed: " + helloRaw,
+                    helloResponse.get("ok").getAsBoolean());
+            String durableSessionId = helloResponse.getAsJsonObject("result")
+                    .get("session_id").getAsString();
+            assertGovernedResponse("hello", helloRaw, helloResponse,
+                    rawImagePath, sensitiveFolder);
+            rawResponses.add(helloRaw);
+
             for (String command : TCPCommandServer.knownCommands()) {
+                if ("hello".equals(command)) {
+                    continue;
+                }
                 String raw;
                 try {
                     raw = send(boundPort.get(), requestFor(command,
-                            rawImagePath, sensitiveFolder));
+                            rawImagePath, sensitiveFolder, durableSessionId));
                 } catch (Exception e) {
                     throw new AssertionError(
                             "TCP command timed out or failed: " + command, e);
                 }
                 rawResponses.add(raw);
                 JsonObject response = new JsonParser().parse(raw).getAsJsonObject();
-                assertTrue(command + " missing _governance in " + raw,
-                        response.has("_governance"));
-                assertEquals("Pseudonymised",
-                        response.getAsJsonObject("_governance")
-                                .get("posture").getAsString());
-                assertNoOriginals(command, raw, rawImagePath, sensitiveFolder);
+                assertGovernedResponse(command, raw, response,
+                        rawImagePath, sensitiveFolder);
             }
 
             AuditLog.getInstance().flushForTest();
@@ -170,10 +181,11 @@ public class PseudonymisationIntegrationTest {
     }
 
     private static JsonObject requestFor(String command, Path rawImagePath,
-                                         Path sensitiveFolder) {
+                                         Path sensitiveFolder,
+                                         String sessionId) {
         JsonObject request = new JsonObject();
         request.addProperty("command", command);
-        request.addProperty("session_id", "stage08-session");
+        request.addProperty("session_id", sessionId);
         request.addProperty("model_endpoint", "openai.codex");
         request.addProperty("identifiable_input", SENSITIVE_ID);
         request.addProperty("path_hint", rawImagePath.toString());
@@ -189,10 +201,10 @@ public class PseudonymisationIntegrationTest {
         } else if ("request_visual".equals(command)) {
             request.addProperty("reason", "inspect " + rawImagePath.toString());
         } else if ("browse_pending_brief".equals(command)) {
-            enqueueStage08Brief(rawImagePath);
+            enqueueStage08Brief(rawImagePath, sessionId);
         } else if ("get_pending_brief".equals(command)) {
-            if (!SelectionBroker.getInstance().hasPending("stage08-session")) {
-                enqueueStage08Brief(rawImagePath);
+            if (!SelectionBroker.getInstance().hasPending(sessionId)) {
+                enqueueStage08Brief(rawImagePath, sessionId);
             }
         } else if ("3d_viewer".equals(command)) {
             request.addProperty("action", "status");
@@ -231,14 +243,26 @@ public class PseudonymisationIntegrationTest {
         return request;
     }
 
-    private static void enqueueStage08Brief(Path rawImagePath) {
+    private static void enqueueStage08Brief(Path rawImagePath, String sessionId) {
         java.util.Map<String, Object> metadata = new java.util.LinkedHashMap<String, Object>();
         metadata.put("channels", 1);
         metadata.put("dimensions", "64x64");
-        SelectionBroker.getInstance().enqueue(new Brief("stage08-session",
+        SelectionBroker.getInstance().enqueue(new Brief(sessionId,
                 java.util.Collections.singletonList(
                         PathTokenMap.getInstance().tokenForSeries(rawImagePath, 1)),
                 "stage08 brief", metadata));
+    }
+
+    private static void assertGovernedResponse(String command, String raw,
+                                               JsonObject response,
+                                               Path rawImagePath,
+                                               Path sensitiveFolder) {
+        assertTrue(command + " missing _governance in " + raw,
+                response.has("_governance"));
+        assertEquals("Pseudonymised",
+                response.getAsJsonObject("_governance")
+                        .get("posture").getAsString());
+        assertNoOriginals(command, raw, rawImagePath, sensitiveFolder);
     }
 
     private static String send(int port, JsonObject request) throws Exception {

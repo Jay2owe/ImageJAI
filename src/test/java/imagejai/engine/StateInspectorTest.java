@@ -2,6 +2,7 @@ package imagejai.engine;
 
 import ij.ImagePlus;
 import ij.ImageStack;
+import ij.WindowManager;
 import ij.process.ByteProcessor;
 import ij.measure.ResultsTable;
 import org.junit.Test;
@@ -11,6 +12,7 @@ import java.util.Locale;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotEquals;
 import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
 
 public class StateInspectorTest {
@@ -99,6 +101,29 @@ public class StateInspectorTest {
             assertTrue(!exact.truncated());
         } finally {
             table.reset();
+        }
+    }
+
+    @Test
+    public void inspectorBindsToTheCurrentImageWithoutRetainingItAfterRestore() {
+        ImagePlus previous = WindowManager.getCurrentImage();
+        ImagePlus temporary = new ImagePlus(
+                "lifecycle-image", new ByteProcessor(3, 2));
+        try {
+            WindowManager.setTempCurrentImage(temporary);
+            ImageInfo info = new StateInspector().getActiveImageInfo();
+
+            assertNotNull(info);
+            assertEquals("lifecycle-image", info.getTitle());
+            assertEquals(3, info.getWidth());
+            assertEquals(2, info.getHeight());
+
+            WindowManager.setTempCurrentImage(previous);
+            assertSame(previous, WindowManager.getCurrentImage());
+        } finally {
+            temporary.changes = false;
+            temporary.close();
+            WindowManager.setTempCurrentImage(previous);
         }
     }
 

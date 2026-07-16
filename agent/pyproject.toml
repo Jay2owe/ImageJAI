@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "imagej-use-auto"
 version = "0.1.0"
 description = "Persistent authenticated stdin runner for ImageJAI"
-requires-python = ">=3.9"
+requires-python = ">=3.10,<3.14"
 dependencies = []
 
 [project.scripts]

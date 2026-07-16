@@ -62,6 +62,56 @@ public class PipelineBuilderTest {
         assertEquals(2, pipeline.currentStepIndex);
     }
 
+    @Test
+    public void failureLifecycleStopsAtFailedStepAndEmitsTerminalCallbackOnce() {
+        CommandEngine engine = new CommandEngine() {
+            @Override public ExecutionResult executeMacro(String code) {
+                if (code.contains("fail")) {
+                    return ExecutionResult.failure("synthetic failure", 1L);
+                }
+                return ExecutionResult.success("ok", null,
+                        Collections.<String>emptyList(), 1L);
+            }
+        };
+        final List<String> callbacks = new ArrayList<String>();
+        PipelineBuilder.Pipeline pipeline = new PipelineBuilder.Pipeline(
+                "failure", Arrays.asList(
+                        step(1, "one", "one();", "pending"),
+                        step(2, "two", "fail();", "pending"),
+                        step(3, "three", "three();", "pending")));
+
+        new PipelineBuilder(engine).executePipeline(pipeline,
+                new PipelineBuilder.PipelineCallback() {
+                    @Override public void onStepStarted(PipelineBuilder.PipelineStep step) {
+                        callbacks.add("start:" + step.index);
+                    }
+                    @Override public void onStepCompleted(PipelineBuilder.PipelineStep step) {
+                        callbacks.add("complete:" + step.index);
+                    }
+                    @Override public void onStepFailed(PipelineBuilder.PipelineStep step,
+                                                       String error) {
+                        callbacks.add("fail:" + step.index + ":" + error);
+                    }
+                    @Override public void onPipelineCompleted(
+                            PipelineBuilder.Pipeline completed) {
+                        callbacks.add("pipeline-complete");
+                    }
+                    @Override public void onPipelineFailed(
+                            PipelineBuilder.Pipeline failed,
+                            PipelineBuilder.PipelineStep step) {
+                        callbacks.add("pipeline-fail:" + step.index);
+                    }
+                });
+
+        assertEquals(Arrays.asList("start:1", "complete:1", "start:2",
+                "fail:2:synthetic failure", "pipeline-fail:2"), callbacks);
+        assertEquals("success", pipeline.steps.get(0).status);
+        assertEquals("failed", pipeline.steps.get(1).status);
+        assertEquals("skipped", pipeline.steps.get(2).status);
+        assertEquals("failed", pipeline.status);
+        assertEquals(1, pipeline.currentStepIndex);
+    }
+
     private static PipelineBuilder.PipelineStep step(
             int index, String description, String code, String status) {
         PipelineBuilder.PipelineStep step =

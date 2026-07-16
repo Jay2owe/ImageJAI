@@ -10,10 +10,12 @@ import org.junit.rules.TemporaryFolder;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.lang.reflect.Field;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
@@ -24,6 +26,8 @@ import java.util.function.LongSupplier;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertNotSame;
+import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 
 public class ReactiveEngineTest {
@@ -38,6 +42,42 @@ public class ReactiveEngineTest {
     public void cleanup() {
         for (ReactiveEngine engine : engines) engine.stop();
         for (MutationCoordinator coordinator : coordinators) coordinator.close();
+    }
+
+    @Test
+    public void startStopIsIdempotentTerminatesResourcesAndSupportsRestart()
+            throws Exception {
+        Path rules = temporary.newFolder("lifecycle-rules").toPath();
+        Rig rig = rig(rules, 1, 1000L, 3,
+                fixedCapture(temporary.newFolder("lifecycle-output").toPath()
+                        .resolve("AI_Exports"), new byte[] {1}, new AtomicInteger()),
+                new NoopPolicy());
+
+        rig.engine.start();
+        rig.engine.start();
+        ExecutorService firstExecutor = (ExecutorService) field(
+                rig.engine, "actionExecutor");
+        Thread firstWatcher = (Thread) field(rig.engine, "watchThread");
+        assertNotNull(firstExecutor);
+        assertNotNull(firstWatcher);
+
+        rig.engine.stop();
+        rig.engine.stop();
+        assertTrue(firstExecutor.isShutdown());
+        assertTrue("reactive executor survived stop",
+                firstExecutor.awaitTermination(2, TimeUnit.SECONDS));
+        firstWatcher.join(TimeUnit.SECONDS.toMillis(2));
+        assertFalse("reactive watch thread survived stop", firstWatcher.isAlive());
+        assertNull(field(rig.engine, "actionExecutor"));
+        assertNull(field(rig.engine, "watchThread"));
+
+        rig.engine.start();
+        ExecutorService restarted = (ExecutorService) field(
+                rig.engine, "actionExecutor");
+        assertNotNull(restarted);
+        assertNotSame(firstExecutor, restarted);
+        rig.engine.stop();
+        assertTrue(restarted.awaitTermination(2, TimeUnit.SECONDS));
     }
 
     @Test
@@ -373,6 +413,12 @@ public class ReactiveEngineTest {
             Thread.sleep(5L);
         }
         assertEquals(expected, engine.availableActionPermitsForTest());
+    }
+
+    private static Object field(Object target, String name) throws Exception {
+        Field field = target.getClass().getDeclaredField(name);
+        field.setAccessible(true);
+        return field.get(target);
     }
 
     private static final class Rig {

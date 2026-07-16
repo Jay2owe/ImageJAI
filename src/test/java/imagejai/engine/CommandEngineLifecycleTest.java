@@ -21,6 +21,7 @@ import java.util.function.Consumer;
 import java.util.function.DoubleConsumer;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
 
@@ -107,6 +108,33 @@ public class CommandEngineLifecycleTest {
             assertEquals(1, coordinator.sources.size());
         } finally {
             server.stop();
+        }
+    }
+
+    @Test
+    public void commandEngineCompletesOnItsInjectedCoordinatorAndRejectsAfterShutdown() {
+        MutationCoordinator coordinator = new MutationCoordinator();
+        CommandEngine engine = new CommandEngine() {
+            @Override public ExecutionResult executeMacroOnCurrentThread(
+                    String code, DoubleConsumer progress) {
+                return ExecutionResult.success(code, null,
+                        Collections.<String>emptyList(), 1L);
+            }
+        };
+        engine.setMutationCoordinator(coordinator);
+        try {
+            ExecutionResult completed = engine.executeMacro("return 'complete';");
+            assertTrue(completed.getError(), completed.isSuccess());
+            assertEquals(0, coordinator.activeCount());
+
+            coordinator.shutdown();
+            ExecutionResult rejected = engine.executeMacro("return 'late';");
+            assertFalse(rejected.isSuccess());
+            assertTrue(rejected.getError(),
+                    rejected.getError().toLowerCase().contains("stopped")
+                            || rejected.getError().toLowerCase().contains("shutdown"));
+        } finally {
+            coordinator.shutdown();
         }
     }
 

@@ -6,9 +6,12 @@ import org.junit.Test;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Collections;
+import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.TimeUnit;
 import java.util.function.DoubleConsumer;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 
 public class JobRegistryResourceBoundsTest {
@@ -88,6 +91,42 @@ public class JobRegistryResourceBoundsTest {
                 json.get("resultsTable_original_bytes").getAsLong());
         assertEquals(5000, json.get("resultsTable_total_rows").getAsInt());
         assertEquals(1, json.get("resultsTable_returned_rows").getAsInt());
+    }
+
+    @Test
+    public void shutdownTerminatesJanitorIsIdempotentAndClosesAdmission() throws Exception {
+        CommandEngine engine = new CommandEngine() {
+            @Override public ExecutionResult executeMacroOnCurrentThread(
+                    String code, DoubleConsumer callback) {
+                return ExecutionResult.success("done", null,
+                        Collections.<String>emptyList(), 1L);
+            }
+        };
+        MutationCoordinator coordinator = new MutationCoordinator();
+        JobRegistry registry = new JobRegistry(engine, coordinator);
+        java.lang.reflect.Field janitorField =
+                JobRegistry.class.getDeclaredField("janitor");
+        janitorField.setAccessible(true);
+        Thread janitor = (Thread) janitorField.get(registry);
+        try {
+            assertTrue(janitor.isAlive());
+            JobRegistry.Job job = registry.submit("return 'done';");
+            job.handle.awaitCompletion();
+
+            registry.shutdown();
+            registry.shutdown();
+            janitor.join(TimeUnit.SECONDS.toMillis(2));
+
+            assertFalse("janitor survived registry shutdown", janitor.isAlive());
+            try {
+                registry.submit("return 'late';");
+                throw new AssertionError("stopped registry accepted a job");
+            } catch (RejectedExecutionException expected) {
+                assertTrue(expected.getMessage().contains("stopped"));
+            }
+        } finally {
+            registry.shutdown();
+        }
     }
 
     private static String repeat(char value, int count) {

@@ -69,6 +69,9 @@
         <package-name>imagejai</package-name>
         <license.licenseName>bsd_3</license.licenseName>
         <license.copyrightOwners>Jamie Malcolm</license.copyrightOwners>
+        <!-- Canonical archive time for byte-for-byte reproducible release JARs.
+             Change this only when deliberately starting a new release line. -->
+        <project.build.outputTimestamp>2026-07-15T00:00:00Z</project.build.outputTimestamp>
         <!-- Java 11 target: required by pty4j / JediTerm (stage 05).
              Fiji ships a JRE 21+ so runtime is fine; build JDK stays at 25.
              NB: pom-scijava sets maven.compiler.release=8 in its BOM, and
@@ -259,12 +262,20 @@
             </plugin>
             <!-- Generate SciJava plugin annotation index -->
             <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-jar-plugin</artifactId>
+                <version>3.3.0</version>
                 <configuration>
+                    <outputTimestamp>${project.build.outputTimestamp}</outputTimestamp>
                     <archive>
                         <manifest>
                             <packageName>imagejai</packageName>
                         </manifest>
+                        <!-- pom-scijava otherwise inserts the wall-clock build
+                             time, which makes identical builds hash differently. -->
+                        <manifestEntries>
+                            <Implementation-Date>${project.build.outputTimestamp}</Implementation-Date>
+                        </manifestEntries>
                     </archive>
                 </configuration>
             </plugin>
@@ -288,6 +299,9 @@
                                         <exclude>META-INF/*.SF</exclude>
                                         <exclude>META-INF/*.DSA</exclude>
                                         <exclude>META-INF/*.RSA</exclude>
+                                        <!-- Dependency POMs are not runtime API
+                                             and violate the plugin artifact policy. -->
+                                        <exclude>META-INF/maven/**</exclude>
                                     </excludes>
                                 </filter>
                             </filters>

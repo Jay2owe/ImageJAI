@@ -8,7 +8,7 @@ public final class Constants {
     private Constants() {}
 
     public static final String PLUGIN_NAME = "AI Assistant";
-    public static final String VERSION = "0.2.0";
+    public static final String VERSION = "0.3.0";
 
     // Config directory: ~/.imagej-ai/
     public static final String CONFIG_DIR_NAME = ".imagej-ai";
