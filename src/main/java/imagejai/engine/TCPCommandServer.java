@@ -116,10 +116,6 @@ public class TCPCommandServer {
     private static final Charset UTF8 = Charset.forName("UTF-8");
     private static final List<String> KNOWN_COMMANDS =
             CommandManifest.requestResponseNames();
-    private static final Set<String> COMMON_REQUEST_FIELDS =
-            Collections.unmodifiableSet(new HashSet<String>(Arrays.asList(
-                    "token", "session_id", "client_session_id", "model_endpoint",
-                    "if_none_match", "force", "note")));
     // 10-minute synchronous-macro ceiling. Long enough for batch 3D Object
     // Counter runs on dense masks without blocking the TCP thread forever.
     // Callers can override per-request with `"timeout_ms": N` (pass 0 or a
@@ -1885,14 +1881,6 @@ public class TCPCommandServer {
         }
         CommandManifest.Descriptor descriptor = CommandManifest.descriptor(commandName);
         if (descriptor == null) return "Unknown command: " + commandName;
-        for (String field : top.keySet()) {
-            if (!"command".equals(field)
-                    && !COMMON_REQUEST_FIELDS.contains(field)
-                    && !descriptor.requestFields.contains(field)) {
-                return "Unknown field '" + field + "' for command '"
-                        + commandName + "'";
-            }
-        }
         return null;
     }
 

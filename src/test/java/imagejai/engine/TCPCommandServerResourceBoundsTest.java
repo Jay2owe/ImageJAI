@@ -164,13 +164,9 @@ public class TCPCommandServerResourceBoundsTest {
 
             JsonObject singleUnknown = new JsonObject();
             singleUnknown.addProperty("command", "ping");
-            singleUnknown.addProperty("unused", "ignored-before-this-fix");
-            JsonObject unknownField = server.dispatch(singleUnknown,
-                    new TCPCommandServer.AgentCaps());
-            assertEquals("invalid_request", unknownField.getAsJsonObject("error")
-                    .get("code").getAsString());
-            assertTrue(unknownField.getAsJsonObject("error").get("message")
-                    .getAsString().contains("Unknown field 'unused'"));
+            singleUnknown.addProperty("note", "forward-compatible metadata");
+            assertEquals("pong", server.dispatch(singleUnknown,
+                    new TCPCommandServer.AgentCaps()).get("result").getAsString());
 
             JsonObject knownFramingFields = new JsonObject();
             knownFramingFields.addProperty("command", "ping");
