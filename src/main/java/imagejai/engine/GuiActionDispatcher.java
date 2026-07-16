@@ -10,6 +10,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Consumer;
 import java.util.regex.Pattern;
@@ -49,6 +50,7 @@ public class GuiActionDispatcher {
         private boolean valid = true;
         private boolean started;
         private boolean finished;
+        private final CountDownLatch finishedSignal = new CountDownLatch(1);
 
         private synchronized boolean tryStart() {
             if (!valid) return false;
@@ -58,6 +60,7 @@ public class GuiActionDispatcher {
 
         private synchronized void finish() {
             finished = true;
+            finishedSignal.countDown();
         }
 
         /** Returns true only when queued work was invalidated before start. */
@@ -70,6 +73,9 @@ public class GuiActionDispatcher {
         public synchronized boolean hasStarted() { return started; }
         public synchronized boolean isFinished() { return finished; }
         public synchronized boolean isValid() { return valid; }
+        public void awaitFinished() throws InterruptedException {
+            finishedSignal.await();
+        }
     }
 
     /** Queue one action with a token checked immediately before execution. */

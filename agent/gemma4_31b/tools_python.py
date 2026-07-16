@@ -37,6 +37,9 @@ _MAX_SERVER_CROP_SIDE = int(math.isqrt(_SERVER_PIXEL_CAP))
 MAX_RAW_PIXEL_VALUES = 1_024
 
 _PIXEL_METADATA_FIELDS = (
+    "image_id",
+    "image_revision",
+    "display_revision",
     "x",
     "y",
     "width",
@@ -53,11 +56,56 @@ _PIXEL_METADATA_FIELDS = (
     "nPixels",
     "type",
     "encoding",
+    "value_domain",
+    "acquisition_min_count",
+    "acquisition_max_count",
+    "acquisition_limit_counts_exact",
 )
 
 
 def _error(msg) -> dict:
     return {"error": str(msg)}
+
+
+def _exact_int(value, name, minimum=None) -> int:
+    """Return a true integer, rejecting bools, floats and numeric strings."""
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise TypeError("{} must be an exact integer".format(name))
+    if minimum is not None and value < minimum:
+        raise ValueError("{} must be at least {}".format(name, minimum))
+    return value
+
+
+def _optional_finite_number(value, name):
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise TypeError("{} must be numeric or null".format(name))
+    value = float(value)
+    if not math.isfinite(value):
+        raise ValueError("{} must be finite".format(name))
+    return value
+
+
+def _decode_value_domain(result: dict):
+    domain = result.get("value_domain")
+    if not isinstance(domain, dict) or domain.get("representation") != "raw":
+        raise ValueError("missing raw value-domain metadata")
+    if domain.get("pixel_type") not in (
+        "uint8", "uint16", "float32", "rgb24", "indexed8", "unknown"
+    ):
+        raise ValueError("invalid pixel type metadata")
+    if domain.get("signed") is not None and not isinstance(domain.get("signed"), bool):
+        raise ValueError("invalid signed metadata")
+    if not isinstance(domain.get("density_calibrated"), bool):
+        raise ValueError("invalid density-calibrated metadata")
+    normalized = dict(domain)
+    for key in (
+        "acquisition_min_raw", "acquisition_max_raw",
+        "acquisition_min_calibrated", "acquisition_max_calibrated",
+    ):
+        normalized[key] = _optional_finite_number(domain.get(key), key)
+    return normalized
 
 
 def _safe_send(command: str, **payload) -> dict:
@@ -91,7 +139,7 @@ def _bit_depth_from_type(type_str) -> int:
 
 def _get_image_info() -> dict:
     """Return the active image's info dict, or {'error': ...}."""
-    resp = _safe_send("get_image_info")
+    resp = _safe_send("get_image_info", force=True)
     if not isinstance(resp, dict) or not resp.get("ok"):
         err = resp.get("error") if isinstance(resp, dict) else "no reply from Fiji"
         return _error(err or "get_image_info failed")
@@ -99,16 +147,34 @@ def _get_image_info() -> dict:
     if not isinstance(result, dict):
         return _error("get_image_info returned no result")
     try:
-        width = int(result["width"])
-        height = int(result["height"])
-        channels = int(result["channels"])
-        slices = int(result["slices"])
-        frames = int(result["frames"])
+        width = _exact_int(result["width"], "width", 1)
+        height = _exact_int(result["height"], "height", 1)
+        channels = _exact_int(result["channels"], "channels", 1)
+        slices = _exact_int(result["slices"], "slices", 1)
+        frames = _exact_int(result["frames"], "frames", 1)
+        image_id = str(result["image_id"])
+        image_revision = _exact_int(result["image_revision"], "image_revision", 1)
+        display_revision = _exact_int(result["display_revision"], "display_revision", 1)
+        channel = _exact_int(result["channel"], "channel", 1)
+        slice_start = _exact_int(result["sliceStart"], "sliceStart", 1)
+        slice_end = _exact_int(result["sliceEnd"], "sliceEnd", 1)
+        slice_axis = str(result["sliceAxis"])
+        frame = _exact_int(result["frame"], "frame", 1)
+        value_domain = _decode_value_domain(result)
     except (KeyError, TypeError, ValueError) as exc:
         return _error(
             "get_image_info returned incomplete image-axis metadata: {}".format(exc)
         )
-    if min(width, height, channels, slices, frames) <= 0:
+    if (
+        min(width, height, channels, slices, frames) <= 0
+        or not image_id
+        or image_revision <= 0
+        or slice_axis != "Z"
+        or slice_start != slice_end
+        or not 1 <= channel <= channels
+        or not 1 <= slice_start <= slices
+        or not 1 <= frame <= frames
+    ):
         return _error("get_image_info returned invalid image-axis metadata")
     normalized = dict(result)
     normalized.update({
@@ -117,8 +183,30 @@ def _get_image_info() -> dict:
         "channels": channels,
         "slices": slices,
         "frames": frames,
+        "image_id": image_id,
+        "image_revision": image_revision,
+        "display_revision": display_revision,
+        "channel": channel,
+        "sliceStart": slice_start,
+        "sliceEnd": slice_end,
+        "sliceAxis": slice_axis,
+        "frame": frame,
+        "value_domain": value_domain,
     })
     return normalized
+
+
+def _snapshot_payload(info: dict, requested_slice: int | None = None) -> dict:
+    """Bind a follow-up read to one immutable image revision and C/Z/T plane."""
+    return {
+        "image_id": info["image_id"],
+        "image_revision": int(info["image_revision"]),
+        "display_revision": int(info["display_revision"]),
+        "channel": int(info["channel"]),
+        "slice": int(info["sliceStart"] if requested_slice is None else requested_slice),
+        "frame": int(info["frame"]),
+        "force": True,
+    }
 
 
 def _validate_region_against_info(info: dict, x: int, y: int, width: int, height: int):
@@ -184,30 +272,50 @@ def _decode_pixel_metadata(result: dict, width: int, height: int):
     """Return validated server metadata, including exact C/Z/T attribution."""
     try:
         meta = {
-            "x": int(result["x"]),
-            "y": int(result["y"]),
+            "image_id": str(result["image_id"]),
+            "image_revision": _exact_int(result["image_revision"], "image_revision", 1),
+            "display_revision": _exact_int(result["display_revision"], "display_revision", 1),
+            "x": _exact_int(result["x"], "x", 0),
+            "y": _exact_int(result["y"], "y", 0),
             "width": width,
             "height": height,
-            "sliceStart": int(result["sliceStart"]),
-            "sliceEnd": int(result["sliceEnd"]),
-            "sliceCount": int(result["sliceCount"]),
+            "sliceStart": _exact_int(result["sliceStart"], "sliceStart", 1),
+            "sliceEnd": _exact_int(result["sliceEnd"], "sliceEnd", 1),
+            "sliceCount": _exact_int(result["sliceCount"], "sliceCount", 1),
             "sliceAxis": str(result["sliceAxis"]),
-            "channel": int(result["channel"]),
-            "frame": int(result["frame"]),
-            "channels": int(result["channels"]),
-            "slices": int(result["slices"]),
-            "frames": int(result["frames"]),
-            "nPixels": int(result["nPixels"]),
+            "channel": _exact_int(result["channel"], "channel", 1),
+            "frame": _exact_int(result["frame"], "frame", 1),
+            "channels": _exact_int(result["channels"], "channels", 1),
+            "slices": _exact_int(result["slices"], "slices", 1),
+            "frames": _exact_int(result["frames"], "frames", 1),
+            "nPixels": _exact_int(result["nPixels"], "nPixels", 1),
             "type": str(result["type"]),
             "encoding": str(result["encoding"]),
+            "value_domain": _decode_value_domain(result),
         }
+        counts_exact = result["acquisition_limit_counts_exact"]
+        if not isinstance(counts_exact, bool):
+            raise TypeError("acquisition_limit_counts_exact must be bool")
+        min_count_raw = result["acquisition_min_count"]
+        max_count_raw = result["acquisition_max_count"]
+        meta["acquisition_min_count"] = (
+            None if min_count_raw is None
+            else _exact_int(min_count_raw, "acquisition_min_count", 0)
+        )
+        meta["acquisition_max_count"] = (
+            None if max_count_raw is None
+            else _exact_int(max_count_raw, "acquisition_max_count", 0)
+        )
+        meta["acquisition_limit_counts_exact"] = counts_exact
     except (KeyError, TypeError, ValueError) as exc:
         return None, _error(
             "get_pixels reply missing or malformed C/Z/T metadata: {}".format(exc)
         )
 
     if (
-        meta["x"] < 0
+        not meta["image_id"]
+        or meta["image_revision"] <= 0
+        or meta["x"] < 0
         or meta["y"] < 0
         or meta["sliceAxis"] != "Z"
         or meta["encoding"] != "base64_float32_le"
@@ -219,6 +327,21 @@ def _decode_pixel_metadata(result: dict, width: int, height: int):
         or not 1 <= meta["sliceStart"] <= meta["sliceEnd"] <= meta["slices"]
         or meta["sliceCount"] != meta["sliceEnd"] - meta["sliceStart"] + 1
         or meta["nPixels"] != width * height * meta["sliceCount"]
+        or (
+            meta["acquisition_limit_counts_exact"]
+            and (
+                meta["acquisition_min_count"] is None
+                or meta["acquisition_max_count"] is None
+            )
+        )
+        or (
+            meta["acquisition_min_count"] is not None
+            and meta["acquisition_min_count"] > meta["nPixels"]
+        )
+        or (
+            meta["acquisition_max_count"] is not None
+            and meta["acquisition_max_count"] > meta["nPixels"]
+        )
     ):
         return None, _error("get_pixels returned inconsistent C/Z/T metadata")
     if meta["sliceCount"] != 1:
@@ -226,12 +349,27 @@ def _decode_pixel_metadata(result: dict, width: int, height: int):
     return meta, None
 
 
-def _metadata_matches_info(meta: dict, info: dict) -> bool:
-    """Reject a response if the image axis sizes changed after preflight."""
+def _metadata_matches_info(
+    meta: dict, info: dict, requested_slice: int | None = None
+) -> bool:
+    """Reject a response from a different image revision or C/Z/T plane."""
     try:
-        return all(
-            int(meta[key]) == int(info[key])
-            for key in ("channels", "slices", "frames")
+        expected_slice = int(
+            info["sliceStart"] if requested_slice is None else requested_slice
+        )
+        return (
+            str(meta["image_id"]) == str(info["image_id"])
+            and int(meta["image_revision"]) == int(info["image_revision"])
+            and int(meta["display_revision"]) == int(info["display_revision"])
+            and str(meta["sliceAxis"]) == "Z"
+            and int(meta["sliceStart"]) == expected_slice
+            and int(meta["sliceEnd"]) == expected_slice
+            and int(meta["channel"]) == int(info["channel"])
+            and int(meta["frame"]) == int(info["frame"])
+            and all(
+                int(meta[key]) == int(info[key])
+                for key in ("channels", "slices", "frames")
+            )
         )
     except (KeyError, TypeError, ValueError):
         return False
@@ -262,8 +400,8 @@ def _decode_pixels(resp):
     except (binascii.Error, ValueError, TypeError) as exc:
         return None, _error("base64 decode failed: {}".format(exc))
     try:
-        w = int(result.get("width", 0))
-        h = int(result.get("height", 0))
+        w = _exact_int(result["width"], "width", 1)
+        h = _exact_int(result["height"], "height", 1)
     except (TypeError, ValueError):
         return None, _error("get_pixels returned malformed dimensions")
     if w <= 0 or h <= 0:
@@ -274,6 +412,8 @@ def _decode_pixels(resp):
     if len(raw) != meta["nPixels"] * 4:
         return None, _error("get_pixels float32 byte length does not match metadata")
     plane = np.frombuffer(raw, dtype="<f4").reshape((h, w))
+    if not np.isfinite(plane).all():
+        return None, _error("get_pixels returned non-finite pixel values")
     return plane, meta
 
 
@@ -297,13 +437,15 @@ def _fetch_full_downsampled(max_side: int = _MAX_LONG_EDGE):
     bit_depth = _bit_depth_from_type(info.get("type", ""))
 
     if w * h <= _SERVER_PIXEL_CAP:
-        arr, meta = _decode_pixels(_safe_send("get_pixels"))
+        arr, meta = _decode_pixels(
+            _safe_send("get_pixels", **_snapshot_payload(info))
+        )
         if arr is None:
             return None, meta
         if not _geometry_matches(meta, 0, 0, w, h):
             return None, _error("active image geometry changed during pixel fetch")
         if not _metadata_matches_info(meta, info):
-            return None, _error("active image axis sizes changed during pixel fetch")
+            return None, _error("active image snapshot or pixel plane changed during fetch")
         if factor > 1:
             arr = arr[::factor, ::factor]
         meta["downsample_factor"] = int(factor)
@@ -318,13 +460,15 @@ def _fetch_full_downsampled(max_side: int = _MAX_LONG_EDGE):
     cy = max(0, (h - crop) // 2)
     cw = min(crop, w - cx)
     ch = min(crop, h - cy)
-    arr, meta = _decode_pixels(_safe_send("get_pixels", x=cx, y=cy, width=cw, height=ch))
+    payload = _snapshot_payload(info)
+    payload.update({"x": cx, "y": cy, "width": cw, "height": ch})
+    arr, meta = _decode_pixels(_safe_send("get_pixels", **payload))
     if arr is None:
         return None, meta
     if not _geometry_matches(meta, cx, cy, cw, ch):
         return None, _error("active image geometry changed during pixel fetch")
     if not _metadata_matches_info(meta, info):
-        return None, _error("active image axis sizes changed during pixel fetch")
+        return None, _error("active image snapshot or pixel plane changed during fetch")
     meta["downsample_factor"] = int(factor)
     meta["bit_depth"] = int(bit_depth)
     meta["source"] = "center_crop"
@@ -472,11 +616,9 @@ def get_pixels_array(slice: int, region: list) -> dict:
         region: Rectangle as [x, y, width, height], or empty list for the whole image.
     """
     try:
-        slice_val = int(slice)
+        slice_val = _exact_int(slice, "slice", 0)
     except (TypeError, ValueError):
-        return _error("slice must be a 1-based integer, or 0 for the current slice")
-    if slice_val < 0:
-        return _error("slice must be a 1-based integer, or 0 for the current slice")
+        return _error("slice must be the exact integer 0 or a 1-based integer")
 
     info = _get_image_info()
     if "error" in info:
@@ -497,20 +639,22 @@ def get_pixels_array(slice: int, region: list) -> dict:
                 )
             )
 
-    kwargs: dict = {}
-    if slice_val > 0:
-        kwargs["slice"] = slice_val
+    selected_slice = slice_val if slice_val > 0 else int(info["sliceStart"])
+    kwargs: dict = _snapshot_payload(info, selected_slice)
     expected_x = 0
     expected_y = 0
     expected_width = image_width
     expected_height = image_height
     if isinstance(region, list) and len(region) == 4:
         try:
-            rx, ry, rw, rh = (int(v) for v in region)
+            rx = _exact_int(region[0], "region x")
+            ry = _exact_int(region[1], "region y")
+            rw = _exact_int(region[2], "region width", 1)
+            rh = _exact_int(region[3], "region height", 1)
         except (TypeError, ValueError):
-            return _error("region must be [x, y, width, height] with integer values")
-        if rw <= 0 or rh <= 0:
-            return _error("region width and height must be positive")
+            return _error(
+                "region must be [x, y, width, height] with exact integer values"
+            )
         bounds_error = _validate_region_against_info(info, rx, ry, rw, rh)
         if bounds_error is not None:
             return bounds_error
@@ -536,8 +680,8 @@ def get_pixels_array(slice: int, region: list) -> dict:
         meta, expected_x, expected_y, expected_width, expected_height
     ):
         return _error("Fiji returned clamped pixel geometry; image state changed")
-    if not _metadata_matches_info(meta, info):
-        return _error("active image axis sizes changed during pixel fetch")
+    if not _metadata_matches_info(meta, info, selected_slice):
+        return _error("active image snapshot or pixel plane changed during fetch")
     if not _slice_matches(meta, slice_val):
         return _error("Fiji returned a different pixel slice; image state changed")
     return _measurement_result(meta, pixels=arr.tolist())
@@ -554,27 +698,27 @@ def region_stats(x: int, y: int, width: int, height: int) -> dict:
         height: Rectangle height in pixels.
     """
     try:
-        x_i = int(x)
-        y_i = int(y)
-        w_i = int(width)
-        h_i = int(height)
+        x_i = _exact_int(x, "x")
+        y_i = _exact_int(y, "y")
+        w_i = _exact_int(width, "width", 1)
+        h_i = _exact_int(height, "height", 1)
     except (TypeError, ValueError):
-        return _error("x, y, width, height must all be integers")
-    if w_i <= 0 or h_i <= 0:
-        return _error("width and height must be positive")
+        return _error("x, y, width, height must all be exact integers")
     info = _get_image_info()
     if "error" in info:
         return info
     bounds_error = _validate_region_against_info(info, x_i, y_i, w_i, h_i)
     if bounds_error is not None:
         return bounds_error
-    arr, meta = _decode_pixels(_safe_send("get_pixels", x=x_i, y=y_i, width=w_i, height=h_i))
+    payload = _snapshot_payload(info)
+    payload.update({"x": x_i, "y": y_i, "width": w_i, "height": h_i})
+    arr, meta = _decode_pixels(_safe_send("get_pixels", **payload))
     if arr is None:
         return meta
     if not _geometry_matches(meta, x_i, y_i, w_i, h_i):
         return _error("Fiji returned clamped pixel geometry; image state changed")
     if not _metadata_matches_info(meta, info):
-        return _error("active image axis sizes changed during pixel fetch")
+        return _error("active image snapshot or pixel plane changed during fetch")
     flat = arr.ravel()
     return _measurement_result(
         meta,
@@ -602,12 +746,12 @@ def line_profile(x1: int, y1: int, x2: int, y2: int) -> dict:
         y2: End point y in pixels.
     """
     try:
-        x1_i = int(x1)
-        y1_i = int(y1)
-        x2_i = int(x2)
-        y2_i = int(y2)
+        x1_i = _exact_int(x1, "x1")
+        y1_i = _exact_int(y1, "y1")
+        x2_i = _exact_int(x2, "x2")
+        y2_i = _exact_int(y2, "y2")
     except (TypeError, ValueError):
-        return _error("x1, y1, x2, y2 must all be integers")
+        return _error("x1, y1, x2, y2 must all be exact integers")
     info = _get_image_info()
     if "error" in info:
         return info
@@ -632,13 +776,15 @@ def line_profile(x1: int, y1: int, x2: int, y2: int) -> dict:
     bh = max(y1_i, y2_i) - by + 1
     if bw <= 0 or bh <= 0:
         return _error("line endpoints are degenerate")
-    arr, meta = _decode_pixels(_safe_send("get_pixels", x=bx, y=by, width=bw, height=bh))
+    payload = _snapshot_payload(info)
+    payload.update({"x": bx, "y": by, "width": bw, "height": bh})
+    arr, meta = _decode_pixels(_safe_send("get_pixels", **payload))
     if arr is None:
         return meta
     if not _geometry_matches(meta, bx, by, bw, bh):
         return _error("Fiji returned clamped pixel geometry; image state changed")
     if not _metadata_matches_info(meta, info):
-        return _error("active image axis sizes changed during pixel fetch")
+        return _error("active image snapshot or pixel plane changed during fetch")
     dx = float(x2_i - x1_i)
     dy = float(y2_i - y1_i)
     length = math.hypot(dx, dy)
@@ -704,7 +850,7 @@ def quick_object_count(threshold_method: str) -> dict:
 
 @tool
 def histogram_summary() -> dict:
-    """Return intensity percentiles and saturation plus exact channel, Z-slice and frame metadata.
+    """Return intensity percentiles and, for unsigned integer images, saturation plus exact plane metadata.
 
     Args:
         None.
@@ -714,20 +860,34 @@ def histogram_summary() -> dict:
         return meta
     flat = arr.ravel()
     bit_depth = int(meta.get("bit_depth", 0))
-    if bit_depth in (8, 16):
-        ceiling = float((1 << bit_depth) - 1)
-    elif bit_depth == 32:
-        ceiling = float(flat.max())
-    else:
-        ceiling = float(flat.max())
-    saturated_fraction = float((flat >= ceiling).mean()) if flat.size else 0.0
+    domain = meta["value_domain"]
+    floor = domain.get("acquisition_min_raw")
+    ceiling = domain.get("acquisition_max_raw")
+    counts_exact = bool(meta["acquisition_limit_counts_exact"])
+    min_count = meta["acquisition_min_count"]
+    max_count = meta["acquisition_max_count"]
+    limits_known = floor is not None and ceiling is not None
+    saturated_fraction = (
+        float(max_count) / float(meta["nPixels"])
+        if counts_exact and max_count is not None and meta["nPixels"] > 0
+        else None
+    )
+    minimum_fraction = (
+        float(min_count) / float(meta["nPixels"])
+        if counts_exact and min_count is not None and meta["nPixels"] > 0
+        else None
+    )
     out = _measurement_result(
         meta,
         p01=float(np.percentile(flat, 1)),
         p50=float(np.percentile(flat, 50)),
         p99=float(np.percentile(flat, 99)),
         saturated_fraction=saturated_fraction,
+        acquisition_min_fraction=minimum_fraction,
+        acquisition_minimum=floor,
         saturation_ceiling=ceiling,
+        saturation_available=counts_exact and limits_known,
+        value_domain=domain,
         bit_depth=bit_depth,
         downsample_factor=int(meta.get("downsample_factor", 1)),
     )
@@ -746,11 +906,13 @@ def count_bright_regions(min_intensity: int, min_area_pixels: int) -> dict:
     """
     try:
         cutoff = float(min_intensity)
-        min_area = int(min_area_pixels)
+        min_area = _exact_int(min_area_pixels, "min_area_pixels", 1)
     except (TypeError, ValueError):
-        return _error("min_intensity and min_area_pixels must be numbers")
-    if min_area < 1:
-        min_area = 1
+        return _error(
+            "min_intensity must be numeric and min_area_pixels an exact positive integer"
+        )
+    if not math.isfinite(cutoff):
+        return _error("min_intensity must be finite")
     arr, meta = _fetch_full_downsampled()
     if arr is None:
         return meta

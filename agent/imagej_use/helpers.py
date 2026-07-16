@@ -166,6 +166,7 @@ def make_core_namespace(
         "screenshot": screenshot,
         "screenshot_to_path": screenshot,
         "wait_for_event": session.wait_for_event,
+        "wait_for_operation": session.wait_for_operation,
         "get_dialogs": session.get_dialogs,
         "interact_dialog": session.interact_dialog,
     }

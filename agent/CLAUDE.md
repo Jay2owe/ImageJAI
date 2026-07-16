@@ -335,6 +335,14 @@ Dialog control is semantic only. Inspect with `get_dialogs()`, then use
 `interact_dialog('click_button', target='OK', dialog='...')`. Never use screen
 coordinates. The runner does not start, stop, or close Fiji.
 
+`open_image`, `interact_dialog`, and `close_dialogs` can outlive their first
+request deadline. A response with error code `operation_in_progress` is a
+handoff, not a failure. Extract `response['operation']['operation_id']` and
+call `wait_for_operation('<same command>', operation_id, timeout=120,
+poll_interval=0.1)` on the same session. Never submit the original mutation
+again: operation IDs are owner- and command-scoped, and the poll helper sends
+only the same command plus that ID.
+
 For one-shot shell operations, use `ij.py`:
 
 ```bash

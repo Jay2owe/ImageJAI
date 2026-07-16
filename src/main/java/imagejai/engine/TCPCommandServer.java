@@ -629,6 +629,53 @@ public class TCPCommandServer {
     OpenImageOperation openImageOperationForTest = null;
     java.util.function.Supplier<List<ImageGraph.ImageRef>> openImagesForTest = null;
     java.util.function.Supplier<ImagePlus> currentImageForTest = null;
+    java.util.function.Function<JsonObject, JsonObject> dialogInteractionForTest = null;
+    Runnable pixelExtractionStartedForTest = null;
+    interface RawPixelReader {
+        float read(ImageProcessor processor, int x, int y);
+    }
+    RawPixelReader rawPixelReaderForTest = null;
+
+    private final ImageRevisionTracker imageRevisionTracker =
+            ImageRevisionTracker.getInstance();
+    /**
+     * Tracks EDT mutations whose request deadline expires after execution has
+     * started.  The registry is replaceable after stop/start because shutdown
+     * deliberately closes its observer thread.
+     */
+    private volatile EdtOperationRegistry edtOperationRegistry =
+            new EdtOperationRegistry();
+
+    private static final class ActiveImageSnapshot {
+        final ImagePlus image;
+        final String imageId;
+        final long imageRevision;
+        final long displayRevision;
+        final int channel;
+        final int slice;
+        final int frame;
+        final int channels;
+        final int slices;
+        final int frames;
+
+        final ImageRevisionTracker.Snapshot revisionSnapshot;
+
+        ActiveImageSnapshot(ImagePlus image,
+                            ImageRevisionTracker.Snapshot revisionSnapshot,
+                            int channel, int slice, int frame) {
+            this.image = image;
+            this.revisionSnapshot = revisionSnapshot;
+            this.imageId = revisionSnapshot.imageId;
+            this.imageRevision = revisionSnapshot.imageRevision;
+            this.displayRevision = revisionSnapshot.displayRevision;
+            this.channel = channel;
+            this.slice = slice;
+            this.frame = frame;
+            this.channels = image.getNChannels();
+            this.slices = image.getNSlices();
+            this.frames = image.getNFrames();
+        }
+    }
 
     /**
      * Step 13: session-scoped image provenance DAG shared across all
@@ -736,6 +783,8 @@ public class TCPCommandServer {
         int remaining() { return Math.max(0, MAX_COMPOUND_WORK - consumed); }
     }
     private final Object serverLifecycleLock = new Object();
+    /** Monotonic ownership fence for stop/start overlap between server threads. */
+    private volatile long serverGeneration;
     private volatile Runnable beforeBindHookForTest;
     private volatile boolean running;
     private ServerListener listener;
@@ -832,9 +881,20 @@ public class TCPCommandServer {
      * @param listener callback for server events (may be null)
      */
     public void start(ServerListener listener) {
-        if (running) return;
-        this.listener = listener;
-        running = true;
+        synchronized (serverLifecycleLock) {
+            if (running) return;
+            if (edtOperationRegistry.isShutdown()) {
+                if (edtOperationRegistry.activeCount() != 0) {
+                    if (listener != null) {
+                        listener.onError("TCP server restart deferred while EDT operations finish");
+                    }
+                    return;
+                }
+                edtOperationRegistry = new EdtOperationRegistry();
+            }
+            final long generation = ++serverGeneration;
+            this.listener = listener;
+            running = true;
         sessionRegistry.activate();
         connectionWorkers = new ThreadPoolExecutor(
                 MAX_CONNECTION_WORKERS, MAX_CONNECTION_WORKERS,
@@ -863,6 +923,7 @@ public class TCPCommandServer {
             System.err.println("[ImageJAI-TCP] Token init failed: " + t.getMessage());
             this.serverToken = null;
             running = false;
+            edtOperationRegistry.shutdown();
             sessionRegistry.revokeAll();
             connectionWorkers.shutdownNow();
             connectionWorkers = null;
@@ -892,14 +953,19 @@ public class TCPCommandServer {
             System.err.println("[ImageJAI-TCP] Reactive engine start failed: " + t.getMessage());
         }
 
+        final EdtOperationRegistry runOperations = edtOperationRegistry;
+        final ThreadPoolExecutor runConnectionWorkers = connectionWorkers;
+        final ServerListener runListener = listener;
         serverThread = new Thread(new Runnable() {
             @Override
             public void run() {
-                runServer();
+                runServer(generation, runOperations, runConnectionWorkers,
+                        runListener);
             }
         }, "imagej-ai-tcp-server");
         serverThread.setDaemon(true);
         serverThread.start();
+        }
     }
 
     /**
@@ -913,6 +979,12 @@ public class TCPCommandServer {
             running = false;
             listenerSocket = serverSocket;
             serverSocket = null;
+            try {
+                edtOperationRegistry.shutdown();
+            } catch (Exception e) {
+                System.err.println("[ImageJAI-TCP] Error shutting down EDT operations: "
+                        + e.getMessage());
+            }
         }
         closeQuietly(listenerSocket);
         sessionRegistry.revokeAll();
@@ -1023,7 +1095,10 @@ public class TCPCommandServer {
     // Server main loop
     // -----------------------------------------------------------------------
 
-    private void runServer() {
+    private void runServer(long generation,
+                           EdtOperationRegistry operationRegistry,
+                           ThreadPoolExecutor runWorkers,
+                           ServerListener runListener) {
         ServerSocket listenerSocket = null;
         try {
             // Loopback-only bind. Any non-loopback bind would expose the
@@ -1034,7 +1109,7 @@ public class TCPCommandServer {
             listenerSocket = new ServerSocket();
             listenerSocket.setReuseAddress(true);
             synchronized (serverLifecycleLock) {
-                if (!running) return;
+                if (!running || serverGeneration != generation) return;
                 listenerSocket.bind(new java.net.InetSocketAddress(
                         InetAddress.getLoopbackAddress(), port), 50);
                 // stop() cannot interleave between bind and publication.
@@ -1043,14 +1118,15 @@ public class TCPCommandServer {
             int boundPort = listenerSocket.getLocalPort();
             System.err.println("[ImageJAI-TCP] Server listening on " +
                     InetAddress.getLoopbackAddress().getHostAddress() + ":" + boundPort);
-            if (listener != null) {
-                listener.onServerStarted(boundPort);
+            if (runListener != null && running
+                    && serverGeneration == generation) {
+                runListener.onServerStarted(boundPort);
             }
 
-            while (running) {
+            while (running && serverGeneration == generation) {
                 try {
                     final Socket clientSocket = listenerSocket.accept();
-                    ThreadPoolExecutor workers = connectionWorkers;
+                    ThreadPoolExecutor workers = runWorkers;
                     if (workers == null || workers.isShutdown()) {
                         closeQuietly(clientSocket);
                         continue;
@@ -1061,8 +1137,9 @@ public class TCPCommandServer {
                     activeClientSockets.add(clientSocket);
                     try {
                         workers.execute(task);
-                        if (listener != null) {
-                            listener.onClientConnected(
+                        if (runListener != null && running
+                                && serverGeneration == generation) {
+                            runListener.onClientConnected(
                                     clientSocket.getRemoteSocketAddress().toString());
                         }
                     } catch (RejectedExecutionException capacity) {
@@ -1072,7 +1149,7 @@ public class TCPCommandServer {
                     }
                 } catch (SocketException e) {
                     // Expected when server is stopped
-                    if (running) {
+                    if (running && serverGeneration == generation) {
                         System.err.println("[ImageJAI-TCP] Accept error: " + e.getMessage());
                     }
                 }
@@ -1080,32 +1157,64 @@ public class TCPCommandServer {
         } catch (java.net.BindException e) {
             String msg = "Port " + port + " already in use";
             System.err.println("[ImageJAI-TCP] " + msg);
-            if (listener != null) {
-                listener.onError(msg);
+            if (runListener != null && serverGeneration == generation) {
+                runListener.onError(msg);
             }
         } catch (Exception e) {
-            if (running) {
+            if (running && serverGeneration == generation) {
                 String msg = "Server error: " + e.getMessage();
                 System.err.println("[ImageJAI-TCP] " + msg);
-                if (listener != null) {
-                    listener.onError(msg);
+                if (runListener != null && serverGeneration == generation) {
+                    runListener.onError(msg);
                 }
             }
         } finally {
             closeQuietly(listenerSocket);
+            boolean currentGeneration;
+            boolean failedWhileRunning;
             synchronized (serverLifecycleLock) {
-                if (serverSocket == listenerSocket) serverSocket = null;
-                running = false;
+                currentGeneration = serverGeneration == generation;
+                failedWhileRunning = currentGeneration && running;
+                if (currentGeneration) {
+                    if (serverSocket == listenerSocket) serverSocket = null;
+                    running = false;
+                    operationRegistry.shutdown();
+                    if (failedWhileRunning) {
+                        try {
+                            reactiveEngine.stop();
+                        } catch (Exception cleanupFailure) {
+                            System.err.println("[ImageJAI-TCP] Error stopping reactive engine: "
+                                    + cleanupFailure.getMessage());
+                        }
+                        try {
+                            ConsoleCapture.uninstall();
+                        } catch (Exception cleanupFailure) {
+                            System.err.println("[ImageJAI-TCP] Error restoring console streams: "
+                                    + cleanupFailure.getMessage());
+                        }
+                    }
+                }
             }
-            shutdownConnectionWorkers();
-            for (Socket client : activeClientSockets) closeQuietly(client);
-            activeClientSockets.clear();
+            if (!currentGeneration) operationRegistry.shutdown();
+            if (currentGeneration) sessionRegistry.revokeAll();
+            shutdownConnectionWorkers(runWorkers);
+            if (currentGeneration) {
+                for (Socket client : activeClientSockets) closeQuietly(client);
+                activeClientSockets.clear();
+            }
         }
     }
 
     private synchronized void shutdownConnectionWorkers() {
         ThreadPoolExecutor workers = connectionWorkers;
         connectionWorkers = null;
+        shutdownConnectionWorkers(workers);
+    }
+
+    private void shutdownConnectionWorkers(ThreadPoolExecutor workers) {
+        synchronized (this) {
+            if (connectionWorkers == workers) connectionWorkers = null;
+        }
         if (workers == null) return;
         List<Runnable> queued = workers.shutdownNow();
         for (Runnable task : queued) {
@@ -2326,7 +2435,7 @@ public class TCPCommandServer {
         if (request == null) {
             return "";
         }
-        String[] keys = {"token", "image_token", "path", "file"};
+        String[] keys = {"image_token", "path", "file"};
         for (String key : keys) {
             String value = optString(request, key, "");
             if (!value.trim().isEmpty()) {
@@ -2560,7 +2669,7 @@ public class TCPCommandServer {
         } else if ("get_state".equals(command)) {
             return handleGetState();
         } else if ("get_image_info".equals(command)) {
-            return handleGetImageInfo();
+            return handleGetImageInfo(request);
         } else if ("get_results_table".equals(command)) {
             return handleGetResultsTable();
         } else if ("capture_image".equals(command)) {
@@ -2568,9 +2677,9 @@ public class TCPCommandServer {
         } else if ("request_visual".equals(command)) {
             return handleRequestVisual(request, caps, sock);
         } else if ("open_image".equals(command)) {
-            return handleOpenImage(request, false);
+            return handleOpenImage(request, false, caps, sock, command);
         } else if ("open_image_by_token".equals(command)) {
-            return handleOpenImage(request, true);
+            return handleOpenImage(request, true, caps, sock, command);
         } else if ("browse_pending_brief".equals(command)) {
             return handleBrowsePendingBrief(request, caps, sock);
         } else if ("get_pending_brief".equals(command)) {
@@ -2584,11 +2693,11 @@ public class TCPCommandServer {
         } else if ("get_log".equals(command)) {
             return handleGetLog();
         } else if ("get_histogram".equals(command)) {
-            return handleGetHistogram();
+            return handleGetHistogram(request);
         } else if ("get_open_windows".equals(command)) {
             return handleGetOpenWindows();
         } else if ("get_metadata".equals(command)) {
-            return handleGetMetadata();
+            return handleGetMetadata(request);
         } else if ("batch".equals(command)) {
             return handleBatch(request, caps);
         } else if ("run".equals(command)) {
@@ -2600,9 +2709,9 @@ public class TCPCommandServer {
         } else if ("get_dialogs".equals(command)) {
             return handleGetDialogs();
         } else if ("close_dialogs".equals(command)) {
-            return handleCloseDialogs(request);
+            return handleCloseDialogs(request, caps, sock, command);
         } else if ("close_windows".equals(command)) {
-            return handleCloseDialogs(request);
+            return handleCloseDialogs(request, caps, sock, command);
         } else if ("probe_command".equals(command)) {
             return handleProbeCommand(request);
         } else if ("list_commands".equals(command)) {
@@ -2610,7 +2719,7 @@ public class TCPCommandServer {
         } else if ("run_script".equals(command)) {
             return handleRunScript(request, caps);
         } else if ("interact_dialog".equals(command)) {
-            return handleInteractDialog(request, caps);
+            return handleInteractDialog(request, caps, sock, command);
         } else if ("get_progress".equals(command)) {
             return handleGetProgress();
         } else if ("get_friction_log".equals(command)) {
@@ -2913,6 +3022,14 @@ public class TCPCommandServer {
                 || "get_friction_patterns".equals(command)
                 || "clear_friction_log".equals(command)) {
             return;
+        }
+        JsonElement structured = response == null ? null : response.get("error");
+        if (structured != null && structured.isJsonObject()) {
+            JsonElement code = structured.getAsJsonObject().get("code");
+            if (code != null && code.isJsonPrimitive()
+                    && "operation_in_progress".equals(code.getAsString())) {
+                return;
+            }
         }
 
         String error = extractErrorString(response);
@@ -3236,6 +3353,105 @@ public class TCPCommandServer {
         return sock == null ? "default" : "socket-" + sock.getPort();
     }
 
+    /** Scope EDT operation handles to both the durable session and command. */
+    private String edtOperationOwner(AgentCaps caps, Socket sock, String command) {
+        String session = sessionKey(caps, sock);
+        String suffix = "|" + command;
+        int maxSession = EdtOperationRegistry.MAX_OWNER_CHARS - suffix.length();
+        if (session.length() > maxSession) session = session.substring(0, maxSession);
+        return session + suffix;
+    }
+
+    private static boolean canPollEdtOperation(AgentCaps caps, Socket sock) {
+        return sock == null || (caps != null && caps.sessionId != null
+                && !caps.sessionId.trim().isEmpty());
+    }
+
+    /**
+     * Poll before validating fields required only when creating an operation.
+     * An operation id is deliberately meaningful only to the command that
+     * created it, preventing a cross-command poll from exposing a result.
+     */
+    private JsonObject pollEdtOperation(JsonObject request, AgentCaps caps,
+                                        Socket sock, String command) {
+        if (request == null || !request.has("operation_id")) return null;
+        JsonElement idElement = request.get("operation_id");
+        if (idElement == null || !idElement.isJsonPrimitive()
+                || !idElement.getAsJsonPrimitive().isString()
+                || !EdtOperationRegistry.isValidOperationId(
+                        idElement.getAsString())) {
+            return protocolError("invalid_operation_id",
+                    "operation_id must be the opaque string returned by this command.");
+        }
+        JsonObject status = edtOperationRegistry.operationStatus(
+                edtOperationOwner(caps, sock, command), idElement.getAsString());
+        if (status == null) {
+            return protocolError("operation_unknown",
+                    "No operation with that id belongs to this session and command.");
+        }
+        if (status.get("terminal").getAsBoolean()) {
+            return terminalEdtOperationResult(status, true);
+        }
+        return successResponse(status);
+    }
+
+    /** Return an old-style immediate result or a truthful nonterminal handle. */
+    private JsonObject awaitEdtOperation(EdtOperationRegistry.Operation operation,
+                                         String owner, long timeoutMs) {
+        boolean terminal = false;
+        try {
+            terminal = operation.awaitTerminal(timeoutMs <= 0L
+                    ? Long.MAX_VALUE : timeoutMs);
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+        }
+        if (!terminal) {
+            // Queued work can be invalidated safely. It remains nonterminal
+            // until the queued wrapper actually runs and observes the token.
+            if (!operation.hasStarted()) {
+                edtOperationRegistry.cancel(owner, operation.id());
+            }
+            JsonObject latest = operation.toJson();
+            // The wrapper can finish between the timed wait and cancellation.
+            // Never describe a terminal embedded status as "in progress".
+            if (!latest.get("terminal").getAsBoolean()) {
+                return operationInProgress(latest);
+            }
+            return terminalEdtOperationResult(latest, false);
+        }
+
+        return terminalEdtOperationResult(operation.toJson(), false);
+    }
+
+    private JsonObject terminalEdtOperationResult(JsonObject status,
+                                                  boolean attachStatus) {
+        JsonElement result = status.get("result");
+        if (result != null && result.isJsonObject()) {
+            JsonObject response = result.getAsJsonObject().deepCopy();
+            if (attachStatus) response.add("operation", status.deepCopy());
+            return response;
+        }
+        JsonObject failed = protocolError("edt_operation_failed",
+                status.has("error") ? status.get("error").getAsString()
+                        : "The EDT operation did not produce a result.");
+        failed.add("operation", status);
+        return failed;
+    }
+
+    private JsonObject operationInProgress(JsonObject status) {
+        JsonObject response = new JsonObject();
+        response.addProperty("ok", false);
+        JsonObject error = new JsonObject();
+        error.addProperty("code", "operation_in_progress");
+        error.addProperty("message",
+                "The EDT operation is still in progress; poll this command with operation_id.");
+        error.addProperty("category", "operation");
+        error.addProperty("retry_safe", false);
+        response.add("error", error);
+        response.add("operation", status);
+        return response;
+    }
+
     /**
      * Capability names the server will actually emit on replies to this
      * connection. Step 02 adds {@code "structured_errors"}; later steps
@@ -3509,19 +3725,65 @@ public class TCPCommandServer {
      * {@code {"activeImage": null}} when no image is open.
      */
     JsonObject handleGetDisplayState(JsonObject request, AgentCaps caps) {
-        ImagePlus imp = WindowManager.getCurrentImage();
+        final Object[] holder = new Object[1];
+        final CountDownLatch latch = new CountDownLatch(1);
+        GuiActionDispatcher.ActionToken actionToken =
+                GuiActionDispatcher.queueSwingAction(new Runnable() {
+            @Override public void run() {
+                try {
+                    holder[0] = readDisplayStateAtomic(request);
+                } catch (Throwable failure) {
+                    holder[0] = failure;
+                } finally {
+                    latch.countDown();
+                }
+            }
+        });
+        try {
+            if (!latch.await(5000L, TimeUnit.MILLISECONDS)) {
+                actionToken.invalidate();
+                return errorResponse("Timed out getting display state");
+            }
+        } catch (InterruptedException interrupted) {
+            actionToken.invalidate();
+            Thread.currentThread().interrupt();
+            return errorResponse("Interrupted");
+        }
+        if (holder[0] instanceof Throwable) {
+            Throwable failure = (Throwable) holder[0];
+            return errorResponse("Error reading display state: " + failure.getMessage());
+        }
+        return (JsonObject) holder[0];
+    }
+
+    /** Runs wholly on the EDT so cursor, ROI, overlay and LUT are one read. */
+    private JsonObject readDisplayStateAtomic(JsonObject request) {
+        ImagePlus imp = currentImage();
         JsonObject out = new JsonObject();
         if (imp == null) {
+            if (request.has("image_id") || request.has("image_revision")) {
+                return imageSnapshotChanged();
+            }
             out.add("activeImage", JsonNull.INSTANCE);
             return successResponse(out);
         }
+        ActiveImageSnapshot snapshot;
+        try {
+            snapshot = activeImageSnapshot(imp);
+        } catch (RuntimeException failure) {
+            return errorResponse("Error reading active image revision: "
+                    + failure.getMessage());
+        }
+        JsonObject mismatch = validateImageSnapshot(request, snapshot);
+        if (mismatch == null) mismatch = validateExpectedPlane(request, snapshot);
+        if (mismatch != null) return mismatch;
         out.addProperty("activeImage", imp.getTitle());
-        out.addProperty("c", imp.getC());
-        out.addProperty("z", imp.getZ());
-        out.addProperty("t", imp.getT());
-        out.addProperty("channels", imp.getNChannels());
-        out.addProperty("slices", imp.getNSlices());
-        out.addProperty("frames", imp.getNFrames());
+        out.addProperty("c", snapshot.channel);
+        out.addProperty("z", snapshot.slice);
+        out.addProperty("t", snapshot.frame);
+        out.addProperty("channels", snapshot.channels);
+        out.addProperty("slices", snapshot.slices);
+        out.addProperty("frames", snapshot.frames);
         if (imp instanceof CompositeImage) {
             CompositeImage ci = (CompositeImage) imp;
             out.addProperty("compositeMode", compositeModeName(ci.getMode()));
@@ -3549,7 +3811,23 @@ public class TCPCommandServer {
         } else {
             out.add("lut", JsonNull.INSTANCE);
         }
-        return successResponse(out);
+        Roi activeRoi = imp.getRoi();
+        out.addProperty("hasRoi", activeRoi != null);
+        if (activeRoi != null) {
+            out.addProperty("roiType", activeRoi.getTypeAsString());
+            Rectangle bounds = activeRoi.getBounds();
+            if (bounds != null) {
+                out.addProperty("roiWidth", bounds.width);
+                out.addProperty("roiHeight", bounds.height);
+            }
+        }
+        ij.gui.Overlay overlay = imp.getOverlay();
+        out.addProperty("hasOverlay", overlay != null);
+        if (overlay != null) out.addProperty("overlaySize", overlay.size());
+        attachImageSnapshot(out, snapshot, snapshot.channel,
+                snapshot.slice, snapshot.slice, snapshot.frame);
+        return imageSnapshotStillCurrent(snapshot)
+                ? successResponse(out) : imageSnapshotChanged();
     }
 
     /**
@@ -6316,7 +6594,7 @@ public class TCPCommandServer {
         return successResponse((JsonObject) holder[0]);
     }
 
-    private JsonObject handleGetImageInfo() {
+    private JsonObject handleGetImageInfo(final JsonObject request) {
         final Object[] holder = new Object[1];
         final CountDownLatch latch = new CountDownLatch(1);
 
@@ -6325,11 +6603,25 @@ public class TCPCommandServer {
             @Override
             public void run() {
                 try {
-                    ImageInfo info = stateInspector.getActiveImageInfo();
-                    if (info != null) {
-                        holder[0] = imageInfoToJson(info);
-                    } else {
+                    ImagePlus image = currentImage();
+                    if (image == null) {
                         holder[0] = null;
+                    } else {
+                        ActiveImageSnapshot snapshot = activeImageSnapshot(image);
+                        JsonObject mismatch = validateImageSnapshot(request, snapshot);
+                        if (mismatch == null) {
+                            mismatch = validateExpectedPlane(request, snapshot);
+                        }
+                        if (mismatch != null) {
+                            holder[0] = mismatch;
+                        } else {
+                            JsonObject result = imageInfoToJson(image);
+                            result.add("value_domain", valueDomain(image));
+                            attachImageSnapshot(result, snapshot, snapshot.channel,
+                                    snapshot.slice, snapshot.slice, snapshot.frame);
+                            holder[0] = imageSnapshotStillCurrent(snapshot)
+                                    ? result : imageSnapshotChanged();
+                        }
                     }
                 } catch (Exception e) {
                     holder[0] = e;
@@ -6355,6 +6647,10 @@ public class TCPCommandServer {
         }
         if (holder[0] == null) {
             return errorResponse("No active image");
+        }
+        if (holder[0] instanceof JsonObject
+                && ((JsonObject) holder[0]).has("ok")) {
+            return (JsonObject) holder[0];
         }
         return successResponse((JsonObject) holder[0]);
     }
@@ -6442,10 +6738,17 @@ public class TCPCommandServer {
             @Override
             public void run() {
                 try {
-                    ij.ImagePlus imp = ij.WindowManager.getCurrentImage();
+                    ij.ImagePlus imp = currentImage();
                     if (imp == null) {
                         holder[0] = "NO_IMAGE";
                     } else {
+                        ActiveImageSnapshot snapshot = activeImageSnapshot(imp);
+                        JsonObject mismatch = validateImageSnapshot(request, snapshot);
+                        if (mismatch == null) mismatch = validateExpectedPlane(request, snapshot);
+                        if (mismatch != null) {
+                            holder[0] = mismatch;
+                            return;
+                        }
                         String imageToken = visualImageToken(imp);
                         boolean fullResolutionOverride =
                                 posture == PrivacyPosture.PSEUDONYMISED
@@ -6470,13 +6773,16 @@ public class TCPCommandServer {
                             result.addProperty("width", imp.getWidth());
                             result.addProperty("height", imp.getHeight());
                             result.addProperty("source", source.name());
+                            attachImageSnapshot(result, snapshot, snapshot.channel,
+                                    snapshot.slice, snapshot.slice, snapshot.frame);
                             if (posture == PrivacyPosture.PSEUDONYMISED
                                     && source == CaptureSource.ACTIVE_IMAGE_CONTENT) {
                                 // Internal hand-off: CaptureHandler removes this
                                 // after atomically consuming the exact image grant.
                                 result.addProperty("_visual_image_token", imageToken);
                             }
-                            holder[0] = result;
+                            holder[0] = imageSnapshotStillCurrent(snapshot)
+                                    ? result : imageSnapshotChanged();
                         }
                     }
                 } catch (Exception e) {
@@ -6507,6 +6813,10 @@ public class TCPCommandServer {
                         + " bytes; crop or reduce maxSize.");
             }
             return errorResponse("Capture error: " + ((Exception) holder[0]).getMessage());
+        }
+        if (holder[0] instanceof JsonObject
+                && ((JsonObject) holder[0]).has("ok")) {
+            return (JsonObject) holder[0];
         }
         if ("NO_IMAGE".equals(holder[0])) {
             return errorResponse("No active image");
@@ -6581,12 +6891,20 @@ public class TCPCommandServer {
         }
     }
 
-    private JsonObject handleOpenImage(JsonObject request, boolean tokenOnly) {
-        JsonElement targetElement = firstPresent(request, "token", "image_token", "path", "file");
+    private JsonObject handleOpenImage(JsonObject request, boolean tokenOnly,
+                                       AgentCaps caps, Socket sock,
+                                       String command) {
+        JsonObject poll = pollEdtOperation(request, caps, sock, command);
+        if (poll != null) return poll;
+        // `token` is reserved for installation/session authentication at the
+        // transport boundary. Governed file handles always use image_token.
+        JsonElement targetElement = tokenOnly
+                ? request.get("image_token")
+                : firstPresent(request, "image_token", "path", "file");
         if (targetElement == null || !targetElement.isJsonPrimitive()) {
             return errorResponse(tokenOnly
-                    ? "Missing token for open_image_by_token"
-                    : "Missing path or token for open_image");
+                    ? "Missing image_token for open_image_by_token"
+                    : "Missing path, file, or image_token for open_image");
         }
 
         String target = targetElement.getAsString();
@@ -6626,84 +6944,97 @@ public class TCPCommandServer {
         final int requestedSeries = series;
         final List<ImageGraph.ImageRef> before = currentOpenImageRefs();
         final ImagePlus activeBefore = currentImage();
-        final Object[] holder = new Object[1];
-        final CountDownLatch latch = new CountDownLatch(1);
+        final Object[] holder = new Object[2];
         long requestedTimeout = resolveTimeoutMs(request, 30000L);
-        final long timeoutMs = Math.max(1L, Math.min(120000L, requestedTimeout));
-        final long deadline = System.currentTimeMillis() + timeoutMs;
-        GuiActionDispatcher.ActionToken actionToken =
-                GuiActionDispatcher.queueSwingAction(new Runnable() {
-            @Override
-            public void run() {
-                try {
-                    if (openImageOperationForTest != null) {
-                        openImageOperationForTest.open(realPathString, requestedSeries);
-                    } else {
-                        if (requestedSeries >= 0) {
-                            String options = "open=[" + realPathString.replace("]", "\\]") + "] "
-                                    + "autoscale color_mode=Default view=Hyperstack "
-                                    + "stack_order=XYCZT series_" + requestedSeries;
-                            IJ.run("Bio-Formats Importer", options);
-                        } else {
-                            IJ.open(realPathString);
-                        }
-                    }
-                } catch (Throwable e) {
-                    holder[0] = e;
-                } finally {
-                    latch.countDown();
-                }
-            }
-        });
-
+        final long timeoutMs = requestedTimeout <= 0L ? 0L
+                : Math.max(1L, Math.min(120000L, requestedTimeout));
+        final String owner = edtOperationOwner(caps, sock, command);
         try {
-            long remaining = Math.max(1L, deadline - System.currentTimeMillis());
-            if (!latch.await(remaining, TimeUnit.MILLISECONDS)) {
-                actionToken.invalidate();
-                restoreActiveImage(activeBefore);
-                return errorResponse("Timed out opening image");
-            }
-        } catch (InterruptedException e) {
-            actionToken.invalidate();
-            restoreActiveImage(activeBefore);
-            Thread.currentThread().interrupt();
-            return errorResponse("Interrupted");
-        }
-        if (holder[0] instanceof Throwable) {
-            restoreActiveImage(activeBefore);
-            return errorResponse("open_image_failed");
-        }
+            EdtOperationRegistry.Operation operation = edtOperationRegistry.admit(
+                    owner,
+                    new EdtOperationRegistry.ActionStarter() {
+                        @Override public GuiActionDispatcher.ActionToken start() {
+                            return GuiActionDispatcher.queueSwingAction(new Runnable() {
+                                @Override public void run() {
+                                    try {
+                                        if (openImageOperationForTest != null) {
+                                            openImageOperationForTest.open(
+                                                    realPathString, requestedSeries);
+                                        } else if (requestedSeries >= 0) {
+                                            String options = "open=["
+                                                    + realPathString.replace("]", "\\]") + "] "
+                                                    + "autoscale color_mode=Default view=Hyperstack "
+                                                    + "stack_order=XYCZT series_" + requestedSeries;
+                                            IJ.run("Bio-Formats Importer", options);
+                                        } else {
+                                            IJ.open(realPathString);
+                                        }
+                                    } catch (Throwable failure) {
+                                        holder[0] = failure;
+                                        restoreActiveImageOnEdt(activeBefore);
+                                    }
+                                }
+                            });
+                        }
+                    },
+                    new EdtOperationRegistry.CompletionSupplier() {
+                        private long observationStartedNanos;
+                        private boolean observationStarted;
 
-        ImageGraph.ImageRef opened = null;
-        while (System.currentTimeMillis() <= deadline) {
-            opened = findRequestedOpenedImage(before, currentOpenImageRefs(), normalizedPath);
-            if (opened != null) break;
-            try {
-                Thread.sleep(Math.min(25L,
-                        Math.max(1L, deadline - System.currentTimeMillis())));
-            } catch (InterruptedException e) {
-                restoreActiveImage(activeBefore);
-                Thread.currentThread().interrupt();
-                return errorResponse("Interrupted");
-            }
-        }
-        if (opened == null) {
-            restoreActiveImage(activeBefore);
-            return errorResponse("open_image_failed: requested image did not open");
-        }
-        imageGraph.addOpenedImage(opened);
+                        @Override public boolean isReady() {
+                            if (holder[0] instanceof Throwable || holder[1] != null) {
+                                return true;
+                            }
+                            ImageGraph.ImageRef opened = findRequestedOpenedImage(
+                                    before, currentOpenImageRefs(), normalizedPath);
+                            if (opened != null) {
+                                holder[1] = opened;
+                                return true;
+                            }
+                            long now = System.nanoTime();
+                            if (!observationStarted) {
+                                observationStartedNanos = now;
+                                observationStarted = true;
+                            }
+                            long observationMs = timeoutMs <= 0L
+                                    ? 120000L : Math.max(1000L, timeoutMs);
+                            return now - observationStartedNanos
+                                    >= TimeUnit.MILLISECONDS.toNanos(observationMs);
+                        }
 
-        String baseToken = pseudonymisationFilter.pathTokenMap().tokenForPath(normalizedPath);
-        JsonObject result = new JsonObject();
-        result.addProperty("opened", true);
-        result.addProperty("path_token", requestedSeries >= 0
-                ? pseudonymisationFilter.pathTokenMap().tokenForSeries(normalizedPath, requestedSeries)
-                : baseToken);
-        result.addProperty("series", requestedSeries);
-        result.addProperty("resolved_from_token", tokenResolved);
-        result.addProperty("title", opened.title);
-        result.addProperty("image_id", opened.identity);
-        return successResponse(result);
+                        @Override public JsonObject complete() {
+                            if (holder[0] instanceof Throwable) {
+                                return errorResponse("open_image_failed");
+                            }
+                            ImageGraph.ImageRef opened =
+                                    (ImageGraph.ImageRef) holder[1];
+                            if (opened == null) {
+                                restoreActiveImageAfterEdt(activeBefore);
+                                return errorResponse(
+                                        "open_image_failed: requested image did not open");
+                            }
+                            imageGraph.addOpenedImage(opened);
+                            String baseToken = pseudonymisationFilter.pathTokenMap()
+                                    .tokenForPath(normalizedPath);
+                            JsonObject result = new JsonObject();
+                            result.addProperty("opened", true);
+                            result.addProperty("path_token", requestedSeries >= 0
+                                    ? pseudonymisationFilter.pathTokenMap().tokenForSeries(
+                                            normalizedPath, requestedSeries)
+                                    : baseToken);
+                            result.addProperty("series", requestedSeries);
+                            result.addProperty("resolved_from_token", tokenResolved);
+                            result.addProperty("title", opened.title);
+                            result.addProperty("image_id", opened.identity);
+                            return successResponse(result);
+                        }
+                    });
+            return awaitEdtOperation(operation, owner,
+                    canPollEdtOperation(caps, sock) ? timeoutMs : 0L);
+        } catch (RejectedExecutionException rejected) {
+            return protocolError("edt_operation_capacity",
+                    "The bounded EDT operation queue is full or stopped.");
+        }
     }
 
     private List<ImageGraph.ImageRef> currentOpenImageRefs() {
@@ -6714,6 +7045,200 @@ public class TCPCommandServer {
     private ImagePlus currentImage() {
         return currentImageForTest != null
                 ? currentImageForTest.get() : WindowManager.getCurrentImage();
+    }
+
+    private ActiveImageSnapshot activeImageSnapshot(ImagePlus image) {
+        if (image == null) return null;
+        ImageRevisionTracker.Snapshot revision = imageRevisionTracker.snapshot(image);
+        return new ActiveImageSnapshot(image, revision,
+                image.getC(), image.getZ(), image.getT());
+    }
+
+    /**
+     * Validate an optional optimistic read binding. A caller obtains the
+     * fields from get_image_info, then echoes them on every related read. A
+     * same-shaped active-image switch or in-place dataset edit therefore
+     * fails closed instead of returning data attributed to the old image.
+     */
+    private JsonObject validateImageSnapshot(JsonObject request,
+                                             ActiveImageSnapshot snapshot) {
+        if (request == null || snapshot == null) return null;
+        boolean hasId = request.has("image_id");
+        boolean hasRevision = request.has("image_revision");
+        if (hasId != hasRevision) {
+            return protocolError("invalid_image_snapshot",
+                    "image_id and image_revision must be supplied together.");
+        }
+        JsonElement id = request.get("image_id");
+        if (id != null) {
+            if (!id.isJsonPrimitive() || !id.getAsJsonPrimitive().isString()
+                    || id.getAsString().trim().isEmpty()) {
+                return protocolError("invalid_image_snapshot",
+                        "image_id must be an opaque string from get_image_info.");
+            }
+            if (!snapshot.imageId.equals(id.getAsString())) {
+                return protocolError("image_snapshot_mismatch",
+                        "The active image changed after the initiating read.");
+            }
+        }
+        JsonElement revision = request.get("image_revision");
+        if (revision != null) {
+            try {
+                long expected = strictPositiveLong(revision, "image_revision");
+                if (snapshot.imageRevision != expected) {
+                    return protocolError("image_snapshot_mismatch",
+                            "The active image dataset changed after the initiating read.");
+                }
+            } catch (IllegalArgumentException invalid) {
+                return protocolError("invalid_image_snapshot",
+                        "image_revision must be a positive integer from get_image_info.");
+            }
+        }
+        JsonElement displayRevision = request.get("display_revision");
+        if (displayRevision != null) {
+            if (!hasId) {
+                return protocolError("invalid_image_snapshot",
+                        "display_revision requires image_id and image_revision.");
+            }
+            try {
+                long expected = strictPositiveLong(displayRevision, "display_revision");
+                if (snapshot.displayRevision != expected) {
+                    return protocolError("image_snapshot_mismatch",
+                            "The active image display or annotations changed after the initiating read.");
+                }
+            } catch (IllegalArgumentException invalid) {
+                return protocolError("invalid_image_snapshot",
+                        "display_revision must be a positive integer from get_image_info.");
+            }
+        }
+        return null;
+    }
+
+    private JsonObject validateExpectedPlane(JsonObject request,
+                                             ActiveImageSnapshot snapshot) {
+        try {
+            Integer channel = strictOptionalInt(request, "channel");
+            Integer slice = strictOptionalInt(request, "slice");
+            Integer frame = strictOptionalInt(request, "frame");
+            if ((channel != null && channel.intValue() != snapshot.channel)
+                    || (slice != null && slice.intValue() != snapshot.slice)
+                    || (frame != null && frame.intValue() != snapshot.frame)) {
+                return protocolError("image_snapshot_mismatch",
+                        "The active C/Z/T plane changed after the initiating read.");
+            }
+        } catch (IllegalArgumentException invalid) {
+            return protocolError("invalid_image_plane",
+                    "channel, slice, and frame must be canonical 1-based integers.");
+        }
+        return null;
+    }
+
+    private boolean imageSnapshotStillCurrent(ActiveImageSnapshot snapshot) {
+        return snapshot != null && currentImage() == snapshot.image
+                && imageRevisionTracker.isCurrent(snapshot.revisionSnapshot);
+    }
+
+    private JsonObject imageSnapshotChanged() {
+        return protocolError("image_snapshot_mismatch",
+                "The active image, dataset, display, or annotations changed during the read.");
+    }
+
+    private static long strictPositiveLong(JsonElement element, String field) {
+        if (element == null || !element.isJsonPrimitive()
+                || !element.getAsJsonPrimitive().isNumber()) {
+            throw new IllegalArgumentException(field + " must be an integer");
+        }
+        String raw = element.toString();
+        if (!raw.matches("[1-9][0-9]*")) {
+            throw new IllegalArgumentException(field + " must be a canonical positive integer");
+        }
+        try {
+            return Long.parseLong(raw);
+        } catch (NumberFormatException invalid) {
+            throw new IllegalArgumentException(field + " is outside integer range", invalid);
+        }
+    }
+
+    private static Integer strictOptionalInt(JsonObject request, String field) {
+        if (request == null || !request.has(field)) return null;
+        JsonElement element = request.get(field);
+        if (element == null || !element.isJsonPrimitive()
+                || !element.getAsJsonPrimitive().isNumber()) {
+            throw new IllegalArgumentException(field + " must be an integer");
+        }
+        String raw = element.toString();
+        if (!raw.matches("-?(?:0|[1-9][0-9]*)")) {
+            throw new IllegalArgumentException(field + " must be a canonical integer");
+        }
+        try {
+            return Integer.valueOf(Integer.parseInt(raw));
+        } catch (NumberFormatException invalid) {
+            throw new IllegalArgumentException(field + " is outside integer range", invalid);
+        }
+    }
+
+    private static void attachImageSnapshot(JsonObject result,
+                                            ActiveImageSnapshot snapshot,
+                                            int channel, int sliceStart,
+                                            int sliceEnd, int frame) {
+        result.addProperty("image_id", snapshot.imageId);
+        result.addProperty("image_revision", snapshot.imageRevision);
+        result.addProperty("display_revision", snapshot.displayRevision);
+        result.addProperty("channel", channel);
+        result.addProperty("sliceStart", sliceStart);
+        result.addProperty("sliceEnd", sliceEnd);
+        result.addProperty("sliceAxis", "Z");
+        result.addProperty("frame", frame);
+        result.addProperty("channels", snapshot.channels);
+        result.addProperty("slices", snapshot.slices);
+        result.addProperty("frames", snapshot.frames);
+    }
+
+    /**
+     * Respect a timeout only while an EDT mutation is still queued. Once the
+     * action has started, join its actual completion before returning any
+     * terminal reply; otherwise Fiji could keep mutating after the client was
+     * told the operation had timed out.
+     */
+    private static boolean awaitEdtMutation(CountDownLatch completed,
+                                            GuiActionDispatcher.ActionToken token,
+                                            long timeoutMs)
+            throws InterruptedException {
+        boolean actionCompleted = false;
+        boolean interrupted = false;
+        try {
+            if (timeoutMs <= 0L) {
+                completed.await();
+                actionCompleted = true;
+            } else {
+                actionCompleted = completed.await(timeoutMs, TimeUnit.MILLISECONDS);
+            }
+        } catch (InterruptedException beforeExit) {
+            if (token.invalidate()) throw beforeExit;
+            interrupted = true;
+        }
+        if (!actionCompleted && !interrupted && token.invalidate()) return false;
+
+        while (!actionCompleted) {
+            try {
+                completed.await();
+                actionCompleted = true;
+            } catch (InterruptedException ignored) {
+                interrupted = true;
+            }
+        }
+        // The handler's latch is released from inside the queued runnable's
+        // finally block. Join the ActionToken as well so the wrapper itself
+        // has returned and terminal really means the EDT action exited.
+        while (!token.isFinished()) {
+            try {
+                token.awaitFinished();
+            } catch (InterruptedException ignored) {
+                interrupted = true;
+            }
+        }
+        if (interrupted) Thread.currentThread().interrupt();
+        return true;
     }
 
     static ImageGraph.ImageRef findRequestedOpenedImage(
@@ -6788,6 +7313,37 @@ public class TCPCommandServer {
             token.invalidate();
             Thread.currentThread().interrupt();
         }
+    }
+
+    /** Restore directly when the caller is already inside the EDT action. */
+    private void restoreActiveImageOnEdt(ImagePlus activeBefore) {
+        if (activeBefore == null || currentImage() == activeBefore) return;
+        ImageWindow window = activeBefore.getWindow();
+        if (window != null) WindowManager.setCurrentWindow(window);
+    }
+
+    /** Join the restoration mutation before publishing a terminal failure. */
+    private void restoreActiveImageAfterEdt(final ImagePlus activeBefore) {
+        if (activeBefore == null || currentImage() == activeBefore) return;
+        if (SwingUtilities.isEventDispatchThread()) {
+            restoreActiveImageOnEdt(activeBefore);
+            return;
+        }
+        GuiActionDispatcher.ActionToken token =
+                GuiActionDispatcher.queueSwingAction(new Runnable() {
+                    @Override public void run() {
+                        restoreActiveImageOnEdt(activeBefore);
+                    }
+                });
+        boolean interrupted = false;
+        while (!token.isFinished()) {
+            try {
+                token.awaitFinished();
+            } catch (InterruptedException ignored) {
+                interrupted = true;
+            }
+        }
+        if (interrupted) Thread.currentThread().interrupt();
     }
 
     private JsonObject handleBrowsePendingBrief(JsonObject request, AgentCaps caps, Socket sock) {
@@ -7093,7 +7649,30 @@ public class TCPCommandServer {
         return successResponse(new JsonPrimitive(AgentContextSanitizer.wrap(log, "LOG")));
     }
 
-    private JsonObject handleGetHistogram() {
+    private JsonObject handleGetHistogram(final JsonObject request) {
+        final Integer requestedChannel;
+        final Integer requestedSlice;
+        final Integer requestedFrame;
+        final String scope;
+        try {
+            requestedChannel = strictOptionalInt(request, "channel");
+            requestedSlice = strictOptionalInt(request, "slice");
+            requestedFrame = strictOptionalInt(request, "frame");
+            JsonElement scopeElement = request.get("scope");
+            if (scopeElement == null) {
+                scope = "active_roi";
+            } else if (scopeElement.isJsonPrimitive()
+                    && scopeElement.getAsJsonPrimitive().isString()
+                    && ("active_roi".equals(scopeElement.getAsString())
+                    || "full_plane".equals(scopeElement.getAsString()))) {
+                scope = scopeElement.getAsString();
+            } else {
+                throw new IllegalArgumentException("invalid scope");
+            }
+        } catch (IllegalArgumentException invalid) {
+            return protocolError("invalid_image_plane",
+                    "scope must be active_roi or full_plane; C/Z/T must be canonical integers.");
+        }
         final Object[] holder = new Object[1];
         final CountDownLatch latch = new CountDownLatch(1);
 
@@ -7102,11 +7681,59 @@ public class TCPCommandServer {
             @Override
             public void run() {
                 try {
-                    ImagePlus imp = WindowManager.getCurrentImage();
+                    ImagePlus imp = currentImage();
                     if (imp == null) {
                         holder[0] = "NO_IMAGE";
                     } else {
-                        ImageStatistics stats = imp.getStatistics();
+                        ActiveImageSnapshot snapshot = activeImageSnapshot(imp);
+                        JsonObject mismatch = validateImageSnapshot(request, snapshot);
+                        if (mismatch != null) {
+                            holder[0] = mismatch;
+                            return;
+                        }
+                        int channel = requestedChannel == null
+                                ? snapshot.channel : requestedChannel.intValue();
+                        int slice = requestedSlice == null
+                                ? snapshot.slice : requestedSlice.intValue();
+                        int frame = requestedFrame == null
+                                ? snapshot.frame : requestedFrame.intValue();
+                        if (channel < 1 || channel > snapshot.channels
+                                || slice < 1 || slice > snapshot.slices
+                                || frame < 1 || frame > snapshot.frames) {
+                            holder[0] = protocolError("invalid_image_plane",
+                                    "Requested C/Z/T plane is outside the active image.");
+                            return;
+                        }
+                        int stackIndex = imp.getStackIndex(channel, slice, frame);
+                        ImageProcessor source = imp.getStack().getProcessor(stackIndex);
+                        ImageProcessor statisticsProcessor = source.duplicate();
+                        statisticsProcessor.setCalibrationTable(null);
+                        Roi activeRoi = "active_roi".equals(scope) ? imp.getRoi() : null;
+                        if (activeRoi != null
+                                && roiAppliesToPlane(activeRoi, channel, slice, frame)) {
+                            statisticsProcessor.setRoi(activeRoi);
+                        } else {
+                            activeRoi = null;
+                            statisticsProcessor.resetRoi();
+                        }
+                        ImageStatistics stats = ImageStatistics.getStatistics(statisticsProcessor);
+                        AcquisitionLimits limits = acquisitionLimits(imp);
+                        long lowCount = 0L;
+                        long highCount = 0L;
+                        if (limits.known()) {
+                            Rectangle bounds = activeRoi == null
+                                    ? new Rectangle(0, 0, imp.getWidth(), imp.getHeight())
+                                    : activeRoi.getBounds().intersection(
+                                            new Rectangle(0, 0, imp.getWidth(), imp.getHeight()));
+                            for (int y = bounds.y; y < bounds.y + bounds.height; y++) {
+                                for (int x = bounds.x; x < bounds.x + bounds.width; x++) {
+                                    if (activeRoi != null && !activeRoi.contains(x, y)) continue;
+                                    double value = source.getf(x, y);
+                                    if (value == limits.rawMin.doubleValue()) lowCount++;
+                                    if (value == limits.rawMax.doubleValue()) highCount++;
+                                }
+                            }
+                        }
                         JsonObject result = new JsonObject();
                         result.addProperty("min", stats.min);
                         result.addProperty("max", stats.max);
@@ -7121,7 +7748,12 @@ public class TCPCommandServer {
                             }
                         }
                         result.add("bins", bins);
-                        holder[0] = result;
+                        result.addProperty("scope", scope);
+                        result.add("value_domain", valueDomain(imp));
+                        attachLimitCounts(result, limits, lowCount, highCount);
+                        attachImageSnapshot(result, snapshot, channel, slice, slice, frame);
+                        holder[0] = imageSnapshotStillCurrent(snapshot)
+                                ? result : imageSnapshotChanged();
                     }
                 } catch (Exception e) {
                     holder[0] = e;
@@ -7148,7 +7780,18 @@ public class TCPCommandServer {
         if ("NO_IMAGE".equals(holder[0])) {
             return errorResponse("No active image");
         }
+        if (holder[0] instanceof JsonObject
+                && ((JsonObject) holder[0]).has("ok")) {
+            return (JsonObject) holder[0];
+        }
         return successResponse((JsonObject) holder[0]);
+    }
+
+    private static boolean roiAppliesToPlane(Roi roi, int channel, int slice, int frame) {
+        return roi == null
+                || ((roi.getCPosition() == 0 || roi.getCPosition() == channel)
+                && (roi.getZPosition() == 0 || roi.getZPosition() == slice)
+                && (roi.getTPosition() == 0 || roi.getTPosition() == frame));
     }
 
     private JsonObject handleGetOpenWindows() {
@@ -7214,7 +7857,7 @@ public class TCPCommandServer {
         return successResponse((JsonObject) holder[0]);
     }
 
-    private JsonObject handleGetMetadata() {
+    private JsonObject handleGetMetadata(final JsonObject request) {
         final Object[] holder = new Object[1];
         final CountDownLatch latch = new CountDownLatch(1);
 
@@ -7223,10 +7866,17 @@ public class TCPCommandServer {
             @Override
             public void run() {
                 try {
-                    ImagePlus imp = WindowManager.getCurrentImage();
+                    ImagePlus imp = currentImage();
                     if (imp == null) {
                         holder[0] = "NO_IMAGE";
                     } else {
+                        ActiveImageSnapshot snapshot = activeImageSnapshot(imp);
+                        JsonObject mismatch = validateImageSnapshot(request, snapshot);
+                        if (mismatch == null) mismatch = validateExpectedPlane(request, snapshot);
+                        if (mismatch != null) {
+                            holder[0] = mismatch;
+                            return;
+                        }
                         JsonObject result = new JsonObject();
                         result.addProperty("title", imp.getTitle());
 
@@ -7265,7 +7915,11 @@ public class TCPCommandServer {
                             result.add("calibration", calJson);
                         }
 
-                        holder[0] = result;
+                        result.add("value_domain", valueDomain(imp));
+                        attachImageSnapshot(result, snapshot, snapshot.channel,
+                                snapshot.slice, snapshot.slice, snapshot.frame);
+                        holder[0] = imageSnapshotStillCurrent(snapshot)
+                                ? result : imageSnapshotChanged();
                     }
                 } catch (Exception e) {
                     holder[0] = e;
@@ -7291,6 +7945,10 @@ public class TCPCommandServer {
         }
         if ("NO_IMAGE".equals(holder[0])) {
             return errorResponse("No active image");
+        }
+        if (holder[0] instanceof JsonObject
+                && ((JsonObject) holder[0]).has("ok")) {
+            return (JsonObject) holder[0];
         }
         return successResponse((JsonObject) holder[0]);
     }
@@ -8228,6 +8886,116 @@ public class TCPCommandServer {
         return json;
     }
 
+    /** Build image-info JSON from the exact ImagePlus captured for a read. */
+    private JsonObject imageInfoToJson(ImagePlus image) {
+        JsonObject json = new JsonObject();
+        json.addProperty("title", image.getTitle());
+        json.addProperty("width", image.getWidth());
+        json.addProperty("height", image.getHeight());
+        switch (image.getType()) {
+            case ImagePlus.GRAY8: json.addProperty("type", "8-bit"); break;
+            case ImagePlus.GRAY16: json.addProperty("type", "16-bit"); break;
+            case ImagePlus.GRAY32: json.addProperty("type", "32-bit"); break;
+            case ImagePlus.COLOR_RGB: json.addProperty("type", "RGB"); break;
+            case ImagePlus.COLOR_256: json.addProperty("type", "8-bit color"); break;
+            default: json.addProperty("type", "unknown"); break;
+        }
+        json.addProperty("slices", image.getNSlices());
+        json.addProperty("channels", image.getNChannels());
+        json.addProperty("frames", image.getNFrames());
+        Calibration calibration = image.getCalibration();
+        String calibrationText = calibration != null && calibration.scaled()
+                ? calibration.pixelWidth + " " + calibration.getUnit() + "/px" : "";
+        json.addProperty("calibration", calibrationText);
+        json.addProperty("isStack", image.getStackSize() > 1);
+        json.addProperty("isHyperstack", image.isHyperStack());
+        return json;
+    }
+
+    private static final class AcquisitionLimits {
+        final String pixelType;
+        final Boolean signed;
+        final Double rawMin;
+        final Double rawMax;
+
+        AcquisitionLimits(String pixelType, Boolean signed,
+                          Double rawMin, Double rawMax) {
+            this.pixelType = pixelType;
+            this.signed = signed;
+            this.rawMin = rawMin;
+            this.rawMax = rawMax;
+        }
+
+        boolean known() { return rawMin != null && rawMax != null; }
+    }
+
+    private static AcquisitionLimits acquisitionLimits(ImagePlus image) {
+        switch (image.getType()) {
+            case ImagePlus.GRAY8:
+                return new AcquisitionLimits("uint8", Boolean.FALSE, 0.0, 255.0);
+            case ImagePlus.GRAY16:
+                return new AcquisitionLimits("uint16", Boolean.FALSE, 0.0, 65535.0);
+            case ImagePlus.GRAY32:
+                return new AcquisitionLimits("float32", Boolean.TRUE, null, null);
+            case ImagePlus.COLOR_256:
+                return new AcquisitionLimits("indexed8", Boolean.FALSE, 0.0, 255.0);
+            case ImagePlus.COLOR_RGB:
+                // getPixelValue() semantics for RGB are ImageJ-processor
+                // specific, so packed/channel clipping cannot be inferred.
+                return new AcquisitionLimits("rgb24", null, null, null);
+            default:
+                return new AcquisitionLimits("unknown", null, null, null);
+        }
+    }
+
+    private static JsonObject valueDomain(ImagePlus image) {
+        AcquisitionLimits limits = acquisitionLimits(image);
+        Calibration calibration = image.getCalibration();
+        boolean densityCalibrated = calibration != null && calibration.calibrated();
+        JsonObject domain = new JsonObject();
+        domain.addProperty("representation", "raw");
+        domain.addProperty("pixel_type", limits.pixelType);
+        if (limits.signed == null) domain.add("signed", JsonNull.INSTANCE);
+        else domain.addProperty("signed", limits.signed.booleanValue());
+        domain.addProperty("density_calibrated", densityCalibrated);
+        addNullableNumber(domain, "acquisition_min_raw", limits.rawMin);
+        addNullableNumber(domain, "acquisition_max_raw", limits.rawMax);
+        if (limits.known() && densityCalibrated) {
+            double first = calibration.getCValue(limits.rawMin.doubleValue());
+            double second = calibration.getCValue(limits.rawMax.doubleValue());
+            addNullableNumber(domain, "acquisition_min_calibrated",
+                    Double.valueOf(Math.min(first, second)));
+            addNullableNumber(domain, "acquisition_max_calibrated",
+                    Double.valueOf(Math.max(first, second)));
+        } else {
+            domain.add("acquisition_min_calibrated", JsonNull.INSTANCE);
+            domain.add("acquisition_max_calibrated", JsonNull.INSTANCE);
+        }
+        return domain;
+    }
+
+    private static void addNullableNumber(JsonObject target, String key, Double value) {
+        if (value == null || value.isNaN() || value.isInfinite()) {
+            target.add(key, JsonNull.INSTANCE);
+        } else {
+            target.addProperty(key, value.doubleValue());
+        }
+    }
+
+    private static void attachLimitCounts(JsonObject result,
+                                          AcquisitionLimits limits,
+                                          long lowCount, long highCount) {
+        if (limits.known()) {
+            result.addProperty("acquisition_min_count", lowCount);
+            result.addProperty("acquisition_max_count", highCount);
+            result.addProperty("acquisition_limit_counts_exact", true);
+        } else {
+            result.add("acquisition_min_count", JsonNull.INSTANCE);
+            result.add("acquisition_max_count", JsonNull.INSTANCE);
+            result.addProperty("acquisition_limit_counts_exact", false);
+        }
+    }
+
     /**
      * Base64-encode a byte array. Java 8 compatible using javax.xml.bind
      * or manual implementation since java.util.Base64 requires Java 8 update.
@@ -8282,19 +9050,47 @@ public class TCPCommandServer {
         final int reqW;
         final int reqH;
         final int reqSlice;
+        final int reqChannel;
+        final int reqFrame;
         final boolean hasSlice;
+        final boolean hasChannel;
+        final boolean hasFrame;
         final boolean allSlices;
         try {
-            reqX = request.has("x") ? request.get("x").getAsInt() : -1;
-            reqY = request.has("y") ? request.get("y").getAsInt() : -1;
-            reqW = request.has("width") ? request.get("width").getAsInt() : -1;
-            reqH = request.has("height") ? request.get("height").getAsInt() : -1;
+            Integer x = strictOptionalInt(request, "x");
+            Integer y = strictOptionalInt(request, "y");
+            Integer width = strictOptionalInt(request, "width");
+            Integer height = strictOptionalInt(request, "height");
+            reqX = x == null ? -1 : x.intValue();
+            reqY = y == null ? -1 : y.intValue();
+            reqW = width == null ? -1 : width.intValue();
+            reqH = height == null ? -1 : height.intValue();
+            if ((x != null && reqX < 0) || (y != null && reqY < 0)
+                    || (width != null && reqW <= 0)
+                    || (height != null && reqH <= 0)) {
+                throw new IllegalArgumentException("invalid region bounds");
+            }
             hasSlice = request.has("slice");
-            reqSlice = hasSlice ? request.get("slice").getAsInt() : -1;
-            allSlices = request.has("allSlices")
-                    && request.get("allSlices").getAsBoolean();
-        } catch (RuntimeException e) {
-            return errorResponse("Invalid get_pixels parameters");
+            Integer slice = strictOptionalInt(request, "slice");
+            reqSlice = slice == null ? -1 : slice.intValue();
+            hasChannel = request.has("channel");
+            Integer channel = strictOptionalInt(request, "channel");
+            reqChannel = channel == null ? -1 : channel.intValue();
+            hasFrame = request.has("frame");
+            Integer frame = strictOptionalInt(request, "frame");
+            reqFrame = frame == null ? -1 : frame.intValue();
+            JsonElement all = request.get("allSlices");
+            if (all != null && (!all.isJsonPrimitive()
+                    || !all.getAsJsonPrimitive().isBoolean())) {
+                throw new IllegalArgumentException("allSlices must be boolean");
+            }
+            allSlices = all != null && all.getAsBoolean();
+            if (allSlices && hasSlice) {
+                throw new IllegalArgumentException("slice and allSlices are mutually exclusive");
+            }
+        } catch (IllegalArgumentException e) {
+            return protocolError("invalid_image_plane",
+                    "get_pixels region and C/Z/T fields must be canonical integers.");
         }
 
         final Object[] holder = new Object[1];
@@ -8315,6 +9111,13 @@ public class TCPCommandServer {
                     originalC = imp.getC();
                     originalZ = imp.getZ();
                     originalT = imp.getT();
+
+                    ActiveImageSnapshot snapshot = activeImageSnapshot(imp);
+                    JsonObject mismatch = validateImageSnapshot(request, snapshot);
+                    if (mismatch != null) {
+                        holder[0] = mismatch;
+                        return;
+                    }
 
                     int imgW = imp.getWidth();
                     int imgH = imp.getHeight();
@@ -8338,6 +9141,18 @@ public class TCPCommandServer {
                                 + nSlices + " (1-based Z)");
                         return;
                     }
+                    if (hasChannel && (reqChannel < 1 || reqChannel > nChannels)) {
+                        holder[0] = new Exception("channel must be between 1 and "
+                                + nChannels + " (1-based C)");
+                        return;
+                    }
+                    if (hasFrame && (reqFrame < 1 || reqFrame > nFrames)) {
+                        holder[0] = new Exception("frame must be between 1 and "
+                                + nFrames + " (1-based T)");
+                        return;
+                    }
+                    int selectedChannel = hasChannel ? reqChannel : originalC;
+                    int selectedFrame = hasFrame ? reqFrame : originalT;
 
                     // Determine region
                     int x = reqX >= 0 ? Math.min(reqX, imgW - 1) : 0;
@@ -8390,17 +9205,30 @@ public class TCPCommandServer {
                     byte[] rawBytes = new byte[(int) rawByteCount];
                     java.nio.ByteBuffer buf = java.nio.ByteBuffer.wrap(rawBytes);
                     buf.order(java.nio.ByteOrder.LITTLE_ENDIAN);
+                    AcquisitionLimits limits = acquisitionLimits(imp);
+                    long lowCount = 0L;
+                    long highCount = 0L;
+                    if (pixelExtractionStartedForTest != null) {
+                        pixelExtractionStartedForTest.run();
+                    }
                     for (int z = startSlice; z <= endSlice; z++) {
-                        int stackIndex = imp.getStackIndex(originalC, z, originalT);
+                        int stackIndex = imp.getStackIndex(selectedChannel, z, selectedFrame);
                         if (stackIndex < 1 || stackIndex > stackSize) {
                             throw new IllegalStateException("Invalid stack index for C="
-                                    + originalC + ", Z=" + z + ", T=" + originalT);
+                                    + selectedChannel + ", Z=" + z + ", T=" + selectedFrame);
                         }
                         ij.process.ImageProcessor ip =
                                 imp.getStack().getProcessor(stackIndex);
                         for (int py = y; py < y + h; py++) {
                             for (int px = x; px < x + w; px++) {
-                                buf.putFloat(ip.getPixelValue(px, py));
+                                float value = rawPixelReaderForTest == null
+                                        ? ip.getf(px, py)
+                                        : rawPixelReaderForTest.read(ip, px, py);
+                                buf.putFloat(value);
+                                if (limits.known()) {
+                                    if (value == limits.rawMin.doubleValue()) lowCount++;
+                                    if (value == limits.rawMax.doubleValue()) highCount++;
+                                }
                             }
                         }
                     }
@@ -8416,17 +9244,17 @@ public class TCPCommandServer {
                     result.addProperty("sliceEnd", endSlice);
                     result.addProperty("sliceCount", sliceCount);
                     result.addProperty("sliceAxis", "Z");
-                    result.addProperty("channel", originalC);
-                    result.addProperty("frame", originalT);
-                    result.addProperty("channels", nChannels);
-                    result.addProperty("slices", nSlices);
-                    result.addProperty("frames", nFrames);
+                    attachImageSnapshot(result, snapshot, selectedChannel,
+                            startSlice, endSlice, selectedFrame);
                     result.addProperty("nPixels", totalPixels);
                     result.addProperty("type", imp.getBitDepth() + "-bit");
                     result.addProperty("encoding", "base64_float32_le");
+                    result.add("value_domain", valueDomain(imp));
+                    attachLimitCounts(result, limits, lowCount, highCount);
                     result.addProperty("data", b64);
 
-                    holder[0] = result;
+                    holder[0] = imageSnapshotStillCurrent(snapshot)
+                            ? result : imageSnapshotChanged();
                 } catch (Throwable e) {
                     holder[0] = e;
                 } finally {
@@ -8463,6 +9291,10 @@ public class TCPCommandServer {
         }
         if ("COMPOUND_BUDGET".equals(holder[0])) {
             return compoundBudgetError("get_pixels", responseBudget);
+        }
+        if (holder[0] instanceof JsonObject
+                && ((JsonObject) holder[0]).has("ok")) {
+            return (JsonObject) holder[0];
         }
         return successResponse((JsonObject) holder[0]);
     }
@@ -9272,17 +10104,44 @@ public class TCPCommandServer {
         return l.equals("cancel") || l.equals("close") || l.equals("no");
     }
 
-    private JsonObject handleCloseDialogs(JsonObject request) {
+    private JsonObject handleCloseDialogs(JsonObject request, AgentCaps caps,
+                                          Socket sock, String command) {
+        JsonObject poll = pollEdtOperation(request, caps, sock, command);
+        if (poll != null) return poll;
         JsonElement patternElement = request.get("pattern");
         final String pattern = (patternElement != null && patternElement.isJsonPrimitive())
                 ? patternElement.getAsString()
                 : null;
-
-        int closed = dismissOpenDialogs(pattern);
-
-        JsonObject result = new JsonObject();
-        result.addProperty("closedCount", closed);
-        return successResponse(result);
+        final int[] closed = new int[1];
+        final String owner = edtOperationOwner(caps, sock, command);
+        long requestedTimeout = resolveTimeoutMs(request, 2000L);
+        final long timeoutMs = requestedTimeout <= 0L ? 0L
+                : Math.max(1L, Math.min(120000L, requestedTimeout));
+        try {
+            EdtOperationRegistry.Operation operation = edtOperationRegistry.admit(
+                    owner,
+                    new EdtOperationRegistry.ActionStarter() {
+                        @Override public GuiActionDispatcher.ActionToken start() {
+                            return GuiActionDispatcher.queueSwingAction(new Runnable() {
+                                @Override public void run() {
+                                    closed[0] = dismissOpenDialogsOnEdt(pattern, null);
+                                }
+                            });
+                        }
+                    },
+                    new EdtOperationRegistry.CompletionSupplier() {
+                        @Override public JsonObject complete() {
+                            JsonObject result = new JsonObject();
+                            result.addProperty("closedCount", closed[0]);
+                            return successResponse(result);
+                        }
+                    });
+            return awaitEdtOperation(operation, owner,
+                    canPollEdtOperation(caps, sock) ? timeoutMs : 0L);
+        } catch (RejectedExecutionException rejected) {
+            return protocolError("edt_operation_capacity",
+                    "The bounded EDT operation queue is full or stopped.");
+        }
     }
 
     /**
@@ -9403,6 +10262,69 @@ public class TCPCommandServer {
         }
 
         return closedCount[0];
+    }
+
+    /** Close matching dialogs synchronously; callers must already be on EDT. */
+    private int dismissOpenDialogsOnEdt(String pattern, JsonArray captured) {
+        int closedCount = 0;
+        for (java.awt.Window win : java.awt.Window.getWindows()) {
+            if (!win.isShowing()
+                    || !(win instanceof java.awt.Dialog || win instanceof java.awt.Frame)) {
+                continue;
+            }
+            String title = win instanceof java.awt.Dialog
+                    ? ((java.awt.Dialog) win).getTitle()
+                    : ((java.awt.Frame) win).getTitle();
+            if (title == null) title = "";
+            if (title.equals("ImageJ") || title.equals("Fiji")
+                    || title.contains("AI Assistant")
+                    || title.contains("ImageJ") || title.contains("Startup")
+                    || win == IJ.getInstance() || win instanceof ImageWindow) {
+                continue;
+            }
+            if (pattern != null
+                    && !title.toLowerCase().contains(pattern.toLowerCase())) {
+                continue;
+            }
+            if (captured != null) {
+                try {
+                    JsonObject entry = new JsonObject();
+                    entry.addProperty("title", title);
+                    String body = extractDialogBody(win);
+                    if (body != null && !body.isEmpty()) {
+                        if (body.length() > 400) body = body.substring(0, 400) + "...";
+                        entry.addProperty("body", body);
+                    }
+                    captured.add(entry);
+                } catch (Throwable ignore) {}
+            }
+
+            boolean canceled = false;
+            try {
+                Class<?> genericDialogClass = Class.forName("ij.gui.GenericDialog");
+                if (genericDialogClass.isInstance(win)) {
+                    Class<?> c = win.getClass();
+                    while (c != null && c != Object.class) {
+                        try {
+                            java.lang.reflect.Field f = c.getDeclaredField("wasCanceled");
+                            f.setAccessible(true);
+                            f.setBoolean(win, true);
+                            canceled = true;
+                            break;
+                        } catch (NoSuchFieldException missing) {
+                            c = c.getSuperclass();
+                        } catch (Exception inaccessible) {
+                            break;
+                        }
+                    }
+                }
+            } catch (Exception ignore) {}
+            if (!canceled && win instanceof Container) clickCancelButton((Container) win);
+            win.setVisible(false);
+            win.dispose();
+            closedCount++;
+        }
+        return closedCount;
     }
 
     /**
@@ -9904,7 +10826,10 @@ public class TCPCommandServer {
      * "index" selects the Nth component of that type (0-based).
      * Both "target" and "index" can be used together for disambiguation.
      */
-    private JsonObject handleInteractDialog(JsonObject request, AgentCaps caps) {
+    private JsonObject handleInteractDialog(JsonObject request, AgentCaps caps,
+                                            Socket sock, String command) {
+        JsonObject poll = pollEdtOperation(request, caps, sock, command);
+        if (poll != null) return poll;
         JsonElement actionElement = request.get("action");
         if (actionElement == null || !actionElement.isJsonPrimitive()) {
             return errorResponse("Missing 'action' field for interact_dialog");
@@ -9958,14 +10883,16 @@ public class TCPCommandServer {
 
         // Execute on EDT
         final Object[] holder = new Object[1];
-        final CountDownLatch latch = new CountDownLatch(1);
         final JsonElement valEl = valueElement;
 
-        GuiActionDispatcher.ActionToken actionToken =
-                GuiActionDispatcher.queueSwingAction(new Runnable() {
+        final Runnable dialogAction = new Runnable() {
             @Override
             public void run() {
                 try {
+                    if (dialogInteractionForTest != null) {
+                        holder[0] = dialogInteractionForTest.apply(request);
+                        return;
+                    }
                     // Find the dialog
                     Dialog dlg = findDialog(dialogTitle);
                     if (dlg == null && !"list_components".equals(action)) {
@@ -10007,24 +10934,46 @@ public class TCPCommandServer {
                     }
                 } catch (Exception e) {
                     holder[0] = errorResponse("interact_dialog error: " + e.getMessage());
-                } finally {
-                    latch.countDown();
                 }
             }
-        });
+        };
 
+        final String owner = edtOperationOwner(caps, sock, command);
+        long requestedTimeout = resolveTimeoutMs(request, 5000L);
+        final long timeoutMs = requestedTimeout <= 0L ? 0L
+                : Math.max(1L, Math.min(120000L, requestedTimeout));
         try {
-            if (!latch.await(5000, TimeUnit.MILLISECONDS)) {
-                actionToken.invalidate();
-                return errorResponse("interact_dialog timed out");
-            }
-        } catch (InterruptedException e) {
-            actionToken.invalidate();
-            Thread.currentThread().interrupt();
-            return errorResponse("Interrupted");
+            EdtOperationRegistry.Operation operation = edtOperationRegistry.admit(
+                    owner,
+                    new EdtOperationRegistry.ActionStarter() {
+                        @Override public GuiActionDispatcher.ActionToken start() {
+                            return GuiActionDispatcher.queueSwingAction(dialogAction);
+                        }
+                    },
+                    new EdtOperationRegistry.CompletionSupplier() {
+                        @Override public JsonObject complete() {
+                            return finalizeDialogInteraction((JsonObject) holder[0],
+                                    modalBefore, phantomAutoDismiss,
+                                    graphImagesBefore, graphActiveBefore,
+                                    graphInteractionLabel, graphMarkerBefore, caps);
+                        }
+                    });
+            return awaitEdtOperation(operation, owner,
+                    canPollEdtOperation(caps, sock) ? timeoutMs : 0L);
+        } catch (RejectedExecutionException rejected) {
+            return protocolError("edt_operation_capacity",
+                    "The bounded EDT operation queue is full or stopped.");
         }
+    }
 
-        JsonObject reply = (JsonObject) holder[0];
+    private JsonObject finalizeDialogInteraction(JsonObject reply,
+                                                  Set<Window> modalBefore,
+                                                  boolean phantomAutoDismiss,
+                                                  List<ImageGraph.ImageRef> graphImagesBefore,
+                                                  ImageGraph.ImageRef graphActiveBefore,
+                                                  String graphInteractionLabel,
+                                                  long graphMarkerBefore,
+                                                  AgentCaps caps) {
         // Step 10: attach phantomDialog to the interact_dialog reply if the
         // action opened a new modal. The detector runs regardless of whether
         // the interaction itself succeeded — a silent confirmation dialog on

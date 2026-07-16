@@ -6,12 +6,23 @@ import struct
 from agent.gemma4_31b import loop, tools_jobs, tools_python
 
 
+FLOAT_DOMAIN = {
+    "representation": "raw", "pixel_type": "float32", "signed": True,
+    "density_calibrated": False, "acquisition_min_raw": None,
+    "acquisition_max_raw": None, "acquisition_min_calibrated": None,
+    "acquisition_max_calibrated": None,
+}
+
+
 def _pixel_response(*, x, y, width, height, values=None):
     values = values or [1.0] * (width * height)
     raw = struct.pack("<{}f".format(len(values)), *values)
     return {
         "ok": True,
         "result": {
+            "image_id": "image-123",
+            "image_revision": 7,
+            "display_revision": 11,
             "x": x,
             "y": y,
             "width": width,
@@ -28,6 +39,10 @@ def _pixel_response(*, x, y, width, height, values=None):
             "nPixels": len(values),
             "type": "32-bit",
             "encoding": "base64_float32_le",
+            "value_domain": FLOAT_DOMAIN,
+            "acquisition_min_count": None,
+            "acquisition_max_count": None,
+            "acquisition_limit_counts_exact": False,
             "data": base64.b64encode(raw).decode("ascii"),
         },
     }
@@ -98,7 +113,11 @@ def test_completed_job_without_nested_execution_result_fails_closed(monkeypatch)
 
 def test_region_tools_reject_out_of_bounds_without_pixel_fetch(monkeypatch):
     monkeypatch.setattr(tools_python, "_get_image_info", lambda: {
-        "width": 10, "height": 8, "channels": 4, "slices": 5, "frames": 6,
+        "image_id": "image-123", "image_revision": 7, "display_revision": 11,
+        "value_domain": FLOAT_DOMAIN,
+        "width": 10, "height": 8, "channel": 2, "sliceStart": 1,
+        "sliceEnd": 1, "sliceAxis": "Z", "frame": 3,
+        "channels": 4, "slices": 5, "frames": 6,
     })
     monkeypatch.setattr(
         tools_python,
@@ -115,7 +134,11 @@ def test_region_tools_reject_out_of_bounds_without_pixel_fetch(monkeypatch):
 
 def test_region_stats_rejects_server_clamping_after_image_race(monkeypatch):
     monkeypatch.setattr(tools_python, "_get_image_info", lambda: {
-        "width": 10, "height": 8, "channels": 4, "slices": 5, "frames": 6,
+        "image_id": "image-123", "image_revision": 7, "display_revision": 11,
+        "value_domain": FLOAT_DOMAIN,
+        "width": 10, "height": 8, "channel": 2, "sliceStart": 1,
+        "sliceEnd": 1, "sliceAxis": "Z", "frame": 3,
+        "channels": 4, "slices": 5, "frames": 6,
     })
     monkeypatch.setattr(
         tools_python,
@@ -130,7 +153,11 @@ def test_region_stats_rejects_server_clamping_after_image_race(monkeypatch):
 
 def test_line_profile_rejects_server_clamping_after_image_race(monkeypatch):
     monkeypatch.setattr(tools_python, "_get_image_info", lambda: {
-        "width": 10, "height": 8, "channels": 4, "slices": 5, "frames": 6,
+        "image_id": "image-123", "image_revision": 7, "display_revision": 11,
+        "value_domain": FLOAT_DOMAIN,
+        "width": 10, "height": 8, "channel": 2, "sliceStart": 1,
+        "sliceEnd": 1, "sliceAxis": "Z", "frame": 3,
+        "channels": 4, "slices": 5, "frames": 6,
     })
     monkeypatch.setattr(
         tools_python,
@@ -145,7 +172,11 @@ def test_line_profile_rejects_server_clamping_after_image_race(monkeypatch):
 
 def test_valid_geometry_is_reported_exactly(monkeypatch):
     monkeypatch.setattr(tools_python, "_get_image_info", lambda: {
-        "width": 10, "height": 8, "channels": 4, "slices": 5, "frames": 6,
+        "image_id": "image-123", "image_revision": 7, "display_revision": 11,
+        "value_domain": FLOAT_DOMAIN,
+        "width": 10, "height": 8, "channel": 2, "sliceStart": 1,
+        "sliceEnd": 1, "sliceAxis": "Z", "frame": 3,
+        "channels": 4, "slices": 5, "frames": 6,
     })
     monkeypatch.setattr(
         tools_python,

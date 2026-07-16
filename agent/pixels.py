@@ -84,27 +84,112 @@ def _error_message(resp):
     return str(error)
 
 
+def _exact_int(value, name, minimum=None):
+    """Return a true integer, rejecting bools, floats and numeric strings."""
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise TypeError("{} must be an exact integer".format(name))
+    if minimum is not None and value < minimum:
+        raise ValueError("{} must be at least {}".format(name, minimum))
+    return value
+
+
+def _add_image_binding(
+    command, *, image_id=None, image_revision=None, display_revision=None,
+    channel=None, slice=None, frame=None,
+):
+    if (image_id is None) != (image_revision is None):
+        raise ValueError("image_id and image_revision must be provided together")
+    if image_id is not None:
+        if not isinstance(image_id, str) or not image_id.strip():
+            raise TypeError("image_id must be a non-empty string")
+        command["image_id"] = image_id.strip()
+        command["image_revision"] = _exact_int(
+            image_revision, "image_revision", minimum=1
+        )
+    if display_revision is not None:
+        if image_id is None:
+            raise ValueError("display_revision requires an image snapshot binding")
+        command["display_revision"] = _exact_int(
+            display_revision, "display_revision", minimum=1
+        )
+    for key, value in (("channel", channel), ("slice", slice), ("frame", frame)):
+        if value is not None:
+            command[key] = _exact_int(value, key, minimum=1)
+    return command
+
+
+def _optional_finite_number(value, name):
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise RuntimeError("get_pixels failed: {} must be numeric or null".format(name))
+    value = float(value)
+    if not math.isfinite(value):
+        raise RuntimeError("get_pixels failed: {} must be finite".format(name))
+    return value
+
+
+def _value_domain(result):
+    domain = result.get("value_domain")
+    if not isinstance(domain, dict) or domain.get("representation") != "raw":
+        raise RuntimeError("get_pixels failed: missing raw value-domain metadata")
+    pixel_type = domain.get("pixel_type")
+    if pixel_type not in ("uint8", "uint16", "float32", "rgb24", "indexed8", "unknown"):
+        raise RuntimeError("get_pixels failed: invalid pixel type metadata")
+    signed = domain.get("signed")
+    if signed is not None and not isinstance(signed, bool):
+        raise RuntimeError("get_pixels failed: invalid signed metadata")
+    if not isinstance(domain.get("density_calibrated"), bool):
+        raise RuntimeError("get_pixels failed: invalid calibration-domain metadata")
+    normalized = dict(domain)
+    for key in (
+        "acquisition_min_raw", "acquisition_max_raw",
+        "acquisition_min_calibrated", "acquisition_max_calibrated",
+    ):
+        normalized[key] = _optional_finite_number(domain.get(key), key)
+    return normalized
+
+
 def _pixel_metadata(result, width, height, slice_count, pixel_count):
     """Validate and preserve the server's geometry and C/Z/T attribution."""
     try:
-        x = int(result["x"])
-        y = int(result["y"])
-        slice_start = int(result["sliceStart"])
-        slice_end = int(result["sliceEnd"])
+        image_id = str(result["image_id"])
+        image_revision = _exact_int(result["image_revision"], "image_revision", 1)
+        display_revision = _exact_int(result["display_revision"], "display_revision", 1)
+        x = _exact_int(result["x"], "x", 0)
+        y = _exact_int(result["y"], "y", 0)
+        slice_start = _exact_int(result["sliceStart"], "sliceStart", 1)
+        slice_end = _exact_int(result["sliceEnd"], "sliceEnd", 1)
         slice_axis = str(result["sliceAxis"])
-        channel = int(result["channel"])
-        frame = int(result["frame"])
-        channels = int(result["channels"])
-        slices = int(result["slices"])
-        frames = int(result["frames"])
+        channel = _exact_int(result["channel"], "channel", 1)
+        frame = _exact_int(result["frame"], "frame", 1)
+        channels = _exact_int(result["channels"], "channels", 1)
+        slices = _exact_int(result["slices"], "slices", 1)
+        frames = _exact_int(result["frames"], "frames", 1)
         image_type = str(result["type"])
-    except (KeyError, TypeError, ValueError) as exc:
+        value_domain = _value_domain(result)
+        counts_exact = result["acquisition_limit_counts_exact"]
+        if not isinstance(counts_exact, bool):
+            raise TypeError("acquisition_limit_counts_exact must be bool")
+        min_count_raw = result["acquisition_min_count"]
+        max_count_raw = result["acquisition_max_count"]
+        min_count = (
+            None if min_count_raw is None
+            else _exact_int(min_count_raw, "acquisition_min_count", 0)
+        )
+        max_count = (
+            None if max_count_raw is None
+            else _exact_int(max_count_raw, "acquisition_max_count", 0)
+        )
+    except (KeyError, TypeError, ValueError, RuntimeError) as exc:
         raise RuntimeError(
             "get_pixels failed: missing or malformed C/Z/T metadata"
         ) from exc
 
     if (
-        x < 0
+        not image_id
+        or image_revision <= 0
+        or x < 0
         or y < 0
         or slice_axis != "Z"
         or channels <= 0
@@ -114,10 +199,16 @@ def _pixel_metadata(result, width, height, slice_count, pixel_count):
         or not 1 <= frame <= frames
         or not 1 <= slice_start <= slice_end <= slices
         or slice_count != slice_end - slice_start + 1
+        or (counts_exact and (min_count is None or max_count is None))
+        or (min_count is not None and min_count > pixel_count)
+        or (max_count is not None and max_count > pixel_count)
     ):
         raise RuntimeError("get_pixels failed: inconsistent C/Z/T metadata")
 
     return {
+        "image_id": image_id,
+        "image_revision": image_revision,
+        "display_revision": display_revision,
         "x": x,
         "y": y,
         "width": width,
@@ -133,6 +224,10 @@ def _pixel_metadata(result, width, height, slice_count, pixel_count):
         "frames": frames,
         "nPixels": pixel_count,
         "type": image_type,
+        "value_domain": value_domain,
+        "acquisition_min_count": min_count,
+        "acquisition_max_count": max_count,
+        "acquisition_limit_counts_exact": counts_exact,
     }
 
 
@@ -233,7 +328,11 @@ def _select_kth(values, k):
     return values[k]
 
 
-def get_pixels(x=None, y=None, width=None, height=None, slice_num=None, all_slices=False):
+def get_pixels(
+    x=None, y=None, width=None, height=None, slice_num=None, all_slices=False,
+    *, image_id=None, image_revision=None, display_revision=None,
+    channel=None, slice=None, frame=None,
+):
     """
     Fetch raw pixel data from ImageJ.
 
@@ -241,19 +340,34 @@ def get_pixels(x=None, y=None, width=None, height=None, slice_num=None, all_slic
         (pixels, meta) where pixels is a row/slice-addressable sequence backed
         by one compact float32 buffer, and meta contains dimensions and type.
     """
+    if slice_num is not None and slice is not None:
+        raise ValueError("slice_num and slice cannot both be provided")
+    requested_geometry = (x, y, width, height)
+    if any(value is not None for value in requested_geometry) and not all(
+        value is not None for value in requested_geometry
+    ):
+        raise ValueError("x, y, width and height must be provided together")
     cmd = {"command": "get_pixels"}
-    if x is not None:
-        cmd["x"] = x
-    if y is not None:
-        cmd["y"] = y
-    if width is not None:
-        cmd["width"] = width
-    if height is not None:
-        cmd["height"] = height
-    if slice_num is not None:
-        cmd["slice"] = slice_num
+    expected_geometry = None
+    if all(value is not None for value in requested_geometry):
+        expected_geometry = (
+            _exact_int(x, "x", 0),
+            _exact_int(y, "y", 0),
+            _exact_int(width, "width", 1),
+            _exact_int(height, "height", 1),
+        )
+        for key, value in zip(("x", "y", "width", "height"), expected_geometry):
+            cmd[key] = value
+    if not isinstance(all_slices, bool):
+        raise TypeError("all_slices must be bool")
     if all_slices:
         cmd["allSlices"] = True
+    selected_slice = slice if slice is not None else slice_num
+    cmd = _add_image_binding(
+        cmd, image_id=image_id, image_revision=image_revision,
+        display_revision=display_revision, channel=channel,
+        slice=selected_slice, frame=frame,
+    )
 
     resp = send(cmd)
     if not isinstance(resp, dict) or not resp.get("ok"):
@@ -264,10 +378,10 @@ def get_pixels(x=None, y=None, width=None, height=None, slice_num=None, all_slic
         raise RuntimeError("get_pixels failed: result is not an object")
     try:
         b64 = result["data"]
-        w = int(result["width"])
-        h = int(result["height"])
-        n_slices = int(result["sliceCount"])
-        n_pixels = int(result["nPixels"])
+        w = _exact_int(result["width"], "width", 1)
+        h = _exact_int(result["height"], "height", 1)
+        n_slices = _exact_int(result["sliceCount"], "sliceCount", 1)
+        n_pixels = _exact_int(result["nPixels"], "nPixels", 1)
     except (KeyError, TypeError, ValueError) as exc:
         raise RuntimeError("get_pixels failed: malformed result metadata") from exc
     if w <= 0 or h <= 0 or n_slices <= 0 or n_pixels != w * h * n_slices:
@@ -294,6 +408,15 @@ def get_pixels(x=None, y=None, width=None, height=None, slice_num=None, all_slic
         pixels = _CompactStack(floats, w, h, n_slices)
 
     meta = _pixel_metadata(result, w, h, n_slices, n_pixels)
+    if expected_geometry is not None:
+        actual = (meta["x"], meta["y"], meta["width"], meta["height"])
+        if actual != expected_geometry:
+            raise RuntimeError(
+                "get_pixels failed: Fiji returned clamped pixel geometry "
+                "{} instead of requested {}; image state changed".format(
+                    actual, expected_geometry
+                )
+            )
     return pixels, meta
 
 
@@ -373,10 +496,24 @@ def find_bright_objects(pixels_2d, meta=None, threshold_factor=2.0, min_size=10)
     Threshold = mean + threshold_factor * stddev.
     Returns list of objects with centroid, area, mean intensity.
     """
-    stats = compute_stats(pixels_2d)
-    if stats["count"] == 0:
+    # Object membership must use the unrounded moments.  compute_stats keeps
+    # its historical two-decimal presentation contract, but those display
+    # values can move a threshold across a real pixel value.
+    if isinstance(pixels_2d, _CompactPlane):
+        raw_values = pixels_2d.iter_values()
+    else:
+        raw_values = (value for row in pixels_2d for value in row)
+    values = array("d")
+    for value in raw_values:
+        numeric = float(value)
+        if not math.isfinite(numeric):
+            raise ValueError("pixel data contains a non-finite value")
+        values.append(numeric)
+    if not values:
         return []
-    threshold = stats["mean"] + threshold_factor * stats["std"]
+    mean = math.fsum(values) / len(values)
+    variance = math.fsum((value - mean) ** 2 for value in values) / len(values)
+    threshold = mean + float(threshold_factor) * math.sqrt(variance)
     h = len(pixels_2d)
     w = len(pixels_2d[0]) if h > 0 else 0
 
@@ -442,18 +579,23 @@ def get_current_stats():
 
 def get_slice_stats(slice_num):
     """Return stats and metadata for one 1-based stack slice."""
-    pixels, meta = get_pixels(slice_num=slice_num)
-    return {"slice": slice_num, "stats": compute_stats(pixels), "meta": meta}
+    selected = _exact_int(slice_num, "slice_num", 1)
+    pixels, meta = get_pixels(slice_num=selected)
+    return {"slice": selected, "stats": compute_stats(pixels), "meta": meta}
 
 
 def get_region_stats(x, y, width, height):
     """Return stats and metadata for a rectangular region."""
-    pixels, meta = get_pixels(x=x, y=y, width=width, height=height)
+    x_i = _exact_int(x, "x", 0)
+    y_i = _exact_int(y, "y", 0)
+    width_i = _exact_int(width, "width", 1)
+    height_i = _exact_int(height, "height", 1)
+    pixels, meta = get_pixels(x=x_i, y=y_i, width=width_i, height=height_i)
     return {
-        "x": x,
-        "y": y,
-        "width": width,
-        "height": height,
+        "x": meta["x"],
+        "y": meta["y"],
+        "width": meta["width"],
+        "height": meta["height"],
         "stats": compute_stats(pixels),
         "meta": meta,
     }
@@ -461,6 +603,10 @@ def get_region_stats(x, y, width, height):
 
 def get_line_profile(x1, y1, x2, y2):
     """Return the current image intensity profile between two points."""
+    x1 = _exact_int(x1, "x1")
+    y1 = _exact_int(y1, "y1")
+    x2 = _exact_int(x2, "x2")
+    y2 = _exact_int(y2, "y2")
     pixels, meta = get_pixels()
     return line_profile(pixels, x1, y1, x2, y2, meta)
 
@@ -477,16 +623,55 @@ def find_cells(threshold_factor=2.0, min_size=10):
 
 
 def get_stack_stats():
-    """Return per-slice stats for the active stack."""
-    info_resp = send({"command": "get_image_info"})
-    if not info_resp.get("ok"):
-        raise RuntimeError(info_resp.get("error"))
-    n_slices = info_resp["result"]["slices"]
+    """Return per-slice stats bound to one image revision and C/T position."""
+    info_resp = send({"command": "get_image_info", "force": True})
+    if not isinstance(info_resp, dict) or not info_resp.get("ok"):
+        raise RuntimeError(_error_message(info_resp))
+    info = info_resp.get("result")
+    if not isinstance(info, dict):
+        raise RuntimeError("get_image_info failed: result is not an object")
+    try:
+        image_id = str(info["image_id"])
+        image_revision = _exact_int(info["image_revision"], "image_revision", 1)
+        display_revision = _exact_int(info["display_revision"], "display_revision", 1)
+        channel = _exact_int(info["channel"], "channel", 1)
+        frame = _exact_int(info["frame"], "frame", 1)
+        channels = _exact_int(info["channels"], "channels", 1)
+        n_slices = _exact_int(info["slices"], "slices", 1)
+        frames = _exact_int(info["frames"], "frames", 1)
+    except (KeyError, TypeError, ValueError) as exc:
+        raise RuntimeError("get_image_info returned malformed snapshot metadata") from exc
+    if not image_id or channel > channels or frame > frames:
+        raise RuntimeError("get_image_info returned inconsistent snapshot metadata")
 
     rows = []
     for s in range(1, n_slices + 1):
-        pixels, meta = get_pixels(slice_num=s)
-        rows.append({"slice": s, "stats": compute_stats(pixels), "meta": meta})
+        plane, meta = get_pixels(
+            slice_num=s,
+            image_id=image_id,
+            image_revision=image_revision,
+            display_revision=display_revision,
+            channel=channel,
+            frame=frame,
+        )
+        if (
+            meta.get("image_id") != image_id
+            or meta.get("image_revision") != image_revision
+            or meta.get("display_revision") != display_revision
+            or meta.get("channel") != channel
+            or meta.get("frame") != frame
+            or meta.get("channels") != channels
+            or meta.get("slices") != n_slices
+            or meta.get("frames") != frames
+            or meta.get("sliceAxis") != "Z"
+            or meta.get("sliceStart") != s
+            or meta.get("sliceEnd") != s
+            or meta.get("sliceCount") != 1
+        ):
+            raise RuntimeError(
+                "get_pixels failed: stack plane did not match bound image snapshot"
+            )
+        rows.append({"slice": s, "stats": compute_stats(plane), "meta": meta})
     return rows
 
 

@@ -326,6 +326,10 @@ _CLAUDE_MUST_CONTAIN: tuple[str, ...] = (
     "python ij.py ui list",
     "python ij.py ui click",
     "python ij.py ui dropdown",
+    # Long-running EDT mutation handoff
+    "operation_in_progress",
+    "wait_for_operation",
+    "Never submit the original mutation",
     # Plugin probing
     "probe_plugin.py",
     # Pixel-side analysis

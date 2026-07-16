@@ -3,6 +3,7 @@ package imagejai.engine;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 import org.junit.After;
+import org.junit.Assume;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.TemporaryFolder;
@@ -290,6 +291,155 @@ public class ReactiveEngineTest {
     }
 
     @Test
+    public void captureRejectsSymbolicAiExportsEscape() throws Exception {
+        Path dataset = temporary.newFolder("symlink-dataset").toPath();
+        Path outside = temporary.newFolder("symlink-outside").toPath();
+        Path exports = dataset.resolve("AI_Exports");
+        try {
+            Files.createSymbolicLink(exports, outside);
+        } catch (UnsupportedOperationException | java.io.IOException | SecurityException unavailable) {
+            Files.deleteIfExists(exports);
+            Assume.assumeTrue("directory symlink creation unavailable: "
+                    + unavailable.getMessage(), false);
+        }
+        try {
+            assertCaptureEscapeRejected("symlink", exports, outside);
+        } finally {
+            Files.deleteIfExists(exports);
+        }
+    }
+
+    @Test
+    public void captureRejectsWindowsJunctionEscapeWhenJunctionsAreAvailable()
+            throws Exception {
+        Assume.assumeTrue("Windows junction test", System.getProperty("os.name", "")
+                .toLowerCase(java.util.Locale.ROOT).contains("win"));
+        Path dataset = temporary.newFolder("junction-dataset").toPath();
+        Path outside = temporary.newFolder("junction-outside").toPath();
+        Path exports = dataset.resolve("AI_Exports");
+        Process process = new ProcessBuilder("cmd.exe", "/d", "/c",
+                "mklink /J \"" + exports + "\" \"" + outside + "\"")
+                .redirectErrorStream(true).start();
+        boolean completed = process.waitFor(5, TimeUnit.SECONDS);
+        if (!completed) {
+            process.destroyForcibly();
+            process.waitFor(2, TimeUnit.SECONDS);
+        }
+        byte[] commandOutput = completed ? readProcessOutput(process)
+                : "junction command timed out".getBytes(StandardCharsets.UTF_8);
+        boolean created = completed && process.exitValue() == 0 && Files.exists(exports);
+        if (!created) {
+            process.destroyForcibly();
+            Files.deleteIfExists(exports);
+            Assume.assumeTrue("junction creation unavailable: "
+                    + new String(commandOutput, StandardCharsets.UTF_8), false);
+        }
+        try {
+            assertCaptureEscapeRejected("junction", exports, outside);
+        } finally {
+            Files.deleteIfExists(exports);
+        }
+    }
+
+    @Test
+    public void reloadQuarantinesOversizedDeepAndExcessiveActionRules()
+            throws Exception {
+        Path rules = temporary.newFolder("bounded-rules").toPath();
+        writeRule(rules, "valid", true, "trigger.valid",
+                actions(captureAction("valid")));
+        Files.write(rules.resolve("oversized.json"),
+                new byte[ReactiveEngine.MAX_RULE_FILE_BYTES + 1]);
+
+        StringBuilder deep = new StringBuilder();
+        deep.append("{\"name\":\"deep\",\"when\":{\"event\":\"trigger.deep\"},")
+                .append("\"do\":[{\"capture\":\"deep\"}],\"extra\":");
+        for (int i = 0; i < ReactiveEngine.MAX_JSON_DEPTH + 1; i++) deep.append('[');
+        deep.append('0');
+        for (int i = 0; i < ReactiveEngine.MAX_JSON_DEPTH + 1; i++) deep.append(']');
+        deep.append('}');
+        Files.write(rules.resolve("deep.json"), deep.toString()
+                .getBytes(StandardCharsets.UTF_8));
+
+        JsonArray tooManyActions = new JsonArray();
+        for (int i = 0; i < ReactiveEngine.MAX_RULE_ACTIONS + 1; i++) {
+            tooManyActions.add(captureAction("action-" + i));
+        }
+        writeRule(rules, "actions", true, "trigger.actions", tooManyActions);
+
+        Rig rig = rig(rules, 2, 1000L, 3,
+                fixedCapture(temporary.newFolder("bounded-output").toPath()
+                                .resolve("AI_Exports"), new byte[] {1},
+                        new AtomicInteger()), new NoopPolicy());
+        rig.engine.reload();
+
+        assertEquals(1, rig.engine.getRules().size());
+        assertEquals("valid", rig.engine.getRules().get(0).name);
+        assertQuarantinedReason(rig.engine, "byte limit");
+        assertQuarantinedReason(rig.engine, "depth exceeded");
+        assertQuarantinedReason(rig.engine, "action count");
+    }
+
+    @Test
+    public void reloadBoundsRuleFileDiscovery() throws Exception {
+        Path rules = temporary.newFolder("file-count-rules").toPath();
+        for (int i = 0; i < ReactiveEngine.MAX_RULE_FILES + 1; i++) {
+            writeRule(rules, String.format(java.util.Locale.ROOT, "rule-%03d", i),
+                    true, "trigger.count", actions(captureAction("count")));
+        }
+        Rig rig = rig(rules, 2, 1000L, 3,
+                fixedCapture(temporary.newFolder("file-count-output").toPath()
+                                .resolve("AI_Exports"), new byte[] {1},
+                        new AtomicInteger()), new NoopPolicy());
+
+        rig.engine.reload();
+
+        assertTrue(rig.engine.getRules().size() <= ReactiveEngine.MAX_LOADED_RULES);
+        assertQuarantinedReason(rig.engine, "file count exceeded");
+        assertQuarantinedReason(rig.engine, "Rule count exceeded");
+    }
+
+    @Test
+    public void reloadEnforcesJsonKeyStringContainerAndNodeBudgets() throws Exception {
+        Path rules = temporary.newFolder("json-shape-rules").toPath();
+        String longKey = repeat('k', ReactiveEngine.MAX_JSON_KEY_CHARS + 1);
+        writeRawRule(rules, "long-key", rulePrefix("long-key") + "\""
+                + longKey + "\":0}");
+        String longValue = repeat('v', ReactiveEngine.MAX_JSON_STRING_CHARS + 1);
+        writeRawRule(rules, "long-value", rulePrefix("long-value")
+                + "\"extra\":\"" + longValue + "\"}");
+
+        StringBuilder container = new StringBuilder(rulePrefix("container"))
+                .append("\"extra\":[");
+        for (int i = 0; i < ReactiveEngine.MAX_JSON_CONTAINER_LENGTH + 1; i++) {
+            if (i > 0) container.append(',');
+            container.append('0');
+        }
+        container.append("]}");
+        writeRawRule(rules, "container", container.toString());
+
+        StringBuilder nodes = new StringBuilder(rulePrefix("nodes"))
+                .append("\"extra\":[");
+        for (int i = 0; i < ReactiveEngine.MAX_JSON_CONTAINER_LENGTH; i++) {
+            if (i > 0) nodes.append(',');
+            nodes.append("[0,0,0,0,0,0,0,0]");
+        }
+        nodes.append("]}");
+        writeRawRule(rules, "nodes", nodes.toString());
+
+        Rig rig = rig(rules, 2, 1000L, 3,
+                fixedCapture(temporary.newFolder("json-shape-output").toPath()
+                                .resolve("AI_Exports"), new byte[] {1},
+                        new AtomicInteger()), new NoopPolicy());
+        rig.engine.reload();
+
+        assertEquals(0, rig.engine.getRules().size());
+        assertQuarantinedReason(rig.engine, "key exceeded");
+        assertQuarantinedReason(rig.engine, "value exceeded");
+        assertQuarantinedReason(rig.engine, "container length");
+        assertQuarantinedReason(rig.engine, "node count");
+    }
+
+    @Test
     public void invalidActionIsQuarantinedAndReloadFailureIsObservable() throws Exception {
         Path rules = temporary.newFolder("reload-rules").toPath();
         JsonObject invalid = new JsonObject();
@@ -354,6 +504,43 @@ public class ReactiveEngineTest {
         return latch;
     }
 
+    private void assertCaptureEscapeRejected(String prefix, Path exports, Path outside)
+            throws Exception {
+        Path rules = temporary.newFolder(prefix + "-rules").toPath();
+        writeRule(rules, prefix, true, "trigger." + prefix,
+                actions(captureAction(prefix)));
+        Rig rig = rig(rules, 2, 1000L, 1,
+                fixedCapture(exports, new byte[] {1, 2, 3}, new AtomicInteger()),
+                new NoopPolicy());
+        CountDownLatch failed = diagnostic(rig.bus, "reactive.action_failed",
+                "AI_Exports");
+        rig.engine.start();
+        rig.bus.publish("trigger." + prefix);
+        assertTrue("capture through " + prefix + " was not rejected",
+                failed.await(2, TimeUnit.SECONDS));
+        try (java.util.stream.Stream<Path> paths = Files.list(outside)) {
+            assertEquals("capture escaped through " + prefix, 0L, paths.count());
+        }
+    }
+
+    private static byte[] readProcessOutput(Process process) throws Exception {
+        java.io.ByteArrayOutputStream output = new java.io.ByteArrayOutputStream();
+        byte[] buffer = new byte[1024];
+        int read;
+        while ((read = process.getInputStream().read(buffer)) >= 0) {
+            if (read > 0) output.write(buffer, 0, read);
+        }
+        return output.toByteArray();
+    }
+
+    private static void assertQuarantinedReason(ReactiveEngine engine,
+                                                String fragment) {
+        for (ReactiveEngine.Quarantined entry : engine.getQuarantined()) {
+            if (entry.error != null && entry.error.contains(fragment)) return;
+        }
+        throw new AssertionError("No quarantine reason contained '" + fragment + "'");
+    }
+
     private static ReactiveEngine.CaptureBackend fixedCapture(
             final Path exports, final byte[] bytes, final AtomicInteger calls) {
         return new ReactiveEngine.CaptureBackend() {
@@ -390,6 +577,22 @@ public class ReactiveEngineTest {
         root.add("do", actions);
         Files.write(dir.resolve(name + ".json"), root.toString()
                 .getBytes(StandardCharsets.UTF_8));
+    }
+
+    private static void writeRawRule(Path dir, String name, String json)
+            throws Exception {
+        Files.write(dir.resolve(name + ".json"), json.getBytes(StandardCharsets.UTF_8));
+    }
+
+    private static String rulePrefix(String name) {
+        return "{\"name\":\"" + name + "\",\"when\":{\"event\":\"trigger."
+                + name + "\"},\"do\":[{\"capture\":\"x\"}],";
+    }
+
+    private static String repeat(char value, int count) {
+        StringBuilder repeated = new StringBuilder(count);
+        for (int i = 0; i < count; i++) repeated.append(value);
+        return repeated.toString();
     }
 
     private static JsonArray actions(JsonObject... actions) {

@@ -3,6 +3,9 @@ package imagejai.engine;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
+import ij.ImagePlus;
+import ij.process.ByteProcessor;
+import imagejai.engine.security.PathTokenMap;
 import org.junit.Test;
 
 import java.io.BufferedReader;
@@ -12,10 +15,14 @@ import java.io.PrintWriter;
 import java.net.InetAddress;
 import java.net.Socket;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
@@ -199,6 +206,66 @@ public class TCPCommandServerHelloTest {
                     "{\"command\":\"execute_macro\",\"code\":\"run(\\\"Close\\\");\"}"))));
             assertEquals("compatibility_read_only", errorCode(exchange(port, parse(
                     "{\"command\":\"run_pipeline\",\"steps\":[]}"))));
+        } finally {
+            server.stop();
+            restoreProperty("imagejai.tcp.requireToken", previous);
+        }
+    }
+
+    @Test
+    public void authenticatedLoopbackKeepsInstallationTokenSeparateFromImageToken()
+            throws Exception {
+        String previous = System.getProperty("imagejai.tcp.requireToken");
+        System.setProperty("imagejai.tcp.requireToken", "true");
+        TCPCommandServer server = newServer();
+        server.setServerTokenForTest("installation-secret");
+        Path requested = Paths.get("loopback-governed.tif")
+                .toAbsolutePath().normalize();
+        String imageToken = PathTokenMap.getInstance().tokenForPath(requested);
+        AtomicInteger attempts = new AtomicInteger();
+        AtomicReference<List<ImageGraph.ImageRef>> open =
+                new AtomicReference<List<ImageGraph.ImageRef>>(new ArrayList<ImageGraph.ImageRef>());
+        AtomicReference<ImagePlus> active = new AtomicReference<ImagePlus>();
+        server.openImagesForTest = open::get;
+        server.currentImageForTest = active::get;
+        server.openImageOperationForTest = (path, series) -> {
+            attempts.incrementAndGet();
+            ImagePlus image = new ImagePlus("loopback-governed.tif",
+                    new ByteProcessor(1, 1));
+            ImageGraph.ImageRef ref = new ImageGraph.ImageRef(image,
+                    ImageGraph.stableIdentity(image), 1, image.getTitle(),
+                    requested.toString());
+            active.set(image);
+            open.set(java.util.Collections.singletonList(ref));
+        };
+        try {
+            int port = startAndAwait(server);
+            JsonObject hello = exchange(port, parse(
+                    "{\"command\":\"hello\",\"token\":\"installation-secret\"}"));
+            String session = hello.getAsJsonObject("result")
+                    .get("session_id").getAsString();
+
+            JsonObject missingImageToken = new JsonObject();
+            missingImageToken.addProperty("command", "open_image_by_token");
+            missingImageToken.addProperty("session_id", session);
+            missingImageToken.addProperty("token", "installation-secret");
+            JsonObject missing = exchange(port, missingImageToken);
+            assertFalse(missing.toString(), missing.get("ok").getAsBoolean());
+            assertTrue(missing.toString().contains("image_token"));
+            assertEquals(0, attempts.get());
+
+            JsonObject openRequest = new JsonObject();
+            openRequest.addProperty("command", "open_image_by_token");
+            openRequest.addProperty("session_id", session);
+            openRequest.addProperty("token", "installation-secret");
+            openRequest.addProperty("image_token", imageToken);
+            openRequest.addProperty("timeout_ms", 1000);
+            JsonObject opened = exchange(port, openRequest);
+
+            assertTrue(opened.toString(), opened.get("ok").getAsBoolean());
+            assertTrue(opened.getAsJsonObject("result")
+                    .get("resolved_from_token").getAsBoolean());
+            assertEquals(1, attempts.get());
         } finally {
             server.stop();
             restoreProperty("imagejai.tcp.requireToken", previous);

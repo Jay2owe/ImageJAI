@@ -19,6 +19,9 @@ def pixel_response(values, width, height, slice_count=1, **overrides):
     raw = struct.pack("<" + str(len(values)) + "f", *values)
     result = {
         "data": base64.b64encode(raw).decode("ascii"),
+        "image_id": "image-123",
+        "image_revision": 7,
+        "display_revision": 11,
         "x": 0,
         "y": 0,
         "width": width,
@@ -34,6 +37,19 @@ def pixel_response(values, width, height, slice_count=1, **overrides):
         "frames": 5,
         "nPixels": len(values),
         "type": "float32",
+        "value_domain": {
+            "representation": "raw",
+            "pixel_type": "float32",
+            "signed": True,
+            "density_calibrated": False,
+            "acquisition_min_raw": None,
+            "acquisition_max_raw": None,
+            "acquisition_min_calibrated": None,
+            "acquisition_max_calibrated": None,
+        },
+        "acquisition_min_count": None,
+        "acquisition_max_count": None,
+        "acquisition_limit_counts_exact": False,
     }
     result.update(overrides)
     return {"ok": True, "result": result}
@@ -138,6 +154,9 @@ def test_get_pixels_builds_payload_and_decodes_2d(monkeypatch):
     }]
     assert data == [[1.0, 2.0], [3.0, 4.0]]
     assert meta == {
+        "image_id": "image-123",
+        "image_revision": 7,
+        "display_revision": 11,
         "x": 5,
         "y": 6,
         "width": 2,
@@ -153,6 +172,10 @@ def test_get_pixels_builds_payload_and_decodes_2d(monkeypatch):
         "frames": 5,
         "nPixels": 4,
         "type": "float32",
+        "value_domain": pixel_response([1.0], 1, 1)["result"]["value_domain"],
+        "acquisition_min_count": None,
+        "acquisition_max_count": None,
+        "acquisition_limit_counts_exact": False,
     }
 
 
@@ -172,6 +195,43 @@ def test_get_pixels_decodes_3d_stack(monkeypatch):
 
     assert data == [[[1.0], [2.0]], [[3.0], [4.0]]]
     assert meta["sliceCount"] == 2
+
+
+def test_get_pixels_rejects_server_clamping_and_never_echoes_requested_region(monkeypatch):
+    monkeypatch.setattr(
+        pixels,
+        "send",
+        lambda cmd: pixel_response(
+            [1.0], width=1, height=1, x=9, y=20
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="clamped pixel geometry"):
+        pixels.get_pixels(x=10, y=20, width=2, height=1)
+
+
+@pytest.mark.parametrize("bad", [True, 1.0, "1"])
+def test_get_pixels_rejects_ambiguous_region_and_plane_integers(monkeypatch, bad):
+    monkeypatch.setattr(
+        pixels, "send",
+        lambda cmd: pytest.fail("invalid requests must not reach Fiji"),
+    )
+
+    with pytest.raises(TypeError, match="exact integer"):
+        pixels.get_pixels(x=bad, y=0, width=1, height=1)
+    with pytest.raises(TypeError, match="exact integer"):
+        pixels.get_pixels(slice_num=bad)
+
+
+def test_find_bright_objects_uses_full_precision_threshold_moments():
+    # Rounded presentation moments are both 0.00, which would incorrectly
+    # classify 0.01 as bright.  The exact threshold is 0.01 and membership is
+    # strict greater-than, so there is no object.
+    values = [[0.0, 0.0, 0.0, 0.0, 0.01]]
+
+    assert pixels.compute_stats(values)["mean"] == 0.0
+    assert pixels.compute_stats(values)["std"] == 0.0
+    assert pixels.find_bright_objects(values, threshold_factor=2.0, min_size=1) == []
 
 
 def test_get_pixels_rejects_structured_errors_and_malformed_payloads(monkeypatch):
@@ -229,6 +289,9 @@ def test_large_pixel_response_uses_one_compact_float32_backing_buffer(monkeypatc
         "ok": True,
         "result": {
             "data": base64.b64encode(raw).decode("ascii"),
+            "image_id": "image-large",
+            "image_revision": 1,
+            "display_revision": 1,
             "x": 0,
             "y": 0,
             "width": width,
@@ -244,6 +307,10 @@ def test_large_pixel_response_uses_one_compact_float32_backing_buffer(monkeypatc
             "frames": 1,
             "nPixels": width * height,
             "type": "float32",
+            "value_domain": pixel_response([1.0], 1, 1)["result"]["value_domain"],
+            "acquisition_min_count": None,
+            "acquisition_max_count": None,
+            "acquisition_limit_counts_exact": False,
         },
     }
     monkeypatch.setattr(pixels, "send", lambda cmd: response)
@@ -259,7 +326,7 @@ def test_large_pixel_response_uses_one_compact_float32_backing_buffer(monkeypatc
 def test_stats_helpers_call_get_pixels_with_expected_args(monkeypatch):
     calls = []
     sample = [[1.0, 2.0], [3.0, 4.0]]
-    meta = {"width": 2, "height": 2}
+    meta = {"x": 10, "y": 20, "width": 30, "height": 40}
 
     def fake_get_pixels(*args, **kwargs):
         assert args == ()
@@ -320,19 +387,50 @@ def test_get_stack_stats_uses_image_info_then_fetches_each_slice(monkeypatch):
 
     def fake_send(cmd):
         send_calls.append(cmd)
-        return {"ok": True, "result": {"slices": 3}}
+        return {"ok": True, "result": {
+            "image_id": "stack-image",
+            "image_revision": 4,
+            "display_revision": 9,
+            "channel": 2,
+            "frame": 3,
+            "channels": 4,
+            "slices": 3,
+            "frames": 5,
+        }}
 
-    def fake_get_pixels(slice_num):
-        slice_calls.append(slice_num)
-        return [[float(slice_num), float(slice_num + 1)]], {"slice": slice_num}
+    def fake_get_pixels(slice_num, **kwargs):
+        slice_calls.append((slice_num, kwargs))
+        return [[float(slice_num), float(slice_num + 1)]], {
+            "image_id": "stack-image",
+            "image_revision": 4,
+            "display_revision": 9,
+            "channel": 2,
+            "frame": 3,
+            "channels": 4,
+            "slices": 3,
+            "frames": 5,
+            "sliceAxis": "Z",
+            "sliceStart": slice_num,
+            "sliceEnd": slice_num,
+            "sliceCount": 1,
+        }
 
     monkeypatch.setattr(pixels, "send", fake_send)
     monkeypatch.setattr(pixels, "get_pixels", fake_get_pixels)
 
     rows = pixels.get_stack_stats()
 
-    assert send_calls == [{"command": "get_image_info"}]
-    assert slice_calls == [1, 2, 3]
+    assert send_calls == [{"command": "get_image_info", "force": True}]
+    expected_binding = {
+        "image_id": "stack-image",
+        "image_revision": 4,
+        "display_revision": 9,
+        "channel": 2,
+        "frame": 3,
+    }
+    assert slice_calls == [
+        (1, expected_binding), (2, expected_binding), (3, expected_binding)
+    ]
     assert [row["slice"] for row in rows] == [1, 2, 3]
     assert [row["stats"]["mean"] for row in rows] == [1.5, 2.5, 3.5]
 
@@ -345,6 +443,33 @@ def test_get_stack_stats_reports_image_info_errors(monkeypatch):
     )
 
     with pytest.raises(RuntimeError, match="No image open"):
+        pixels.get_stack_stats()
+
+
+def test_get_stack_stats_rejects_one_plane_from_another_revision(monkeypatch):
+    monkeypatch.setattr(
+        pixels,
+        "send",
+        lambda cmd: {"ok": True, "result": {
+            "image_id": "stack-image", "image_revision": 4,
+            "display_revision": 9, "channel": 1, "frame": 1,
+            "channels": 1, "slices": 2, "frames": 1,
+        }},
+    )
+
+    def fake_get_pixels(slice_num, **kwargs):
+        return [[1.0]], {
+            "image_id": "stack-image",
+            "image_revision": 5 if slice_num == 2 else 4,
+            "display_revision": 9,
+            "channel": 1, "frame": 1, "channels": 1,
+            "slices": 2, "frames": 1, "sliceAxis": "Z",
+            "sliceStart": slice_num, "sliceEnd": slice_num, "sliceCount": 1,
+        }
+
+    monkeypatch.setattr(pixels, "get_pixels", fake_get_pixels)
+
+    with pytest.raises(RuntimeError, match="did not match bound image snapshot"):
         pixels.get_stack_stats()
 
 

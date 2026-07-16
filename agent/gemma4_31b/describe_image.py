@@ -24,7 +24,6 @@ from __future__ import annotations
 
 import base64
 import binascii
-import json
 import math
 import re
 import socket
@@ -66,11 +65,57 @@ def _bit_depth_from_type(type_str) -> int:
     return 0
 
 
-def _ceiling_for_bit_depth(bit_depth: int):
-    """Max pixel value for an integer bit depth; None for float / RGB."""
-    if bit_depth in (8, 16):
-        return float((1 << bit_depth) - 1)
-    return None
+def _exact_int(value, name, minimum=None) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise TypeError("{} must be an exact integer".format(name))
+    if minimum is not None and value < minimum:
+        raise ValueError("{} must be at least {}".format(name, minimum))
+    return value
+
+
+def _optional_finite_number(value, name):
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise TypeError("{} must be numeric or null".format(name))
+    value = float(value)
+    if not math.isfinite(value):
+        raise ValueError("{} must be finite".format(name))
+    return value
+
+
+def _decode_value_domain(result: dict):
+    domain = result.get("value_domain")
+    if not isinstance(domain, dict) or domain.get("representation") != "raw":
+        raise ValueError("missing raw value-domain metadata")
+    if domain.get("pixel_type") not in (
+        "uint8", "uint16", "float32", "rgb24", "indexed8", "unknown"
+    ):
+        raise ValueError("invalid pixel type metadata")
+    if domain.get("signed") is not None and not isinstance(domain.get("signed"), bool):
+        raise ValueError("invalid signed metadata")
+    if not isinstance(domain.get("density_calibrated"), bool):
+        raise ValueError("invalid density-calibrated metadata")
+    normalized = dict(domain)
+    for key in (
+        "acquisition_min_raw", "acquisition_max_raw",
+        "acquisition_min_calibrated", "acquisition_max_calibrated",
+    ):
+        normalized[key] = _optional_finite_number(domain.get(key), key)
+    return normalized
+
+
+def _snapshot_payload(info: dict) -> dict:
+    """Bind one follow-up read to the exact image revision and active plane."""
+    return {
+        "image_id": info["image_id"],
+        "image_revision": int(info["image_revision"]),
+        "display_revision": int(info["display_revision"]),
+        "channel": int(info["channel"]),
+        "slice": int(info["sliceStart"]),
+        "frame": int(info["frame"]),
+        "force": True,
+    }
 
 
 def _fmt_int(value) -> str:
@@ -260,15 +305,43 @@ def _hist_stats(hist_result: dict):
         hi = float(hist_result.get("max"))
         mean = float(hist_result.get("mean"))
         std = float(hist_result.get("stdDev"))
-        n_pixels = int(hist_result.get("nPixels", 0))
+        n_pixels = _exact_int(hist_result["nPixels"], "nPixels", 1)
+        value_domain = _decode_value_domain(hist_result)
+        counts_exact = hist_result["acquisition_limit_counts_exact"]
+        if not isinstance(counts_exact, bool):
+            raise TypeError("acquisition_limit_counts_exact must be bool")
+        min_count_raw = hist_result["acquisition_min_count"]
+        max_count_raw = hist_result["acquisition_max_count"]
+        min_count = (
+            None if min_count_raw is None
+            else _exact_int(min_count_raw, "acquisition_min_count", 0)
+        )
+        max_count = (
+            None if max_count_raw is None
+            else _exact_int(max_count_raw, "acquisition_max_count", 0)
+        )
     except (TypeError, ValueError):
         return None
     bins_raw = hist_result.get("bins") or []
     bins = np.asarray(bins_raw, dtype=np.float64)
+    if (
+        not all(math.isfinite(value) for value in (lo, hi, mean, std))
+        or not np.isfinite(bins).all()
+        or np.any(bins < 0)
+        or (counts_exact and (min_count is None or max_count is None))
+        or (min_count is not None and min_count > n_pixels)
+        or (max_count is not None and max_count > n_pixels)
+    ):
+        return None
     median = _median_from_bins(bins, n_pixels, lo, hi)
     return {
         "min": lo, "max": hi, "mean": mean, "std": std,
         "median": median, "n_pixels": n_pixels, "bins": bins,
+        "value_domain": value_domain,
+        "acquisition_min_count": min_count,
+        "acquisition_max_count": max_count,
+        "acquisition_limit_counts_exact": counts_exact,
+        "scope": hist_result.get("scope"),
     }
 
 
@@ -280,31 +353,35 @@ def _fragment_intensity(stats: dict, bit_depth: int) -> str:
         me=_fmt_int(stats["mean"]), md=_fmt_int(stats["median"]),
         sd=_fmt_int(stats["std"]),
     )
-    ceiling = _ceiling_for_bit_depth(bit_depth)
-    if ceiling is None or ceiling <= 0:
+    domain = stats.get("value_domain") or {}
+    floor = domain.get("acquisition_min_raw")
+    ceiling = domain.get("acquisition_max_raw")
+    if floor is None or ceiling is None or ceiling <= floor:
         return first + "."
-    pct = float(stats["max"]) / ceiling * 100.0
-    return "{}; dynamic range used is {:.1f}% of the {}-bit maximum.".format(first, pct, bit_depth)
+    pct = (float(stats["max"]) - float(stats["min"])) / (ceiling - floor) * 100.0
+    return "{}; observed span uses {:.1f}% of the raw acquisition range {} to {}.".format(
+        first, pct, _fmt_int(floor), _fmt_int(ceiling)
+    )
 
 
 def _fragment_saturation(stats: dict, bit_depth: int) -> str:
-    """Sentence 4: saturated-pixel fraction at the top histogram bin."""
-    bins = stats["bins"]
+    """Sentence 4: exact acquisition-maximum fraction when supplied."""
     n_pixels = stats["n_pixels"]
-    if bins.size == 0 or n_pixels <= 0:
+    ceiling = (stats.get("value_domain") or {}).get("acquisition_max_raw")
+    sat_count = stats.get("acquisition_max_count")
+    if (
+        n_pixels <= 0
+        or ceiling is None
+        or not stats.get("acquisition_limit_counts_exact")
+        or sat_count is None
+    ):
         return "Saturated-pixel fraction is unavailable."
-    ceiling = _ceiling_for_bit_depth(bit_depth)
-    if ceiling is None:
-        sat_count = float(bins[-1])
-    elif float(stats["max"]) < ceiling:
-        sat_count = 0.0
-    else:
-        sat_count = float(bins[-1])
     frac = sat_count / float(n_pixels) * 100.0
-    if frac >= 5.0 and ceiling is not None:
+    if frac >= 5.0:
         return (
-            "Saturated-pixel fraction is {} \u2014 a large share of pixels are pinned at {}."
-        ).format(_fmt_pct(frac), int(ceiling))
+            "Saturated-pixel fraction is {} \u2014 a large share of pixels are pinned at "
+            "the raw acquisition maximum {}."
+        ).format(_fmt_pct(frac), _fmt_int(ceiling))
     return "Saturated-pixel fraction is {}.".format(_fmt_pct(frac))
 
 
@@ -447,26 +524,44 @@ def _decode_pixels(resp):
     except (binascii.Error, ValueError, TypeError) as exc:
         return None, {"error": "base64 decode failed: {}".format(exc)}
     try:
-        w = int(result.get("width", 0))
-        h = int(result.get("height", 0))
+        w = _exact_int(result["width"], "width", 1)
+        h = _exact_int(result["height"], "height", 1)
         meta = {
-            "x": int(result["x"]),
-            "y": int(result["y"]),
+            "image_id": str(result["image_id"]),
+            "image_revision": _exact_int(result["image_revision"], "image_revision", 1),
+            "display_revision": _exact_int(result["display_revision"], "display_revision", 1),
+            "x": _exact_int(result["x"], "x", 0),
+            "y": _exact_int(result["y"], "y", 0),
             "width": w,
             "height": h,
-            "sliceStart": int(result["sliceStart"]),
-            "sliceEnd": int(result["sliceEnd"]),
-            "sliceCount": int(result["sliceCount"]),
+            "sliceStart": _exact_int(result["sliceStart"], "sliceStart", 1),
+            "sliceEnd": _exact_int(result["sliceEnd"], "sliceEnd", 1),
+            "sliceCount": _exact_int(result["sliceCount"], "sliceCount", 1),
             "sliceAxis": str(result["sliceAxis"]),
-            "channel": int(result["channel"]),
-            "frame": int(result["frame"]),
-            "channels": int(result["channels"]),
-            "slices": int(result["slices"]),
-            "frames": int(result["frames"]),
-            "nPixels": int(result["nPixels"]),
+            "channel": _exact_int(result["channel"], "channel", 1),
+            "frame": _exact_int(result["frame"], "frame", 1),
+            "channels": _exact_int(result["channels"], "channels", 1),
+            "slices": _exact_int(result["slices"], "slices", 1),
+            "frames": _exact_int(result["frames"], "frames", 1),
+            "nPixels": _exact_int(result["nPixels"], "nPixels", 1),
             "type": str(result["type"]),
             "encoding": str(result["encoding"]),
+            "value_domain": _decode_value_domain(result),
         }
+        counts_exact = result["acquisition_limit_counts_exact"]
+        if not isinstance(counts_exact, bool):
+            raise TypeError("acquisition_limit_counts_exact must be bool")
+        min_count_raw = result["acquisition_min_count"]
+        max_count_raw = result["acquisition_max_count"]
+        meta["acquisition_min_count"] = (
+            None if min_count_raw is None
+            else _exact_int(min_count_raw, "acquisition_min_count", 0)
+        )
+        meta["acquisition_max_count"] = (
+            None if max_count_raw is None
+            else _exact_int(max_count_raw, "acquisition_max_count", 0)
+        )
+        meta["acquisition_limit_counts_exact"] = counts_exact
     except (KeyError, TypeError, ValueError) as exc:
         return None, {
             "error": "get_pixels reply missing or malformed C/Z/T metadata: {}".format(exc)
@@ -474,7 +569,9 @@ def _decode_pixels(resp):
     if w <= 0 or h <= 0:
         return None, {"error": "get_pixels returned zero-size region"}
     if (
-        meta["x"] < 0
+        not meta["image_id"]
+        or meta["image_revision"] <= 0
+        or meta["x"] < 0
         or meta["y"] < 0
         or meta["sliceAxis"] != "Z"
         or meta["encoding"] != "base64_float32_le"
@@ -488,18 +585,46 @@ def _decode_pixels(resp):
         or meta["sliceEnd"] != meta["sliceStart"]
         or meta["nPixels"] != w * h
         or len(raw) != meta["nPixels"] * 4
+        or (
+            meta["acquisition_limit_counts_exact"]
+            and (
+                meta["acquisition_min_count"] is None
+                or meta["acquisition_max_count"] is None
+            )
+        )
+        or (
+            meta["acquisition_min_count"] is not None
+            and meta["acquisition_min_count"] > meta["nPixels"]
+        )
+        or (
+            meta["acquisition_max_count"] is not None
+            and meta["acquisition_max_count"] > meta["nPixels"]
+        )
     ):
         return None, {"error": "get_pixels returned inconsistent C/Z/T metadata"}
     plane = np.frombuffer(raw, dtype="<f4").reshape((h, w))
+    if not np.isfinite(plane).all():
+        return None, {"error": "get_pixels returned non-finite pixel values"}
     return plane, meta
 
 
 def _metadata_matches_info(meta: dict, info: dict) -> bool:
-    """Return whether a pixel reply still belongs to the info snapshot."""
+    """Return whether a reply belongs to the exact info snapshot and plane."""
     try:
-        return all(
-            int(meta[key]) == int(info[key])
-            for key in ("channels", "slices", "frames")
+        expected_slice = int(info["sliceStart"])
+        return (
+            str(meta["image_id"]) == str(info["image_id"])
+            and int(meta["image_revision"]) == int(info["image_revision"])
+            and int(meta["display_revision"]) == int(info["display_revision"])
+            and str(meta["sliceAxis"]) == "Z"
+            and int(meta["sliceStart"]) == expected_slice
+            and int(meta["sliceEnd"]) == expected_slice
+            and int(meta["channel"]) == int(info["channel"])
+            and int(meta["frame"]) == int(info["frame"])
+            and all(
+                int(meta[key]) == int(info[key])
+                for key in ("channels", "slices", "frames")
+            )
         )
     except (KeyError, TypeError, ValueError):
         return False
@@ -540,7 +665,9 @@ def _fetch_thumbnail(info: dict):
     factor = 1 if long_edge <= _THUMB_MAX_SIDE else (long_edge + _THUMB_MAX_SIDE - 1) // _THUMB_MAX_SIDE
 
     if w * h <= _SERVER_PIXEL_CAP:
-        arr, meta = _decode_pixels(_safe_send("get_pixels"))
+        arr, meta = _decode_pixels(
+            _safe_send("get_pixels", **_snapshot_payload(info))
+        )
         if arr is None:
             return None, meta
         if not _geometry_matches(meta, 0, 0, w, h):
@@ -558,7 +685,9 @@ def _fetch_thumbnail(info: dict):
     cy = max(0, (h - crop) // 2)
     cw = min(crop, w - cx)
     ch = min(crop, h - cy)
-    arr, meta = _decode_pixels(_safe_send("get_pixels", x=cx, y=cy, width=cw, height=ch))
+    payload = _snapshot_payload(info)
+    payload.update({"x": cx, "y": cy, "width": cw, "height": ch})
+    arr, meta = _decode_pixels(_safe_send("get_pixels", **payload))
     if arr is None:
         return None, meta
     if not _geometry_matches(meta, cx, cy, cw, ch):
@@ -700,7 +829,7 @@ def _fragment_thresholds(thumb: np.ndarray, stats: dict | None) -> str:
     ).format(n_otsu, n_li, n_tri)
 
 
-def _fragment_artifacts(thumb: np.ndarray, bit_depth: int) -> str:
+def _fragment_artifacts(thumb: np.ndarray, bit_depth: int, meta: dict | None = None) -> str:
     """Sentence 7: clipped blacks + quadrant saturation + stripe detection.
 
     All three sub-checks always contribute a phrase — either an issue
@@ -712,42 +841,70 @@ def _fragment_artifacts(thumb: np.ndarray, bit_depth: int) -> str:
     issues = []
     clean = []
 
-    mn = float(thumb.min())
-    clipped_frac = float((thumb <= mn).mean()) * 100.0
-    if clipped_frac > 1.0:
-        issues.append("clipped blacks at {}".format(_fmt_pct(clipped_frac)))
+    meta = meta or {}
+    domain = meta.get("value_domain") or {}
+    floor = domain.get("acquisition_min_raw")
+    ceiling = domain.get("acquisition_max_raw")
+    counts_exact = bool(meta.get("acquisition_limit_counts_exact"))
+    n_pixels = meta.get("nPixels")
+    min_count = meta.get("acquisition_min_count")
+    if (
+        floor is None
+        or not counts_exact
+        or not isinstance(n_pixels, int)
+        or n_pixels <= 0
+        or not isinstance(min_count, int)
+    ):
+        clean.append("acquisition-minimum clipping check unavailable")
     else:
-        clean.append("no clipped blacks")
-
-    ceiling = _ceiling_for_bit_depth(bit_depth)
-    if ceiling is None:
-        ceiling = float(thumb.max())
-    mid_y = h // 2
-    mid_x = w // 2
-    quadrants = [
-        ("top-left", thumb[:mid_y, :mid_x]),
-        ("top-right", thumb[:mid_y, mid_x:]),
-        ("bottom-left", thumb[mid_y:, :mid_x]),
-        ("bottom-right", thumb[mid_y:, mid_x:]),
-    ]
-    q_counts = [float((q >= ceiling).sum()) for _, q in quadrants]
-    total_sat = sum(q_counts)
-    if total_sat > 0:
-        max_idx = int(np.argmax(q_counts))
-        others = [c for i, c in enumerate(q_counts) if i != max_idx]
-        mean_others = float(sum(others)) / max(len(others), 1)
-        dominant = q_counts[max_idx] > 5.0 * mean_others if mean_others > 0 else True
-        if dominant:
-            share = q_counts[max_idx] / total_sat * 100.0
-            corner = quadrants[max_idx][0]
+        clipped_frac = float(min_count) / float(n_pixels) * 100.0
+        if clipped_frac > 1.0:
             issues.append(
-                "the {} quadrant carries {:.0f}% of the saturated pixels, suggesting a "
-                "saturated patch in that corner".format(corner, share)
+                "pixels at the raw acquisition minimum {} account for {}".format(
+                    _fmt_int(floor), _fmt_pct(clipped_frac)
+                )
             )
         else:
-            clean.append("no quadrant saturation")
+            clean.append("no substantial acquisition-minimum clipping")
+
+    if ceiling is None:
+        clean.append("saturation-location check unavailable without a raw acquisition maximum")
     else:
-        clean.append("no quadrant saturation")
+        mid_y = h // 2
+        mid_x = w // 2
+        quadrants = [
+            ("top-left", thumb[:mid_y, :mid_x]),
+            ("top-right", thumb[:mid_y, mid_x:]),
+            ("bottom-left", thumb[mid_y:, :mid_x]),
+            ("bottom-right", thumb[mid_y:, mid_x:]),
+        ]
+        if any(
+            q.size < 16 or q.shape[0] < 2 or q.shape[1] < 2
+            for _, q in quadrants
+        ):
+            clean.append("quadrant saturation localization unavailable at this sampling")
+        else:
+            q_rates = [float((q >= ceiling).mean()) for _, q in quadrants]
+            max_idx = int(np.argmax(q_rates))
+            others = [rate for i, rate in enumerate(q_rates) if i != max_idx]
+            mean_others = float(sum(others)) / len(others)
+            dominant = (
+                q_rates[max_idx] > 0
+                and (
+                    q_rates[max_idx] > 5.0 * mean_others
+                    if mean_others > 0
+                    else True
+                )
+            )
+            if dominant:
+                corner = quadrants[max_idx][0]
+                issues.append(
+                    "the {} quadrant has {:.1f}% of pixels at the raw acquisition maximum "
+                    "versus {:.1f}% across other quadrants, suggesting a saturated patch"
+                    .format(corner, q_rates[max_idx] * 100.0, mean_others * 100.0)
+                )
+            else:
+                clean.append("no quadrant saturation")
 
     if h >= 2 and w >= 2:
         row_means = thumb.mean(axis=1)
@@ -780,45 +937,15 @@ def _fragment_artifacts(thumb: np.ndarray, bit_depth: int) -> str:
 # Measurement 10: ROI / overlay
 # --------------------------------------------------------------------------
 
-_ROI_SCRIPT = """
-import groovy.json.JsonOutput
-def imp = ij.WindowManager.getCurrentImage()
-def out = [:]
-if (imp == null) {
-    out.error = "no_image"
-} else {
-    def roi = imp.getRoi()
-    out.hasRoi = (roi != null)
-    if (roi != null) {
-        def b = roi.getBounds()
-        out.roiType = roi.getTypeAsString()
-        out.roiWidth = b.width
-        out.roiHeight = b.height
-    }
-    def overlay = imp.getOverlay()
-    out.hasOverlay = (overlay != null)
-    if (overlay != null) out.overlaySize = overlay.size()
-}
-JsonOutput.toJson(out)
-""".strip()
-
-
-def _fetch_roi_overlay():
-    """One-round Groovy call: reports active ROI shape/size and overlay presence."""
-    resp = _safe_send("run_script", code=_ROI_SCRIPT, language="groovy")
+def _fetch_roi_overlay(info: dict):
+    """Read ROI/overlay facts bound to the same immutable image snapshot."""
+    resp = _safe_send("get_display_state", **_snapshot_payload(info))
     if not isinstance(resp, dict) or not resp.get("ok"):
         return None
-    result = resp.get("result") or {}
-    if not result.get("success"):
+    data = resp.get("result") or {}
+    if not isinstance(data, dict) or not _metadata_matches_info(data, info):
         return None
-    output = result.get("output")
-    if not isinstance(output, str) or not output.strip():
-        return None
-    try:
-        data = json.loads(output)
-    except (ValueError, TypeError):
-        return None
-    return data if isinstance(data, dict) else None
+    return data
 
 
 def _fragment_roi_overlay(data) -> str:
@@ -859,7 +986,7 @@ def describe_image() -> str:
     Args:
         None.
     """
-    info_resp = _safe_send("get_image_info")
+    info_resp = _safe_send("get_image_info", force=True)
     if not isinstance(info_resp, dict) or not info_resp.get("ok"):
         err = info_resp.get("error") if isinstance(info_resp, dict) else "no reply from Fiji"
         return "describe_image: cannot read active image info ({}).".format(err or "unknown error")
@@ -867,49 +994,61 @@ def describe_image() -> str:
     if not isinstance(info, dict) or not info:
         return "describe_image: no active image."
     try:
-        channels = int(info["channels"])
-        slices = int(info["slices"])
-        frames = int(info["frames"])
+        image_id = str(info["image_id"])
+        image_revision = _exact_int(info["image_revision"], "image_revision", 1)
+        display_revision = _exact_int(info["display_revision"], "display_revision", 1)
+        channel = _exact_int(info["channel"], "channel", 1)
+        slice_start = _exact_int(info["sliceStart"], "sliceStart", 1)
+        slice_end = _exact_int(info["sliceEnd"], "sliceEnd", 1)
+        slice_axis = str(info["sliceAxis"])
+        frame = _exact_int(info["frame"], "frame", 1)
+        channels = _exact_int(info["channels"], "channels", 1)
+        slices = _exact_int(info["slices"], "slices", 1)
+        frames = _exact_int(info["frames"], "frames", 1)
+        value_domain = _decode_value_domain(info)
     except (KeyError, TypeError, ValueError) as exc:
         return "describe_image: cannot attribute image axes ({}).".format(exc)
-    if min(channels, slices, frames) <= 0:
+    if (
+        min(channels, slices, frames) <= 0
+        or not image_id
+        or image_revision <= 0
+        or slice_axis != "Z"
+        or slice_start != slice_end
+        or not 1 <= channel <= channels
+        or not 1 <= slice_start <= slices
+        or not 1 <= frame <= frames
+    ):
         return "describe_image: cannot attribute image axes (invalid axis sizes)."
 
     bit_depth = _bit_depth_from_type(info.get("type", ""))
 
     thumb_arr, thumb_meta = _fetch_thumbnail(info)
-    plane_meta = thumb_meta if thumb_arr is not None else None
-    if plane_meta is None and channels == slices == frames == 1:
-        # Explicit compatibility for a singleton image: its only possible
-        # source plane is C=Z=T=1 even if the thumbnail fetch itself failed.
-        plane_meta = {
-            "sliceAxis": "Z",
-            "sliceStart": 1,
-            "channel": 1,
-            "frame": 1,
-            "channels": 1,
-            "slices": 1,
-            "frames": 1,
-        }
+    plane_meta = info
 
     hist_stats = None
     hist_error = None
-    if plane_meta is not None:
-        hist_resp = _safe_send("get_histogram")
-        if isinstance(hist_resp, dict) and hist_resp.get("ok"):
-            hist_stats = _hist_stats(hist_resp.get("result") or {})
-        elif isinstance(hist_resp, dict):
-            hist_error = hist_resp.get("error") or "unknown histogram error"
+    histogram_payload = _snapshot_payload(info)
+    histogram_payload["scope"] = "full_plane"
+    hist_resp = _safe_send("get_histogram", **histogram_payload)
+    hist_result = hist_resp.get("result") if isinstance(hist_resp, dict) else None
+    if (
+        isinstance(hist_resp, dict)
+        and hist_resp.get("ok")
+        and isinstance(hist_result, dict)
+        and hist_result.get("scope") == "full_plane"
+        and _metadata_matches_info(hist_result, info)
+    ):
+        hist_stats = _hist_stats(hist_result)
+    elif isinstance(hist_resp, dict) and hist_resp.get("ok"):
+        hist_error = "histogram snapshot/plane did not match image info"
+    elif isinstance(hist_resp, dict):
+        hist_error = hist_resp.get("error") or "unknown histogram error"
     else:
-        hist_error = (
-            "pixel-plane C/Z/T metadata was unavailable or inconsistent, "
-            "so hyperstack measurements were not attributed"
-        )
-    roi_data = _fetch_roi_overlay()
+        hist_error = "no reply from Fiji"
+    roi_data = _fetch_roi_overlay(info)
 
     fragments = [_fragment_header(info), _fragment_calibration(info)]
-    if plane_meta is not None:
-        fragments.append(_fragment_plane_attribution(plane_meta))
+    fragments.append(_fragment_plane_attribution(plane_meta))
     if hist_stats is not None:
         fragments.append(_fragment_intensity(hist_stats, bit_depth))
         fragments.append(_fragment_saturation(hist_stats, bit_depth))
@@ -920,7 +1059,7 @@ def describe_image() -> str:
         )
     if thumb_arr is not None:
         fragments.append(_fragment_thresholds(thumb_arr, hist_stats))
-        fragments.append(_fragment_artifacts(thumb_arr, bit_depth))
+        fragments.append(_fragment_artifacts(thumb_arr, bit_depth, thumb_meta))
     else:
         fragments.append("Thumbnail-based threshold and artifact checks are unavailable.")
     fragments.append(_fragment_roi_overlay(roi_data))

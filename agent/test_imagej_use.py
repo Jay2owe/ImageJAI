@@ -73,6 +73,11 @@ class FakeSession:
     def wait_for_event(self, topics=None, predicate=None, timeout=60):
         return self._call("wait_for_event", topics, predicate, timeout)
 
+    def wait_for_operation(
+            self, command, operation_id, timeout=120, poll_interval=0.1):
+        return self._call(
+            "wait_for_operation", command, operation_id, timeout, poll_interval)
+
     def get_dialogs(self):
         return self._call("get_dialogs")
 
@@ -151,6 +156,7 @@ print(get_state()['result'])
 print(run_macro('run(\"Invert\");')['result'])
 print(screenshot_to_path('.tmp/result.png'))
 print(wait_for_event('macro.*', {'event': 'macro.completed'}, 2)['result'])
+print(wait_for_operation('open_image', 'edt_AAAAAAAAAAAAAAAA', 2, .01)['result'])
 """
 
     run._execute(
@@ -160,7 +166,8 @@ print(wait_for_event('macro.*', {'event': 'macro.completed'}, 2)['result'])
     assert output.getvalue().splitlines()[0:2] == ["get_state", "run_macro"]
     assert (tmp_path / ".tmp" / "result.png").read_bytes() == PNG
     assert [call[0] for call in session.calls] == [
-        "hello", "get_state", "run_macro", "capture_image", "wait_for_event"]
+        "hello", "get_state", "run_macro", "capture_image", "wait_for_event",
+        "wait_for_operation"]
 
 
 def test_governed_event_wait_uses_same_authenticated_loopback_session():

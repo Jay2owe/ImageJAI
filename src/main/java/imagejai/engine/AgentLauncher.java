@@ -747,7 +747,7 @@ public class AgentLauncher {
         return quoteExecutableForShell(pythonExecutable(), operatingSystemName());
     }
 
-    static String quoteExecutableForShell(String executable, String osName) {
+    public static String quoteExecutableForShell(String executable, String osName) {
         String candidate = LaunchPolicy.requireSafeCommandText(
                 executable, "Python executable");
         if (osName != null && osName.toLowerCase(Locale.ROOT).contains("win")) {

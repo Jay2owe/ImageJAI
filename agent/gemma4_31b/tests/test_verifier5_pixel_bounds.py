@@ -7,6 +7,14 @@ import struct
 from agent.gemma4_31b import tools_python
 
 
+FLOAT_DOMAIN = {
+    "representation": "raw", "pixel_type": "float32", "signed": True,
+    "density_calibrated": False, "acquisition_min_raw": None,
+    "acquisition_max_raw": None, "acquisition_min_calibrated": None,
+    "acquisition_max_calibrated": None,
+}
+
+
 def _pixel_response(
     *,
     x: int,
@@ -24,6 +32,9 @@ def _pixel_response(
     return {
         "ok": True,
         "result": {
+            "image_id": "image-123",
+            "image_revision": 7,
+            "display_revision": 11,
             "x": x,
             "y": y,
             "width": width,
@@ -40,6 +51,10 @@ def _pixel_response(
             "nPixels": len(values),
             "type": "32-bit",
             "encoding": "base64_float32_le",
+            "value_domain": FLOAT_DOMAIN,
+            "acquisition_min_count": None,
+            "acquisition_max_count": None,
+            "acquisition_limit_counts_exact": False,
             "data": base64.b64encode(raw).decode("ascii"),
         },
     }
@@ -47,8 +62,17 @@ def _pixel_response(
 
 def _info(width: int, height: int, slices: int = 5) -> dict:
     return {
+        "image_id": "image-123",
+        "image_revision": 7,
+        "display_revision": 11,
+        "value_domain": FLOAT_DOMAIN,
         "width": width,
         "height": height,
+        "channel": 2,
+        "sliceStart": 1,
+        "sliceEnd": 1,
+        "sliceAxis": "Z",
+        "frame": 3,
         "channels": 4,
         "slices": slices,
         "frames": 6,
@@ -86,7 +110,7 @@ def test_explicit_slice_rejects_server_clamping_after_image_race(monkeypatch):
 
     result = tools_python.get_pixels_array(5, [])
 
-    assert "different pixel slice" in result["error"]
+    assert "snapshot or pixel plane changed" in result["error"]
 
 
 def test_explicit_slice_requires_exact_start_end_and_count(monkeypatch):
@@ -129,7 +153,16 @@ def test_explicit_slice_requires_exact_start_end_and_count(monkeypatch):
     assert accepted["channel"] == 2
     assert accepted["frame"] == 3
     assert accepted["sliceAxis"] == "Z"
-    assert calls == [("get_pixels", {"slice": 3}), ("get_pixels", {"slice": 3})]
+    expected = {
+        "image_id": "image-123",
+        "image_revision": 7,
+        "display_revision": 11,
+        "channel": 2,
+        "slice": 3,
+        "frame": 3,
+        "force": True,
+    }
+    assert calls == [("get_pixels", expected), ("get_pixels", expected)]
 
 
 def test_current_slice_still_requires_one_self_consistent_plane(monkeypatch):
@@ -149,7 +182,7 @@ def test_current_slice_still_requires_one_self_consistent_plane(monkeypatch):
                 y=0,
                 width=1,
                 height=1,
-                slice_start=4,
+                slice_start=1,
                 values=[9.0],
             ),
         ]
@@ -162,7 +195,7 @@ def test_current_slice_still_requires_one_self_consistent_plane(monkeypatch):
     assert "exactly one Z plane" in tools_python.get_pixels_array(0, [])["error"]
     accepted = tools_python.get_pixels_array(0, [])
     assert accepted["pixels"] == [[9.0]]
-    assert accepted["sliceStart"] == 4
+    assert accepted["sliceStart"] == 1
 
 
 def test_oversized_raw_request_is_rejected_without_fetch_or_large_objects(monkeypatch):

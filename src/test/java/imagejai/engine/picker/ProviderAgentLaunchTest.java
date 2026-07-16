@@ -35,6 +35,22 @@ public class ProviderAgentLaunchTest {
     }
 
     @Test
+    public void planQuotesConfiguredWindowsPythonExecutableWithSpaces() {
+        String python = "C:\\Program Files\\ImageJAI Python\\python.exe";
+        ProviderAgentLaunch.Plan plan = ProviderAgentLaunch.plan(
+                "C:\\work\\agent", entry("groq", "model"), null,
+                python, "Windows 11");
+
+        assertNotNull(plan);
+        assertEquals("\"" + python + "\" -m agent.providers.agent_cli"
+                        + " --provider groq --model model",
+                plan.info.command);
+        // AgentLauncher probes/executes the executable as an argv element in
+        // non-shell paths, so this field must remain unquoted.
+        assertEquals(python, plan.info.executablePath);
+    }
+
+    @Test
     public void planSetsProviderModelAndPythonpath() {
         ProviderAgentLaunch.Plan plan = ProviderAgentLaunch.plan(
                 "/home/me/agent", entry("anthropic", "claude-sonnet-4-6"), null);

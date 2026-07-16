@@ -81,6 +81,7 @@ import os
 import base64
 import copy
 import math
+import re
 import struct
 import threading
 import time
@@ -184,6 +185,7 @@ __all__ = [
     "job_cancel",
     "job_list",
     "wait_for_job",
+    "wait_for_operation",
     "gui_toast",
     "gui_inline",
     "gui_focus",
@@ -653,6 +655,178 @@ def _read_server_token():
         return None
 
 
+def _exact_int(value, name, minimum=None):
+    """Return a true integer, rejecting bools, floats and numeric strings."""
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise TypeError("{} must be an exact integer".format(name))
+    if minimum is not None and value < minimum:
+        raise ValueError("{} must be at least {}".format(name, minimum))
+    return value
+
+
+def _add_image_binding(
+    request,
+    *,
+    image_id=None,
+    image_revision=None,
+    display_revision=None,
+    channel=None,
+    slice=None,
+    frame=None,
+    scope=None,
+):
+    """Add a validated optional active-image snapshot/plane binding."""
+    if (image_id is None) != (image_revision is None):
+        raise ValueError("image_id and image_revision must be provided together")
+    if image_id is not None:
+        if not isinstance(image_id, str) or not image_id.strip():
+            raise TypeError("image_id must be a non-empty string")
+        request["image_id"] = image_id.strip()
+        request["image_revision"] = _exact_int(
+            image_revision, "image_revision", minimum=1
+        )
+    if display_revision is not None:
+        if image_id is None:
+            raise ValueError(
+                "display_revision requires image_id and image_revision"
+            )
+        request["display_revision"] = _exact_int(
+            display_revision, "display_revision", minimum=1
+        )
+    for key, value in (("channel", channel), ("slice", slice), ("frame", frame)):
+        if value is not None:
+            request[key] = _exact_int(value, key, minimum=1)
+    if scope is not None:
+        if scope not in ("full_plane", "active_roi"):
+            raise ValueError("scope must be 'full_plane' or 'active_roi'")
+        request["scope"] = scope
+    return request
+
+
+_OPERATION_COMMANDS = frozenset({
+    "open_image", "open_image_by_token", "interact_dialog",
+    "close_dialogs", "close_windows",
+})
+_OPERATION_ID_RE = re.compile(r"edt_[A-Za-z0-9_-]{16,64}\Z")
+
+
+def _validate_operation_wait(command, operation_id, timeout, poll_interval):
+    if not isinstance(command, str) or command not in _OPERATION_COMMANDS:
+        raise ValueError(
+            "command must be one of {}".format(", ".join(sorted(_OPERATION_COMMANDS)))
+        )
+    if not isinstance(operation_id, str) or not _OPERATION_ID_RE.fullmatch(operation_id):
+        raise ValueError("operation_id is not a valid opaque EDT operation id")
+    for value, name in ((timeout, "timeout"), (poll_interval, "poll_interval")):
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise TypeError("{} must be a finite number".format(name))
+        if not math.isfinite(float(value)) or float(value) <= 0:
+            raise ValueError("{} must be finite and greater than zero".format(name))
+    if float(poll_interval) < 0.01:
+        raise ValueError("poll_interval must be at least 0.01 seconds")
+    return command, operation_id, float(timeout), float(poll_interval)
+
+
+def _operation_status(response):
+    """Extract and validate a status object from a lifecycle poll reply."""
+    if not isinstance(response, dict):
+        return None
+    operation = response.get("operation")
+    if isinstance(operation, dict):
+        return operation
+    result = response.get("result")
+    if isinstance(result, dict) and "operation_id" in result:
+        return result
+    return None
+
+
+def _operation_wait_timeout(command, operation_id, last_status, timeout):
+    operation = dict(last_status) if isinstance(last_status, dict) else {
+        "operation_id": operation_id,
+        "state": "unknown",
+        "terminal": False,
+    }
+    return {
+        "ok": False,
+        "error": {
+            "code": "operation_wait_timeout",
+            "message": (
+                "Timed out after {:.3g}s waiting for {}; the operation may still complete."
+            ).format(timeout, command),
+            "category": "operation",
+            "retry_safe": True,
+        },
+        "operation": operation,
+    }
+
+
+def _wait_for_operation(request_fn, command, operation_id, timeout, poll_interval):
+    command, operation_id, timeout, poll_interval = _validate_operation_wait(
+        command, operation_id, timeout, poll_interval
+    )
+    started = time.monotonic()
+    deadline = started + timeout
+    last_status = None
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return _operation_wait_timeout(
+                command, operation_id, last_status, timeout
+            )
+        response = request_fn(
+            {"command": command, "operation_id": operation_id},
+            timeout=max(0.001, min(TIMEOUT, remaining)),
+        )
+        status = _operation_status(response)
+        if status is None:
+            # Owner/command failures and other terminal protocol errors have
+            # no status and must be surfaced unchanged, never retried as the
+            # original mutation.
+            if isinstance(response, dict) and response.get("ok") is False:
+                return response
+            return {
+                "ok": False,
+                "error": {
+                    "code": "operation_protocol_error",
+                    "message": "Operation poll did not return a lifecycle status.",
+                    "category": "protocol",
+                    "retry_safe": False,
+                },
+            }
+        if status.get("operation_id") != operation_id:
+            return {
+                "ok": False,
+                "error": {
+                    "code": "operation_protocol_error",
+                    "message": "Operation poll returned a different operation_id.",
+                    "category": "protocol",
+                    "retry_safe": False,
+                },
+                "operation": status,
+            }
+        terminal = status.get("terminal")
+        if not isinstance(terminal, bool):
+            return {
+                "ok": False,
+                "error": {
+                    "code": "operation_protocol_error",
+                    "message": "Operation poll returned an invalid terminal flag.",
+                    "category": "protocol",
+                    "retry_safe": False,
+                },
+                "operation": status,
+            }
+        last_status = status
+        if terminal:
+            return response
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return _operation_wait_timeout(
+                command, operation_id, last_status, timeout
+            )
+        time.sleep(min(poll_interval, remaining))
+
+
 class ImageJSession:
     """Authenticated capability session over ImageJAI's one-shot sockets.
 
@@ -793,6 +967,21 @@ class ImageJSession:
             token = self._token
 
         request = dict(cmd)
+        # ``token`` is the installation credential on the authenticated wire
+        # envelope.  Older callers used the same field name for the governed
+        # image handle accepted by open_image_by_token.  Preserve that public
+        # compatibility without letting the command argument overwrite (or be
+        # overwritten by) the authentication credential.
+        legacy_image_token = (
+            request.get("command") == "open_image_by_token"
+            or (
+                request.get("command") == "open_image"
+                and "path" not in request
+            )
+        )
+        if legacy_image_token and "token" in request:
+            request.setdefault("image_token", request["token"])
+            request.pop("token", None)
         request["session_id"] = session_id
         if token:
             request["token"] = token
@@ -1010,8 +1199,16 @@ class ImageJSession:
     def get_state(self):
         return self.request({"command": "get_state"})
 
-    def get_image_info(self):
-        return self.request({"command": "get_image_info"})
+    def get_image_info(
+        self, *, image_id=None, image_revision=None, display_revision=None,
+        channel=None, slice=None, frame=None,
+    ):
+        return self.request(_add_image_binding(
+            {"command": "get_image_info"},
+            image_id=image_id, image_revision=image_revision,
+            display_revision=display_revision, channel=channel,
+            slice=slice, frame=frame,
+        ))
 
     def get_results_table(self):
         return self.request({"command": "get_results_table"})
@@ -1026,8 +1223,66 @@ class ImageJSession:
             "code": code,
         }, timeout=timeout)
 
-    def capture_image(self, max_size=1024):
-        return self.request({"command": "capture_image", "maxSize": max_size})
+    def get_histogram(
+        self, *, image_id=None, image_revision=None, display_revision=None,
+        channel=None, slice=None, frame=None, scope=None,
+    ):
+        return self.request(_add_image_binding(
+            {"command": "get_histogram"},
+            image_id=image_id, image_revision=image_revision,
+            display_revision=display_revision, channel=channel,
+            slice=slice, frame=frame, scope=scope,
+        ))
+
+    def get_pixels(
+        self, x=None, y=None, width=None, height=None, slice_num=None,
+        all_slices=False, *, image_id=None, image_revision=None,
+        display_revision=None, channel=None, slice=None, frame=None,
+    ):
+        if slice_num is not None and slice is not None:
+            raise ValueError("slice_num and slice cannot both be provided")
+        request = {"command": "get_pixels"}
+        for key, value, minimum in (
+            ("x", x, 0), ("y", y, 0), ("width", width, 1),
+            ("height", height, 1),
+        ):
+            if value is not None:
+                request[key] = _exact_int(value, key, minimum=minimum)
+        if not isinstance(all_slices, bool):
+            raise TypeError("all_slices must be bool")
+        selected_slice = slice if slice is not None else slice_num
+        if all_slices:
+            request["allSlices"] = True
+        return self.request(_add_image_binding(
+            request, image_id=image_id, image_revision=image_revision,
+            display_revision=display_revision, channel=channel,
+            slice=selected_slice, frame=frame,
+        ))
+
+    def get_display_state(
+        self, *, image_id=None, image_revision=None, display_revision=None,
+        channel=None, slice=None, frame=None,
+    ):
+        return self.request(_add_image_binding(
+            {"command": "get_display_state"},
+            image_id=image_id, image_revision=image_revision,
+            display_revision=display_revision, channel=channel,
+            slice=slice, frame=frame,
+        ))
+
+    def capture_image(
+        self, max_size=1024, *, image_id=None, image_revision=None,
+        display_revision=None, channel=None, slice=None, frame=None,
+    ):
+        request = {
+            "command": "capture_image",
+            "maxSize": _exact_int(max_size, "max_size", minimum=1),
+        }
+        return self.request(_add_image_binding(
+            request, image_id=image_id, image_revision=image_revision,
+            display_revision=display_revision, channel=channel,
+            slice=slice, frame=frame,
+        ))
 
     def get_dialogs(self):
         return self.request({"command": "get_dialogs"})
@@ -1037,6 +1292,24 @@ class ImageJSession:
         command["command"] = "interact_dialog"
         command["action"] = action
         return self.request(command)
+
+    def wait_for_operation(
+        self, command, operation_id, timeout=120, poll_interval=0.1,
+    ):
+        """Poll one handed-off EDT mutation on this authenticated session.
+
+        The original mutation must not be submitted again.  Its opaque
+        ``operation_id`` is scoped by the server to this session owner and
+        the exact original command.
+        """
+        return _wait_for_operation(
+            lambda request, timeout: self.request(
+                request, timeout=timeout, _check_dialogs=False),
+            command,
+            operation_id,
+            timeout,
+            poll_interval,
+        )
 
     def wait_for_event(self, topics=None, predicate=None, timeout=60):
         """Wait for one governed event on this session.
@@ -1266,8 +1539,16 @@ def get_state():
     return imagej_command({"command": "get_state"})
 
 
-def get_image_info():
-    return imagej_command({"command": "get_image_info"})
+def get_image_info(
+    *, image_id=None, image_revision=None, display_revision=None,
+    channel=None, slice=None, frame=None,
+):
+    return imagej_command(_add_image_binding(
+        {"command": "get_image_info"},
+        image_id=image_id, image_revision=image_revision,
+        display_revision=display_revision, channel=channel,
+        slice=slice, frame=frame,
+    ))
 
 
 def get_results_table():
@@ -1286,8 +1567,16 @@ def get_roi_state():
     return imagej_command({"command": "get_roi_state"})
 
 
-def get_display_state():
-    return imagej_command({"command": "get_display_state"})
+def get_display_state(
+    *, image_id=None, image_revision=None, display_revision=None,
+    channel=None, slice=None, frame=None,
+):
+    return imagej_command(_add_image_binding(
+        {"command": "get_display_state"},
+        image_id=image_id, image_revision=image_revision,
+        display_revision=display_revision, channel=channel,
+        slice=slice, frame=frame,
+    ))
 
 
 def get_console(tail=2000):
@@ -1321,8 +1610,19 @@ def run_jython(code, timeout=180):
     return run_script(code, language="jython", timeout=timeout)
 
 
-def capture_image(max_size=1024):
-    return imagej_command({"command": "capture_image", "maxSize": max_size})
+def capture_image(
+    max_size=1024, *, image_id=None, image_revision=None,
+    display_revision=None, channel=None, slice=None, frame=None,
+):
+    request = {
+        "command": "capture_image",
+        "maxSize": _exact_int(max_size, "max_size", minimum=1),
+    }
+    return imagej_command(_add_image_binding(
+        request, image_id=image_id, image_revision=image_revision,
+        display_revision=display_revision, channel=channel,
+        slice=slice, frame=frame,
+    ))
 
 
 def run_pipeline(steps):
@@ -1337,8 +1637,16 @@ def get_log():
     return imagej_command({"command": "get_log"})
 
 
-def get_histogram():
-    return imagej_command({"command": "get_histogram"})
+def get_histogram(
+    *, image_id=None, image_revision=None, display_revision=None,
+    channel=None, slice=None, frame=None, scope=None,
+):
+    return imagej_command(_add_image_binding(
+        {"command": "get_histogram"},
+        image_id=image_id, image_revision=image_revision,
+        display_revision=display_revision, channel=channel,
+        slice=slice, frame=frame, scope=scope,
+    ))
 
 
 def get_open_windows():
@@ -1349,15 +1657,30 @@ def get_metadata():
     return imagej_command({"command": "get_metadata"})
 
 
-def get_pixels(x=None, y=None, width=None, height=None, slice_num=None, all_slices=False):
+def get_pixels(
+    x=None, y=None, width=None, height=None, slice_num=None, all_slices=False,
+    *, image_id=None, image_revision=None, display_revision=None,
+    channel=None, slice=None, frame=None,
+):
+    if slice_num is not None and slice is not None:
+        raise ValueError("slice_num and slice cannot both be provided")
     cmd = {"command": "get_pixels"}
-    if x is not None: cmd["x"] = x
-    if y is not None: cmd["y"] = y
-    if width is not None: cmd["width"] = width
-    if height is not None: cmd["height"] = height
-    if slice_num is not None: cmd["slice"] = slice_num
-    if all_slices: cmd["allSlices"] = True
-    return imagej_command(cmd)
+    for key, value, minimum in (
+        ("x", x, 0), ("y", y, 0), ("width", width, 1),
+        ("height", height, 1),
+    ):
+        if value is not None:
+            cmd[key] = _exact_int(value, key, minimum=minimum)
+    if not isinstance(all_slices, bool):
+        raise TypeError("all_slices must be bool")
+    if all_slices:
+        cmd["allSlices"] = True
+    selected_slice = slice if slice is not None else slice_num
+    return imagej_command(_add_image_binding(
+        cmd, image_id=image_id, image_revision=image_revision,
+        display_revision=display_revision, channel=channel,
+        slice=selected_slice, frame=frame,
+    ))
 
 
 def viewer3d(action="status", **kwargs):
@@ -1383,6 +1706,22 @@ def interact_dialog(action, **kwargs):
     cmd["command"] = "interact_dialog"
     cmd["action"] = action
     return imagej_command(cmd)
+
+
+def wait_for_operation(
+    command, operation_id, timeout=120, poll_interval=0.1,
+    *, host=HOST, port=PORT,
+):
+    """Poll a handed-off EDT mutation without replaying its side effects."""
+    session = _session_for(host, port)
+    return _wait_for_operation(
+        lambda request, timeout: session.request(
+            request, timeout=timeout, _check_dialogs=False),
+        command,
+        operation_id,
+        timeout,
+        poll_interval,
+    )
 
 
 def run_chain(chain, halt_on_error=True):

@@ -6,7 +6,6 @@ import com.google.gson.JsonParser;
 import ij.ImagePlus;
 import ij.ImageStack;
 import ij.process.ByteProcessor;
-import ij.process.ImageProcessor;
 import org.junit.Test;
 
 import javax.swing.SwingUtilities;
@@ -308,24 +307,16 @@ public class TCPCommandServerStateDeltaTest {
     @Test
     public void getPixelsRestoresHyperstackPositionWhenPixelReadFails() {
         TCPCommandServer server = newServer();
-        ImageStack stack = new ImageStack(2, 2) {
-            @Override public ImageProcessor getProcessor(int n) {
-                if (n == 6) {
-                    return new ByteProcessor(2, 2) {
-                        @Override public float getPixelValue(int x, int y) {
-                            throw new IllegalStateException("synthetic pixel failure");
-                        }
-                    };
-                }
-                return super.getProcessor(n);
-            }
-        };
+        ImageStack stack = new ImageStack(2, 2);
         for (int i = 0; i < 8; i++) stack.addSlice(new ByteProcessor(2, 2));
         ImagePlus imp = new ImagePlus("failing-hyper", stack);
         imp.setDimensions(2, 2, 2);
         imp.setOpenAsHyperStack(true);
         imp.setPosition(2, 2, 2);
         server.currentImageForTest = () -> imp;
+        server.rawPixelReaderForTest = (processor, x, y) -> {
+            throw new IllegalStateException("synthetic raw pixel failure");
+        };
         try {
             JsonObject response = server.dispatch(parse(
                     "{\"command\":\"get_pixels\",\"allSlices\":true}"),

@@ -52,6 +52,22 @@ public class StateInspectorTest {
     }
 
     @Test
+    public void datasetHashCoversIntensityCalibrationFunctionAndCoefficients() {
+        ImagePlus image = hyperstack();
+        image.getCalibration().setFunction(
+                ij.measure.Calibration.STRAIGHT_LINE,
+                new double[] {10.0, 2.0}, "calibrated");
+        String baseline = StateInspector.datasetHash(image);
+
+        image.getCalibration().setFunction(
+                ij.measure.Calibration.STRAIGHT_LINE,
+                new double[] {11.0, 2.0}, "calibrated");
+
+        assertNotEquals("scientific values changed despite identical raw pixels",
+                baseline, StateInspector.datasetHash(image));
+    }
+
+    @Test
     public void datasetHashHasStableSha256Shape() {
         String hash = StateInspector.datasetHash(hyperstack());
         assertNotNull(hash);

@@ -311,6 +311,19 @@ def render_api(data: dict, counts: dict[str, int]) -> str:
          "authenticated sessions carry `session_id` and `token`. The Python client adds "
          "those session fields automatically after `hello`."),
         "",
+        ("Snapshot-bound image reads return `image_id`, `image_revision`, "
+         "`display_revision`, and the exact C/Z/T plane. Echo `image_id` and "
+         "`image_revision` together (optionally `display_revision`) to fail closed if "
+         "the active dataset, display, or annotations changed. Revisions are O(1) "
+         "ImageJ update epochs: direct writes through a retained raw pixel array must "
+         "call an ImageJ update method such as `updateAndDraw()` or explicitly mark the "
+         "dataset dirty."),
+        "",
+        ("A timed-out EDT mutation can return `operation_in_progress`. Do not submit the "
+         "mutation again: poll the same command with only its opaque `operation_id`. "
+         "Terminal polling converges to the normal command response and includes the "
+         "terminal operation status."),
+        "",
         "| Command | Class | Request fields | Reply | Auth/capabilities | Python | Description |",
         "|---|---|---|---|---|---|---|",
     ]

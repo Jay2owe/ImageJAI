@@ -17,18 +17,52 @@ from agent.providers.base import fn_to_json_schema
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 AXIS_FIELDS = ("channel", "frame", "sliceAxis", "channels", "slices", "frames")
+UINT16_DOMAIN = {
+    "representation": "raw", "pixel_type": "uint16", "signed": False,
+    "density_calibrated": False, "acquisition_min_raw": 0,
+    "acquisition_max_raw": 65535, "acquisition_min_calibrated": 0,
+    "acquisition_max_calibrated": 65535,
+}
+
+
+def _binding(**overrides):
+    value = {
+        "image_id": "image-123",
+        "image_revision": 7,
+        "display_revision": 11,
+        "channel": 2,
+        "sliceStart": 4,
+        "sliceEnd": 4,
+        "sliceAxis": "Z",
+        "frame": 6,
+        "channels": 3,
+        "slices": 5,
+        "frames": 7,
+        "value_domain": UINT16_DOMAIN,
+    }
+    value.update(overrides)
+    return value
 
 
 def _info(width=2, height=2):
     return {
+        "image_id": "image-123",
+        "image_revision": 7,
+        "display_revision": 11,
         "title": "hyper.tif",
         "width": width,
         "height": height,
         "type": "16-bit",
         "calibration": "0.5 um/px",
+        "channel": 2,
+        "sliceStart": 4,
+        "sliceEnd": 4,
+        "sliceAxis": "Z",
+        "frame": 6,
         "channels": 3,
         "slices": 5,
         "frames": 7,
+        "value_domain": UINT16_DOMAIN,
     }
 
 
@@ -38,6 +72,9 @@ def _pixel_response(values=None, *, width=2, height=2, channel=2, z=4, frame=6):
     return {
         "ok": True,
         "result": {
+            "image_id": "image-123",
+            "image_revision": 7,
+            "display_revision": 11,
             "x": 0,
             "y": 0,
             "width": width,
@@ -54,6 +91,10 @@ def _pixel_response(values=None, *, width=2, height=2, channel=2, z=4, frame=6):
             "nPixels": len(values),
             "type": "16-bit",
             "encoding": "base64_float32_le",
+            "value_domain": UINT16_DOMAIN,
+            "acquisition_min_count": 0,
+            "acquisition_max_count": 0,
+            "acquisition_limit_counts_exact": True,
             "data": base64.b64encode(raw).decode("ascii"),
         },
     }
@@ -133,19 +174,26 @@ def test_describe_image_names_the_measured_hyperstack_plane(monkeypatch):
         if command == "get_pixels":
             return _pixel_response([0.0, 1.0, 2.0, 3.0])
         if command == "get_histogram":
+            assert payload["scope"] == "full_plane"
             return {
                 "ok": True,
                 "result": {
+                    **_binding(),
                     "min": 0.0,
                     "max": 3.0,
                     "mean": 1.5,
                     "stdDev": 1.1,
                     "nPixels": 4,
                     "bins": [1, 1, 1, 1],
+                    "value_domain": UINT16_DOMAIN,
+                    "acquisition_min_count": 1,
+                    "acquisition_max_count": 0,
+                    "acquisition_limit_counts_exact": True,
+                    "scope": "full_plane",
                 },
             }
-        if command == "run_script":
-            return {"ok": True, "result": {"success": True, "output": "{}"}}
+        if command == "get_display_state":
+            return {"ok": True, "result": {**_binding(), "hasRoi": False, "hasOverlay": False}}
         raise AssertionError(command)
 
     monkeypatch.setattr(describe_image, "_safe_send", fake_send)
@@ -156,29 +204,60 @@ def test_describe_image_names_the_measured_hyperstack_plane(monkeypatch):
     assert "slice axis Z" in text
 
 
-def test_describe_image_drops_unattributed_hyperstack_measurements(monkeypatch):
+def test_describe_image_rejects_same_shaped_replacement_measurements(monkeypatch):
     calls = []
-    malformed_pixels = _pixel_response()
-    del malformed_pixels["result"]["frame"]
+    replacement_pixels = _pixel_response()
+    replacement_pixels["result"]["image_id"] = "different-image"
 
     def fake_send(command, **payload):
         calls.append(command)
         if command == "get_image_info":
             return {"ok": True, "result": _info()}
         if command == "get_pixels":
-            return malformed_pixels
-        if command == "run_script":
-            return {"ok": True, "result": {"success": True, "output": "{}"}}
+            return replacement_pixels
         if command == "get_histogram":
-            raise AssertionError("unattributed hyperstack histogram must not be measured")
+            return {
+                "ok": True,
+                "result": {
+                    **_binding(image_id="different-image"),
+                    "min": 0.0,
+                    "max": 255.0,
+                    "mean": 200.0,
+                    "stdDev": 1.0,
+                    "nPixels": 4,
+                    "bins": [0, 0, 0, 4],
+                    "value_domain": UINT16_DOMAIN,
+                    "acquisition_min_count": 0,
+                    "acquisition_max_count": 0,
+                    "acquisition_limit_counts_exact": True,
+                    "scope": "full_plane",
+                },
+            }
+        if command == "get_display_state":
+            return {
+                "ok": True,
+                "result": {
+                    **_binding(image_id="different-image"),
+                    "hasRoi": True,
+                    "roiType": "Rectangle",
+                    "roiWidth": 99,
+                    "roiHeight": 99,
+                    "hasOverlay": True,
+                    "overlaySize": 99,
+                },
+            }
         raise AssertionError(command)
 
     monkeypatch.setattr(describe_image, "_safe_send", fake_send)
 
     text = describe_image.describe_image()
 
-    assert "hyperstack measurements were not attributed" in text
-    assert "get_histogram" not in calls
+    assert "histogram snapshot/plane did not match image info" in text
+    assert "Thumbnail-based threshold and artifact checks are unavailable" in text
+    assert "ROI/overlay status unavailable" in text
+    assert "mean 200" not in text
+    assert "99" not in text
+    assert {"get_pixels", "get_histogram", "get_display_state"}.issubset(calls)
 
 
 def test_shipped_pixel_contract_matches_schema_and_runtime_constant():

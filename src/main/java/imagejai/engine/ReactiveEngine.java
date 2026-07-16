@@ -4,6 +4,8 @@ import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
+import com.google.gson.stream.JsonReader;
+import com.google.gson.stream.JsonToken;
 
 import ij.IJ;
 import ij.ImagePlus;
@@ -15,14 +17,19 @@ import imagejai.engine.safeMode.DestructiveScanner;
 
 import javax.swing.SwingUtilities;
 import java.awt.Window;
-import java.io.FileInputStream;
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
-import java.io.InputStreamReader;
+import java.io.InputStream;
+import java.io.StringReader;
 import java.lang.reflect.Method;
+import java.nio.ByteBuffer;
+import java.nio.channels.FileChannel;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.ClosedWatchServiceException;
+import java.nio.file.DirectoryStream;
 import java.nio.file.FileSystems;
 import java.nio.file.Files;
+import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.nio.file.StandardOpenOption;
@@ -30,6 +37,7 @@ import java.nio.file.StandardWatchEventKinds;
 import java.nio.file.WatchEvent;
 import java.nio.file.WatchKey;
 import java.nio.file.WatchService;
+import java.nio.file.attribute.BasicFileAttributes;
 import java.io.File;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
@@ -103,6 +111,16 @@ public class ReactiveEngine {
     static final int DEFAULT_FAILURE_QUARANTINE_THRESHOLD = 3;
     static final int MAX_CAPTURE_BYTES = 8 * 1024 * 1024;
     private static final int MAX_CAPTURE_BASE_CHARS = 80;
+    static final int MAX_RULE_FILES = 256;
+    static final int MAX_LOADED_RULES = 128;
+    static final int MAX_RULE_DIRECTORY_ENTRIES = 1024;
+    static final int MAX_RULE_FILE_BYTES = 256 * 1024;
+    static final int MAX_JSON_DEPTH = 32;
+    static final int MAX_JSON_NODES = 4096;
+    static final int MAX_JSON_CONTAINER_LENGTH = 512;
+    static final int MAX_JSON_STRING_CHARS = 64 * 1024;
+    static final int MAX_JSON_KEY_CHARS = 128;
+    static final int MAX_RULE_ACTIONS = 64;
     private static final Set<String> ACTION_KEYS = Collections.unmodifiableSet(
             new HashSet<String>(Arrays.asList("execute_macro", "publish_event",
                     "gui_action", "run_intent", "close_dialog", "capture", "wait")));
@@ -360,34 +378,33 @@ public class ReactiveEngine {
         List<Quarantined> qu = new ArrayList<Quarantined>();
         Set<String> loadedNames = new HashSet<String>();
 
-        File dir = rulesDir.toFile();
-        if (dir.isDirectory()) {
-            File[] files = dir.listFiles();
-            if (files != null) {
-                java.util.Arrays.sort(files, new Comparator<File>() {
-                    @Override
-                    public int compare(File a, File b) {
-                        return a.getAbsolutePath().compareTo(b.getAbsolutePath());
-                    }
-                });
-                for (File f : files) {
-                    if (!f.isFile()) continue;
-                    String name = f.getName();
-                    if (!name.toLowerCase().endsWith(".json")) continue;
-                    if ("reactive.lock".equals(name)) continue;
-                    try {
-                        Rule rule = parseRule(f);
-                        if (!loadedNames.add(rule.name)) {
-                            throw new IllegalArgumentException(
-                                    "Duplicate rule name '" + rule.name + "'");
-                        }
-                        loaded.add(rule);
-                    } catch (Exception e) {
-                        qu.add(new Quarantined(f.getAbsolutePath(), e.getMessage() != null
-                                ? e.getMessage() : e.toString()));
-                        logWarn("Quarantined " + name + ": " + e.getMessage());
-                    }
+        List<File> files = discoverRuleFiles(qu);
+        Collections.sort(files, new Comparator<File>() {
+            @Override
+            public int compare(File a, File b) {
+                return a.getAbsolutePath().compareTo(b.getAbsolutePath());
+            }
+        });
+        for (File f : files) {
+            String name = f.getName();
+            if (loaded.size() >= MAX_LOADED_RULES) {
+                qu.add(new Quarantined(rulesDir.toString(),
+                        "Rule count exceeded " + MAX_LOADED_RULES + " rule limit"));
+                break;
+            }
+            try {
+                Rule rule = parseRule(f);
+                if (!loadedNames.add(rule.name)) {
+                    throw new IllegalArgumentException(
+                            "Duplicate rule name '" + rule.name + "'");
                 }
+                loaded.add(rule);
+            } catch (StackOverflowError exhausted) {
+                quarantineLoadFailure(qu, f, name,
+                        "JSON nesting exhausted the parser stack");
+            } catch (Exception e) {
+                quarantineLoadFailure(qu, f, name, e.getMessage() != null
+                        ? e.getMessage() : e.toString());
             }
         }
 
@@ -432,19 +449,69 @@ public class ReactiveEngine {
         }
     }
 
+    private List<File> discoverRuleFiles(List<Quarantined> qu) {
+        List<File> files = new ArrayList<File>();
+        if (!Files.isDirectory(rulesDir, LinkOption.NOFOLLOW_LINKS)) return files;
+        int entries = 0;
+        int jsonFiles = 0;
+        try (DirectoryStream<Path> stream = Files.newDirectoryStream(rulesDir)) {
+            for (Path path : stream) {
+                entries++;
+                if (entries > MAX_RULE_DIRECTORY_ENTRIES) {
+                    qu.add(new Quarantined(rulesDir.toString(),
+                            "Rule directory exceeded " + MAX_RULE_DIRECTORY_ENTRIES
+                                    + " entry discovery limit"));
+                    break;
+                }
+                if (!Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS)) continue;
+                String name = path.getFileName().toString();
+                if (!name.toLowerCase().endsWith(".json")) continue;
+                if ("reactive.lock".equals(name)) continue;
+                jsonFiles++;
+                if (jsonFiles > MAX_RULE_FILES) {
+                    qu.add(new Quarantined(rulesDir.toString(),
+                            "Rule file count exceeded " + MAX_RULE_FILES
+                                    + " file limit"));
+                    break;
+                }
+                files.add(path.toFile());
+            }
+        } catch (java.nio.file.DirectoryIteratorException e) {
+            Throwable cause = e.getCause();
+            qu.add(new Quarantined(rulesDir.toString(),
+                    "Could not discover reactive rules: "
+                            + (cause == null ? e.getMessage() : cause.getMessage())));
+        } catch (IOException e) {
+            qu.add(new Quarantined(rulesDir.toString(),
+                    "Could not discover reactive rules: " + e.getMessage()));
+        }
+        return files;
+    }
+
+    private static void quarantineLoadFailure(List<Quarantined> qu, File f,
+                                              String name, String reason) {
+        String safeReason = reason == null ? "unknown rule load failure" : reason;
+        qu.add(new Quarantined(f.getAbsolutePath(), safeReason));
+        logWarn("Quarantined " + name + ": " + safeReason);
+    }
+
     private Rule parseRule(File f) throws IOException {
         JsonObject obj;
-        InputStreamReader reader = null;
+        String json = readBoundedRule(f.toPath());
+        prevalidateJson(json);
+        StringReader reader = null;
         try {
-            reader = new InputStreamReader(new FileInputStream(f), StandardCharsets.UTF_8);
+            reader = new StringReader(json);
             JsonElement el = JsonParser.parseReader(reader);
             if (el == null || !el.isJsonObject()) {
                 throw new IllegalArgumentException("Top-level must be a JSON object");
             }
             obj = el.getAsJsonObject();
+        } catch (StackOverflowError exhausted) {
+            throw new IllegalArgumentException("JSON nesting exhausted the parser stack");
         } finally {
             if (reader != null) {
-                try { reader.close(); } catch (IOException ignore) {}
+                reader.close();
             }
         }
 
@@ -526,6 +593,177 @@ public class ReactiveEngine {
         r.sourceFile = f.getAbsolutePath();
         r.sourceModified = f.lastModified();
         return r;
+    }
+
+    private static String readBoundedRule(Path path) throws IOException {
+        long declared = Files.size(path);
+        if (declared > MAX_RULE_FILE_BYTES) {
+            throw new IllegalArgumentException("Rule file exceeded "
+                    + MAX_RULE_FILE_BYTES + " byte limit");
+        }
+        ByteArrayOutputStream bytes = new ByteArrayOutputStream(
+                (int) Math.min(declared, 8192L));
+        byte[] buffer = new byte[8192];
+        int total = 0;
+        try (InputStream in = Files.newInputStream(path, StandardOpenOption.READ)) {
+            int read;
+            while ((read = in.read(buffer)) >= 0) {
+                if (read == 0) continue;
+                total += read;
+                if (total > MAX_RULE_FILE_BYTES) {
+                    throw new IllegalArgumentException("Rule file exceeded "
+                            + MAX_RULE_FILE_BYTES + " byte limit");
+                }
+                bytes.write(buffer, 0, read);
+            }
+        }
+        return new String(bytes.toByteArray(), StandardCharsets.UTF_8);
+    }
+
+    /**
+     * Walk the JSON token stream iteratively before creating Gson's in-memory
+     * tree. This makes every allocation-relevant dimension finite, including
+     * hostile nesting that would otherwise recurse in tree materialisation.
+     */
+    private static void prevalidateJson(String json) throws IOException {
+        JsonReader reader = new JsonReader(new StringReader(json));
+        reader.setLenient(false);
+        Deque<JsonContainerBudget> stack = new ArrayDeque<JsonContainerBudget>();
+        int nodes = 0;
+        int rootValues = 0;
+        try {
+            while (true) {
+                JsonToken token = reader.peek();
+                if (token == JsonToken.END_DOCUMENT) break;
+                if (token == JsonToken.NAME) {
+                    JsonContainerBudget parent = requireObjectContainer(stack);
+                    String key = reader.nextName();
+                    if (key.length() > MAX_JSON_KEY_CHARS) {
+                        throw new IllegalArgumentException("JSON key exceeded "
+                                + MAX_JSON_KEY_CHARS + " character limit");
+                    }
+                    parent.entries++;
+                    enforceContainerLength(parent);
+                    parent.pendingName = key;
+                    nodes = incrementJsonNodes(nodes);
+                } else if (token == JsonToken.BEGIN_OBJECT
+                        || token == JsonToken.BEGIN_ARRAY) {
+                    boolean actions = token == JsonToken.BEGIN_ARRAY
+                            && stack.size() == 1
+                            && stack.peek().object
+                            && "do".equals(stack.peek().pendingName);
+                    rootValues = recordJsonValue(stack, rootValues);
+                    nodes = incrementJsonNodes(nodes);
+                    if (stack.size() + 1 > MAX_JSON_DEPTH) {
+                        throw new IllegalArgumentException("JSON depth exceeded "
+                                + MAX_JSON_DEPTH + " level limit");
+                    }
+                    if (token == JsonToken.BEGIN_OBJECT) reader.beginObject();
+                    else reader.beginArray();
+                    stack.push(new JsonContainerBudget(
+                            token == JsonToken.BEGIN_OBJECT, actions));
+                } else if (token == JsonToken.END_OBJECT
+                        || token == JsonToken.END_ARRAY) {
+                    if (stack.isEmpty()) {
+                        throw new IllegalArgumentException("Unexpected JSON container end");
+                    }
+                    JsonContainerBudget ended = stack.pop();
+                    if (token == JsonToken.END_OBJECT && !ended.object) {
+                        throw new IllegalArgumentException("Mismatched JSON container end");
+                    }
+                    if (token == JsonToken.END_ARRAY && ended.object) {
+                        throw new IllegalArgumentException("Mismatched JSON container end");
+                    }
+                    if (token == JsonToken.END_OBJECT) reader.endObject();
+                    else reader.endArray();
+                } else {
+                    rootValues = recordJsonValue(stack, rootValues);
+                    nodes = incrementJsonNodes(nodes);
+                    if (token == JsonToken.STRING || token == JsonToken.NUMBER) {
+                        String value = reader.nextString();
+                        if (value.length() > MAX_JSON_STRING_CHARS) {
+                            throw new IllegalArgumentException("JSON value exceeded "
+                                    + MAX_JSON_STRING_CHARS + " character limit");
+                        }
+                    } else if (token == JsonToken.BOOLEAN) {
+                        reader.nextBoolean();
+                    } else if (token == JsonToken.NULL) {
+                        reader.nextNull();
+                    } else {
+                        throw new IllegalArgumentException("Unsupported JSON token " + token);
+                    }
+                }
+            }
+            if (!stack.isEmpty() || rootValues != 1) {
+                throw new IllegalArgumentException("JSON must contain exactly one complete value");
+            }
+        } catch (StackOverflowError exhausted) {
+            throw new IllegalArgumentException("JSON nesting exhausted the parser stack");
+        } catch (IllegalStateException malformed) {
+            throw new IllegalArgumentException("Malformed JSON: " + malformed.getMessage());
+        } finally {
+            reader.close();
+        }
+    }
+
+    private static JsonContainerBudget requireObjectContainer(
+            Deque<JsonContainerBudget> stack) {
+        if (stack.isEmpty() || !stack.peek().object) {
+            throw new IllegalArgumentException("JSON name appeared outside an object");
+        }
+        return stack.peek();
+    }
+
+    private static int recordJsonValue(Deque<JsonContainerBudget> stack,
+                                       int rootValues) {
+        if (stack.isEmpty()) {
+            rootValues++;
+            if (rootValues > 1) {
+                throw new IllegalArgumentException("JSON must contain one top-level value");
+            }
+            return rootValues;
+        }
+        JsonContainerBudget parent = stack.peek();
+        if (parent.object) {
+            if (parent.pendingName == null) {
+                throw new IllegalArgumentException("JSON object value had no key");
+            }
+            parent.pendingName = null;
+        } else {
+            parent.entries++;
+            enforceContainerLength(parent);
+        }
+        return rootValues;
+    }
+
+    private static void enforceContainerLength(JsonContainerBudget container) {
+        int limit = container.actions ? MAX_RULE_ACTIONS : MAX_JSON_CONTAINER_LENGTH;
+        if (container.entries > limit) {
+            throw new IllegalArgumentException((container.actions
+                    ? "Rule action count" : "JSON container length")
+                    + " exceeded " + limit + " entry limit");
+        }
+    }
+
+    private static int incrementJsonNodes(int nodes) {
+        nodes++;
+        if (nodes > MAX_JSON_NODES) {
+            throw new IllegalArgumentException("JSON node count exceeded "
+                    + MAX_JSON_NODES + " node limit");
+        }
+        return nodes;
+    }
+
+    private static final class JsonContainerBudget {
+        final boolean object;
+        final boolean actions;
+        int entries;
+        String pendingName;
+
+        JsonContainerBudget(boolean object, boolean actions) {
+            this.object = object;
+            this.actions = actions;
+        }
     }
 
     private void validateAction(JsonObject action, int index) {
@@ -1071,7 +1309,30 @@ public class ReactiveEngine {
         if (leaf == null || !"AI_Exports".equalsIgnoreCase(leaf.toString())) {
             throw new IOException("Reactive captures must target AI_Exports/");
         }
-        Files.createDirectories(captureDir);
+        Path datasetDir = captureDir.getParent();
+        if (datasetDir == null) {
+            throw new IOException("Could not resolve the capture dataset directory");
+        }
+        Path realDataset = datasetDir.toRealPath();
+        try {
+            Files.createDirectory(captureDir);
+        } catch (java.nio.file.FileAlreadyExistsException exists) {
+            // Validated without following the leaf below. A symlink, junction,
+            // or other reparse-point-like entry must not masquerade as the
+            // dataset's AI_Exports directory.
+            if (!isPlainDirectory(captureDir)) {
+                throw new IOException("AI_Exports is not a real dataset directory", exists);
+            }
+        }
+        if (!isPlainDirectory(captureDir)) {
+            throw new IOException("AI_Exports is not a real dataset directory");
+        }
+        Path realCaptureDir = captureDir.toRealPath();
+        Path expectedRealCaptureDir = realDataset.resolve("AI_Exports").normalize();
+        if (!realCaptureDir.equals(expectedRealCaptureDir)
+                || !realDataset.equals(realCaptureDir.getParent())) {
+            throw new IOException("Capture directory escaped the real dataset AI_Exports/");
+        }
         String safeBase = (baseName != null && !baseName.isEmpty())
                 ? baseName.replaceAll("[^A-Za-z0-9_.-]", "_")
                 : ("reactive_" + ruleName.replaceAll("[^A-Za-z0-9_.-]", "_"));
@@ -1080,15 +1341,52 @@ public class ReactiveEngine {
         }
         String fname = safeBase + "_" + clock.getAsLong() + "_"
                 + Long.toUnsignedString(captureSequence.incrementAndGet(), 36) + ".png";
-        Path out = captureDir.resolve(fname).normalize();
-        if (!out.getParent().equals(captureDir)) {
+        Path out = realCaptureDir.resolve(fname).normalize();
+        if (!out.getParent().equals(realCaptureDir)) {
             throw new IOException("Capture path escaped AI_Exports/");
         }
-        Files.write(out, capture.png, StandardOpenOption.CREATE_NEW,
-                StandardOpenOption.WRITE);
+        // Re-resolve both aliases immediately before CREATE_NEW. Writing via
+        // the canonical directory prevents a symlinked dataset path from being
+        // swapped after validation, while CREATE_NEW refuses replacement.
+        if (!datasetDir.toRealPath().equals(realDataset)
+                || !captureDir.toRealPath().equals(realCaptureDir)
+                || !isPlainDirectory(captureDir)
+                || !isPlainDirectory(realCaptureDir)) {
+            throw new IOException("Capture directory changed before write");
+        }
+        writeCaptureExclusive(out, capture.png, realDataset, realCaptureDir);
         publishDiagnostic("reactive.capture_written", null,
                 "capture=" + fname + " bytes=" + capture.png.length);
         return out;
+    }
+
+    private static boolean isPlainDirectory(Path path) throws IOException {
+        BasicFileAttributes attributes = Files.readAttributes(path,
+                BasicFileAttributes.class, LinkOption.NOFOLLOW_LINKS);
+        return attributes.isDirectory() && !attributes.isSymbolicLink()
+                && !attributes.isOther();
+    }
+
+    private static void writeCaptureExclusive(Path out, byte[] png,
+                                              Path realDataset,
+                                              Path realCaptureDir) throws IOException {
+        try (FileChannel channel = FileChannel.open(out,
+                StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE,
+                LinkOption.NOFOLLOW_LINKS)) {
+            // CREATE_NEW reserves a previously absent leaf. Resolve that leaf
+            // before copying any image bytes, so even the output itself is
+            // checked against the real dataset directory rather than merely
+            // against its lexical spelling.
+            Path realOut = out.toRealPath();
+            if (!realOut.getParent().equals(realCaptureDir)
+                    || !realOut.startsWith(realDataset)
+                    || !realCaptureDir.toRealPath().equals(realCaptureDir)
+                    || !isPlainDirectory(realCaptureDir)) {
+                throw new IOException("Capture output escaped the real dataset AI_Exports/");
+            }
+            ByteBuffer buffer = ByteBuffer.wrap(png);
+            while (buffer.hasRemaining()) channel.write(buffer);
+        }
     }
 
     private static String extractPublicField(Object obj, String fieldName) {

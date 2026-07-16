@@ -8,6 +8,10 @@ The canonical machine-readable contract is [`agent/command_manifest.json`](../ag
 
 The table lists command-specific fields. Every request also carries `command`; authenticated sessions carry `session_id` and `token`. The Python client adds those session fields automatically after `hello`.
 
+Snapshot-bound image reads return `image_id`, `image_revision`, `display_revision`, and the exact C/Z/T plane. Echo `image_id` and `image_revision` together (optionally `display_revision`) to fail closed if the active dataset, display, or annotations changed. Revisions are O(1) ImageJ update epochs: direct writes through a retained raw pixel array must call an ImageJ update method such as `updateAndDraw()` or explicitly mark the dataset dirty.
+
+A timed-out EDT mutation can return `operation_in_progress`. Do not submit the mutation again: poll the same command with only its opaque `operation_id`. Terminal polling converges to the normal command response and includes the terminal operation status.
+
 | Command | Class | Request fields | Reply | Auth/capabilities | Python | Description |
 |---|---|---|---|---|---|---|
 | `3d_viewer` | mutation | optional: `action`, `image`, `type`, `threshold`, `resampling`, `width`, `height` | `object` | session optional | `viewer3d` | Inspect or control the Fiji 3D Viewer. |
@@ -17,27 +21,27 @@ The table lists command-specific fields. Every request also carries `command`; a
 | `branch_list` | read only | none | `object` | session optional; `undo` | raw: `imagej_command` | List undo branches. Use imagej_command({...}) from Python. |
 | `branch_switch` | mutation | required: `branch_id`; optional: `timeout_ms` | `object` | session optional; `undo` | raw: `imagej_command` | Switch to an undo branch. Use imagej_command({...}) from Python. |
 | `browse_pending_brief` | read only | none | `object` | session optional | raw: `imagej_command` | Check whether a file-selection brief is pending. Use imagej_command({...}) from Python. |
-| `capture_image` | read only | optional: `maxSize`, `source` | `object` | session optional | `capture_image` | Capture the active image as a governed PNG payload. |
+| `capture_image` | read only | optional: `maxSize`, `source`, `image_id`, `image_revision`, `display_revision`, `channel`, `slice`, `frame` | `object` | session optional | `capture_image` | Capture the active image as a governed PNG payload bound to an optional image snapshot. |
 | `clear_friction_log` | mutation | none | `object` | session optional; `system property:imagejai.allow.clear friction log` | `clear_friction_log` | Clear friction history when the administrator override is enabled. |
-| `close_dialogs` | mutation | optional: `pattern` | `object` | session optional | `close_dialogs` | Close matching open dialogs. |
-| `close_windows` | mutation | optional: `pattern` | `object` | session optional | raw: `imagej_command` | Compatibility alias for close_dialogs. Use imagej_command({...}) from Python. |
+| `close_dialogs` | mutation | optional: `pattern`, `timeout_ms`, `operation_id` | `object` | session optional | `close_dialogs` | Close matching open dialogs; poll a returned operation_id on the same command. |
+| `close_windows` | mutation | optional: `pattern`, `timeout_ms`, `operation_id` | `object` | session optional | raw: `imagej_command` | Compatibility alias for close_dialogs. Use imagej_command({...}) from Python. |
 | `emit_methods_table` | mutation | none | `object` | session optional | raw: `imagej_command` | Write a provenance-bound QUAREP-LiMi methods document. Use imagej_command({...}) from Python. |
 | `execute_macro` | mutation | required: `code`; optional: `source`, `timeout_ms`, `autoDismissPhantoms` | `object` | session optional | `execute_macro` | Execute ImageJ macro code synchronously. |
 | `execute_macro_async` | mutation | required: `code`; optional: `source`, `timeout_ms`, `autoDismissPhantoms` | `object` | session required | `submit_async` | Submit macro code as an asynchronous job. |
 | `explore_thresholds` | mutation | required: `methods` | `object` | session optional | `explore_thresholds` | Compare threshold methods on the active dataset. |
 | `get_console` | read only | optional: `tail`; hash cache: optional `if_none_match` | `object` | session optional | `get_console` | Read bounded Fiji stdout and stderr. |
 | `get_dialogs` | read only | hash cache: optional `if_none_match` | `object` | session optional | `get_dialogs` | Inspect open dialogs and their semantic controls. |
-| `get_display_state` | read only | hash cache: optional `if_none_match` | `object` | session optional | `get_display_state` | Read channel, slice, frame, LUT and display range state. |
+| `get_display_state` | read only | optional: `image_id`, `image_revision`, `display_revision`, `channel`, `slice`, `frame`; hash cache: optional `if_none_match` | `object` | session optional | `get_display_state` | Atomically read snapshot-bound channel, slice, frame, LUT, ROI, overlay and display range state. |
 | `get_friction_log` | read only | optional: `limit`; hash cache: optional `if_none_match` | `object` | session optional | `get_friction_log` | Read recent command failures. |
 | `get_friction_patterns` | read only | hash cache: optional `if_none_match` | `object` | session optional | `get_friction_patterns` | Read recurring failure patterns. |
-| `get_histogram` | read only | hash cache: optional `if_none_match` | `object` | session optional | `get_histogram` | Read the active image histogram. |
+| `get_histogram` | read only | optional: `image_id`, `image_revision`, `display_revision`, `channel`, `slice`, `frame`, `scope`; hash cache: optional `if_none_match` | `object` | session optional | `get_histogram` | Read an exact C/Z/T histogram for active_roi (legacy default) or full_plane, bound to an active-image snapshot. |
 | `get_image_graph` | read only | none | `object` | session optional | raw: `imagej_command` | Read the session image-provenance graph. Use imagej_command({...}) from Python. |
-| `get_image_info` | read only | hash cache: optional `if_none_match` | `object` | session optional | `get_image_info` | Read dimensions and calibration of the active image. |
+| `get_image_info` | read only | optional: `image_id`, `image_revision`, `display_revision`, `channel`, `slice`, `frame`; hash cache: optional `if_none_match` | `object` | session optional | `get_image_info` | Read dimensions, calibration, stable identity, content/display revisions and exact active plane. |
 | `get_log` | read only | hash cache: optional `if_none_match` | `object` | session optional | `get_log` | Read the ImageJ log. |
-| `get_metadata` | read only | hash cache: optional `if_none_match` | `object` | session optional | `get_metadata` | Read governed image properties and calibration metadata. |
+| `get_metadata` | read only | optional: `image_id`, `image_revision`, `display_revision`, `channel`, `slice`, `frame`; hash cache: optional `if_none_match` | `object` | session optional | `get_metadata` | Read governed snapshot-bound image properties and calibration metadata. |
 | `get_open_windows` | read only | hash cache: optional `if_none_match` | `object` | session optional | `get_open_windows` | List open image and non-image windows. |
 | `get_pending_brief` | mutation | none | `object` | session optional | raw: `imagej_command` | Consume the pending file-selection brief. Use imagej_command({...}) from Python. |
-| `get_pixels` | read only | optional: `x`, `y`, `width`, `height`, `slice`, `allSlices`, `timeout_ms` | `object` | session optional | `get_pixels` | Read bounded raw pixels from the active image. |
+| `get_pixels` | read only | optional: `x`, `y`, `width`, `height`, `channel`, `slice`, `frame`, `allSlices`, `image_id`, `image_revision`, `display_revision`, `timeout_ms` | `object` | session optional | `get_pixels` | Read bounded raw pixels from an exact snapshot-bound C/Z/T plane. |
 | `get_progress` | read only | hash cache: optional `if_none_match` | `object` | session optional | `get_progress` | Read Fiji progress and status text. |
 | `get_results_table` | read only | hash cache: optional `if_none_match` | `object` | session optional | `get_results_table` | Read the Results table as CSV. |
 | `get_roi_state` | read only | hash cache: optional `if_none_match` | `object` | session optional | `get_roi_state` | Read ROI Manager state. |
@@ -49,7 +53,7 @@ The table lists command-specific fields. Every request also carries `command`; a
 | `intent_forget` | mutation | required: `phrase` | `object` | session optional | `intent_forget` | Remove a taught intent mapping. |
 | `intent_list` | read only | hash cache: optional `if_none_match` | `object` | session optional | `intent_list` | List taught intent mappings. |
 | `intent_teach` | mutation | required: `phrase`, `macro`; optional: `description` | `object` | session optional | `intent_teach` | Teach a phrase-to-macro mapping. |
-| `interact_dialog` | mutation | required: `action`; optional: `dialog`, `target`, `index`, `value`, `type`, `autoDismissPhantoms` | `object` | session optional | `interact_dialog` | Act on dialog controls by semantic identity. |
+| `interact_dialog` | mutation | one of: `action`/`operation_id`; optional: `action`, `dialog`, `target`, `index`, `value`, `type`, `autoDismissPhantoms`, `timeout_ms`, `operation_id` | `object` | session optional | `interact_dialog` | Act on dialog controls by semantic identity; poll a returned operation_id on the same command. |
 | `job_cancel` | mutation | required: `job_id` | `object` | session required | `job_cancel` | Cancel an asynchronous macro job. |
 | `job_list` | read only | hash cache: optional `if_none_match` | `object` | session required | `job_list` | List jobs owned by the current session. |
 | `job_status` | read only | required: `job_id`; hash cache: optional `if_none_match` | `object` | session required | `job_status`, `wait_for_job` | Read asynchronous job status. |
@@ -57,8 +61,8 @@ The table lists command-specific fields. Every request also carries `command`; a
 | `ledger_lookup` | read only | optional: `error_code`, `error_fragment`, `macro_prefix`, `max` | `object` | session optional | raw: `imagej_command` | Look up confirmed fixes in the ledger. Use imagej_command({...}) from Python. |
 | `list_commands` | read only | optional: `include_classes` | `object` | session optional | raw: `imagej_command` | List installed Fiji menu commands. Use imagej_command({...}) from Python. |
 | `list_reactive_rules` | read only | hash cache: optional `if_none_match` | `object` | session optional | `list_reactive_rules` | List reactive automation rules. |
-| `open_image` | mutation | one of: `path`/`file`/`token`/`image_token`; optional: `path`, `file`, `token`, `image_token`, `series`, `timeout_ms` | `object` | session optional | raw: `imagej_command` | Open a local image path or governed token. Use imagej_command({...}) from Python. |
-| `open_image_by_token` | mutation | one of: `token`/`image_token`; optional: `token`, `image_token`, `timeout_ms` | `object` | session optional | raw: `imagej_command` | Open an image using a governed path token. Use imagej_command({...}) from Python. |
+| `open_image` | mutation | one of: `path`/`file`/`image_token`/`operation_id`; optional: `path`, `file`, `image_token`, `series`, `timeout_ms`, `operation_id` | `object` | session optional | raw: `imagej_command` | Open a local image path or governed image_token; poll a returned operation_id on the same command. Use imagej_command({...}) from Python. |
+| `open_image_by_token` | mutation | one of: `image_token`/`operation_id`; optional: `image_token`, `timeout_ms`, `operation_id` | `object` | session optional | raw: `imagej_command` | Open an image using governed image_token and poll a returned operation_id on the same command; token remains reserved for authentication. Use imagej_command({...}) from Python. |
 | `ping` | read only | hash cache: optional `if_none_match` | `object` | public | `ping` | Check server liveness. |
 | `probe_command` | mutation | required: `plugin` | `object` | session optional | `probe_command` | Probe a Fiji plugin dialog without accepting it. |
 | `reactive_disable` | mutation | required: `name` | `object` | session optional | `reactive_disable` | Disable a reactive rule. |

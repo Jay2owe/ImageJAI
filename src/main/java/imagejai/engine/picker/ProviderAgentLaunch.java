@@ -77,6 +77,13 @@ final class ProviderAgentLaunch {
      * unusable.
      */
     static Plan plan(String workspace, ModelEntry entry, Map<String, String> extraEnv) {
+        return plan(workspace, entry, extraEnv, pythonCommand(),
+                System.getProperty("os.name", ""));
+    }
+
+    /** Testable overload keeping the raw executable separate from shell syntax. */
+    static Plan plan(String workspace, ModelEntry entry, Map<String, String> extraEnv,
+                     String python, String osName) {
         if (isBlank(workspace) || entry == null
                 || isBlank(entry.providerId()) || isBlank(entry.modelId())) {
             return null;
@@ -93,11 +100,11 @@ final class ProviderAgentLaunch {
             throw new IllegalArgumentException(
                     "permission is available only to a trusted loopback provider");
         }
-        String python = pythonCommand();
+        String pythonForShell = AgentLauncher.quoteExecutableForShell(python, osName);
         // Provider keys and model ids carry no spaces, so they pass unquoted
         // through both cmd.exe and bash without shell escaping (and avoids
         // cmd `start`'s fragile quote parsing on the external path).
-        String command = python + " -m agent.providers.agent_cli"
+        String command = pythonForShell + " -m agent.providers.agent_cli"
                 + " --provider " + provider
                 + " --model " + model
                 + (allowLocalHostCode ? " --allow-local-host-code" : "");

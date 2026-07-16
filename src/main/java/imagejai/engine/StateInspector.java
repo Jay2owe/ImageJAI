@@ -298,8 +298,22 @@ public class StateInspector {
                 updateLong(digest, Double.doubleToLongBits(cal.yOrigin));
                 updateLong(digest, Double.doubleToLongBits(cal.zOrigin));
                 updateLong(digest, Double.doubleToLongBits(cal.frameInterval));
-                updateString(digest, cal.getUnit());
+                updateString(digest, cal.getXUnit());
+                updateString(digest, cal.getYUnit());
+                updateString(digest, cal.getZUnit());
+                updateString(digest, cal.getTimeUnit());
                 updateString(digest, cal.getValueUnit());
+                updateInt(digest, cal.getFunction());
+                double[] coefficients = cal.getCoefficients();
+                updateInt(digest, coefficients == null ? -1 : coefficients.length);
+                if (coefficients != null) {
+                    for (double coefficient : coefficients) {
+                        updateLong(digest, Double.doubleToLongBits(coefficient));
+                    }
+                }
+                updateInt(digest, cal.isSigned16Bit() ? 1 : 0);
+                updateInt(digest, cal.zeroClip() ? 1 : 0);
+                updateInt(digest, cal.getInvertY() ? 1 : 0);
             }
 
             ImageStack stack = imp.getStack();

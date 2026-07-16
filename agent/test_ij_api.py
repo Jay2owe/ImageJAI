@@ -162,6 +162,7 @@ def test_new_helpers_are_public():
         "run_jython",
         "probe_command",
         "interact_dialog",
+        "wait_for_operation",
         "get_progress",
         "get_roi_state",
         "get_display_state",
@@ -218,6 +219,192 @@ def test_imagej_session_negotiates_once_and_carries_credentials_across_sockets()
     assert len(server.requests) == 2
 
 
+def test_wait_for_operation_returns_terminal_success_without_replaying_mutation(
+        monkeypatch):
+    operation_id = "edt_AAAAAAAAAAAAAAAA"
+    session = ij.ImageJSession(token_loader=lambda: None)
+    replies = [
+        {
+            "ok": True,
+            "result": {
+                "operation_id": operation_id,
+                "state": "running",
+                "terminal": False,
+            },
+        },
+        {
+            "ok": True,
+            "result": {"opened": True},
+            "operation": {
+                "operation_id": operation_id,
+                "state": "completed",
+                "terminal": True,
+            },
+        },
+    ]
+    calls = []
+
+    def request(command, timeout=None, _check_dialogs=True):
+        calls.append((dict(command), timeout, _check_dialogs))
+        return replies.pop(0)
+
+    monkeypatch.setattr(session, "request", request)
+    monkeypatch.setattr(ij.time, "sleep", lambda _: None)
+
+    result = session.wait_for_operation(
+        "open_image", operation_id, timeout=2, poll_interval=0.01)
+
+    assert result["result"] == {"opened": True}
+    assert [call[0] for call in calls] == [
+        {"command": "open_image", "operation_id": operation_id},
+        {"command": "open_image", "operation_id": operation_id},
+    ]
+    assert all(call[1] > 0 for call in calls)
+    assert all(call[2] is False for call in calls)
+
+
+def test_wait_for_operation_surfaces_terminal_failure_unchanged(monkeypatch):
+    operation_id = "edt_BBBBBBBBBBBBBBBB"
+    failure = {
+        "ok": False,
+        "error": {
+            "code": "edt_operation_failed",
+            "category": "operation",
+            "retry_safe": False,
+            "message": "dialog action failed",
+        },
+        "operation": {
+            "operation_id": operation_id,
+            "state": "failed",
+            "terminal": True,
+        },
+    }
+    session = ij.ImageJSession(token_loader=lambda: None)
+    monkeypatch.setattr(
+        session, "request", lambda *args, **kwargs: failure)
+
+    assert session.wait_for_operation(
+        "interact_dialog", operation_id, timeout=1, poll_interval=0.01
+    ) is failure
+
+
+def test_wait_for_operation_honours_deadline_without_busy_loop(monkeypatch):
+    operation_id = "edt_CCCCCCCCCCCCCCCC"
+    calls = []
+
+    class Clock:
+        def __init__(self):
+            self.values = iter((10.0, 10.0, 10.5))
+
+        def monotonic(self):
+            return next(self.values)
+
+        def sleep(self, seconds):
+            pytest.fail("deadline-expired poll must not sleep")
+
+    def request(command, timeout=None):
+        calls.append((dict(command), timeout))
+        return {
+            "ok": True,
+            "result": {
+                "operation_id": operation_id,
+                "state": "running",
+                "terminal": False,
+            },
+        }
+
+    monkeypatch.setattr(ij, "time", Clock())
+    result = ij._wait_for_operation(
+        request, "close_dialogs", operation_id, 0.25, 0.1)
+
+    assert result["error"]["code"] == "operation_wait_timeout"
+    assert result["operation"]["operation_id"] == operation_id
+    assert len(calls) == 1
+    assert calls[0][0] == {
+        "command": "close_dialogs", "operation_id": operation_id}
+    assert 0 < calls[0][1] <= 0.25
+
+
+def test_wait_for_operation_owner_or_command_mismatch_is_not_retried(monkeypatch):
+    operation_id = "edt_DDDDDDDDDDDDDDDD"
+    unknown = {
+        "ok": False,
+        "error": {
+            "code": "operation_unknown",
+            "category": "operation",
+            "retry_safe": False,
+            "message": "operation is not owned by this session and command",
+        },
+    }
+    calls = []
+    session = ij.ImageJSession(token_loader=lambda: None)
+
+    def request(command, timeout=None, _check_dialogs=True):
+        calls.append((dict(command), _check_dialogs))
+        return unknown
+
+    monkeypatch.setattr(session, "request", request)
+    result = session.wait_for_operation(
+        "close_windows", operation_id, timeout=1, poll_interval=0.01)
+
+    assert result is unknown
+    assert calls == [({
+        "command": "close_windows", "operation_id": operation_id}, False)]
+
+
+@pytest.mark.parametrize(
+    ("command", "operation_id", "timeout", "poll_interval", "error"),
+    [
+        ("execute_macro", "edt_AAAAAAAAAAAAAAAA", 1, 0.1, ValueError),
+        ("open_image", "not-an-operation", 1, 0.1, ValueError),
+        ("open_image", "edt_AAAAAAAAAAAAAAAA", True, 0.1, TypeError),
+        ("open_image", "edt_AAAAAAAAAAAAAAAA", float("inf"), 0.1, ValueError),
+        ("open_image", "edt_AAAAAAAAAAAAAAAA", 1, 0.001, ValueError),
+    ],
+)
+def test_wait_for_operation_strictly_validates_inputs(
+        command, operation_id, timeout, poll_interval, error):
+    with pytest.raises(error):
+        ij._wait_for_operation(
+            lambda *_args, **_kwargs: pytest.fail("must validate before I/O"),
+            command, operation_id, timeout, poll_interval)
+
+
+def test_module_wait_for_operation_reuses_cached_authenticated_session(
+        monkeypatch):
+    operation_id = "edt_EEEEEEEEEEEEEEEE"
+    seen = []
+
+    class Session:
+        def request(self, command, timeout=None, _check_dialogs=True):
+            seen.append((dict(command), timeout, _check_dialogs))
+            return {
+                "ok": True,
+                "result": {"closed": 2},
+                "operation": {
+                    "operation_id": operation_id,
+                    "state": "completed",
+                    "terminal": True,
+                },
+            }
+
+    cached = Session()
+    monkeypatch.setattr(
+        ij, "_session_for",
+        lambda host, port: (
+            seen.append(("session", host, port)) or cached))
+
+    result = ij.wait_for_operation(
+        "close_dialogs", operation_id, timeout=3, poll_interval=0.05,
+        host="127.0.0.7", port=7777)
+
+    assert result["result"] == {"closed": 2}
+    assert seen[0] == ("session", "127.0.0.7", 7777)
+    assert seen[1][0] == {
+        "command": "close_dialogs", "operation_id": operation_id}
+    assert seen[1][2] is False
+
+
 def test_imagej_session_does_not_replay_authentication_failure():
     def reply(index, request):
         if index == 0:
@@ -251,6 +438,70 @@ def test_imagej_session_does_not_replay_authentication_failure():
     assert response["error"]["code"] == "session_token_mismatch"
     assert len(server.requests) == 2
     assert session.session_id is None
+
+
+def test_open_image_by_token_legacy_argument_cannot_replace_wire_auth_token():
+    command = {"command": "open_image_by_token", "token": "image-handle-123"}
+
+    def reply(index, request):
+        if index == 0:
+            assert request["command"] == "hello"
+            assert request["token"] == "install-secret"
+            return {
+                "ok": True,
+                "result": {
+                    "session_id": "governed-session",
+                    "expires_at": int(time.time() * 1000) + 60_000,
+                    "enabled": [],
+                },
+            }
+        assert request["command"] == "open_image_by_token"
+        assert request["image_token"] == "image-handle-123"
+        assert request["token"] == "install-secret"
+        return {"ok": True, "result": {"opened": True}}
+
+    server = ScriptedLoopbackServer(2, reply)
+    session = ij.ImageJSession(
+        host="127.0.0.1",
+        port=server.port,
+        token_loader=lambda: "install-secret",
+    )
+
+    response = session.request(command)
+    server.finish()
+
+    assert response["ok"] is True
+    assert command == {"command": "open_image_by_token", "token": "image-handle-123"}
+
+
+def test_legacy_token_only_open_image_is_translated_without_mutating_caller():
+    command = {"command": "open_image", "token": "legacy-image-handle"}
+
+    def reply(index, request):
+        if index == 0:
+            return {
+                "ok": True,
+                "result": {
+                    "session_id": "legacy-open-session",
+                    "expires_at": int(time.time() * 1000) + 60_000,
+                    "enabled": [],
+                },
+            }
+        assert request["command"] == "open_image"
+        assert request["image_token"] == "legacy-image-handle"
+        assert request["token"] == "install-secret"
+        assert "path" not in request
+        return {"ok": True, "result": {"opened": True}}
+
+    server = ScriptedLoopbackServer(2, reply)
+    session = ij.ImageJSession(
+        host="127.0.0.1", port=server.port,
+        token_loader=lambda: "install-secret",
+    )
+
+    assert session.request(command)["ok"] is True
+    server.finish()
+    assert command == {"command": "open_image", "token": "legacy-image-handle"}
 
 
 def test_imagej_session_compatibility_mode_still_uses_server_session_id():
@@ -892,6 +1143,81 @@ def test_inspection_wrappers_send_expected_commands(monkeypatch):
         {"command": "get_display_state"},
         {"command": "get_console", "tail": 5000},
     ]
+
+
+def test_active_image_wrappers_expose_exact_snapshot_plane_and_scope_bindings(monkeypatch):
+    calls = capture_imagej_command(monkeypatch)
+    binding = {
+        "image_id": "image-123",
+        "image_revision": 7,
+        "display_revision": 11,
+        "channel": 2,
+        "slice": 4,
+        "frame": 6,
+    }
+
+    ij.get_image_info(**binding)
+    ij.get_histogram(**binding, scope="full_plane")
+    ij.get_display_state(**binding)
+    ij.capture_image(512, **binding)
+    ij.get_pixels(1, 2, 3, 4, **binding)
+
+    assert [row[0] for row in calls] == [
+        {"command": "get_image_info", **binding},
+        {"command": "get_histogram", **binding, "scope": "full_plane"},
+        {"command": "get_display_state", **binding},
+        {"command": "capture_image", "maxSize": 512, **binding},
+        {"command": "get_pixels", "x": 1, "y": 2, "width": 3, "height": 4, **binding},
+    ]
+
+
+@pytest.mark.parametrize("bad", [True, 1.0, "1"])
+def test_active_image_wrappers_reject_ambiguous_integer_inputs(monkeypatch, bad):
+    calls = capture_imagej_command(monkeypatch)
+
+    with pytest.raises(TypeError, match="exact integer"):
+        ij.get_pixels(x=bad, y=0, width=1, height=1)
+    with pytest.raises(TypeError, match="exact integer"):
+        ij.get_histogram(channel=bad)
+    with pytest.raises(TypeError, match="exact integer"):
+        ij.capture_image(bad)
+    assert calls == []
+
+
+def test_active_image_wrappers_require_paired_identity_and_valid_scope(monkeypatch):
+    calls = capture_imagej_command(monkeypatch)
+
+    with pytest.raises(ValueError, match="provided together"):
+        ij.get_histogram(image_id="image-123")
+    with pytest.raises(ValueError, match="scope"):
+        ij.get_histogram(scope="roi-ish")
+    assert calls == []
+
+
+def test_bound_session_helpers_preserve_the_same_public_binding_contract(monkeypatch):
+    session = ij.ImageJSession(token_loader=lambda: None)
+    requests = []
+    monkeypatch.setattr(
+        session,
+        "request",
+        lambda request, **kwargs: requests.append((request, kwargs)) or {"ok": True},
+    )
+    binding = {
+        "image_id": "image-123", "image_revision": 7,
+        "display_revision": 11, "channel": 2, "slice": 4, "frame": 6,
+    }
+
+    session.get_image_info(**binding)
+    session.get_histogram(**binding, scope="active_roi")
+    session.get_pixels(0, 0, 2, 2, **binding)
+    session.get_display_state(**binding)
+    session.capture_image(256, **binding)
+
+    assert [row[0]["command"] for row in requests] == [
+        "get_image_info", "get_histogram", "get_pixels",
+        "get_display_state", "capture_image",
+    ]
+    assert all(row[0]["display_revision"] == 11 for row in requests)
 
 
 def test_probe_and_dialog_wrappers_send_expected_commands(monkeypatch):
