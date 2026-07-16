@@ -133,7 +133,8 @@ stats, line profile). The visual screenshot is lossy — never
 measure from it.
 
 RGB has two deliberate numeric representations. `get_pixels` returns
-packed `rgb24` values. `get_histogram` and its statistics return ImageJ's
+packed `rgb24` as canonical unsigned `0x00RRGGBB` integers from 0 through
+16,777,215. `get_histogram` and its statistics return ImageJ's
 0–255 weighted RGB intensity instead; read `value_domain.scalarization`
 for the exact red, green, and blue weights and rounding rule. Never compare
 those scalar histogram values directly with packed RGB pixel integers.

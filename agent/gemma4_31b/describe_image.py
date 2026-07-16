@@ -954,6 +954,22 @@ def _count_4_connected(mask: np.ndarray) -> int:
     return count
 
 
+def _decode_rgb24_samples(samples: np.ndarray):
+    """Return strict lower-24-bit RGB integers, including legacy signed 0xff forms."""
+    values = np.asarray(samples, dtype=np.float64)
+    if not np.isfinite(values).all() or not np.equal(values, np.floor(values)).all():
+        return None
+
+    # Current get_pixels replies publish ColorProcessor pixels as canonical
+    # 0x00RRGGBB values. Older replies exposed Java's signed 0xffRRGGBB int;
+    # accept exactly that sign-extension range, but no other high-byte values.
+    canonical_lower24 = (values >= 0) & (values <= 0x00ffffff)
+    legacy_signed_ff = (values >= -0x01000000) & (values <= -1)
+    if not np.all(canonical_lower24 | legacy_signed_ff):
+        return None
+    return np.bitwise_and(values.astype(np.int64), 0x00ffffff)
+
+
 def _threshold_thumbnail(thumb: np.ndarray, stats: dict, thumb_meta: dict | None):
     """Align thumbnail samples to the histogram's raw numeric domain."""
     samples = np.asarray(thumb, dtype=np.float64)
@@ -993,19 +1009,17 @@ def _threshold_thumbnail(thumb: np.ndarray, stats: dict, thumb_meta: dict | None
         rgb_weights = np.asarray(
             [red_weight, green_weight, blue_weight], dtype=np.float64
         )
-        signed_rgb = (samples >= -0x01000000) & (samples <= -1)
-        unsigned_rgb = (samples >= 0) & (samples <= 0x00ffffff)
         if (
             not np.isfinite(rgb_weights).all()
             or np.any(rgb_weights < 0)
             or not math.isclose(
                 float(rgb_weights.sum()), 1.0, rel_tol=0.0, abs_tol=1e-9
             )
-            or not np.equal(samples, np.floor(samples)).all()
-            or not np.all(signed_rgb | unsigned_rgb)
         ):
             return None
-        packed = np.bitwise_and(samples.astype(np.int64), 0x00ffffff)
+        packed = _decode_rgb24_samples(samples)
+        if packed is None:
+            return None
         red = ((packed >> 16) & 0xff).astype(np.float64)
         green = ((packed >> 8) & 0xff).astype(np.float64)
         blue = (packed & 0xff).astype(np.float64)

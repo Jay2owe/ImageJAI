@@ -240,7 +240,7 @@ def test_otsu_handles_extremes_constants_and_count_scale_invariance():
     assert describe_image._otsu_threshold_from_hist(scaled) == 77.0
 
 
-def test_rgb_thumbnail_scalarization_accepts_signed_java_argb_and_rounds_half_up():
+def test_rgb_thumbnail_scalarization_accepts_canonical_and_legacy_rgb24():
     stats = describe_image._hist_stats(
         _histogram(
             RGB_HISTOGRAM_DOMAIN,
@@ -250,7 +250,7 @@ def test_rgb_thumbnail_scalarization_accepts_signed_java_argb_and_rounds_half_up
         )
     )
     assert stats is not None
-    signed_pixels = np.asarray(
+    legacy_signed_pixels = np.asarray(
         [[
             _signed_java_int(0xffff0000),
             _signed_java_int(0xff000000),
@@ -260,11 +260,19 @@ def test_rgb_thumbnail_scalarization_accepts_signed_java_argb_and_rounds_half_up
     )
 
     scalar = describe_image._threshold_thumbnail(
-        signed_pixels, stats, {"value_domain": RGB_PIXEL_DOMAIN}
+        legacy_signed_pixels, stats, {"value_domain": RGB_PIXEL_DOMAIN}
     )
 
     assert np.array_equal(scalar, np.asarray([[51.0, 0.0, 128.0]]))
-    for invalid in (-0x01000001, 0x01000000, 1.5):
+    canonical_pixels = np.asarray(
+        [[0x00ffffff, 0x00123456]], dtype=np.float32
+    )
+    canonical_scalar = describe_image._threshold_thumbnail(
+        canonical_pixels, stats, {"value_domain": RGB_PIXEL_DOMAIN}
+    )
+    assert np.array_equal(canonical_scalar, np.asarray([[255.0, 62.0]]))
+
+    for invalid in (-0x01000001, 0x01000000, 0x01123456, 1.5):
         assert describe_image._threshold_thumbnail(
             np.asarray([[invalid]], dtype=np.float64),
             stats,
@@ -418,6 +426,72 @@ def test_describe_image_scalarizes_real_rgb_thumbnail_before_component_counts(mo
         "Auto-thresholds produce 1 connected components with Otsu, 1 with Li and 2 "
         "with Triangle" in text
     )
+
+
+def test_describe_image_accepts_server_canonical_lower24_rgb_pixels(monkeypatch):
+    binding = {
+        "image_id": "rgb-canonical",
+        "image_revision": 10,
+        "display_revision": 11,
+        "channel": 1,
+        "sliceStart": 1,
+        "sliceEnd": 1,
+        "sliceAxis": "Z",
+        "frame": 1,
+        "channels": 1,
+        "slices": 1,
+        "frames": 1,
+    }
+    info = {
+        **binding,
+        "title": "rgb-canonical.tif",
+        "width": 2,
+        "height": 1,
+        "type": "RGB",
+        "calibration": "",
+        "value_domain": RGB_PIXEL_DOMAIN,
+    }
+    histogram = {
+        **binding,
+        **_histogram(
+            RGB_HISTOGRAM_DOMAIN,
+            _bins_at(62, 255),
+            minimum=62.0,
+            maximum=255.0,
+        ),
+        "acquisition_min_count": None,
+        "acquisition_max_count": None,
+        "acquisition_limit_counts_exact": False,
+    }
+
+    def fake_send(command: str, **payload):
+        if command == "get_image_info":
+            return {"ok": True, "result": info}
+        if command == "get_pixels":
+            # The server canonicalizes ColorProcessor ints to 0x00RRGGBB.
+            return _pixel_response(
+                binding,
+                [0x00ffffff, 0x00123456],
+                width=2,
+                height=1,
+            )
+        if command == "get_histogram":
+            return {"ok": True, "result": histogram}
+        if command == "get_display_state":
+            return {
+                "ok": True,
+                "result": {**binding, "hasRoi": False, "hasOverlay": False},
+            }
+        raise AssertionError(command)
+
+    monkeypatch.setattr(describe_image, "_safe_send", fake_send)
+
+    text = describe_image.describe_image()
+
+    assert "Auto-thresholds produce" in text
+    assert "value domains cannot be aligned" not in text
+    assert "stripe-pattern check unavailable for packed RGB values" not in text
+    assert "no stripe pattern" in text
 
 
 def test_describe_image_reports_invalid_histogram_payload_explicitly(monkeypatch):

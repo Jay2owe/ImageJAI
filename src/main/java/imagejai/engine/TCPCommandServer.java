@@ -9399,9 +9399,17 @@ public class TCPCommandServer {
                                 imp.getStack().getProcessor(stackIndex);
                         for (int py = y; py < y + h; py++) {
                             for (int px = x; px < x + w; px++) {
-                                float value = rawPixelReaderForTest == null
-                                        ? ip.getf(px, py)
-                                        : rawPixelReaderForTest.read(ip, px, py);
+                                float value;
+                                if (rawPixelReaderForTest != null) {
+                                    value = rawPixelReaderForTest.read(ip, px, py);
+                                } else if (ip instanceof ColorProcessor) {
+                                    // ColorProcessor can retain a non-zero high byte.
+                                    // Mask before converting to float: converting the
+                                    // signed 32-bit value first would lose low RGB bits.
+                                    value = (float) (ip.get(px, py) & 0x00ffffff);
+                                } else {
+                                    value = ip.getf(px, py);
+                                }
                                 buf.putFloat(value);
                                 if (limits.known()) {
                                     if (value == limits.rawMin.doubleValue()) lowCount++;

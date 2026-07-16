@@ -14,6 +14,9 @@ import ij.process.FloatProcessor;
 import ij.process.ShortProcessor;
 import org.junit.Test;
 
+import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
+import java.util.Base64;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.Assert.assertEquals;
@@ -209,6 +212,16 @@ public class TCPCommandServerScientificSnapshotTest {
                     previousWeights[0], previousWeights[1], previousWeights[2]);
             server.stop();
         }
+    }
+
+    @Test
+    public void rgbPixelsMaskSignedHighByteBeforeFloatTransport() {
+        assertExactRgb24Pixel(0x80ffffff, 0x00ffffff);
+    }
+
+    @Test
+    public void rgbPixelsMaskPositiveHighByteBeforeFloatTransport() {
+        assertExactRgb24Pixel(0x7f123456, 0x00123456);
     }
 
     @Test
@@ -563,6 +576,29 @@ public class TCPCommandServerScientificSnapshotTest {
 
     private static TCPCommandServer newServer() {
         return new TCPCommandServer(0, null, null, null, null);
+    }
+
+    private static void assertExactRgb24Pixel(int storedPixel, int expectedRgb24) {
+        TCPCommandServer server = newServer();
+        ImagePlus image = new ImagePlus("rgb24-transport",
+                new ColorProcessor(1, 1, new int[] {storedPixel}));
+        server.currentImageForTest = () -> image;
+        try {
+            JsonObject pixels = result(server, "{\"command\":\"get_pixels\"}");
+            JsonObject domain = pixels.getAsJsonObject("value_domain");
+            assertEquals("raw", domain.get("representation").getAsString());
+            assertEquals("rgb24", domain.get("pixel_type").getAsString());
+            assertTrue(domain.get("signed").isJsonNull());
+
+            byte[] bytes = Base64.getDecoder().decode(pixels.get("data").getAsString());
+            assertEquals(4, bytes.length);
+            float transported = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN)
+                    .getFloat();
+            assertEquals(expectedRgb24, (int) transported);
+            assertEquals((float) expectedRgb24, transported, 0.0f);
+        } finally {
+            server.stop();
+        }
     }
 
     private static JsonObject result(TCPCommandServer server, String json) {
