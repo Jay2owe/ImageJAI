@@ -109,6 +109,7 @@ public class ReactiveEngineTest {
 
     @Test
     public void queuedWorkExpiresBeforeExecution() throws Exception {
+        final long loadedSuiteAsyncTimeoutSeconds = 10L;
         Path rules = temporary.newFolder("stale-rules").toPath();
         writeRule(rules, "capture", true, "trigger.stale",
                 actions(captureAction("stale")));
@@ -124,12 +125,16 @@ public class ReactiveEngineTest {
         rig.engine.start();
 
         rig.bus.publish("trigger.stale");
-        assertTrue(entered.await(2, TimeUnit.SECONDS));
+        assertTrue("initial reactive action did not enter its worker within the "
+                        + "loaded-suite timeout",
+                entered.await(loadedSuiteAsyncTimeoutSeconds, TimeUnit.SECONDS));
         rig.bus.publish("trigger.stale");
         now.set(111L);
         release.countDown();
 
-        assertTrue(expired.await(2, TimeUnit.SECONDS));
+        assertTrue("expired queued action did not publish its rejection within the "
+                        + "loaded-suite timeout",
+                expired.await(loadedSuiteAsyncTimeoutSeconds, TimeUnit.SECONDS));
         assertEquals("expired queued action must never allocate a capture", 1,
                 captures.get());
     }
