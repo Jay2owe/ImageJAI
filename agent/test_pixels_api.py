@@ -55,6 +55,63 @@ def pixel_response(values, width, height, slice_count=1, **overrides):
     return {"ok": True, "result": result}
 
 
+def rgb_histogram_response(*, image_revision=7, weights=None, n_pixels=3, domain_overrides=None):
+    domain = {
+        "representation": "raw",
+        "pixel_type": "uint8",
+        "signed": False,
+        "density_calibrated": False,
+        "acquisition_min_raw": 0.0,
+        "acquisition_max_raw": 255.0,
+        "acquisition_min_calibrated": None,
+        "acquisition_max_calibrated": None,
+        "scalarization": {
+            "method": "imagej_weighted_rgb_intensity",
+            "source_pixel_type": "rgb24",
+            "rounding": "nearest_integer_half_up",
+            "weights": weights or {"red": 0.2, "green": 0.3, "blue": 0.5},
+        },
+    }
+    domain.update(domain_overrides or {})
+    return {"ok": True, "result": {
+        "image_id": "image-123",
+        "image_revision": image_revision,
+        "display_revision": 11,
+        "sliceStart": 1,
+        "sliceEnd": 1,
+        "sliceAxis": "Z",
+        "channel": 2,
+        "frame": 3,
+        "channels": 4,
+        "slices": 7,
+        "frames": 5,
+        "scope": "full_plane",
+        "nPixels": n_pixels,
+        "value_domain": domain,
+    }}
+
+
+def rgb_pixel_response(values, width, height, domain_overrides=None):
+    domain = {
+        "representation": "raw",
+        "pixel_type": "rgb24",
+        "signed": None,
+        "density_calibrated": False,
+        "acquisition_min_raw": None,
+        "acquisition_max_raw": None,
+        "acquisition_min_calibrated": None,
+        "acquisition_max_calibrated": None,
+    }
+    domain.update(domain_overrides or {})
+    return pixel_response(
+        values,
+        width,
+        height,
+        type="RGB",
+        value_domain=domain,
+    )
+
+
 def test_public_api_is_explicit():
     for name in [
         "imagej_command",
@@ -232,6 +289,165 @@ def test_find_bright_objects_uses_full_precision_threshold_moments():
     assert pixels.compute_stats(values)["mean"] == 0.0
     assert pixels.compute_stats(values)["std"] == 0.0
     assert pixels.find_bright_objects(values, threshold_factor=2.0, min_size=1) == []
+
+
+def test_rgb_stats_preserve_raw_pixels_and_use_bound_imagej_scalarization(monkeypatch):
+    calls = []
+
+    def fake_send(cmd):
+        calls.append(cmd)
+        if cmd["command"] == "get_pixels":
+            return rgb_pixel_response([0x00ff0000, 0x0000ff00, 0x000000ff], 3, 1)
+        if cmd["command"] == "get_histogram":
+            return rgb_histogram_response()
+        raise AssertionError(cmd)
+
+    monkeypatch.setattr(pixels, "send", fake_send)
+
+    raw, meta = pixels.get_pixels()
+    assert list(raw[0]) == [float(0x00ff0000), float(0x0000ff00), 255.0]
+    assert pixels.compute_stats(raw, meta) == {
+        "count": 3,
+        "mean": 85.33,
+        "std": 31.98,
+        "min": 51.0,
+        "max": 128.0,
+        "median": 77.0,
+    }
+    assert calls[1] == {
+        "command": "get_histogram",
+        "image_id": "image-123",
+        "image_revision": 7,
+        "display_revision": 11,
+        "channel": 2,
+        "slice": 1,
+        "frame": 3,
+        "scope": "full_plane",
+        "force": True,
+    }
+
+    derived = pixels.get_current_stats()
+    assert derived["meta"]["value_domain"]["pixel_type"] == "rgb24"
+    assert derived["analysis_value_domain"]["pixel_type"] == "uint8"
+    assert derived["analysis_value_domain"]["scalarization"]["weights"] == {
+        "red": 0.2,
+        "green": 0.3,
+        "blue": 0.5,
+    }
+
+
+def test_rgb_profile_and_threshold_objects_use_half_up_scalar_plane(monkeypatch):
+    meta = pixels._pixel_metadata(
+        rgb_pixel_response([0.0], 1, 1)["result"], 1, 1, 1, 1
+    )
+    monkeypatch.setattr(pixels, "send", lambda cmd: rgb_histogram_response())
+    raw = [[0x00000000, 0x00ff0000, 0x00000000]]
+
+    profile = pixels.line_profile(raw, 0, 0, 2, 0, meta)
+    objects = pixels.find_bright_objects(
+        raw, meta, threshold_factor=0.5, min_size=1
+    )
+
+    assert [point["value"] for point in profile] == [0.0, 51.0, 0.0]
+    assert all(
+        point["analysis_value_domain"]["pixel_type"] == "uint8"
+        for point in profile
+    )
+    object_domain = objects[0].pop("analysis_value_domain")
+    assert object_domain["scalarization"]["rounding"] == "nearest_integer_half_up"
+    assert objects == [{
+        "label": 1,
+        "x": 1.0,
+        "y": 0.0,
+        "area": 1,
+        "mean_intensity": 51.0,
+        "abs_x": 1.0,
+        "abs_y": 0.0,
+    }]
+
+
+@pytest.mark.parametrize(
+    "histogram",
+    [
+        rgb_histogram_response(image_revision=8),
+        rgb_histogram_response(weights={"red": 0.2, "green": 0.3, "blue": 0.4}),
+        rgb_histogram_response(weights={"red": 0.2, "green": float("nan"), "blue": 0.8}),
+        rgb_histogram_response(n_pixels=0),
+        rgb_histogram_response(
+            domain_overrides={"density_calibrated": True}
+        ),
+        rgb_histogram_response(
+            domain_overrides={"acquisition_min_calibrated": 0.0}
+        ),
+    ],
+)
+def test_rgb_analysis_fails_closed_on_mismatched_or_unsafe_histogram(monkeypatch, histogram):
+    pixel_result = rgb_pixel_response([0x00ff0000], 1, 1)["result"]
+    meta = pixels._pixel_metadata(pixel_result, 1, 1, 1, 1)
+    monkeypatch.setattr(pixels, "send", lambda cmd: histogram)
+
+    with pytest.raises(RuntimeError, match="did not match|unsafe|cardinality"):
+        pixels.compute_stats([[0x00ff0000]], meta)
+
+
+def test_rgb_region_requires_full_plane_histogram_to_cover_requested_pixels(monkeypatch):
+    pixel_result = rgb_pixel_response([0x00ff0000, 0x00000000], 2, 1)["result"]
+    meta = pixels._pixel_metadata(pixel_result, 2, 1, 1, 2)
+    monkeypatch.setattr(
+        pixels, "send", lambda cmd: rgb_histogram_response(n_pixels=1)
+    )
+
+    with pytest.raises(RuntimeError, match="fewer pixels"):
+        pixels.compute_stats([[0x00ff0000, 0x00000000]], meta)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("representation", "calibrated"),
+        ("signed", False),
+        ("density_calibrated", True),
+        ("acquisition_min_raw", 0.0),
+        ("acquisition_max_raw", 255.0),
+        ("acquisition_min_calibrated", 0.0),
+        ("acquisition_max_calibrated", 255.0),
+        ("scalarization", {"method": "already_scalar"}),
+    ],
+)
+def test_rgb_analysis_rejects_mutated_packed_source_domains_before_histogram(
+    monkeypatch, field, value
+):
+    pixel_result = rgb_pixel_response([0x00ff0000], 1, 1)["result"]
+    meta = pixels._pixel_metadata(pixel_result, 1, 1, 1, 1)
+    meta["value_domain"] = dict(meta["value_domain"])
+    meta["value_domain"][field] = value
+    monkeypatch.setattr(
+        pixels,
+        "send",
+        lambda cmd: pytest.fail("unsafe source must fail before histogram fetch"),
+    )
+
+    with pytest.raises(RuntimeError, match="unsafe pixel domain"):
+        pixels.compute_stats([[0x00ff0000]], meta)
+
+
+@pytest.mark.parametrize("type_label", ["RGB", "  rGb   CoLoR  ", "24-BIT"])
+def test_rgb_image_type_cannot_bypass_packed_validation_with_uint8_domain(
+    monkeypatch, type_label
+):
+    pixel_result = rgb_pixel_response(
+        [0x00ff0000], 1, 1, {"pixel_type": "uint8"}
+    )["result"]
+    pixel_result["type"] = type_label
+    meta = pixels._pixel_metadata(pixel_result, 1, 1, 1, 1)
+    monkeypatch.setattr(
+        pixels,
+        "send",
+        lambda cmd: pytest.fail("type/domain mismatch must fail before histogram"),
+    )
+
+    with pytest.raises(RuntimeError, match="unsafe pixel domain"):
+        pixels.compute_stats([[0x00ff0000]], meta)
 
 
 def test_get_pixels_rejects_structured_errors_and_malformed_payloads(monkeypatch):

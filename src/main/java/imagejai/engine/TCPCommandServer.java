@@ -7749,14 +7749,20 @@ public class TCPCommandServer {
                         long lowCount = 0L;
                         long highCount = 0L;
                         if (limits.known()) {
-                            Rectangle bounds = activeRoi == null
-                                    ? new Rectangle(0, 0, imp.getWidth(), imp.getHeight())
-                                    : activeRoi.getBounds().intersection(
-                                            new Rectangle(0, 0, imp.getWidth(), imp.getHeight()));
-                            for (int y = bounds.y; y < bounds.y + bounds.height; y++) {
-                                for (int x = bounds.x; x < bounds.x + bounds.width; x++) {
-                                    if (activeRoi != null && !activeRoi.contains(x, y)) continue;
-                                    double value = source.getf(x, y);
+                            // ImageStatistics reads the processor's clipped ROI and
+                            // byte mask, not Roi.contains(). Those semantics differ
+                            // for line/point selections and can differ after an
+                            // irregular ROI is clipped at the image boundary. Reuse
+                            // the exact processor state that produced the histogram.
+                            Rectangle bounds = statisticsProcessor.getRoi();
+                            byte[] mask = statisticsProcessor.getMaskArray();
+                            for (int y = bounds.y, maskY = 0;
+                                 y < bounds.y + bounds.height; y++, maskY++) {
+                                int maskIndex = maskY * bounds.width;
+                                for (int x = bounds.x; x < bounds.x + bounds.width;
+                                     x++, maskIndex++) {
+                                    if (mask != null && mask[maskIndex] == 0) continue;
+                                    double value = statisticsProcessor.getf(x, y);
                                     if (value == limits.rawMin.doubleValue()) lowCount++;
                                     if (value == limits.rawMax.doubleValue()) highCount++;
                                 }

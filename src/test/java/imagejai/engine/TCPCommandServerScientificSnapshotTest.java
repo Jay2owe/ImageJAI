@@ -5,7 +5,10 @@ import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import ij.ImagePlus;
 import ij.ImageStack;
+import ij.gui.Line;
+import ij.gui.OvalRoi;
 import ij.gui.Overlay;
+import ij.gui.PointRoi;
 import ij.gui.Roi;
 import ij.measure.Calibration;
 import ij.process.ByteProcessor;
@@ -157,6 +160,20 @@ public class TCPCommandServerScientificSnapshotTest {
         } finally {
             server.stop();
         }
+    }
+
+    @Test
+    public void activeRoiLimitCountsUseImageStatisticsProcessorSelection() {
+        assertRoiLimitCounts("one-pixel line", new Line(1, 2, 4, 2),
+                4L, 2L, 2L);
+        assertRoiLimitCounts("single point", new PointRoi(3, 1),
+                1L, 1L, 0L);
+        assertRoiLimitCounts("masked oval", new OvalRoi(1, 1, 4, 4),
+                12L, 6L, 6L);
+        assertRoiLimitCounts("clipped rectangle", new Roi(-1, 1, 3, 2),
+                4L, 2L, 2L);
+        assertRoiLimitCounts("ordinary rectangle", new Roi(2, 1, 3, 2),
+                6L, 3L, 3L);
     }
 
     @Test
@@ -666,5 +683,44 @@ public class TCPCommandServerScientificSnapshotTest {
 
     private static JsonObject parse(String json) {
         return new JsonParser().parse(json).getAsJsonObject();
+    }
+
+    private static void assertRoiLimitCounts(String label, Roi roi,
+                                             long expectedPixels,
+                                             long expectedLow,
+                                             long expectedHigh) {
+        TCPCommandServer server = newServer();
+        byte[] pixels = new byte[36];
+        for (int y = 0; y < 6; y++) {
+            for (int x = 0; x < 6; x++) {
+                pixels[y * 6 + x] = (byte) (((x + y) & 1) == 0 ? 0 : 255);
+            }
+        }
+        ImagePlus image = new ImagePlus(label,
+                new ByteProcessor(6, 6, pixels, null));
+        image.setRoi(roi);
+        server.currentImageForTest = () -> image;
+        try {
+            JsonObject histogram = result(server,
+                    "{\"command\":\"get_histogram\"}");
+            JsonArray bins = histogram.getAsJsonArray("bins");
+
+            assertEquals(label, expectedPixels,
+                    histogram.get("nPixels").getAsLong());
+            assertEquals(label + " histogram minimum", expectedLow,
+                    bins.get(0).getAsLong());
+            assertEquals(label + " histogram maximum", expectedHigh,
+                    bins.get(255).getAsLong());
+            assertEquals(label + " minimum endpoint count", expectedLow,
+                    histogram.get("acquisition_min_count").getAsLong());
+            assertEquals(label + " maximum endpoint count", expectedHigh,
+                    histogram.get("acquisition_max_count").getAsLong());
+            assertEquals(label + " endpoint histogram total", expectedPixels,
+                    bins.get(0).getAsLong() + bins.get(255).getAsLong());
+            assertTrue(label,
+                    histogram.get("acquisition_limit_counts_exact").getAsBoolean());
+        } finally {
+            server.stop();
+        }
     }
 }

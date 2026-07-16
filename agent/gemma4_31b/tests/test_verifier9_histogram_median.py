@@ -216,9 +216,10 @@ def test_sparse_uint8_valley_and_threshold_use_absolute_bin_values(monkeypatch):
 
     assert "valley at intensity 77" in describe_image._fragment_histogram_shape(stats)
     assert describe_image._otsu_threshold_from_hist(stats) == 77.0
-    # Triangle selects absolute bin 52 for this sparse distribution. Mapping
+    # ImageJ 1.54c Triangle selects absolute bin 53 for this sparse distribution
+    # after extending the occupied support and decrementing its split. Mapping
     # through observed 51..128 would incorrectly report about 67 instead.
-    assert describe_image._triangle_threshold_from_hist(stats) == 52.0
+    assert describe_image._triangle_threshold_from_hist(stats) == 53.0
 
 
 def test_otsu_handles_extremes_constants_and_count_scale_invariance():
@@ -519,9 +520,9 @@ def test_describe_image_reports_invalid_histogram_payload_explicitly(monkeypatch
     }
     histogram = {
         **binding,
-        **_histogram(UINT8_DOMAIN, _bins_at(10), minimum=10.0, maximum=10.0),
+        **_histogram(UINT8_DOMAIN, _bins_at(10, 20), minimum=10.0, maximum=20.0),
     }
-    histogram["bins"] = _bins_at(10, 20)  # Sum 2 disagrees with nPixels 1.
+    # Internally valid histogram, but its two pixels cannot be the bound 1x1 plane.
 
     def fake_send(command: str, **payload):
         if command == "get_image_info":

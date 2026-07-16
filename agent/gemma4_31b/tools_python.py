@@ -87,6 +87,64 @@ def _optional_finite_number(value, name):
     return value
 
 
+def _is_rgb_image_type(value) -> bool:
+    return isinstance(value, str) and value.strip().lower() in (
+        "rgb", "rgb color", "24-bit"
+    )
+
+
+def _is_exact_rgb24_source_domain(domain) -> bool:
+    """Recognize only the uncalibrated packed domain emitted by get_pixels."""
+    required = (
+        "representation", "pixel_type", "signed", "density_calibrated",
+        "acquisition_min_raw", "acquisition_max_raw",
+        "acquisition_min_calibrated", "acquisition_max_calibrated",
+    )
+    return (
+        isinstance(domain, dict)
+        and all(key in domain for key in required)
+        and domain.get("representation") == "raw"
+        and domain.get("pixel_type") == "rgb24"
+        and domain.get("signed") is None
+        and domain.get("density_calibrated") is False
+        and all(
+            domain.get(key) is None
+            for key in (
+                "acquisition_min_raw", "acquisition_max_raw",
+                "acquisition_min_calibrated", "acquisition_max_calibrated",
+            )
+        )
+        and domain.get("scalarization") is None
+    )
+
+
+def _is_exact_rgb_scalar_domain(domain) -> bool:
+    """Recognize the raw uint8 domain ImageJ publishes for weighted RGB intensity."""
+    required = (
+        "representation", "pixel_type", "signed", "density_calibrated",
+        "acquisition_min_raw", "acquisition_max_raw",
+        "acquisition_min_calibrated", "acquisition_max_calibrated",
+        "scalarization",
+    )
+    return (
+        isinstance(domain, dict)
+        and all(key in domain for key in required)
+        and domain.get("representation") == "raw"
+        and domain.get("pixel_type") == "uint8"
+        and domain.get("signed") is False
+        and domain.get("density_calibrated") is False
+        and isinstance(domain.get("acquisition_min_raw"), (int, float))
+        and not isinstance(domain.get("acquisition_min_raw"), bool)
+        and float(domain["acquisition_min_raw"]) == 0.0
+        and isinstance(domain.get("acquisition_max_raw"), (int, float))
+        and not isinstance(domain.get("acquisition_max_raw"), bool)
+        and float(domain["acquisition_max_raw"]) == 255.0
+        and domain.get("acquisition_min_calibrated") is None
+        and domain.get("acquisition_max_calibrated") is None
+        and isinstance(domain.get("scalarization"), dict)
+    )
+
+
 def _decode_value_domain(result: dict):
     domain = result.get("value_domain")
     if not isinstance(domain, dict) or domain.get("representation") != "raw":
@@ -106,9 +164,15 @@ def _decode_value_domain(result: dict):
     ):
         normalized[key] = _optional_finite_number(domain.get(key), key)
     scalarization = domain.get("scalarization")
+    if (
+        scalarization is None
+        and (domain.get("pixel_type") == "rgb24" or _is_rgb_image_type(result.get("type")))
+        and not _is_exact_rgb24_source_domain(domain)
+    ):
+        raise ValueError("invalid packed RGB24 source value-domain metadata")
     if scalarization is not None:
         if (
-            domain.get("pixel_type") != "uint8"
+            not _is_exact_rgb_scalar_domain(domain)
             or not isinstance(scalarization, dict)
             or scalarization.get("method") != "imagej_weighted_rgb_intensity"
             or scalarization.get("source_pixel_type") != "rgb24"
@@ -176,22 +240,24 @@ def _get_image_info() -> dict:
         channels = _exact_int(result["channels"], "channels", 1)
         slices = _exact_int(result["slices"], "slices", 1)
         frames = _exact_int(result["frames"], "frames", 1)
-        image_id = str(result["image_id"])
+        image_id = result["image_id"]
         image_revision = _exact_int(result["image_revision"], "image_revision", 1)
         display_revision = _exact_int(result["display_revision"], "display_revision", 1)
         channel = _exact_int(result["channel"], "channel", 1)
         slice_start = _exact_int(result["sliceStart"], "sliceStart", 1)
         slice_end = _exact_int(result["sliceEnd"], "sliceEnd", 1)
-        slice_axis = str(result["sliceAxis"])
+        slice_axis = result["sliceAxis"]
         frame = _exact_int(result["frame"], "frame", 1)
         value_domain = _decode_value_domain(result)
+        if not isinstance(image_id, str) or not isinstance(slice_axis, str):
+            raise TypeError("image_id and sliceAxis must be strings")
     except (KeyError, TypeError, ValueError) as exc:
         return _error(
             "get_image_info returned incomplete image-axis metadata: {}".format(exc)
         )
     if (
         min(width, height, channels, slices, frames) <= 0
-        or not image_id
+        or not image_id.strip()
         or image_revision <= 0
         or slice_axis != "Z"
         or slice_start != slice_end
@@ -296,7 +362,7 @@ def _decode_pixel_metadata(result: dict, width: int, height: int):
     """Return validated server metadata, including exact C/Z/T attribution."""
     try:
         meta = {
-            "image_id": str(result["image_id"]),
+            "image_id": result["image_id"],
             "image_revision": _exact_int(result["image_revision"], "image_revision", 1),
             "display_revision": _exact_int(result["display_revision"], "display_revision", 1),
             "x": _exact_int(result["x"], "x", 0),
@@ -306,17 +372,24 @@ def _decode_pixel_metadata(result: dict, width: int, height: int):
             "sliceStart": _exact_int(result["sliceStart"], "sliceStart", 1),
             "sliceEnd": _exact_int(result["sliceEnd"], "sliceEnd", 1),
             "sliceCount": _exact_int(result["sliceCount"], "sliceCount", 1),
-            "sliceAxis": str(result["sliceAxis"]),
+            "sliceAxis": result["sliceAxis"],
             "channel": _exact_int(result["channel"], "channel", 1),
             "frame": _exact_int(result["frame"], "frame", 1),
             "channels": _exact_int(result["channels"], "channels", 1),
             "slices": _exact_int(result["slices"], "slices", 1),
             "frames": _exact_int(result["frames"], "frames", 1),
             "nPixels": _exact_int(result["nPixels"], "nPixels", 1),
-            "type": str(result["type"]),
-            "encoding": str(result["encoding"]),
+            "type": result["type"],
+            "encoding": result["encoding"],
             "value_domain": _decode_value_domain(result),
         }
+        if (
+            not isinstance(meta["image_id"], str)
+            or not isinstance(meta["sliceAxis"], str)
+            or not isinstance(meta["type"], str)
+            or not isinstance(meta["encoding"], str)
+        ):
+            raise TypeError("image_id, sliceAxis, type and encoding must be strings")
         counts_exact = result["acquisition_limit_counts_exact"]
         if not isinstance(counts_exact, bool):
             raise TypeError("acquisition_limit_counts_exact must be bool")
@@ -337,7 +410,7 @@ def _decode_pixel_metadata(result: dict, width: int, height: int):
         )
 
     if (
-        not meta["image_id"]
+        not meta["image_id"].strip()
         or meta["image_revision"] <= 0
         or meta["x"] < 0
         or meta["y"] < 0
@@ -378,25 +451,128 @@ def _metadata_matches_info(
 ) -> bool:
     """Reject a response from a different image revision or C/Z/T plane."""
     try:
-        expected_slice = int(
-            info["sliceStart"] if requested_slice is None else requested_slice
+        expected_slice = _exact_int(
+            info["sliceStart"] if requested_slice is None else requested_slice,
+            "expected slice",
+            1,
         )
+        meta_image_id = meta["image_id"]
+        info_image_id = info["image_id"]
+        if (
+            not isinstance(meta_image_id, str)
+            or not meta_image_id.strip()
+            or not isinstance(info_image_id, str)
+            or not info_image_id.strip()
+            or not isinstance(meta["sliceAxis"], str)
+            or not isinstance(info["sliceAxis"], str)
+        ):
+            return False
         return (
-            str(meta["image_id"]) == str(info["image_id"])
-            and int(meta["image_revision"]) == int(info["image_revision"])
-            and int(meta["display_revision"]) == int(info["display_revision"])
-            and str(meta["sliceAxis"]) == "Z"
-            and int(meta["sliceStart"]) == expected_slice
-            and int(meta["sliceEnd"]) == expected_slice
-            and int(meta["channel"]) == int(info["channel"])
-            and int(meta["frame"]) == int(info["frame"])
+            meta_image_id == info_image_id
+            and _exact_int(meta["image_revision"], "image_revision", 1)
+            == _exact_int(info["image_revision"], "info image_revision", 1)
+            and _exact_int(meta["display_revision"], "display_revision", 1)
+            == _exact_int(info["display_revision"], "info display_revision", 1)
+            and meta["sliceAxis"] == info["sliceAxis"] == "Z"
+            and _exact_int(meta["sliceStart"], "sliceStart", 1) == expected_slice
+            and _exact_int(meta["sliceEnd"], "sliceEnd", 1) == expected_slice
+            and _exact_int(meta["channel"], "channel", 1)
+            == _exact_int(info["channel"], "info channel", 1)
+            and _exact_int(meta["frame"], "frame", 1)
+            == _exact_int(info["frame"], "info frame", 1)
             and all(
-                int(meta[key]) == int(info[key])
+                _exact_int(meta[key], key, 1)
+                == _exact_int(info[key], "info " + key, 1)
                 for key in ("channels", "slices", "frames")
             )
         )
     except (KeyError, TypeError, ValueError):
         return False
+
+
+def _decode_rgb24_samples(samples: np.ndarray):
+    """Return strict lower-24-bit RGB integers, including legacy signed 0xff forms."""
+    values = np.asarray(samples, dtype=np.float64)
+    if not np.isfinite(values).all() or not np.equal(values, np.floor(values)).all():
+        return None
+    canonical_lower24 = (values >= 0) & (values <= 0x00ffffff)
+    legacy_signed_ff = (values >= -0x01000000) & (values <= -1)
+    if not np.all(canonical_lower24 | legacy_signed_ff):
+        return None
+    return np.bitwise_and(values.astype(np.int64), 0x00ffffff)
+
+
+def _scalarize_rgb24_measurement(arr: np.ndarray, meta: dict, info: dict):
+    """Align packed RGB samples to ImageJ's exact snapshot-bound intensity domain."""
+    pixel_domain = meta.get("value_domain")
+    packed_source = (
+        isinstance(pixel_domain, dict) and pixel_domain.get("pixel_type") == "rgb24"
+    ) or _is_rgb_image_type(meta.get("type"))
+    if not packed_source:
+        return arr, meta
+    if not _is_exact_rgb24_source_domain(pixel_domain):
+        return None, _error("invalid packed RGB24 source value-domain metadata")
+
+    payload = _snapshot_payload(info)
+    payload["scope"] = "full_plane"
+    response = _safe_send("get_histogram", **payload)
+    result = response.get("result") if isinstance(response, dict) else None
+    if not isinstance(response, dict) or not response.get("ok"):
+        detail = response.get("error") if isinstance(response, dict) else None
+        return None, _error(
+            "RGB intensity analysis requires a snapshot-bound full-plane histogram{}".format(
+                ": {}".format(detail) if detail else ""
+            )
+        )
+    if (
+        not isinstance(result, dict)
+        or result.get("scope") != "full_plane"
+        or not _metadata_matches_info(result, info)
+    ):
+        return None, _error(
+            "RGB intensity analysis histogram did not match the image snapshot and C/Z/T plane"
+        )
+    try:
+        histogram_pixels = _exact_int(result["nPixels"], "nPixels", 1)
+        histogram_domain = _decode_value_domain(result)
+        expected_pixels = int(info["width"]) * int(info["height"])
+    except (KeyError, TypeError, ValueError, OverflowError) as exc:
+        return None, _error("invalid RGB histogram scalarization metadata: {}".format(exc))
+    scalarization = histogram_domain.get("scalarization")
+    if (
+        histogram_pixels != expected_pixels
+        or histogram_domain.get("representation") != "raw"
+        or histogram_domain.get("pixel_type") != "uint8"
+        or histogram_domain.get("signed") is not False
+        or histogram_domain.get("density_calibrated") is not False
+        or histogram_domain.get("acquisition_min_raw") != 0.0
+        or histogram_domain.get("acquisition_max_raw") != 255.0
+        or histogram_domain.get("acquisition_min_calibrated") is not None
+        or histogram_domain.get("acquisition_max_calibrated") is not None
+        or not isinstance(scalarization, dict)
+    ):
+        return None, _error("invalid RGB histogram scalarization metadata")
+
+    # _decode_value_domain has already checked the method, source, rounding,
+    # finite/non-negative weights, and a normalized sum within 1e-9.
+    weights = scalarization["weights"]
+    packed = _decode_rgb24_samples(arr)
+    if packed is None:
+        return None, _error("get_pixels returned invalid packed RGB24 samples")
+    red = ((packed >> 16) & 0xff).astype(np.float64)
+    green = ((packed >> 8) & 0xff).astype(np.float64)
+    blue = (packed & 0xff).astype(np.float64)
+    scalar = np.floor(
+        red * weights["red"]
+        + green * weights["green"]
+        + blue * weights["blue"]
+        + 0.5
+    )
+    if not np.isfinite(scalar).all() or np.any(scalar < 0) or np.any(scalar > 255):
+        return None, _error("RGB scalarization produced invalid uint8 intensities")
+    scalar_meta = dict(meta)
+    scalar_meta["value_domain"] = histogram_domain
+    return scalar, scalar_meta
 
 
 def _measurement_result(meta: dict, **payload) -> dict:
@@ -470,10 +646,15 @@ def _fetch_full_downsampled(max_side: int = _MAX_LONG_EDGE):
             return None, _error("active image geometry changed during pixel fetch")
         if not _metadata_matches_info(meta, info):
             return None, _error("active image snapshot or pixel plane changed during fetch")
+        arr, meta = _scalarize_rgb24_measurement(arr, meta, info)
+        if arr is None:
+            return None, meta
         if factor > 1:
             arr = arr[::factor, ::factor]
         meta["downsample_factor"] = int(factor)
-        meta["bit_depth"] = int(bit_depth)
+        meta["bit_depth"] = (
+            8 if meta["value_domain"].get("scalarization") is not None else int(bit_depth)
+        )
         meta["source"] = "full"
         return arr, meta
 
@@ -493,8 +674,13 @@ def _fetch_full_downsampled(max_side: int = _MAX_LONG_EDGE):
         return None, _error("active image geometry changed during pixel fetch")
     if not _metadata_matches_info(meta, info):
         return None, _error("active image snapshot or pixel plane changed during fetch")
+    arr, meta = _scalarize_rgb24_measurement(arr, meta, info)
+    if arr is None:
+        return None, meta
     meta["downsample_factor"] = int(factor)
-    meta["bit_depth"] = int(bit_depth)
+    meta["bit_depth"] = (
+        8 if meta["value_domain"].get("scalarization") is not None else int(bit_depth)
+    )
     meta["source"] = "center_crop"
     meta["note"] = (
         "image {}x{} exceeds the 4M-pixel server cap; "
@@ -556,38 +742,55 @@ def _li_threshold(arr) -> float:
 
 
 def _triangle_threshold(arr) -> float:
-    """Zack's triangle method on a 256-bin histogram of arr."""
+    """ImageJ 1.54c's generalized Triangle method on a 256-bin histogram."""
     flat = arr.ravel()
     lo = float(flat.min())
     hi = float(flat.max())
     if hi <= lo:
         return lo
     hist, edges = np.histogram(flat, bins=256, range=(lo, hi))
+    occupied = np.flatnonzero(hist)
+    if occupied.size == 0:
+        return lo
+    if occupied.size == 1:
+        return float(edges[int(occupied[0])])
     peak = int(np.argmax(hist))
-    if peak < 128:
-        end = len(hist) - 1
-        while end > peak and hist[end] == 0:
-            end -= 1
-    else:
-        end = 0
-        while end < peak and hist[end] == 0:
-            end += 1
-    x0, y0 = float(peak), float(hist[peak])
-    x1, y1 = float(end), float(hist[end])
-    dx = x1 - x0
-    dy = y1 - y0
-    denom = math.sqrt(dx * dx + dy * dy)
+    first = int(occupied[0])
+    last = int(occupied[-1])
+    line_end = first - 1 if first > 0 else first
+    far_end = last + 1 if last < hist.size - 1 else last
+    inverted = peak - line_end < far_end - peak
+    working = hist[::-1].copy() if inverted else hist
+    if inverted:
+        line_end = hist.size - 1 - far_end
+        peak = hist.size - 1 - peak
+    if line_end == peak:
+        index = int(occupied[0])
+        return float(edges[index])
+
+    # Match ImageJ AutoThresholder 1.54c: orient the selected tail on the
+    # left, extend its support by one zero bin when possible, scan strictly
+    # from that endpoint toward the peak, then move the split down one bin.
+    nx = float(working[peak])
+    ny = float(line_end - peak)
+    denom = math.sqrt(nx * nx + ny * ny)
     if denom == 0:
         return float(edges[peak])
-    lo_i, hi_i = min(peak, end), max(peak, end)
-    best = peak
-    max_d = -1.0
-    for i in range(lo_i, hi_i + 1):
-        d = abs(dy * float(i) - dx * float(hist[i]) + x1 * y0 - y1 * x0) / denom
-        if d > max_d:
-            max_d = d
-            best = i
-    return float(edges[best])
+    nx /= denom
+    ny /= denom
+    line_d = nx * line_end + ny * float(working[line_end])
+    split = line_end
+    split_distance = 0.0
+    for index in range(line_end + 1, peak + 1):
+        distance = nx * index + ny * float(working[index]) - line_d
+        if distance > split_distance:
+            split = index
+            split_distance = distance
+    split -= 1
+    if inverted:
+        split = hist.size - 1 - split
+    split = max(0, min(int(split), hist.size - 1))
+    return float(edges[split])
 
 
 _THRESHOLD_METHODS = {
@@ -743,6 +946,9 @@ def region_stats(x: int, y: int, width: int, height: int) -> dict:
         return _error("Fiji returned clamped pixel geometry; image state changed")
     if not _metadata_matches_info(meta, info):
         return _error("active image snapshot or pixel plane changed during fetch")
+    arr, meta = _scalarize_rgb24_measurement(arr, meta, info)
+    if arr is None:
+        return meta
     flat = arr.ravel()
     return _measurement_result(
         meta,
@@ -809,6 +1015,9 @@ def line_profile(x1: int, y1: int, x2: int, y2: int) -> dict:
         return _error("Fiji returned clamped pixel geometry; image state changed")
     if not _metadata_matches_info(meta, info):
         return _error("active image snapshot or pixel plane changed during fetch")
+    arr, meta = _scalarize_rgb24_measurement(arr, meta, info)
+    if arr is None:
+        return meta
     dx = float(x2_i - x1_i)
     dy = float(y2_i - y1_i)
     length = math.hypot(dx, dy)

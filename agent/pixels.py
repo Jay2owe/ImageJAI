@@ -136,6 +136,12 @@ def _value_domain(result):
     pixel_type = domain.get("pixel_type")
     if pixel_type not in ("uint8", "uint16", "float32", "rgb24", "indexed8", "unknown"):
         raise RuntimeError("get_pixels failed: invalid pixel type metadata")
+    if pixel_type == "rgb24" and not {
+        "representation", "pixel_type", "signed", "density_calibrated",
+        "acquisition_min_raw", "acquisition_max_raw",
+        "acquisition_min_calibrated", "acquisition_max_calibrated",
+    }.issubset(domain):
+        raise RuntimeError("get_pixels failed: incomplete rgb24 value-domain metadata")
     signed = domain.get("signed")
     if signed is not None and not isinstance(signed, bool):
         raise RuntimeError("get_pixels failed: invalid signed metadata")
@@ -229,6 +235,227 @@ def _pixel_metadata(result, width, height, slice_count, pixel_count):
         "acquisition_max_count": max_count,
         "acquisition_limit_counts_exact": counts_exact,
     }
+
+
+def _is_rgb_image_type(value):
+    if not isinstance(value, str):
+        return False
+    normalized = " ".join(value.strip().casefold().split())
+    return normalized in ("rgb", "rgb color", "24-bit")
+
+
+def _rgb24_analysis_weights(meta):
+    """Fetch and validate ImageJ's scalar-intensity contract for one RGB plane."""
+    if meta is None:
+        return None
+    if not isinstance(meta, dict):
+        raise RuntimeError("RGB intensity analysis requires pixel metadata")
+    domain = meta.get("value_domain")
+    packed_source = (
+        _is_rgb_image_type(meta.get("type"))
+        or (isinstance(domain, dict) and domain.get("pixel_type") == "rgb24")
+    )
+    if not packed_source:
+        return None
+    if not isinstance(domain, dict) or domain.get("pixel_type") != "rgb24":
+        raise RuntimeError("RGB intensity analysis received an unsafe pixel domain")
+    required_source_fields = {
+        "representation", "pixel_type", "signed", "density_calibrated",
+        "acquisition_min_raw", "acquisition_max_raw",
+        "acquisition_min_calibrated", "acquisition_max_calibrated",
+    }
+    if (
+        not required_source_fields.issubset(domain)
+        or domain.get("representation") != "raw"
+        or domain.get("signed") is not None
+        or domain.get("density_calibrated") is not False
+        or domain.get("acquisition_min_raw") is not None
+        or domain.get("acquisition_max_raw") is not None
+        or domain.get("acquisition_min_calibrated") is not None
+        or domain.get("acquisition_max_calibrated") is not None
+        or domain.get("scalarization") is not None
+    ):
+        raise RuntimeError("RGB intensity analysis received an unsafe pixel domain")
+
+    try:
+        image_id_raw = meta["image_id"]
+        if not isinstance(image_id_raw, str) or not image_id_raw.strip():
+            raise ValueError("image_id must be a non-empty string")
+        image_id = image_id_raw.strip()
+        image_revision = _exact_int(meta["image_revision"], "image_revision", 1)
+        display_revision = _exact_int(meta["display_revision"], "display_revision", 1)
+        channel = _exact_int(meta["channel"], "channel", 1)
+        slice_start = _exact_int(meta["sliceStart"], "sliceStart", 1)
+        slice_end = _exact_int(meta["sliceEnd"], "sliceEnd", 1)
+        frame = _exact_int(meta["frame"], "frame", 1)
+        channels = _exact_int(meta["channels"], "channels", 1)
+        slices = _exact_int(meta["slices"], "slices", 1)
+        frames = _exact_int(meta["frames"], "frames", 1)
+    except (KeyError, TypeError, ValueError) as exc:
+        raise RuntimeError(
+            "RGB intensity analysis requires complete snapshot/C/Z/T metadata"
+        ) from exc
+    if (
+        not image_id
+        or meta.get("sliceAxis") != "Z"
+        or slice_start != slice_end
+        or not 1 <= channel <= channels
+        or not 1 <= slice_start <= slices
+        or not 1 <= frame <= frames
+    ):
+        raise RuntimeError("RGB intensity analysis received inconsistent pixel metadata")
+
+    request = {
+        "command": "get_histogram",
+        "image_id": image_id,
+        "image_revision": image_revision,
+        "display_revision": display_revision,
+        "channel": channel,
+        "slice": slice_start,
+        "frame": frame,
+        "scope": "full_plane",
+        "force": True,
+    }
+    response = send(request)
+    if not isinstance(response, dict) or not response.get("ok"):
+        raise RuntimeError(
+            "RGB intensity analysis cannot obtain scalarization metadata: {}".format(
+                _error_message(response)
+            )
+        )
+    result = response.get("result")
+    if not isinstance(result, dict):
+        raise RuntimeError("RGB histogram scalarization result is not an object")
+
+    try:
+        metadata_matches = (
+            isinstance(result["image_id"], str)
+            and result["image_id"].strip() == image_id
+            and _exact_int(result["image_revision"], "image_revision", 1)
+            == image_revision
+            and _exact_int(result["display_revision"], "display_revision", 1)
+            == display_revision
+            and result["sliceAxis"] == "Z"
+            and _exact_int(result["sliceStart"], "sliceStart", 1) == slice_start
+            and _exact_int(result["sliceEnd"], "sliceEnd", 1) == slice_start
+            and _exact_int(result["channel"], "channel", 1) == channel
+            and _exact_int(result["frame"], "frame", 1) == frame
+            and _exact_int(result["channels"], "channels", 1) == channels
+            and _exact_int(result["slices"], "slices", 1) == slices
+            and _exact_int(result["frames"], "frames", 1) == frames
+            and result["scope"] == "full_plane"
+        )
+    except (KeyError, TypeError, ValueError):
+        metadata_matches = False
+    if not metadata_matches:
+        raise RuntimeError(
+            "RGB histogram scalarization metadata did not match the pixel snapshot/plane"
+        )
+
+    histogram_domain = result.get("value_domain")
+    scalarization = (
+        histogram_domain.get("scalarization")
+        if isinstance(histogram_domain, dict)
+        else None
+    )
+    if (
+        not isinstance(histogram_domain, dict)
+        or histogram_domain.get("representation") != "raw"
+        or histogram_domain.get("pixel_type") != "uint8"
+        or histogram_domain.get("signed") is not False
+        or histogram_domain.get("density_calibrated") is not False
+        or histogram_domain.get("acquisition_min_raw") != 0.0
+        or histogram_domain.get("acquisition_max_raw") != 255.0
+        or histogram_domain.get("acquisition_min_calibrated") is not None
+        or histogram_domain.get("acquisition_max_calibrated") is not None
+        or not isinstance(scalarization, dict)
+        or scalarization.get("method") != "imagej_weighted_rgb_intensity"
+        or scalarization.get("source_pixel_type") != "rgb24"
+        or scalarization.get("rounding") != "nearest_integer_half_up"
+        or not isinstance(scalarization.get("weights"), dict)
+    ):
+        raise RuntimeError("RGB histogram returned unsafe scalarization metadata")
+    weights = scalarization["weights"]
+    normalized = []
+    for component in ("red", "green", "blue"):
+        value = weights.get(component)
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise RuntimeError("RGB histogram returned unsafe scalarization weights")
+        value = float(value)
+        if not math.isfinite(value) or value < 0.0:
+            raise RuntimeError("RGB histogram returned unsafe scalarization weights")
+        normalized.append(value)
+    if not math.isclose(sum(normalized), 1.0, rel_tol=0.0, abs_tol=1e-9):
+        raise RuntimeError("RGB histogram returned unsafe scalarization weights")
+    try:
+        histogram_pixels = _exact_int(result["nPixels"], "nPixels", 1)
+        requested_pixels = _exact_int(meta["nPixels"], "nPixels", 1)
+    except (KeyError, TypeError, ValueError) as exc:
+        raise RuntimeError("RGB histogram returned invalid pixel cardinality") from exc
+    if histogram_pixels < requested_pixels:
+        raise RuntimeError(
+            "RGB full-plane histogram contains fewer pixels than the requested region"
+        )
+
+    normalized_domain = dict(histogram_domain)
+    normalized_scalarization = dict(scalarization)
+    normalized_scalarization["weights"] = {
+        component: value
+        for component, value in zip(("red", "green", "blue"), normalized)
+    }
+    normalized_domain["scalarization"] = normalized_scalarization
+    return {
+        "weights": tuple(normalized),
+        "value_domain": normalized_domain,
+        "histogram_nPixels": histogram_pixels,
+    }
+
+
+def _scalarize_rgb24_plane(pixels_2d, weights):
+    """Apply ImageJ's published weighted RGB intensity and half-up rounding."""
+    height = len(pixels_2d)
+    width = len(pixels_2d[0]) if height else 0
+    scalar = array("f")
+    red_weight, green_weight, blue_weight = weights
+    for row in pixels_2d:
+        if len(row) != width:
+            raise ValueError("pixel data is not rectangular")
+        for sample in row:
+            numeric = float(sample)
+            if not math.isfinite(numeric) or numeric != math.floor(numeric):
+                raise ValueError("RGB pixel data contains a non-integral value")
+            if 0.0 <= numeric <= 0x00ffffff:
+                packed = int(numeric)
+            elif -0x01000000 <= numeric <= -1.0:
+                packed = int(numeric) & 0x00ffffff
+            else:
+                raise ValueError("RGB pixel data is outside the packed rgb24 domain")
+            red = (packed >> 16) & 0xff
+            green = (packed >> 8) & 0xff
+            blue = packed & 0xff
+            intensity = math.floor(
+                red * red_weight
+                + green * green_weight
+                + blue * blue_weight
+                + 0.5
+            )
+            if not 0 <= intensity <= 255:
+                raise ValueError("RGB scalar intensity is outside the uint8 domain")
+            scalar.append(float(intensity))
+    return _CompactPlane(scalar, width, height)
+
+
+def _intensity_plane_and_contract(pixels_2d, meta):
+    """Return the analysis plane and its additive RGB scalar contract, if any."""
+    contract = _rgb24_analysis_weights(meta)
+    if contract is None:
+        return pixels_2d, None
+    return _scalarize_rgb24_plane(pixels_2d, contract["weights"]), contract
+
+
+def _intensity_plane(pixels_2d, meta):
+    """Return a scientifically valid scalar plane, fetching RGB metadata as needed."""
+    return _intensity_plane_and_contract(pixels_2d, meta)[0]
 
 
 class _CompactPlane(Sequence):
@@ -420,8 +647,9 @@ def get_pixels(
     return pixels, meta
 
 
-def compute_stats(pixels_2d):
+def compute_stats(pixels_2d, meta=None):
     """Compute basic statistics for a 2D pixel array."""
+    pixels_2d = _intensity_plane(pixels_2d, meta)
     if isinstance(pixels_2d, _CompactPlane):
         flat = pixels_2d.iter_values()
     else:
@@ -470,6 +698,7 @@ def compute_stats(pixels_2d):
 
 def line_profile(pixels_2d, x1, y1, x2, y2, meta=None):
     """Extract intensity values along a line between two points."""
+    pixels_2d, contract = _intensity_plane_and_contract(pixels_2d, meta)
     h = len(pixels_2d)
     w = len(pixels_2d[0]) if h > 0 else 0
 
@@ -485,7 +714,10 @@ def line_profile(pixels_2d, x1, y1, x2, y2, meta=None):
         px = int(x1 + t * dx)
         py = int(y1 + t * dy)
         if 0 <= px < w and 0 <= py < h:
-            profile.append({"pos": i, "x": px, "y": py, "value": pixels_2d[py][px]})
+            point = {"pos": i, "x": px, "y": py, "value": pixels_2d[py][px]}
+            if contract is not None:
+                point["analysis_value_domain"] = contract["value_domain"]
+            profile.append(point)
 
     return profile
 
@@ -496,6 +728,8 @@ def find_bright_objects(pixels_2d, meta=None, threshold_factor=2.0, min_size=10)
     Threshold = mean + threshold_factor * stddev.
     Returns list of objects with centroid, area, mean intensity.
     """
+    pixels_2d, contract = _intensity_plane_and_contract(pixels_2d, meta)
+
     # Object membership must use the unrounded moments.  compute_stats keeps
     # its historical two-decimal presentation contract, but those display
     # values can move a threshold across a real pixel value.
@@ -564,6 +798,8 @@ def find_bright_objects(pixels_2d, meta=None, threshold_factor=2.0, min_size=10)
                     if meta:
                         obj["abs_x"] = round(obj["x"] + meta.get("x", 0), 1)
                         obj["abs_y"] = round(obj["y"] + meta.get("y", 0), 1)
+                    if contract is not None:
+                        obj["analysis_value_domain"] = contract["value_domain"]
                     objects.append(obj)
 
     # Sort by area descending
@@ -574,14 +810,22 @@ def find_bright_objects(pixels_2d, meta=None, threshold_factor=2.0, min_size=10)
 def get_current_stats():
     """Return stats and metadata for the current slice."""
     pixels, meta = get_pixels()
-    return {"stats": compute_stats(pixels), "meta": meta}
+    analysis, contract = _intensity_plane_and_contract(pixels, meta)
+    result = {"stats": compute_stats(analysis), "meta": meta}
+    if contract is not None:
+        result["analysis_value_domain"] = contract["value_domain"]
+    return result
 
 
 def get_slice_stats(slice_num):
     """Return stats and metadata for one 1-based stack slice."""
     selected = _exact_int(slice_num, "slice_num", 1)
     pixels, meta = get_pixels(slice_num=selected)
-    return {"slice": selected, "stats": compute_stats(pixels), "meta": meta}
+    analysis, contract = _intensity_plane_and_contract(pixels, meta)
+    result = {"slice": selected, "stats": compute_stats(analysis), "meta": meta}
+    if contract is not None:
+        result["analysis_value_domain"] = contract["value_domain"]
+    return result
 
 
 def get_region_stats(x, y, width, height):
@@ -591,14 +835,18 @@ def get_region_stats(x, y, width, height):
     width_i = _exact_int(width, "width", 1)
     height_i = _exact_int(height, "height", 1)
     pixels, meta = get_pixels(x=x_i, y=y_i, width=width_i, height=height_i)
-    return {
+    analysis, contract = _intensity_plane_and_contract(pixels, meta)
+    result = {
         "x": meta["x"],
         "y": meta["y"],
         "width": meta["width"],
         "height": meta["height"],
-        "stats": compute_stats(pixels),
+        "stats": compute_stats(analysis),
         "meta": meta,
     }
+    if contract is not None:
+        result["analysis_value_domain"] = contract["value_domain"]
+    return result
 
 
 def get_line_profile(x1, y1, x2, y2):
@@ -671,7 +919,11 @@ def get_stack_stats():
             raise RuntimeError(
                 "get_pixels failed: stack plane did not match bound image snapshot"
             )
-        rows.append({"slice": s, "stats": compute_stats(plane), "meta": meta})
+        analysis, contract = _intensity_plane_and_contract(plane, meta)
+        row = {"slice": s, "stats": compute_stats(analysis), "meta": meta}
+        if contract is not None:
+            row["analysis_value_domain"] = contract["value_domain"]
+        rows.append(row)
     return rows
 
 
