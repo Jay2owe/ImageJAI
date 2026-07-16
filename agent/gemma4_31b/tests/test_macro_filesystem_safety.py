@@ -24,6 +24,9 @@ from agent.gemma4_31b import safety
         'defaultDir = File.getDefaultDir();',
         'lastDir = File.directory;',
         'lastName = File.name;',
+        'imp = IJ.openImage("/private/subject.tif");',
+        'IJ.open("/private/subject.tif");',
+        'hash = IJ.checksum("MD5 file", "/private/subject.tif");',
     ],
 )
 def test_filesystem_reads_and_enumeration_are_rejected(code: str) -> None:
@@ -71,6 +74,11 @@ def test_unknown_file_primitive_fails_closed() -> None:
     assert "unrecognised File.*" in error
 
     assert safety.check_filesystem(
+        'IJ.futureFilesystemMethod("/private/subject.tif");',
+        "/safe/AI_Exports",
+    ) is not None
+
+    assert safety.check_filesystem(
         'File.write("data", handle);', "/safe/AI_Exports"
     ) is not None
 
@@ -89,6 +97,8 @@ def test_literal_output_writes_under_resolved_ai_exports_are_allowed(tmp_path) -
         print(f, "ok"); File.close(f);
         saveAs("Results", "{output}");
         IJ.saveAs("Tiff", "{(exports / "image.tif").as_posix()}");
+        IJ.saveAsTiff("{(exports / "image2.tif").as_posix()}");
+        IJ.saveString("data", "{(exports / "data.txt").as_posix()}");
     '''
     assert safety.check_filesystem(code, str(exports)) is None
 

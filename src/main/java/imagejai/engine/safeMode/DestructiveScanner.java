@@ -292,7 +292,8 @@ public final class DestructiveScanner {
             "file.isdirectory", "file.length", "file.getlength",
             "file.lastmodified", "file.datelastmodified",
             "file.getdefaultdir", "file.getabsolutepath", "file.directory",
-            "file.name", "file.namewithoutextension"
+            "file.name", "file.namewithoutextension",
+            "ij.open", "ij.openimage", "ij.checksum"
     };
 
     private static final String[] FILESYSTEM_DESTRUCTIVE_CALLS = {
@@ -301,7 +302,10 @@ public final class DestructiveScanner {
 
     private static final String[] FILESYSTEM_BENIGN_CALLS = {
             "file.getname", "file.getnamewithoutextension",
-            "file.getdirectory", "file.getparent", "file.close", "file.separator"
+            "file.getdirectory", "file.getparent", "file.close", "file.separator",
+            "ij.renameresults", "ij.deleterows", "ij.log",
+            "ij.redirecterrormessages", "ij.freememory", "ij.currentmemory",
+            "ij.maxmemory", "ij.getfullversion", "ij.gettoolname", "ij.pad"
     };
 
     private static final String[] READ_MENU_COMMANDS = {
@@ -461,10 +465,10 @@ public final class DestructiveScanner {
                 continue;
             }
 
-            if (name.startsWith("file.")
+            if ((name.startsWith("file.") || name.startsWith("ij."))
                     && !equalsAny(name, FILESYSTEM_BENIGN_CALLS)) {
                 out.add(filesystemDenied(FilesystemKind.UNKNOWN, rawName, "", line,
-                        "is an unrecognised File.* primitive"));
+                        "is an unrecognised File.* or IJ.* primitive"));
             }
         }
         return out;
@@ -829,6 +833,9 @@ public final class DestructiveScanner {
             return Integer.valueOf(0);
         }
         if ("ij.saveas".equals(name) || "ij.save".equals(name)) {
+            return Integer.valueOf(args == null ? -1 : args.size() - 1);
+        }
+        if ("ij.saveastiff".equals(name) || "ij.savestring".equals(name)) {
             return Integer.valueOf(args == null ? -1 : args.size() - 1);
         }
         return null;

@@ -159,7 +159,10 @@ public class DestructiveScannerTest {
                 "cwd = File.getAbsolutePath(\".\");",
                 "defaultDir = File.getDefaultDir();",
                 "lastDir = File.directory;",
-                "lastName = File.name;"
+                "lastName = File.name;",
+                "imp = IJ.openImage(\"/private/subject.tif\");",
+                "IJ.open(\"/private/subject.tif\");",
+                "hash = IJ.checksum(\"MD5 file\", \"/private/subject.tif\");"
         };
         for (String code : unsafe) {
             List<DestructiveScanner.FilesystemAccess> access =
@@ -215,6 +218,7 @@ public class DestructiveScannerTest {
     public void unknownFilePrimitiveAndDynamicWritesFailClosed() {
         String[] unsafe = {
                 "File.futureFilesystemMethod(\"/private/a.tif\");",
+                "IJ.futureFilesystemMethod(\"/private/a.tif\");",
                 "File.write(\"data\", handle);",
                 "saveAs(\"Tiff\", outputPath);",
                 "File.saveString(\"data\", exportDir + \"/result.csv\");",
@@ -242,11 +246,13 @@ public class DestructiveScannerTest {
                 + "print(f, \"ok\"); File.close(f);\n"
                 + "saveAs(\"Results\", \"" + root + "/result.csv\");\n"
                 + "IJ.saveAs(\"Tiff\", \"" + root + "/image.tif\");\n"
+                + "IJ.saveAsTiff(\"" + root + "/image2.tif\");\n"
+                + "IJ.saveString(\"data\", \"" + root + "/data.txt\");\n"
                 + "run(\"Tiff...\", \"save=[" + root + "/run.tif]\");";
 
         List<DestructiveScanner.FilesystemAccess> access =
                 DestructiveScanner.classifyMacroFilesystem(code, root);
-        assertEquals(8, access.size());
+        assertEquals(10, access.size());
         for (DestructiveScanner.FilesystemAccess item : access) {
             assertTrue(item.message, item.allowed);
             assertEquals(DestructiveScanner.FilesystemKind.OUTPUT_WRITE, item.kind);

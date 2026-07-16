@@ -72,6 +72,9 @@ _FILESYSTEM_READ_CALLS = frozenset(
         "file.directory",
         "file.name",
         "file.namewithoutextension",
+        "ij.open",
+        "ij.openimage",
+        "ij.checksum",
     }
 )
 
@@ -89,6 +92,8 @@ _FILESYSTEM_WRITE_PATH_ARGS = {
     "save": 0,
     "ij.saveas": -1,
     "ij.save": -1,
+    "ij.saveastiff": -1,
+    "ij.savestring": -1,
     "file.savestring": 1,
     "file.append": 1,
     "file.makedirectory": 0,
@@ -107,6 +112,16 @@ _FILESYSTEM_BENIGN_CALLS = frozenset(
         "file.getparent",
         "file.close",
         "file.separator",
+        "ij.renameresults",
+        "ij.deleterows",
+        "ij.log",
+        "ij.redirecterrormessages",
+        "ij.freememory",
+        "ij.currentmemory",
+        "ij.maxmemory",
+        "ij.getfullversion",
+        "ij.gettoolname",
+        "ij.pad",
     }
 )
 
@@ -263,9 +278,12 @@ def check_filesystem(code: str, export_folder: str | None = None) -> str | None:
             write_sites.append((raw_name, raw_path))
             continue
 
-        if name.startswith("file.") and name not in _FILESYSTEM_BENIGN_CALLS:
+        if (
+            name.startswith(("file.", "ij."))
+            and name not in _FILESYSTEM_BENIGN_CALLS
+        ):
             return _filesystem_rejection(
-                raw_name, "is an unrecognised File.* primitive"
+                raw_name, "is an unrecognised File.* or IJ.* primitive"
             )
 
     if not write_sites:
