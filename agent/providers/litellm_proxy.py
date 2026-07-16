@@ -6,19 +6,31 @@ non-streaming by design.
 from __future__ import annotations
 
 import json
+import math
 import os
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 
 from openai import APIConnectionError, APIStatusError, APITimeoutError, OpenAI
 
-from .base import ProviderClient, ToolCall, to_openai_tool
+from agent.ollama_agent.budget_ceiling import estimate_runtime_cost_usd
+
+from .base import (
+    ProviderClient,
+    ToolCall,
+    encode_capture_image,
+    prune_capture_images,
+    to_openai_tool,
+)
 
 
 DEFAULT_BASE_URL = "http://localhost:4000/v1"
-DEFAULT_API_KEY = "sk-litellm-proxy-local"
+DEFAULT_API_KEY = ""
 DEFAULT_TIMEOUT_SECONDS = 120.0
 DEFAULT_MAX_RETRIES = 2
+DEFAULT_MAX_OUTPUT_TOKENS = 8192
+MAX_OUTPUT_TOKENS = 32768
 COST_HEADER = "x-litellm-response-cost"
 _COST_LISTENERS: list[Callable[[str], None]] = []
 
@@ -43,6 +55,27 @@ def _notify_cost(value: str | None) -> None:
             listener(str(value))
         except Exception:
             pass
+
+
+def _runtime_api_key() -> str:
+    """Read the per-sidecar key without falling back to a shared constant."""
+
+    for name in ("IMAGEJAI_LITELLM_MASTER_KEY", "LITELLM_MASTER_KEY"):
+        value = os.environ.get(name, "").strip()
+        if value:
+            return value
+    auth_file = os.environ.get("IMAGEJAI_LITELLM_AUTH_FILE", "").strip()
+    path = Path(auth_file) if auth_file else Path(__file__).with_name("proxy.auth")
+    try:
+        value = path.read_text(encoding="utf-8").strip()
+        return value
+    except OSError:
+        return ""
+
+
+def _auth_headers() -> dict[str, str]:
+    key = _runtime_api_key()
+    return {"Authorization": f"Bearer {key}"} if key else {}
 
 
 def default_base_url() -> str:
@@ -83,7 +116,11 @@ def _scan_live_proxy_port() -> int | None:
     for candidate in range(4000, 4011):
         try:
             with urllib.request.urlopen(
-                f"http://localhost:{candidate}/health/readiness", timeout=0.3
+                urllib.request.Request(
+                    f"http://localhost:{candidate}/health/readiness",
+                    headers=_auth_headers(),
+                ),
+                timeout=0.3,
             ) as response:
                 if response.status == 200:
                     return candidate
@@ -113,9 +150,12 @@ class LiteLLMProxyClient(ProviderClient):
         # specific model is not enumerated in /v1/models — skip strict preflight.
         self.wildcard = bool(wildcard)
         self.base_url = _normalise_base_url(base_url)
+        self.api_key = str(api_key or "").strip() or _runtime_api_key()
         self._client = OpenAI(
             base_url=self.base_url,
-            api_key=api_key,
+            # The SDK insists on a non-empty value.  Calls still fail closed
+            # below when the sidecar credential was not published.
+            api_key=self.api_key or "imagejai-missing-proxy-key",
             timeout=timeout,
             max_retries=max_retries,
         )
@@ -127,6 +167,11 @@ class LiteLLMProxyClient(ProviderClient):
         model: str,
         **opts: Any,
     ) -> Any:
+        if not self.api_key:
+            raise RuntimeError(
+                "LiteLLM proxy authentication is unavailable; restart the "
+                "ImageJAI sidecar so it can publish a private runtime key"
+            )
         # Phase C native-only kwargs — silently drop on the proxy path so
         # callers can pass features uniformly. Routing intentionally chooses
         # the native client when these matter.
@@ -138,6 +183,17 @@ class LiteLLMProxyClient(ProviderClient):
             "enable_code_execution",
         ):
             opts.pop(native_only, None)
+        if "max_completion_tokens" in opts:
+            opts["max_completion_tokens"] = min(
+                MAX_OUTPUT_TOKENS,
+                max(1, int(opts["max_completion_tokens"])),
+            )
+            opts.pop("max_tokens", None)
+        else:
+            opts["max_tokens"] = min(
+                MAX_OUTPUT_TOKENS,
+                max(1, int(opts.get("max_tokens", DEFAULT_MAX_OUTPUT_TOKENS))),
+            )
         tool_specs = [to_openai_tool(tool) for tool in tools] if tools else None
         alias = self.normalise_model(model)
         kwargs: dict[str, Any] = {
@@ -150,8 +206,27 @@ class LiteLLMProxyClient(ProviderClient):
         kwargs.update(opts)
         try:
             raw = self._client.chat.completions.with_raw_response.create(**kwargs)
-            _notify_cost(raw.headers.get(COST_HEADER))
-            return raw.parse()
+            response = raw.parse()
+            cost_header = raw.headers.get(COST_HEADER)
+            try:
+                parsed_cost = float(cost_header) if cost_header is not None else 0.0
+            except (TypeError, ValueError):
+                parsed_cost = 0.0
+            if math.isfinite(parsed_cost) and parsed_cost > 0:
+                _notify_cost(str(parsed_cost))
+            else:
+                usage = getattr(response, "usage", None)
+                input_tokens = int(getattr(usage, "prompt_tokens", 0) or 0)
+                output_tokens = int(getattr(usage, "completion_tokens", 0) or 0)
+                fallback = estimate_runtime_cost_usd(
+                    self.provider or "",
+                    model,
+                    input_tokens,
+                    output_tokens,
+                )
+                if fallback > 0:
+                    _notify_cost(str(fallback))
+            return response
         except (APIConnectionError, APIStatusError, APITimeoutError) as exc:
             raise RuntimeError(
                 "LiteLLM proxy chat failed for model {!r} "
@@ -186,6 +261,10 @@ class LiteLLMProxyClient(ProviderClient):
     def available_model_ids(self) -> list[str]:
         """Return model ids advertised by the local LiteLLM proxy."""
 
+        if not self.api_key:
+            raise RuntimeError(
+                "LiteLLM proxy authentication is unavailable; restart the sidecar"
+            )
         try:
             response = self._client.models.list()
         except (APIConnectionError, APIStatusError, APITimeoutError) as exc:
@@ -281,6 +360,26 @@ class LiteLLMProxyClient(ProviderClient):
                 "content": str(result),
             }
         )
+        if call.name == "capture_image":
+            encoded = encode_capture_image(result)
+            if encoded is not None:
+                prune_capture_images(messages[:-1])
+                mime_type, data = encoded
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": "Captured Fiji image:"},
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": f"data:{mime_type};base64,{data}",
+                                    "detail": "low",
+                                },
+                            },
+                        ],
+                    }
+                )
 
 
 def _normalise_base_url(base_url: str) -> str:

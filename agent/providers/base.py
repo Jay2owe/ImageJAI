@@ -6,6 +6,8 @@ multi-provider plan.
 """
 from __future__ import annotations
 
+import base64
+import io
 import inspect
 import re
 import types
@@ -13,10 +15,30 @@ import typing
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Literal
+
+from PIL import Image
 
 
 HOST_CODE_CAPABILITY = "host_code"
+MAX_VISION_EDGE = 896
+MAX_VISION_BYTES = 500 * 1024
+
+# The runtime registry predates provider-native schemas.  These are contract
+# normalisations, not alternate tool implementations: the names remain the
+# exact decorated Python names and the loop supplies the same defaults when a
+# model omits an optional argument.
+TOOL_ARGUMENT_DEFAULTS: dict[str, dict[str, Any]] = {
+    "close_dialogs": {"pattern": ""},
+    "capture_image": {"max_size": 1024},
+}
+
+_BARE_LIST_ITEM_SCHEMAS: dict[tuple[str, str], dict[str, Any]] = {
+    ("get_pixels_array", "region"): {"type": "integer"},
+    ("open_lif_series", "indices"): {"type": "integer"},
+    ("save_recipe", "promote"): {"type": "string"},
+}
 
 
 @dataclass(frozen=True)
@@ -150,6 +172,9 @@ def _annotation_to_jsonschema(annotation: Any) -> dict[str, Any]:
             return _annotation_to_jsonschema(non_none[0])
         return {"anyOf": [_annotation_to_jsonschema(arg) for arg in non_none]}
 
+    if annotation is list:
+        return {"type": "array", "items": {}}
+
     if origin in (list, typing.List):
         item_type = args[0] if args else str
         return {"type": "array", "items": _annotation_to_jsonschema(item_type)}
@@ -226,10 +251,19 @@ def fn_to_json_schema(fn: Callable[..., Any]) -> dict[str, Any]:
             continue
         annotation = resolved_hints.get(name, parameter.annotation)
         prop = _annotation_to_jsonschema(annotation)
+        bare_items = _BARE_LIST_ITEM_SCHEMAS.get((fn.__name__, name))
+        if prop.get("type") == "array" and bare_items is not None:
+            prop["items"] = dict(bare_items)
         if name in arg_docs:
             prop["description"] = arg_docs[name]
+        contract_default = TOOL_ARGUMENT_DEFAULTS.get(fn.__name__, {}).get(name, inspect.Parameter.empty)
+        if contract_default is not inspect.Parameter.empty:
+            prop["default"] = contract_default
         properties[name] = prop
-        if parameter.default is inspect.Parameter.empty:
+        if (
+            parameter.default is inspect.Parameter.empty
+            and contract_default is inspect.Parameter.empty
+        ):
             required.append(name)
 
     return {
@@ -273,3 +307,79 @@ def to_gemini_tool(fn: Callable[..., Any]) -> dict[str, Any]:
     if spec["schema"]["properties"]:
         declaration["parameters"] = spec["schema"]
     return declaration
+
+
+def apply_tool_argument_defaults(name: str, args: dict[str, Any]) -> dict[str, Any]:
+    """Return model arguments completed with the public registry defaults."""
+
+    completed = dict(args)
+    for key, value in TOOL_ARGUMENT_DEFAULTS.get(str(name), {}).items():
+        completed.setdefault(key, value)
+    return completed
+
+
+def encode_capture_image(path_value: str) -> tuple[str, str] | None:
+    """Return a bounded ``(mime_type, base64)`` capture for provider vision.
+
+    Captures are always re-encoded as RGB JPEG and constrained by both pixel
+    edge and encoded byte count.  Invalid/non-file tool output is ignored.
+    """
+
+    path = Path(str(path_value or "").strip())
+    if not path.is_file():
+        return None
+    try:
+        with Image.open(path) as source:
+            image = source.convert("RGB")
+        if max(image.size) > MAX_VISION_EDGE:
+            scale = MAX_VISION_EDGE / float(max(image.size))
+            image = image.resize(
+                (
+                    max(1, round(image.width * scale)),
+                    max(1, round(image.height * scale)),
+                ),
+                Image.Resampling.LANCZOS,
+            )
+        quality = 85
+        while True:
+            buffer = io.BytesIO()
+            image.save(buffer, format="JPEG", quality=quality, optimize=True)
+            payload = buffer.getvalue()
+            if len(payload) <= MAX_VISION_BYTES:
+                return "image/jpeg", base64.b64encode(payload).decode("ascii")
+            if quality > 45:
+                quality -= 10
+                continue
+            if max(image.size) <= 256:
+                return None
+            image = image.resize(
+                (
+                    max(1, round(image.width * 0.75)),
+                    max(1, round(image.height * 0.75)),
+                ),
+                Image.Resampling.LANCZOS,
+            )
+    except (OSError, ValueError):
+        return None
+
+
+def prune_capture_images(messages: list[dict[str, Any]]) -> None:
+    """Remove earlier provider image blocks so raw pixels cannot accumulate."""
+
+    for message in messages:
+        message.pop("capture_image", None)
+        message.pop("images", None)
+        content = message.get("content")
+        if not isinstance(content, list):
+            continue
+        retained: list[Any] = []
+        for part in content:
+            if not isinstance(part, dict):
+                retained.append(part)
+                continue
+            if part.get("type") in {"image", "image_url"}:
+                continue
+            if "inline_data" in part:
+                continue
+            retained.append(part)
+        message["content"] = retained

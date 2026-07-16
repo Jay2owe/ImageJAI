@@ -18,6 +18,7 @@ import atexit
 import json
 import os
 import re
+import secrets
 import shutil
 import signal
 import socket
@@ -48,12 +49,17 @@ except Exception:  # pragma: no cover - litellm may not be installed yet
 HOST = "127.0.0.1"
 DEFAULT_PORT = 4000
 PORT_RANGE = range(4000, 4011)
-DEFAULT_API_KEY = "sk-imagejai-local-proxy"
+DEFAULT_API_KEY = ""  # Runtime keys are generated per sidecar start.
 COST_HEADER = "x-litellm-response-cost"
 BILLING_STATUSES = frozenset({401, 402, 429})
 
 _LAST_HANDLE: subprocess.Popen[str] | None = None
 _LAST_PORT = DEFAULT_PORT
+_LAST_MASTER_KEY = ""
+_LAST_RUNTIME_DIR: Path | None = None
+_LAST_AUTH_FILE: Path | None = None
+_LAST_STATE_FILE: Path | None = None
+_LAST_PORT_FILE: Path | None = None
 
 
 class ResponseCostMiddleware(CustomLogger):
@@ -205,7 +211,8 @@ response_cost_middleware = ResponseCostMiddleware()
 def start(config_path: str | os.PathLike[str]) -> subprocess.Popen[str]:
     """Start LiteLLM Proxy and return the process handle."""
 
-    global _LAST_HANDLE, _LAST_PORT
+    global _LAST_AUTH_FILE, _LAST_HANDLE, _LAST_MASTER_KEY, _LAST_PORT
+    global _LAST_PORT_FILE, _LAST_RUNTIME_DIR, _LAST_STATE_FILE
 
     config = Path(config_path).resolve()
     if not config.exists():
@@ -218,8 +225,33 @@ def start(config_path: str | os.PathLike[str]) -> subprocess.Popen[str]:
     with _port_file_lock(port_file):
         port = _first_available_port()
         _LAST_PORT = port
-        runtime_config = _write_runtime_config(config, port)
+        master_key = os.environ.get("LITELLM_MASTER_KEY", "").strip()
+        if not master_key:
+            master_key = "sk-imagejai-" + secrets.token_urlsafe(32)
+        runtime_dir = _create_private_runtime_dir()
+        auth_file = config.with_name("proxy.auth")
+        state_file = config.with_name("proxy.runtime.json")
+        runtime_config = _write_runtime_config(config, port, runtime_dir, master_key)
+        _write_private_file(auth_file, master_key + "\n")
+        _write_private_file(
+            state_file,
+            json.dumps(
+                {
+                    "port": port,
+                    "runtime_dir": str(runtime_dir),
+                    "auth_file": str(auth_file),
+                    "runtime_config": str(runtime_config),
+                },
+                separators=(",", ":"),
+            )
+            + "\n",
+        )
         _write_port_file_atomic(port_file, port)
+        _LAST_MASTER_KEY = master_key
+        _LAST_RUNTIME_DIR = runtime_dir
+        _LAST_AUTH_FILE = auth_file
+        _LAST_STATE_FILE = state_file
+        _LAST_PORT_FILE = port_file
 
         env = os.environ.copy()
         env.setdefault("PYTHONUNBUFFERED", "1")
@@ -227,6 +259,8 @@ def start(config_path: str | os.PathLike[str]) -> subprocess.Popen[str]:
         env.setdefault("OLLAMA_API_BASE", "http://localhost:11434")
         env["IMAGEJAI_LITELLM_PORT"] = str(port)
         env["IMAGEJAI_LITELLM_CONFIG"] = str(runtime_config)
+        env["IMAGEJAI_LITELLM_MASTER_KEY"] = master_key
+        env["LITELLM_MASTER_KEY"] = master_key
 
         cmd = [
             sys.executable,
@@ -239,15 +273,22 @@ def start(config_path: str | os.PathLike[str]) -> subprocess.Popen[str]:
             "--port",
             str(port),
         ]
-        handle = subprocess.Popen(
-            cmd,
-            cwd=str(config.parents[2]),
-            env=env,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            creationflags=_creation_flags(),
-        )
+        try:
+            handle = subprocess.Popen(
+                cmd,
+                cwd=str(config.parents[2]),
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                creationflags=_creation_flags(),
+            )
+        except Exception:
+            _remove_port_file_if_owned(port_file, port)
+            _remove_private_file_if_owned(auth_file, master_key)
+            _remove_runtime_state_if_owned(state_file, runtime_dir)
+            shutil.rmtree(runtime_dir, ignore_errors=True)
+            raise
         # The LiteLLM child runs our ResponseCostMiddleware, which prints the
         # `[ImageJAI-LiteLLM-Cost]` / `[ImageJAI-LiteLLM-Billing]` sentinels to
         # *its* stdout. Drain that pipe and forward it to our own stdout so the
@@ -292,22 +333,27 @@ def _start_output_forwarder(handle: subprocess.Popen[str]) -> threading.Thread |
 def stop(handle: subprocess.Popen[str] | None) -> None:
     """Terminate a LiteLLM Proxy process started by start()."""
 
-    if handle is None or handle.poll() is not None:
-        return
-    if os.name == "nt":
-        subprocess.run(
-            ["taskkill", "/PID", str(handle.pid), "/T", "/F"],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            check=False,
-        )
-    else:
-        handle.send_signal(signal.SIGTERM)
-        try:
-            handle.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            handle.kill()
-    _remove_port_file_if_owned(_port_file(Path(__file__)), _LAST_PORT)
+    try:
+        if handle is not None and handle.poll() is None:
+            if os.name == "nt":
+                subprocess.run(
+                    ["taskkill", "/PID", str(handle.pid), "/T", "/F"],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    check=False,
+                )
+            else:
+                handle.send_signal(signal.SIGTERM)
+                try:
+                    handle.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    handle.kill()
+    finally:
+        _remove_port_file_if_owned(_LAST_PORT_FILE or _port_file(Path(__file__)), _LAST_PORT)
+        _remove_private_file_if_owned(_LAST_AUTH_FILE, _LAST_MASTER_KEY)
+        _remove_runtime_state_if_owned(_LAST_STATE_FILE, _LAST_RUNTIME_DIR)
+        if _LAST_RUNTIME_DIR is not None:
+            shutil.rmtree(_LAST_RUNTIME_DIR, ignore_errors=True)
 
 
 def wait_healthy(timeout: float = 8.0) -> bool:
@@ -316,9 +362,11 @@ def wait_healthy(timeout: float = 8.0) -> bool:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         try:
-            with urllib.request.urlopen(
-                f"http://{HOST}:{_LAST_PORT}/health/readiness", timeout=0.6
-            ) as response:
+            request = urllib.request.Request(
+                f"http://{HOST}:{_LAST_PORT}/health/readiness",
+                headers=_proxy_auth_headers(),
+            )
+            with urllib.request.urlopen(request, timeout=0.6) as response:
                 if response.status == 200:
                     return True
         except (OSError, urllib.error.URLError):
@@ -354,7 +402,7 @@ def startup_self_test() -> bool:
         data=payload,
         headers={
             "Content-Type": "application/json",
-            "Authorization": f"Bearer {DEFAULT_API_KEY}",
+            "Authorization": f"Bearer {_LAST_MASTER_KEY}",
         },
         method="POST",
     )
@@ -442,21 +490,124 @@ def _first_available_port() -> int:
     raise RuntimeError("no free LiteLLM proxy port in 4000..4010")
 
 
-def _write_runtime_config(config: Path, port: int) -> Path:
+def _create_private_runtime_dir() -> Path:
+    path = Path(tempfile.mkdtemp(prefix="imagejai-litellm-"))
+    try:
+        path.chmod(0o700)
+        _restrict_to_current_user(path, directory=True)
+    except OSError:
+        shutil.rmtree(path, ignore_errors=True)
+        raise
+    return path
+
+
+def _write_private_file(path: Path, content: str) -> None:
+    """Atomically publish a user-private runtime file."""
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=str(path.parent))
+    temporary_path = Path(temporary)
+    try:
+        try:
+            os.fchmod(fd, 0o600)
+        except (AttributeError, OSError):
+            pass
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as stream:
+            stream.write(content)
+            stream.flush()
+            os.fsync(stream.fileno())
+        temporary_path.chmod(0o600)
+        _restrict_to_current_user(temporary_path, directory=False)
+        os.replace(temporary_path, path)
+        path.chmod(0o600)
+    except Exception:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+        temporary_path.unlink(missing_ok=True)
+        raise
+
+
+def _restrict_to_current_user(path: Path, *, directory: bool) -> None:
+    """Apply a real user-only ACL on Windows; POSIX uses chmod above."""
+
+    if os.name != "nt":
+        return
+    username = os.environ.get("USERNAME", "").strip()
+    domain = os.environ.get("USERDOMAIN", "").strip()
+    if not username:
+        raise OSError("cannot determine current Windows user for private runtime ACL")
+    principal = f"{domain}\\{username}" if domain else username
+    permission = "(OI)(CI)F" if directory else "F"
+    completed = subprocess.run(
+        [
+            "icacls",
+            str(path),
+            "/inheritance:r",
+            "/grant:r",
+            f"{principal}:{permission}",
+        ],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    )
+    if completed.returncode != 0:
+        raise OSError(f"failed to secure LiteLLM runtime ACL for {path}")
+
+
+def _proxy_auth_headers() -> dict[str, str]:
+    return (
+        {"Authorization": f"Bearer {_LAST_MASTER_KEY}"}
+        if _LAST_MASTER_KEY
+        else {}
+    )
+
+
+def _remove_private_file_if_owned(path: Path | None, expected: str) -> None:
+    if path is None or not expected:
+        return
+    try:
+        if path.read_text(encoding="utf-8").strip() == expected:
+            path.unlink()
+    except OSError:
+        pass
+
+
+def _remove_runtime_state_if_owned(path: Path | None, runtime_dir: Path | None) -> None:
+    if path is None or runtime_dir is None:
+        return
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        if Path(str(payload.get("runtime_dir", ""))).resolve() == runtime_dir.resolve():
+            path.unlink()
+    except (OSError, ValueError, TypeError):
+        pass
+
+
+def _write_runtime_config(
+    config: Path,
+    port: int,
+    runtime_dir: Path | None = None,
+    master_key: str | None = None,
+) -> Path:
     raw = yaml.safe_load(config.read_text(encoding="utf-8")) or {}
     raw["model_list"] = [_prepare_entry(e) for e in raw.get("model_list", []) if _enabled(e)]
     raw["model_list"] = [e for e in raw["model_list"] if e is not None]
     raw.setdefault("general_settings", {})
-    if os.environ.get("LITELLM_MASTER_KEY"):
-        raw["general_settings"]["master_key"] = os.environ["LITELLM_MASTER_KEY"]
+    key = str(master_key or os.environ.get("LITELLM_MASTER_KEY", "")).strip()
+    if not key:
+        raise RuntimeError("LiteLLM master key is required")
+    raw["general_settings"]["master_key"] = key
     raw.setdefault("environment_variables", {})
     raw["environment_variables"]["IMAGEJAI_LITELLM_PORT"] = str(port)
 
-    target = Path(tempfile.gettempdir()) / f"imagejai-litellm-{port}.yaml"
+    private_dir = runtime_dir or _create_private_runtime_dir()
+    target = private_dir / "litellm.runtime.yaml"
     callback_module = target.parent / "agent" / "providers" / "proxy.py"
     callback_module.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(Path(__file__), callback_module)
-    target.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
+    _write_private_file(target, yaml.safe_dump(raw, sort_keys=False))
     return target
 
 
@@ -487,7 +638,11 @@ def _prepare_entry(entry: dict[str, Any]) -> dict[str, Any]:
 
 def _proxy_models() -> list[str]:
     try:
-        with urllib.request.urlopen(f"http://{HOST}:{_LAST_PORT}/v1/models", timeout=2.0) as response:
+        request = urllib.request.Request(
+            f"http://{HOST}:{_LAST_PORT}/v1/models",
+            headers=_proxy_auth_headers(),
+        )
+        with urllib.request.urlopen(request, timeout=2.0) as response:
             payload = json.loads(response.read().decode("utf-8"))
         return [item["id"] for item in payload.get("data", []) if item.get("id", "").startswith("ollama/")]
     except (OSError, urllib.error.URLError, json.JSONDecodeError):

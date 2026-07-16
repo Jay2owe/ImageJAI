@@ -13,6 +13,10 @@ from .litellm_proxy import DEFAULT_API_KEY, LiteLLMProxyClient, default_base_url
 
 _NATIVE_PROVIDERS = frozenset({"anthropic", "gemini"})
 
+for _adapter in (AnthropicNativeClient, GeminiNativeClient, LiteLLMProxyClient):
+    if "._spike." in str(getattr(_adapter, "__module__", "")):
+        raise RuntimeError("experimental provider adapters cannot be production-routed")
+
 _PROXY_MODEL_PREFIXES = {
     "openai": "openai/",
     "groq": "groq/",
@@ -159,6 +163,7 @@ def get_client(provider: str, model: str | None = None, **opts: Any) -> Provider
     elif provider_key == "gemini":
         client = GeminiNativeClient(
             api_key=opts.get("api_key"),
+            timeout=opts.get("timeout", 120.0),
             max_retries=opts.get("max_retries", 2),
             server_tools=opts.get("server_tools"),
         )

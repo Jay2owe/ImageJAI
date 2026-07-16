@@ -40,7 +40,7 @@ Conflict watchlist:
 | 02 | completed | `41ab3b4`, `a0dfb36` | 6 hook tests passed; installer idempotent; post-commit returned in 81.9 ms; public CLI rebuilt 25,707 nodes |
 | 03 | completed | `30aa947` | 9 Python loopback + 27 focused Java passed; Maven package 789; offline Python 401 passed with 2 stage-18 failures |
 | 04 | completed | `2f4b81f` | 12 focused Java + 11 Python API tests passed; Maven package green; authenticated privacy-governed streams retain 8/256 bounds; live Fiji stream deferred |
-| 05 | pending | - | - |
+| 05 | completed | `1dde5a6` | 829 Maven tests plus 33 focused coordinator, queue-storm, pipeline-lock, timeout, and two-session event-isolation tests passed; terminal completion waits for worker exit |
 | 06 | completed | `0e51e0f` | 15 policy + 207 Gemma/provider tests passed; bundled import passed; Maven package 789 tests passed |
 | 07 | pending | - | - |
 | 08 | completed | `0120743` | 48 focused privacy/launch tests passed; integrated Maven clean package passed 802 tests; credential-bearing metadata and unsafe launches rejected |

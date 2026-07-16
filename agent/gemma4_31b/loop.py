@@ -30,6 +30,7 @@ try:
         HOST_CODE_CAPABILITY,
         HostCodeApprovalRequest,
         ProviderToolPolicy,
+        apply_tool_argument_defaults,
     )
     from agent.providers.router import provider_tool_policy, validate_process_identifier
 except ImportError:  # pragma: no cover - bundled workspace import layout
@@ -37,6 +38,7 @@ except ImportError:  # pragma: no cover - bundled workspace import layout
         HOST_CODE_CAPABILITY,
         HostCodeApprovalRequest,
         ProviderToolPolicy,
+        apply_tool_argument_defaults,
     )
     from providers.router import (  # type: ignore
         provider_tool_policy,
@@ -85,6 +87,28 @@ from .registry import is_host_code_tool, tools_for_policy
 _FALLBACK_OLLAMA_MODEL_ENVS = ("IMAGEJAI_MODEL", "OLLAMA_MODEL")
 DEFAULT_PROVIDER = "ollama-cloud"
 NUM_CTX = 131072
+MAX_MODEL_ROUNDS_PER_TURN = 24
+MAX_TOOL_CALLS_PER_TURN = 64
+MAX_HISTORY_MESSAGES = 160
+MAX_HISTORY_CHARS = 1_000_000
+MAX_USER_PROMPT_CHARS = 64_000
+MAX_TOOL_RESULT_CHARS = 64_000
+MAX_PIXEL_RESULT_CHARS = 32_000
+MAX_RETAINED_MESSAGE_TEXT_CHARS = 4_096
+
+_EVENT_TOPICS = (
+    "image.activated",
+    "image.opened",
+    "image.updated",
+    "image.closed",
+    "macro.completed",
+    "dialog.appeared",
+    "dialog.closed",
+)
+_EVENT_SUBSCRIBER_STARTED = False
+_EVENT_SUBSCRIBER_LOCK = threading.Lock()
+_EVENT_RECONNECT_INITIAL_S = 0.25
+_EVENT_RECONNECT_MAX_S = 5.0
 
 
 def _resolve_default_model() -> str:
@@ -412,7 +436,7 @@ def _estimate_tokens(messages: list) -> int:
     total_chars = 0
     for message in messages:
         if isinstance(message, dict):
-            total_chars += len(message.get("content", "") or "")
+            total_chars += _serialised_size(message)
         else:
             total_chars += len(getattr(message, "content", "") or "")
             tool_calls = getattr(message, "tool_calls", None)
@@ -422,6 +446,207 @@ def _estimate_tokens(messages: list) -> int:
                     for tc in tool_calls
                 ]))
     return total_chars // 4 + 100
+
+
+def _serialised_size(value: Any) -> int:
+    try:
+        return len(json.dumps(value, ensure_ascii=False, default=str))
+    except (TypeError, ValueError, OverflowError):
+        return len(str(value))
+
+
+def _is_plain_user_message(message: Any) -> bool:
+    return (
+        isinstance(message, dict)
+        and message.get("role") == "user"
+        and "function_response" not in message
+        and isinstance(message.get("content"), str)
+    )
+
+
+def _bound_history(messages: list) -> None:
+    """Drop complete oldest turns before provider context can grow unbounded."""
+
+    def over_limit() -> bool:
+        return (
+            len(messages) > MAX_HISTORY_MESSAGES
+            or sum(_serialised_size(message) for message in messages) > MAX_HISTORY_CHARS
+        )
+
+    while over_limit():
+        user_indices = [
+            index for index, message in enumerate(messages) if _is_plain_user_message(message)
+        ]
+        if len(user_indices) < 2:
+            break
+        # Delete the oldest complete turn, including transient system notes
+        # immediately before it, but retain the initial system prompt.
+        first = 1 if messages and isinstance(messages[0], dict) and messages[0].get("role") == "system" else 0
+        del messages[first:user_indices[1]]
+
+    while over_limit() and _drop_oldest_completed_exchange(messages):
+        pass
+
+    # Post-tool guidance is useful for the immediately following round but is
+    # safe to discard before corrupting provider call/result pairing.
+    index = 1
+    while over_limit() and index < len(messages):
+        message = messages[index]
+        if isinstance(message, dict) and message.get("role") == "system":
+            del messages[index]
+            continue
+        index += 1
+
+    if over_limit():
+        # A single unusually tool-heavy turn has no complete older turn to
+        # drop. Preserve provider call/result structure but compact old text.
+        for message in messages:
+            _compact_message_text(message)
+            if not over_limit():
+                break
+
+    if over_limit():
+        # Last-resort validity-preserving reset: never send an oversized or
+        # structurally dangling provider history. Keep the bounded base prompt
+        # and most recent plain user request so the model can safely re-plan.
+        base = messages[0] if messages and isinstance(messages[0], dict) \
+            and messages[0].get("role") == "system" else None
+        latest_user = next(
+            (message for message in reversed(messages) if _is_plain_user_message(message)),
+            None,
+        )
+        retained = []
+        if base is not None:
+            retained.append(base)
+        if MAX_HISTORY_MESSAGES - len(retained) > 1:
+            retained.append(
+                {
+                    "role": "system",
+                    "content": "Earlier tool exchanges were dropped to enforce context limits; re-inspect state before mutating.",
+                }
+            )
+        if latest_user is not None and len(retained) < MAX_HISTORY_MESSAGES:
+            retained.append(latest_user)
+        messages[:] = retained[:MAX_HISTORY_MESSAGES]
+        for message in messages:
+            _compact_message_text(message)
+        if over_limit():
+            messages.clear()
+
+
+def _drop_oldest_completed_exchange(messages: list) -> bool:
+    """Drop one whole assistant/tool exchange, never a dangling half."""
+
+    assistants = [
+        index
+        for index, message in enumerate(messages)
+        if (
+            (isinstance(message, dict) and message.get("role") == "assistant")
+            or getattr(message, "role", None) == "assistant"
+        )
+    ]
+    if len(assistants) < 2:
+        return False
+    start = assistants[0]
+    end = assistants[1]
+    del messages[start:end]
+    return True
+
+
+def _compact_message_text(value: Any) -> None:
+    if isinstance(value, list):
+        for item in value:
+            _compact_message_text(item)
+        return
+    if not isinstance(value, dict):
+        return
+    safe_text_keys = {"content", "result", "text", "output"}
+    for key, item in list(value.items()):
+        if key in safe_text_keys and isinstance(item, str):
+            if len(item) > MAX_RETAINED_MESSAGE_TEXT_CHARS:
+                value[key] = item[:MAX_RETAINED_MESSAGE_TEXT_CHARS] + "\n… [history compacted]"
+        elif isinstance(item, (dict, list)):
+            _compact_message_text(item)
+
+
+def _bounded_tool_result(tool_name: str, result_text: str) -> str:
+    limit = MAX_PIXEL_RESULT_CHARS if tool_name == "get_pixels_array" else MAX_TOOL_RESULT_CHARS
+    if len(result_text) <= limit:
+        return result_text
+    suffix = "\n… [bounded: {} characters omitted]".format(len(result_text) - limit)
+    if tool_name == "get_pixels_array":
+        suffix += "\nRequest a smaller region; raw pixel history is capped."
+    return result_text[:limit] + suffix
+
+
+def _start_governed_event_subscriber(topics: Any = None) -> None:
+    """Bridge the authenticated stage-04 event stream into the rich loop."""
+
+    global _EVENT_SUBSCRIBER_STARTED
+    with _EVENT_SUBSCRIBER_LOCK:
+        if _EVENT_SUBSCRIBER_STARTED:
+            return
+        _EVENT_SUBSCRIBER_STARTED = True
+
+    selected = list(topics or _EVENT_TOPICS)
+
+    threading.Thread(
+        target=_consume_governed_events,
+        args=(selected,),
+        name="imagejai-governed-event-subscriber",
+        daemon=True,
+    ).start()
+
+
+def _new_governed_event_session() -> Any:
+    try:
+        from agent.ij import ImageJSession
+    except ImportError:  # pragma: no cover - bundled workspace layout
+        from ij import ImageJSession  # type: ignore
+    from .registry import GEMMA_CAPS, HOST, PORT
+
+    return ImageJSession(
+        host=HOST,
+        port=PORT,
+        agent="imagejai-rich-loop",
+        capabilities=GEMMA_CAPS,
+    )
+
+
+def _consume_governed_events(
+    topics: list[str],
+    *,
+    session_factory: Any = None,
+    stop_event: threading.Event | None = None,
+    sleep_fn: Any = time.sleep,
+) -> None:
+    """Keep the authenticated event bridge alive across startup/protocol failures."""
+
+    factory = session_factory or _new_governed_event_session
+    stop = stop_event or threading.Event()
+    delay = _EVENT_RECONNECT_INITIAL_S
+    while not stop.is_set():
+        try:
+            session = factory()
+            for frame in session.events(topics, reconnect=True):
+                if stop.is_set():
+                    return
+                if isinstance(frame, dict) and frame.get("ok") is False:
+                    break
+                if isinstance(frame, dict):
+                    events._handle_frame(frame)
+                    delay = _EVENT_RECONNECT_INITIAL_S
+        except Exception:
+            pass
+        if stop.is_set():
+            return
+        sleep_fn(delay)
+        delay = min(_EVENT_RECONNECT_MAX_S, delay * 2.0)
+
+
+# ``gemma4_31b.__main__`` calls this module attribute before entering run().
+# Redirect that legacy wrapper entry point to the governed session transport.
+events.start_subscriber = _start_governed_event_subscriber
 
 
 def _format_ctx_bar(used: int, limit: int, width: int = 24) -> str:
@@ -666,14 +891,23 @@ def _run_interruptible(fn, *args, abort_event: threading.Event | None = None, **
         except BaseException as exc:
             result["exc"] = exc
 
-    thread = threading.Thread(target=_run, daemon=True)
+    thread = threading.Thread(target=_run, daemon=False)
     thread.start()
+    aborted = False
     try:
         while thread.is_alive():
             thread.join(timeout=0.1)
             if abort_event is not None and abort_event.is_set():
-                raise _TurnAborted()
+                aborted = True
     except KeyboardInterrupt:
+        aborted = True
+        if abort_event is not None:
+            abort_event.set()
+    finally:
+        # Never orphan an in-flight model/socket/tool worker. Provider and TCP
+        # timeouts bound this wait; ownership remains with the interrupted turn.
+        thread.join()
+    if aborted:
         raise _TurnAborted()
     if result["exc"]:
         raise result["exc"]
@@ -1607,6 +1841,7 @@ def _one_turn(
     ticker = _ActivityTicker()
     turn_start = time.time()
     round_n = 0
+    tool_call_count = 0
     last_tool_signature = None
     identical_tool_repeats = 0
     async_job_active = False
@@ -1623,6 +1858,15 @@ def _one_turn(
         while True:
             if budget_guard is not None and budget_guard.exceeded():
                 return _budget_pause_message(budget_guard), False
+            if round_n >= MAX_MODEL_ROUNDS_PER_TURN:
+                _mark_turn_failure(turn_config)
+                return (
+                    "(stopped at the per-turn model-round limit of {})".format(
+                        MAX_MODEL_ROUNDS_PER_TURN
+                    ),
+                    True,
+                )
+            _bound_history(messages)
             round_n += 1
             model_initial, model_transitions = _status_plan_for_model_round(
                 round_n,
@@ -1707,6 +1951,15 @@ def _one_turn(
                 ), _turn_had_failure(turn_config)
 
             for call in tool_calls:
+                if tool_call_count >= MAX_TOOL_CALLS_PER_TURN:
+                    _mark_turn_failure(turn_config)
+                    return (
+                        "(stopped at the per-turn tool-call limit of {})".format(
+                            MAX_TOOL_CALLS_PER_TURN
+                        ),
+                        True,
+                    )
+                tool_call_count += 1
                 name = _tool_call_name(call)
                 args = _tool_call_args(call)
                 call_error = _tool_call_error(call)
@@ -1722,6 +1975,7 @@ def _one_turn(
                     _append_tool_result(messages, call, name, result_text, provider_client)
                     _flip_turn_config_to_recover(turn_config)
                     continue
+                args = apply_tool_argument_defaults(name, args)
                 _console_emit(
                     "  {} \033[33m{}({})\033[0m".format(
                         _tool_icon_display(name),
@@ -1773,7 +2027,7 @@ def _one_turn(
                 async_job_active = _update_async_job_state(name, result, async_job_active)
                 if async_job_active and not previous_async_state:
                     ticker.set_phase(_RUNNING_FIJI_STATUS)
-                result_text = _format_tool_result(result)
+                result_text = _bounded_tool_result(name, _format_tool_result(result))
                 if result_text.startswith("ERROR:"):
                     _flip_turn_config_to_recover(turn_config)
                 display_text = result_text
@@ -1782,6 +2036,7 @@ def _one_turn(
                     display_text = display_text[:20480] + "\n… [truncated, {} chars hidden]".format(hidden)
                 _console_emit("  \033[90m→ {}\033[0m".format(display_text), reserve_status_line=True)
                 _append_tool_result(messages, call, name, result_text, provider_client)
+                _bound_history(messages)
                 for post_note in _post_tool_system_notes(name, args, result_text, turn_state):
                     messages.append({"role": "system", "content": post_note})
                     preview_len = 140
@@ -2315,6 +2570,7 @@ def run(
 
     provider_key = _normalise_provider(provider, model)
     validate_process_identifier(model, "model")
+    _start_governed_event_subscriber(_EVENT_TOPICS)
     tool_policy = _resolve_tool_policy(provider_key, provider_client, provider_opts)
     approval_callback = (provider_opts or {}).get("host_code_approval")
     cloud_elevation = (
@@ -2446,7 +2702,7 @@ def run(
                         budget_guard,
                         ctx_limit,
                     ),
-                    daemon=True,
+                    daemon=False,
                 )
                 active_turn = {
                     "thread": thread,
@@ -2460,6 +2716,7 @@ def run(
                 thread.start()
 
             if active_turn is not None and not active_turn["thread"].is_alive():
+                active_turn["thread"].join()
                 result = active_turn["result_queue"].get_nowait()
                 if result["status"] == "ok":
                     _console_emit("\033[34m{}>\033[0m {}\n".format(assistant_label, result["reply"]), reserve_status_line=True)
@@ -2601,6 +2858,15 @@ def run(
             if queued_prompt is None:
                 continue
 
+            if len(queued_prompt) > MAX_USER_PROMPT_CHARS:
+                _console_emit(
+                    "(prompt rejected: {} characters exceeds the {} character limit)".format(
+                        len(queued_prompt), MAX_USER_PROMPT_CHARS
+                    ),
+                    reserve_status_line=True,
+                )
+                continue
+
             if active_turn is None and not pending_prompts:
                 pending_prompts.appendleft(queued_prompt)
             else:
@@ -2614,6 +2880,9 @@ def run(
             pass
     finally:
         input_stop.set()
+        if active_turn is not None:
+            active_turn["abort_event"].set()
+            active_turn["thread"].join()
 
     _console_emit("bye")
     return 0

@@ -16,6 +16,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.nio.file.StandardCopyOption;
+import java.util.Comparator;
 import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
 
@@ -23,6 +24,9 @@ import java.util.concurrent.CopyOnWriteArrayList;
  * Starts and supervises the bundled LiteLLM Proxy Python sidecar.
  */
 public class LiteLlmProxyService {
+    private enum Lifecycle {
+        STOPPED, STARTING, RUNNING, SHUTDOWN
+    }
     private static final String LOG_PREFIX = "[ImageJAI-LiteLLM]";
     private static final String COST_PREFIX = "[ImageJAI-LiteLLM-Cost] ";
     private static final String BILLING_PREFIX = "[ImageJAI-LiteLLM-Billing] ";
@@ -39,9 +43,12 @@ public class LiteLlmProxyService {
 
     private volatile Process process;
     private volatile Path activeProvidersDir;
+    private volatile Path activeRuntimeDir;
+    private volatile String masterKey;
     private volatile int port = DEFAULT_PORT;
     private volatile boolean shutdown;
     private volatile boolean ready;
+    private volatile Lifecycle lifecycle = Lifecycle.STOPPED;
 
     public LiteLlmProxyService(String agentWorkspace) {
         this.agentWorkspace = agentWorkspace != null
@@ -50,9 +57,10 @@ public class LiteLlmProxyService {
     }
 
     public synchronized void startAsync() {
-        if (process != null && process.isAlive()) {
+        if (shutdown || lifecycle != Lifecycle.STOPPED) {
             return;
         }
+        lifecycle = Lifecycle.STARTING;
         Thread starter = new Thread(new Runnable() {
             @Override
             public void run() {
@@ -100,66 +108,85 @@ public class LiteLlmProxyService {
     public synchronized void shutdown() {
         shutdown = true;
         ready = false;
+        lifecycle = Lifecycle.SHUTDOWN;
         Process running = process;
-        if (running == null || !running.isAlive()) {
-            return;
-        }
-        IJ.log(LOG_PREFIX + " stopping proxy sidecar");
-        if (isWindows()) {
-            try {
-                String pid = processPid(running);
-                if (pid != null) {
-                    new ProcessBuilder("taskkill", "/PID", pid, "/T", "/F").start().waitFor();
-                } else {
-                    running.destroy();
-                    if (!running.waitFor(5, java.util.concurrent.TimeUnit.SECONDS)) {
-                        running.destroyForcibly();
-                    }
-                }
-            } catch (Exception e) {
-                running.destroyForcibly();
+        try {
+            if (running != null) {
+                IJ.log(LOG_PREFIX + " stopping proxy sidecar");
+                terminateProcess(running);
             }
-        } else {
-            running.destroy();
-            try {
-                if (running.waitFor(5, java.util.concurrent.TimeUnit.SECONDS)) {
-                    return;
-                }
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-            }
-            running.destroyForcibly();
+        } finally {
+            process = null;
+            cleanupRuntimeState();
         }
     }
 
     private void startBlocking() {
+        Process started = null;
+        boolean running = false;
         try {
+            if (!startupAllowed()) return;
             Path providersDir = resolveProvidersDir();
             activeProvidersDir = providersDir;
             Path proxy = providersDir.resolve("proxy.py");
             Path config = providersDir.resolve("litellm.config.yaml");
-            ProcessBuilder builder = new ProcessBuilder(
-                    pythonCommand(), proxy.toString(), "--start", "--config", config.toString());
-            builder.directory(providersDir.getParent().getParent().toFile());
-            builder.redirectErrorStream(true);
-            Process started = builder.start();
-            process = started;
+            if (!startupAllowed()) return;
+            started = launchSidecar(providersDir, proxy, config);
+            synchronized (this) {
+                if (!shutdown && lifecycle == Lifecycle.STARTING) {
+                    process = started;
+                }
+            }
+            if (process != started) return;
             startOutputPump(started);
 
             boolean healthy = waitHealthy(STARTUP_READY_TIMEOUT_SECONDS);
-            if (healthy) {
-                ready = true;
+            synchronized (this) {
+                if (healthy && !shutdown && lifecycle == Lifecycle.STARTING
+                        && process == started && started.isAlive()) {
+                    ready = true;
+                    lifecycle = Lifecycle.RUNNING;
+                    running = true;
+                }
+            }
+            if (running) {
+                startExitWatcher(started);
                 IJ.log(LOG_PREFIX + " proxy ready on localhost:" + port);
             } else if (!shutdown) {
                 IJ.log(LOG_PREFIX + " proxy did not become ready within "
                         + (int) STARTUP_READY_TIMEOUT_SECONDS + "s");
             }
         } catch (Exception e) {
-            IJ.log(LOG_PREFIX + " failed to start proxy: " + e.getMessage());
+            if (!shutdown) {
+                IJ.log(LOG_PREFIX + " failed to start proxy: " + e.getMessage());
+            }
+        } finally {
+            if (!running) {
+                if (started != null) terminateProcess(started);
+                synchronized (this) {
+                    if (process == started) process = null;
+                    ready = false;
+                    if (!shutdown) lifecycle = Lifecycle.STOPPED;
+                }
+                cleanupRuntimeState();
+            }
         }
     }
 
-    private Path resolveProvidersDir() throws IOException {
+    private synchronized boolean startupAllowed() {
+        return !shutdown && lifecycle == Lifecycle.STARTING;
+    }
+
+    protected Process launchSidecar(Path providersDir, Path proxy, Path config)
+            throws IOException {
+        ProcessBuilder builder = new ProcessBuilder(
+                pythonCommand(), proxy.toString(), "--start", "--config", config.toString());
+        builder.directory(providersDir.getParent().getParent().toFile());
+        builder.redirectErrorStream(true);
+        return builder.start();
+    }
+
+    protected Path resolveProvidersDir() throws IOException {
         if (agentWorkspace != null) {
             Path fromWorkspace = agentWorkspace.resolve("providers");
             if (Files.isRegularFile(fromWorkspace.resolve("proxy.py"))
@@ -208,6 +235,42 @@ public class LiteLlmProxyService {
         }, "ImageJAI-litellm-proxy-log");
         pump.setDaemon(true);
         pump.start();
+    }
+
+    /**
+     * Reaps the exact process promoted to RUNNING and makes a later restart
+     * possible if that child exits unexpectedly. The identity check prevents
+     * a delayed watcher from clearing state owned by a replacement process.
+     */
+    private void startExitWatcher(final Process started) {
+        Thread watcher = new Thread(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    started.waitFor();
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    return;
+                }
+                synchronized (LiteLlmProxyService.this) {
+                    if (process != started) {
+                        return;
+                    }
+                    process = null;
+                    ready = false;
+                    if (!shutdown) {
+                        lifecycle = Lifecycle.STOPPED;
+                        IJ.log(LOG_PREFIX + " proxy sidecar exited");
+                    }
+                    // Keep cleanup under the lifecycle lock so startAsync()
+                    // cannot publish a replacement while old runtime state is
+                    // still being removed.
+                    cleanupRuntimeState();
+                }
+            }
+        }, "ImageJAI-litellm-proxy-exit");
+        watcher.setDaemon(true);
+        watcher.start();
     }
 
     // Package-private so LiteLlmProxyServiceTest can drive sentinel parsing
@@ -280,10 +343,12 @@ public class LiteLlmProxyService {
         }
     }
 
-    private boolean waitHealthy(double timeoutSeconds) {
+    protected boolean waitHealthy(double timeoutSeconds) {
         long deadline = System.nanoTime() + (long) (timeoutSeconds * 1_000_000_000L);
         while (System.nanoTime() < deadline) {
+            if (shutdown) return false;
             updatePortFromFile();
+            updateAuthFromFile();
             if (readinessOk(port)) {
                 return true;
             }
@@ -300,6 +365,42 @@ public class LiteLlmProxyService {
             }
         }
         return false;
+    }
+
+    private void terminateProcess(Process running) {
+        if (running == null || !running.isAlive()) {
+            return;
+        }
+        if (isWindows()) {
+            try {
+                String pid = processPid(running);
+                if (pid != null) {
+                    new ProcessBuilder("taskkill", "/PID", pid, "/T", "/F")
+                            .start().waitFor();
+                } else {
+                    running.destroy();
+                    if (!running.waitFor(5, java.util.concurrent.TimeUnit.SECONDS)) {
+                        running.destroyForcibly();
+                    }
+                }
+            } catch (Exception e) {
+                running.destroyForcibly();
+            }
+        } else {
+            running.destroy();
+            try {
+                if (!running.waitFor(5, java.util.concurrent.TimeUnit.SECONDS)) {
+                    running.destroyForcibly();
+                }
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                running.destroyForcibly();
+            }
+        }
+    }
+
+    String lifecycleStateForTest() {
+        return lifecycle.name();
     }
 
     /**
@@ -343,6 +444,10 @@ public class LiteLlmProxyService {
     }
 
     private boolean readinessOk(int candidatePort) {
+        String key = masterKey;
+        if (key == null || key.trim().isEmpty()) {
+            return false;
+        }
         HttpURLConnection connection = null;
         try {
             URL url = new URL("http://localhost:" + candidatePort + "/health/readiness");
@@ -350,6 +455,7 @@ public class LiteLlmProxyService {
             connection.setConnectTimeout(600);
             connection.setReadTimeout(600);
             connection.setRequestMethod("GET");
+            connection.setRequestProperty("Authorization", "Bearer " + key);
             return connection.getResponseCode() == 200;
         } catch (IOException e) {
             return false;
@@ -357,6 +463,100 @@ public class LiteLlmProxyService {
             if (connection != null) {
                 connection.disconnect();
             }
+        }
+    }
+
+    private void updateAuthFromFile() {
+        Path providers = activeProvidersDir;
+        if (providers == null) {
+            return;
+        }
+        Path authFile = providers.resolve("proxy.auth");
+        Path stateFile = providers.resolve("proxy.runtime.json");
+        try {
+            String key = new String(Files.readAllBytes(authFile), StandardCharsets.UTF_8).trim();
+            if (!key.isEmpty()) {
+                masterKey = key;
+            }
+            if (Files.isRegularFile(stateFile)) {
+                JsonObject state = JsonParser.parseString(
+                        new String(Files.readAllBytes(stateFile), StandardCharsets.UTF_8))
+                        .getAsJsonObject();
+                if (state.has("runtime_dir") && !state.get("runtime_dir").isJsonNull()) {
+                    activeRuntimeDir = Paths.get(state.get("runtime_dir").getAsString())
+                            .toAbsolutePath().normalize();
+                }
+            }
+        } catch (Exception ignored) {
+            // Startup polling retries until both private state files exist.
+        }
+    }
+
+    private void cleanupRuntimeState() {
+        Path providers = activeProvidersDir;
+        String key = masterKey;
+        Path runtimeDir = activeRuntimeDir;
+        if (providers != null) {
+            deleteIfContentMatches(providers.resolve("proxy.auth"), key);
+            deleteIfContentMatches(providers.resolve("proxy.port"), Integer.toString(port));
+            Path stateFile = providers.resolve("proxy.runtime.json");
+            try {
+                if (Files.isRegularFile(stateFile)) {
+                    JsonObject state = JsonParser.parseString(
+                            new String(Files.readAllBytes(stateFile), StandardCharsets.UTF_8))
+                            .getAsJsonObject();
+                    String recorded = state.has("runtime_dir")
+                            ? state.get("runtime_dir").getAsString() : "";
+                    if (runtimeDir != null && runtimeDir.toString().equals(recorded)) {
+                        Files.deleteIfExists(stateFile);
+                    }
+                }
+            } catch (Exception ignored) {
+                // A stale state file is safer than deleting an unverified path.
+            }
+        }
+        deleteVerifiedRuntimeDirectory(runtimeDir);
+        activeRuntimeDir = null;
+        masterKey = null;
+    }
+
+    private void deleteIfContentMatches(Path path, String expected) {
+        if (path == null || expected == null || expected.isEmpty()) {
+            return;
+        }
+        try {
+            String actual = new String(Files.readAllBytes(path), StandardCharsets.UTF_8).trim();
+            if (expected.equals(actual)) {
+                Files.deleteIfExists(path);
+            }
+        } catch (IOException ignored) {
+            // Ownership could not be proven; leave the file in place.
+        }
+    }
+
+    private void deleteVerifiedRuntimeDirectory(Path candidate) {
+        if (candidate == null) {
+            return;
+        }
+        Path normalized = candidate.toAbsolutePath().normalize();
+        Path tempRoot = Paths.get(System.getProperty("java.io.tmpdir"))
+                .toAbsolutePath().normalize();
+        Path parent = normalized.getParent();
+        Path name = normalized.getFileName();
+        if (parent == null || name == null || !parent.equals(tempRoot)
+                || !name.toString().startsWith("imagejai-litellm-")) {
+            return;
+        }
+        try (java.util.stream.Stream<Path> paths = Files.walk(normalized)) {
+            paths.sorted(Comparator.reverseOrder()).forEach(path -> {
+                try {
+                    Files.deleteIfExists(path);
+                } catch (IOException ignored) {
+                    // Best-effort cleanup after the child process has stopped.
+                }
+            });
+        } catch (IOException ignored) {
+            // Already removed by Python's atexit handler or never published.
         }
     }
 

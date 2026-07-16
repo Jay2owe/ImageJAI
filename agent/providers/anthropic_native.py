@@ -24,11 +24,19 @@ from collections.abc import Callable
 from typing import Any
 
 from anthropic import Anthropic, APIConnectionError, APIStatusError, APITimeoutError
+from agent.ollama_agent.budget_ceiling import estimate_runtime_cost_usd
 
-from .base import ProviderClient, ToolCall, to_anthropic_tool
+from .base import (
+    ProviderClient,
+    ToolCall,
+    encode_capture_image,
+    prune_capture_images,
+    to_anthropic_tool,
+)
 
 
 DEFAULT_MAX_TOKENS = 4096
+MAX_OUTPUT_TOKENS = 32768
 DEFAULT_TIMEOUT_SECONDS = 120.0
 DEFAULT_MAX_RETRIES = 2
 
@@ -69,9 +77,6 @@ def _emit_cost(value: float) -> None:
 
 
 def _estimate_cost_usd(model: str, response: Any) -> float:
-    pricing = ANTHROPIC_PRICING_USD_PER_MTOK.get(model)
-    if not pricing:
-        return 0.0
     usage = getattr(response, "usage", None)
     if usage is None:
         return 0.0
@@ -79,6 +84,9 @@ def _estimate_cost_usd(model: str, response: Any) -> float:
     out_tok = int(getattr(usage, "output_tokens", 0) or 0)
     cache_read = int(getattr(usage, "cache_read_input_tokens", 0) or 0)
     cache_write = int(getattr(usage, "cache_creation_input_tokens", 0) or 0)
+    pricing = ANTHROPIC_PRICING_USD_PER_MTOK.get(model)
+    if not pricing:
+        return estimate_runtime_cost_usd("anthropic", model, in_tok, out_tok)
     # Treat cache reads at 10% of input rate (Anthropic ephemeral caching);
     # cache writes at the standard input rate per Anthropic's billing docs.
     billable_in = in_tok + cache_write + (cache_read * 0.1)
@@ -118,7 +126,7 @@ class AnthropicNativeClient(ProviderClient):
         **opts: Any,
     ) -> Any:
         enable_prompt_caching = bool(opts.pop("enable_prompt_caching", True))
-        thinking_budget = int(opts.pop("thinking_budget", 0) or 0)
+        thinking_budget = min(MAX_OUTPUT_TOKENS, max(0, int(opts.pop("thinking_budget", 0) or 0)))
         enable_server_tools = opts.pop("enable_server_tools", None) or []
         if isinstance(enable_server_tools, str):
             enable_server_tools = [enable_server_tools]
@@ -128,7 +136,10 @@ class AnthropicNativeClient(ProviderClient):
         kwargs: dict[str, Any] = {
             "model": model,
             "messages": non_system_messages,
-            "max_tokens": opts.pop("max_tokens", DEFAULT_MAX_TOKENS),
+            "max_tokens": min(
+                MAX_OUTPUT_TOKENS,
+                max(1, int(opts.pop("max_tokens", DEFAULT_MAX_TOKENS))),
+            ),
         }
 
         tool_specs: list[dict[str, Any]] = (
@@ -273,18 +284,29 @@ class AnthropicNativeClient(ProviderClient):
         call: ToolCall,
         result: str,
     ) -> None:
-        messages.append(
+        content: list[dict[str, Any]] = [
             {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "tool_result",
-                        "tool_use_id": call.id,
-                        "content": str(result),
-                    }
-                ],
+                "type": "tool_result",
+                "tool_use_id": call.id,
+                "content": str(result),
             }
-        )
+        ]
+        if call.name == "capture_image":
+            encoded = encode_capture_image(result)
+            if encoded is not None:
+                prune_capture_images(messages)
+                mime_type, data = encoded
+                content.append(
+                    {
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": mime_type,
+                            "data": data,
+                        },
+                    }
+                )
+        messages.append({"role": "user", "content": content})
 
 
 def _block_get(block: Any, key: str) -> Any:
