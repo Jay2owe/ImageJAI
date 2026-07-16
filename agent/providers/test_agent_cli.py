@@ -20,6 +20,8 @@ from agent.providers.base import (
 def _clear_provider_env(monkeypatch):
     monkeypatch.delenv("IMAGEJAI_PROVIDER", raising=False)
     monkeypatch.delenv("IMAGEJAI_MODEL", raising=False)
+    monkeypatch.delenv("IMAGEJAI_ALLOW_LOCAL_HOST_CODE", raising=False)
+    monkeypatch.delenv("OLLAMA_HOST", raising=False)
 
 
 def test_tool_map_has_core_fiji_tools():
@@ -55,10 +57,10 @@ def test_main_routes_ollama_to_gemma_wrapper(monkeypatch):
     not the thin provider REPL. Regression guard for the picker routing the
     user tuned via the gemma improvement loop."""
     _clear_provider_env(monkeypatch)
-    seen: list[tuple[str, str]] = []
+    seen: list[tuple[str, str, dict]] = []
 
-    def fake_wrapper(provider, model):
-        seen.append((provider, model))
+    def fake_wrapper(provider, model, opts):
+        seen.append((provider, model, opts))
         return 0
 
     def boom_rich(*args, **kwargs):  # the provider-client loop must NOT be reached
@@ -69,7 +71,10 @@ def test_main_routes_ollama_to_gemma_wrapper(monkeypatch):
 
     assert cli.main(["--provider", "ollama-cloud", "--model", "gemma4:31b-cloud"]) == 0
     assert cli.main(["--provider", "ollama", "--model", "gemma3:27b"]) == 0
-    assert seen == [("ollama-cloud", "gemma4:31b-cloud"), ("ollama", "gemma3:27b")]
+    assert seen == [
+        ("ollama-cloud", "gemma4:31b-cloud", {}),
+        ("ollama", "gemma3:27b", {}),
+    ]
 
 
 def test_main_ollama_wrapper_importerror_falls_back(monkeypatch, capsys):
@@ -77,7 +82,8 @@ def test_main_ollama_wrapper_importerror_falls_back(monkeypatch, capsys):
     the generic provider loop instead of crashing."""
     _clear_provider_env(monkeypatch)
 
-    def missing_wrapper(provider, model):
+    def missing_wrapper(provider, model, opts):
+        del provider, model, opts
         raise ImportError("no module named ollama")
 
     fell_back: list[tuple[str, str]] = []
@@ -110,6 +116,96 @@ def test_main_routes_non_ollama_to_rich_wrapper(monkeypatch):
 
     assert cli.main(["--provider", "groq", "--model", "llama-3.3-70b-versatile"]) == 0
     assert seen == [("groq", "llama-3.3-70b-versatile")]
+
+
+def test_explicit_local_host_code_grant_reaches_ollama_wrapper(monkeypatch):
+    _clear_provider_env(monkeypatch)
+    seen = []
+
+    def fake_wrapper(provider, model, opts):
+        seen.append((provider, model, opts))
+        return 0
+
+    monkeypatch.setattr(cli, "_run_ollama_wrapper", fake_wrapper)
+
+    assert cli.main([
+        "--provider", "ollama",
+        "--model", "gemma3:27b",
+        "--allow-local-host-code",
+    ]) == 0
+    assert seen == [(
+        "ollama",
+        "gemma3:27b",
+        {"capabilities": [HOST_CODE_CAPABILITY]},
+    )]
+
+
+def test_local_host_code_env_is_strict_and_local_only(monkeypatch, capsys):
+    _clear_provider_env(monkeypatch)
+    monkeypatch.setenv("IMAGEJAI_ALLOW_LOCAL_HOST_CODE", "yes")
+    seen = []
+    monkeypatch.setattr(
+        cli,
+        "_run_ollama_wrapper",
+        lambda provider, model, opts: seen.append((provider, opts)) or 0,
+    )
+
+    assert cli.main(["--provider", "ollama", "--model", "gemma3:27b"]) == 0
+    assert seen == [("ollama", {"capabilities": [HOST_CODE_CAPABILITY]})]
+
+    seen.clear()
+    assert cli.main([
+        "--provider", "ollama-cloud", "--model", "gemma4:31b-cloud",
+    ]) == 2
+    assert seen == []
+    assert "cannot be granted to cloud provider" in capsys.readouterr().err
+
+
+def test_cloud_cli_host_code_grant_fails_before_launch(monkeypatch, capsys):
+    _clear_provider_env(monkeypatch)
+    monkeypatch.setattr(
+        cli,
+        "_run_rich_provider_wrapper",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("cloud grant must fail before launch")
+        ),
+    )
+
+    assert cli.main([
+        "--provider", "groq",
+        "--model", "llama-3.3-70b-versatile",
+        "--allow-local-host-code",
+    ]) == 2
+    assert "cannot be granted to cloud provider" in capsys.readouterr().err
+
+
+def test_invalid_host_code_env_value_fails_closed(monkeypatch, capsys):
+    _clear_provider_env(monkeypatch)
+    monkeypatch.setenv("IMAGEJAI_ALLOW_LOCAL_HOST_CODE", "treu")
+
+    assert cli.main([
+        "--provider", "ollama", "--model", "gemma3:27b",
+    ]) == 2
+    assert "must be one of" in capsys.readouterr().err
+
+
+def test_remote_ollama_endpoint_cannot_receive_local_host_code(monkeypatch, capsys):
+    _clear_provider_env(monkeypatch)
+    monkeypatch.setenv("OLLAMA_HOST", "https://ollama.example.invalid:11434")
+
+    assert cli.main([
+        "--provider", "ollama",
+        "--model", "gemma3:27b",
+        "--allow-local-host-code",
+    ]) == 2
+    assert "requires a loopback OLLAMA_HOST" in capsys.readouterr().err
+
+
+def test_host_code_prompt_describes_optional_tool_surface():
+    prompt = cli._build_system_prompt("groq", "llama-3.3-70b-versatile")
+    assert "Use only tools present in the current schema" in prompt
+    assert "cloud providers never receive this grant" in prompt
+    assert "`run_script(code, language)` *(optional)*" in prompt
 
 
 def test_native_opts_parses_boolean_env(monkeypatch):

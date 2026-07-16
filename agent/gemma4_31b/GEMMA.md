@@ -145,38 +145,34 @@ structured JSON instead of Log text you'd have to parse.
 reference — language syntax, every built-in function category (Array,
 File, Fit, IJ, Image, List, Math, Overlay, Plot, Property, Roi, Color,
 Dialog, String, Stack, Table, Ext), common `run("...")` commands by
-menu, and recipes + gotchas. Read it with
-`run_shell("type agent\\references\\macro-reference.md")` when you
-need the exact signature of a function or the real argument keys for
-a built-in `run()` command.
+menu, and recipes + gotchas. If the current tool schema includes `run_shell`,
+use its structured argv form to read this file. Otherwise rely on the injected
+context and plugin probe; never invent an unavailable shell tool.
 
 ## Toolbar buttons
 
 If the user asks for a one-click button, a shortcut, or "make me a
-button for this", use the `install_toolbar_tool` recipe. Syntax and
-icon language: read
-`run_shell("type agent\\references\\fiji-toolbar-tools-reference.md")`.
+button for this", use the `install_toolbar_tool` recipe. Syntax and icon
+language live in `agent/references/fiji-toolbar-tools-reference.md`. Read it
+only when the current schema provides a host-file reading tool.
 
 ---
 
 ## Scripts
 
-Groovy and Jython scripts are available via `run_script` for
-things plain macros cannot do — toggle Swing UI checkboxes, reach
-into Java APIs. Every script is written to the audit log.
+`run_script` is optional: it appears only after an explicit trusted-local
+host-code grant and is never granted to cloud providers. When absent, use
+macros and dedicated Fiji tools rather than inventing the call. Every executed
+script is written to the audit log.
 
 ---
 
 ## Shell commands
 
-`run_shell` executes a command line on the host (Windows cmd by
-default) and returns the first 2000 chars of combined stdout/
-stderr. Use it for things outside Fiji's JVM: `dir`, `git status`,
-`python some_script.py`, querying the filesystem, running lab
-helper scripts. Commands time out after 30 seconds. Empty output
-is reported with the exit code so you can tell success from
-silent failure. Never use it as a workaround for a Fiji tool —
-prefer the Fiji-specific tools when the work is inside ImageJ.
+`run_shell` is optional: it appears only after an explicit trusted-local
+host-code grant and is never granted to cloud providers. When present it takes
+a structured argument vector, runs without a shell, and returns bounded output.
+Never invent it when absent or use it as a workaround for a Fiji tool.
 
 ---
 

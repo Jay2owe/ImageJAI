@@ -10,9 +10,52 @@ package is pip-installed.
 from __future__ import annotations
 
 import argparse
+import os
 import sys
+from urllib.parse import urlparse
 
 from . import active_image, events, loop, safety
+
+
+_LOCAL_HOST_CODE_ENV = "IMAGEJAI_ALLOW_LOCAL_HOST_CODE"
+_TRUE_ENV_VALUES = frozenset({"1", "true", "yes", "on"})
+_FALSE_ENV_VALUES = frozenset({"", "0", "false", "no", "off"})
+
+
+def _local_host_code_opts(provider: str, explicit_grant: bool) -> dict:
+    """Parse the direct Ollama entry point's trusted-local permission."""
+
+    raw = os.environ.get(_LOCAL_HOST_CODE_ENV)
+    value = "" if raw is None else raw.strip().lower()
+    if value in _TRUE_ENV_VALUES:
+        env_grant = True
+    elif value in _FALSE_ENV_VALUES:
+        env_grant = False
+    else:
+        raise ValueError(
+            "{} must be one of 1/true/yes/on or 0/false/no/off".format(
+                _LOCAL_HOST_CODE_ENV
+            )
+        )
+    if not (bool(explicit_grant) or env_grant):
+        return {}
+    if provider != "ollama":
+        raise ValueError(
+            "local host-code permission cannot be granted to cloud provider {!r}".format(
+                provider
+            )
+        )
+    endpoint = os.environ.get("OLLAMA_HOST", "").strip()
+    if endpoint:
+        try:
+            hostname = urlparse(endpoint).hostname
+        except ValueError:
+            hostname = None
+        if hostname not in {"localhost", "127.0.0.1", "::1"}:
+            raise ValueError(
+                "local host-code permission requires a loopback OLLAMA_HOST"
+            )
+    return {"capabilities": ["host_code"]}
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -81,6 +124,14 @@ def main(argv: list[str] | None = None) -> int:
         choices=["auto", "on", "off"],
         help="Initial thinking lock.",
     )
+    parser.add_argument(
+        "--allow-local-host-code",
+        action="store_true",
+        help=(
+            "Expose run_shell, run_script, and saved-recipe execution to a "
+            "trusted local provider. Rejected for Ollama Cloud."
+        ),
+    )
     args = parser.parse_args(argv)
 
     model = (args.model or "").strip()
@@ -99,6 +150,15 @@ def main(argv: list[str] | None = None) -> int:
     prompt_filename = "GEMMA_CLAUDE.md" if args.style == "claude" else "GEMMA.md"
     initial_mode_lock = None if args.mode == "auto" else args.mode
     initial_think_lock = None if args.think == "auto" else (args.think == "on")
+    provider_key = loop._normalise_provider(args.provider, model)
+    try:
+        provider_opts = _local_host_code_opts(
+            provider_key,
+            args.allow_local_host_code,
+        )
+    except ValueError as exc:
+        print("error: {}".format(exc), file=sys.stderr)
+        return 2
 
     events.start_subscriber(
         [
@@ -118,7 +178,8 @@ def main(argv: list[str] | None = None) -> int:
         prompt_filename=prompt_filename,
         initial_mode_lock=initial_mode_lock,
         initial_think_lock=initial_think_lock,
-        provider=args.provider,
+        provider=provider_key,
+        provider_opts=provider_opts,
     )
 
 

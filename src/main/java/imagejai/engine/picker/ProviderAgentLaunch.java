@@ -3,6 +3,7 @@ package imagejai.engine.picker;
 import ij.IJ;
 import imagejai.engine.AgentLauncher;
 import imagejai.engine.AgentSession;
+import imagejai.engine.LaunchPolicy;
 
 import java.io.File;
 import java.util.Collections;
@@ -23,6 +24,8 @@ import java.util.Map;
  */
 final class ProviderAgentLaunch {
 
+    static final String LOCAL_HOST_CODE_ENV = "IMAGEJAI_ALLOW_LOCAL_HOST_CODE";
+
     private ProviderAgentLaunch() {
     }
 
@@ -30,10 +33,13 @@ final class ProviderAgentLaunch {
     static final class Plan {
         final AgentLauncher.AgentInfo info;
         final Map<String, String> env;
+        final boolean dangerousPermissions;
 
-        Plan(AgentLauncher.AgentInfo info, Map<String, String> env) {
+        Plan(AgentLauncher.AgentInfo info, Map<String, String> env,
+             boolean dangerousPermissions) {
             this.info = info;
             this.env = Collections.unmodifiableMap(env);
+            this.dangerousPermissions = dangerousPermissions;
         }
     }
 
@@ -47,12 +53,21 @@ final class ProviderAgentLaunch {
                     + "directory or use a CLI agent.");
             return null;
         }
-        Plan plan = plan(cliLauncher.getAgentWorkspace(), entry, extraEnv);
+        Map<String, String> requestedEnv = withProcessHostCodeGrant(extraEnv);
+        final Plan plan;
+        try {
+            plan = plan(cliLauncher.getAgentWorkspace(), entry, requestedEnv);
+        } catch (IllegalArgumentException denied) {
+            IJ.log("[ProviderAgentLaunch] Local host-code permission refused: "
+                    + denied.getMessage());
+            return null;
+        }
         if (plan == null) {
             IJ.log("[ProviderAgentLaunch] Missing provider/model/workspace — cannot launch.");
             return null;
         }
-        return cliLauncher.launch(plan.info, mode, plan.env);
+        return cliLauncher.launch(plan.info, mode, plan.env,
+                plan.dangerousPermissions);
     }
 
     /**
@@ -69,13 +84,23 @@ final class ProviderAgentLaunch {
 
         String provider = entry.providerId().trim();
         String model = entry.modelId().trim();
+        boolean allowLocalHostCode = strictBoolean(extraEnv == null
+                ? null : extraEnv.get(LOCAL_HOST_CODE_ENV));
+        String endpoint = "ollama".equalsIgnoreCase(provider) && extraEnv != null
+                ? extraEnv.get("OLLAMA_HOST") : null;
+        if (allowLocalHostCode
+                && !LaunchPolicy.isLocalProviderEndpoint(provider, endpoint)) {
+            throw new IllegalArgumentException(
+                    "permission is available only to a trusted loopback provider");
+        }
         String python = pythonCommand();
         // Provider keys and model ids carry no spaces, so they pass unquoted
         // through both cmd.exe and bash without shell escaping (and avoids
         // cmd `start`'s fragile quote parsing on the external path).
         String command = python + " -m agent.providers.agent_cli"
                 + " --provider " + provider
-                + " --model " + model;
+                + " --model " + model
+                + (allowLocalHostCode ? " --allow-local-host-code" : "");
 
         String name = isBlank(entry.displayName())
                 ? provider + " / " + model
@@ -108,7 +133,34 @@ final class ProviderAgentLaunch {
         if (extraEnv != null) {
             env.putAll(extraEnv);
         }
-        return new Plan(info, env);
+        return new Plan(info, env, allowLocalHostCode);
+    }
+
+    private static Map<String, String> withProcessHostCodeGrant(
+            Map<String, String> extraEnv) {
+        Map<String, String> env = new LinkedHashMap<String, String>();
+        if (extraEnv != null) env.putAll(extraEnv);
+        if (!env.containsKey(LOCAL_HOST_CODE_ENV)) {
+            String inherited = System.getenv(LOCAL_HOST_CODE_ENV);
+            if (inherited != null) env.put(LOCAL_HOST_CODE_ENV, inherited);
+        }
+        if (!env.containsKey("OLLAMA_HOST")) {
+            String inherited = System.getenv("OLLAMA_HOST");
+            if (inherited != null) env.put("OLLAMA_HOST", inherited);
+        }
+        return env;
+    }
+
+    /** Security-sensitive boolean: typos must abort instead of silently denying. */
+    private static boolean strictBoolean(String raw) {
+        if (raw == null) return false;
+        String value = raw.trim().toLowerCase(java.util.Locale.ROOT);
+        if (value.isEmpty() || "0".equals(value) || "false".equals(value)
+                || "no".equals(value) || "off".equals(value)) return false;
+        if ("1".equals(value) || "true".equals(value)
+                || "yes".equals(value) || "on".equals(value)) return true;
+        throw new IllegalArgumentException(LOCAL_HOST_CODE_ENV
+                + " must be one of 1/true/yes/on or 0/false/no/off");
     }
 
     private static String pythonCommand() {

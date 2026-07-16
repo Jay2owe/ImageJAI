@@ -13,11 +13,15 @@ precise numbers still use `describe_image` / `histogram_summary` / `region_stats
 
 ## Tools
 
+Use only tools present in the current schema. `run_shell`, `run_script`, and
+`run_saved_recipe` are absent by default; they appear only after an explicit
+trusted-local host-code grant and are never granted to cloud providers.
+
 | Tool | Purpose |
 |------|---------|
 | `run_macro(code)` | Macro with auto-probed plugin args. Begin with `selectImage("<title>")` for any macro that touches the active image. |
 | `run_macro_async(code)` + `job_status(id)` | Anything > 2 s (segmentation, tracking, deconvolution). |
-| `run_script(code, language)` | Groovy / Jython / JavaScript inside Fiji's JVM. |
+| `run_script(code, language)` *(optional)* | Groovy / Jython / JavaScript inside Fiji's JVM; trusted-local host-code grant only. |
 | `probe_plugin(name)` | Open a plugin's dialog, return real macro arg keys. Required on unfamiliar plugins. |
 | `threshold_shootout` | Otsu/Li/Triangle/Minimum/Huang side by side with counts + montage. Extensible via `methods=`/`manual_thresholds=`. **Its `count` IS the count — don't re-segment to re-count.** |
 | `describe_image` | Intensity stats, histogram shape, rough object counts. Skip when the `[triage]` banner already suffices. |
@@ -27,7 +31,7 @@ precise numbers still use `describe_image` / `histogram_summary` / `region_stats
 | `capture_image` | Screenshot of the active image, auto-attached to the next turn for visual sanity. Pair with `describe_image` for numbers. |
 | `region_stats` / `histogram_summary` / `line_profile` / `quick_object_count` / `count_bright_regions` | NumPy-side, cheap, no macro. |
 | `list_dialog_components` / `click_dialog_button` / `set_dialog_text` / `set_dialog_checkbox` / `set_dialog_dropdown` / `close_dialogs` | Drive Swing dialogs macros can't reach. |
-| `run_shell(command)` | Host-OS shell (cmd.exe on Windows). 30 s, 2000-char cap. Use for `dir`, reading `agent/references/*-reference.md`. **Never** as a Fiji workaround. |
+| `run_shell(argv, cwd)` *(optional)* | Structured host-OS process execution; trusted-local host-code grant only. **Never** as a Fiji workaround. |
 
 ---
 
@@ -119,9 +123,9 @@ calibration, batch-iterate-close-iterate patterns), see
 
 ## Reference documents
 
-`agent/references/` holds ~60 `-reference.md` docs. Read them with
-`run_shell("type agent\\references\\<name>-reference.md")` (Windows: `type`, not `cat`).
-`INDEX.md` lists all of them.
+`agent/references/` holds ~60 `-reference.md` docs. If `run_shell` is present,
+read them with a structured argv call; otherwise rely on the injected context
+and do not invent a shell tool. `INDEX.md` lists all of them.
 
 **Before writing any macro**, `macro-reference.md` is the exhaustive reference —
 language syntax, every built-in function category (Array, File, Fit, IJ, Image,

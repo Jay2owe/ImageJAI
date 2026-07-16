@@ -3,6 +3,7 @@ package imagejai.engine.picker;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 
 import java.io.File;
@@ -66,6 +67,54 @@ public class ProviderAgentLaunchTest {
         // on-premises cloud-tag refusal can still fire.
         assertTrue(plan.info.isOllama());
         assertEquals("gemma4:31b-cloud", plan.info.defaultOllamaModel());
+    }
+
+    @Test
+    public void localHostCodeGrantIsExplicitAndClassifiedDangerous() {
+        java.util.Map<String, String> env = Collections.singletonMap(
+                ProviderAgentLaunch.LOCAL_HOST_CODE_ENV, "true");
+        ProviderAgentLaunch.Plan plan = ProviderAgentLaunch.plan(
+                "/ws/agent", entry("ollama", "gemma3:27b"), env);
+
+        assertNotNull(plan);
+        assertTrue(plan.info.command.contains("--allow-local-host-code"));
+        assertTrue(plan.dangerousPermissions);
+        assertEquals("true", plan.env.get(
+                ProviderAgentLaunch.LOCAL_HOST_CODE_ENV));
+    }
+
+    @Test
+    public void localHostCodeGrantDefaultsOffAndRejectsCloudOrTypos() {
+        ProviderAgentLaunch.Plan defaultPlan = ProviderAgentLaunch.plan(
+                "/ws/agent", entry("ollama", "gemma3:27b"), null);
+        assertFalse(defaultPlan.info.command.contains("--allow-local-host-code"));
+        assertFalse(defaultPlan.dangerousPermissions);
+
+        assertHostCodePlanRejected("ollama-cloud", "true");
+        assertHostCodePlanRejected("groq", "true");
+        assertHostCodePlanRejected("ollama", "treu");
+
+        java.util.Map<String, String> remote = new java.util.LinkedHashMap<>();
+        remote.put(ProviderAgentLaunch.LOCAL_HOST_CODE_ENV, "true");
+        remote.put("OLLAMA_HOST", "https://ollama.example.invalid:11434");
+        try {
+            ProviderAgentLaunch.plan(
+                    "/ws/agent", entry("ollama", "model"), remote);
+            org.junit.Assert.fail("remote Ollama host must not receive host code");
+        } catch (IllegalArgumentException expected) {
+            assertFalse(expected.getMessage().isEmpty());
+        }
+    }
+
+    private static void assertHostCodePlanRejected(String provider, String value) {
+        try {
+            ProviderAgentLaunch.plan("/ws/agent", entry(provider, "model"),
+                    Collections.singletonMap(
+                            ProviderAgentLaunch.LOCAL_HOST_CODE_ENV, value));
+            org.junit.Assert.fail("unsafe host-code grant must be rejected");
+        } catch (IllegalArgumentException expected) {
+            assertFalse(expected.getMessage().isEmpty());
+        }
     }
 
     @Test

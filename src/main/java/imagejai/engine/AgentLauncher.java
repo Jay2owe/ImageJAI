@@ -220,17 +220,36 @@ public class AgentLauncher {
     }
 
     /**
+     * Provider launch with an explicit dangerous-permission classification.
+     * The caller must already have restricted the permission to a trusted
+     * local provider; the flag keeps the central launch-policy audit accurate.
+     */
+    public AgentSession launch(AgentInfo agent, Mode mode, Map<String, String> extraEnv,
+                               boolean dangerousPermissions) {
+        return launch(agent, mode, extraEnv, SessionAction.NEW_SESSION,
+                dangerousPermissions);
+    }
+
+    /**
      * Launch with extra environment variables and an explicit CLI session
      * action. Existing provider/native wrappers call the three-argument
      * overload, so only direct CLI launches can opt into resume.
      */
     public AgentSession launch(AgentInfo agent, Mode mode, Map<String, String> extraEnv,
                                SessionAction sessionAction) {
+        return launch(agent, mode, extraEnv, sessionAction, false);
+    }
+
+    private AgentSession launch(AgentInfo agent, Mode mode,
+                                Map<String, String> extraEnv,
+                                SessionAction sessionAction,
+                                boolean dangerousPermissions) {
         SessionAction action = sessionAction == null
                 ? SessionAction.NEW_SESSION
                 : sessionAction;
         try {
-            LaunchPolicy.Decision decision = evaluateLaunch(agent, extraEnv).enforce();
+            LaunchPolicy.Decision decision = evaluateLaunch(
+                    agent, extraEnv, dangerousPermissions).enforce();
             Map<String, String> permittedEnv = decision.permittedEnvironment();
             syncContextFiles();
 
@@ -242,17 +261,24 @@ public class AgentLauncher {
                 try {
                     return createEmbeddedSession(agent, spec);
                 } catch (IOException e) {
-                    return fallbackToExternalAfterEmbeddedFailure(agent, permittedEnv, action, e);
+                    return fallbackToExternalAfterEmbeddedFailure(
+                            agent, permittedEnv, action, dangerousPermissions, e);
                 } catch (RuntimeException e) {
                     if (e instanceof PostureViolation) {
                         throw e;
                     }
-                    return fallbackToExternalAfterEmbeddedFailure(agent, permittedEnv, action, e);
+                    return fallbackToExternalAfterEmbeddedFailure(
+                            agent, permittedEnv, action, dangerousPermissions, e);
                 } catch (LinkageError e) {
-                    return fallbackToExternalAfterEmbeddedFailure(agent, permittedEnv, action, e);
+                    return fallbackToExternalAfterEmbeddedFailure(
+                            agent, permittedEnv, action, dangerousPermissions, e);
                 }
             }
 
+            if (dangerousPermissions) {
+                return launchExternalSession(
+                        agent, permittedEnv, "", action, true);
+            }
             return launchExternalSession(agent, permittedEnv, "", action);
         } catch (IOException e) {
             IJ.log("[AgentLauncher] Approved agent process could not be started: "
@@ -278,7 +304,17 @@ public class AgentLauncher {
                                        Map<String, String> extraEnv,
                                        String notice,
                                        SessionAction sessionAction) throws IOException {
-        LaunchPolicy.Decision decision = evaluateLaunch(agent, extraEnv).enforce();
+        return launchExternalSession(agent, extraEnv, notice, sessionAction, false);
+    }
+
+    private AgentSession launchExternalSession(AgentInfo agent,
+                                                Map<String, String> extraEnv,
+                                                String notice,
+                                                SessionAction sessionAction,
+                                                boolean dangerousPermissions)
+            throws IOException {
+        LaunchPolicy.Decision decision = evaluateLaunch(
+                agent, extraEnv, dangerousPermissions).enforce();
         AgentLaunchSpec spec = buildExternalLaunchSpec(agent, sessionAction);
         if (!decision.permittedEnvironment().isEmpty()) {
             spec.env.putAll(decision.permittedEnvironment());
@@ -295,15 +331,24 @@ public class AgentLauncher {
     private AgentSession fallbackToExternalAfterEmbeddedFailure(AgentInfo agent,
                                                                Map<String, String> extraEnv,
                                                                SessionAction sessionAction,
+                                                               boolean dangerousPermissions,
                                                                Throwable failure)
             throws IOException {
         String reason = "Embedded terminal failed (" + safeFailureCategory(failure) + ")";
         IJ.log("[AgentLauncher] " + reason + ". Falling back to external terminal.");
         String notice = reason + ". Launching the approved agent in an external window.";
-        if (sessionAction == SessionAction.NEW_SESSION) {
-            return launchExternalSession(agent, extraEnv, notice);
+        if (!dangerousPermissions) {
+            if (sessionAction == SessionAction.NEW_SESSION) {
+                return launchExternalSession(agent, extraEnv, notice);
+            }
+            return launchExternalSession(agent, extraEnv, notice, sessionAction);
         }
-        return launchExternalSession(agent, extraEnv, notice, sessionAction);
+        if (sessionAction == SessionAction.NEW_SESSION) {
+            return launchExternalSession(agent, extraEnv, notice,
+                    SessionAction.NEW_SESSION, dangerousPermissions);
+        }
+        return launchExternalSession(agent, extraEnv, notice, sessionAction,
+                dangerousPermissions);
     }
 
     /**

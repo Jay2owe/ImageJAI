@@ -31,9 +31,10 @@ import json
 import os
 import sys
 from typing import Any, Callable
+from urllib.parse import urlparse
 
 from agent.providers.base import HOST_CODE_CAPABILITY, ProviderToolPolicy
-from agent.providers.router import PROVIDER_KEYS, get_client
+from agent.providers.router import PROVIDER_KEYS, get_client, provider_tool_policy
 
 try:  # pragma: no cover - exercised when the contexts package is importable
     from agent.contexts.loader import load_context
@@ -166,7 +167,11 @@ _MAX_TOOL_ROUNDS = 16
 _OLLAMA_PROVIDERS = frozenset({"ollama", "ollama-cloud"})
 
 
-def _run_ollama_wrapper(provider: str, model: str) -> int:
+def _run_ollama_wrapper(
+    provider: str,
+    model: str,
+    opts: dict[str, Any] | None = None,
+) -> int:
     """Delegate an Ollama model to the gemma4_31b wrapper loop.
 
     Returns the wrapper's exit code. Raises ImportError if the wrapper package
@@ -180,6 +185,9 @@ def _run_ollama_wrapper(provider: str, model: str) -> int:
         argv += ["--provider", provider.strip()]
     if model and model.strip():
         argv += ["--model", model.strip()]
+    capabilities = set((opts or {}).get("capabilities") or ())
+    if HOST_CODE_CAPABILITY in capabilities:
+        argv.append("--allow-local-host-code")
     return gemma_main(argv)
 
 
@@ -236,6 +244,73 @@ def _native_opts() -> dict[str, Any]:
             server_tools.append(tool)
     if server_tools:
         opts["server_tools"] = server_tools
+    return opts
+
+
+_LOCAL_HOST_CODE_ENV = "IMAGEJAI_ALLOW_LOCAL_HOST_CODE"
+_TRUE_ENV_VALUES = frozenset({"1", "true", "yes", "on"})
+_FALSE_ENV_VALUES = frozenset({"", "0", "false", "no", "off"})
+
+
+def _strict_env_bool(name: str) -> bool:
+    """Parse one security-sensitive boolean without typo-to-false behavior."""
+
+    raw = os.environ.get(name)
+    if raw is None:
+        return False
+    value = raw.strip().lower()
+    if value in _TRUE_ENV_VALUES:
+        return True
+    if value in _FALSE_ENV_VALUES:
+        return False
+    raise ValueError(
+        "{} must be one of 1/true/yes/on or 0/false/no/off".format(name)
+    )
+
+
+def _local_host_code_opts(
+    provider: str,
+    *,
+    explicit_grant: bool = False,
+) -> dict[str, Any]:
+    """Return a host-code capability only for an explicitly trusted local provider.
+
+    The CLI flag and environment variable are launcher/user inputs, never model
+    inputs.  Even an explicit request fails closed for cloud providers.
+    """
+
+    env_grant = _strict_env_bool(_LOCAL_HOST_CODE_ENV)
+    requested = bool(explicit_grant) or env_grant
+    if not requested:
+        return {}
+    policy = provider_tool_policy(provider)
+    if not policy.is_local:
+        raise ValueError(
+            "local host-code permission cannot be granted to cloud provider {!r}".format(
+                provider
+            )
+        )
+    if provider == "ollama":
+        endpoint = os.environ.get("OLLAMA_HOST", "").strip()
+        if endpoint:
+            try:
+                hostname = urlparse(endpoint).hostname
+            except ValueError:
+                hostname = None
+            if hostname not in {"localhost", "127.0.0.1", "::1"}:
+                raise ValueError(
+                    "local host-code permission requires a loopback OLLAMA_HOST"
+                )
+    return {"capabilities": [HOST_CODE_CAPABILITY]}
+
+
+def _provider_opts(provider: str, *, explicit_host_code: bool = False) -> dict[str, Any]:
+    """Compose native-provider options with the trusted-local permission."""
+
+    opts = _native_opts()
+    opts.update(
+        _local_host_code_opts(provider, explicit_grant=explicit_host_code)
+    )
     return opts
 
 
@@ -494,6 +569,14 @@ def main(argv: list[str] | None = None) -> int:
                         help="canonical provider key, e.g. groq, anthropic, gemini")
     parser.add_argument("--model", default=os.environ.get("IMAGEJAI_MODEL"),
                         help="model id, e.g. llama-3.3-70b-versatile")
+    parser.add_argument(
+        "--allow-local-host-code",
+        action="store_true",
+        help=(
+            "Expose run_shell, run_script, and saved-recipe execution to a "
+            "trusted local provider. Rejected for every cloud provider."
+        ),
+    )
     args = parser.parse_args(argv)
 
     provider = (args.provider or "").strip()
@@ -503,20 +586,30 @@ def main(argv: list[str] | None = None) -> int:
               "IMAGEJAI_MODEL) are required", file=sys.stderr)
         return 2
 
-    if provider.lower() in _OLLAMA_PROVIDERS:
-        try:
-            return _run_ollama_wrapper(provider, model)
-        except ImportError as exc:
-            print(f"warning: gemma4_31b wrapper unavailable ({exc}); falling "
-                  f"back to the provider-client loop for {provider}/{model}",
-                  file=sys.stderr)
-
-    if provider not in PROVIDER_KEYS:
+    provider_key = provider.lower()
+    if provider_key not in PROVIDER_KEYS:
         print(f"error: unknown provider {provider!r}; known: "
               f"{', '.join(PROVIDER_KEYS)}", file=sys.stderr)
         return 2
 
-    return _run_rich_provider_wrapper(provider, model, _native_opts())
+    try:
+        opts = _provider_opts(
+            provider_key,
+            explicit_host_code=args.allow_local_host_code,
+        )
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+
+    if provider_key in _OLLAMA_PROVIDERS:
+        try:
+            return _run_ollama_wrapper(provider_key, model, opts)
+        except ImportError as exc:
+            print(f"warning: gemma4_31b wrapper unavailable ({exc}); falling "
+                  f"back to the provider-client loop for {provider_key}/{model}",
+                  file=sys.stderr)
+
+    return _run_rich_provider_wrapper(provider_key, model, opts)
 
 
 if __name__ == "__main__":
