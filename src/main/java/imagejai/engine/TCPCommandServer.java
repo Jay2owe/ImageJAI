@@ -4402,9 +4402,6 @@ public class TCPCommandServer {
         }
 
         final boolean safetyEnabled = isScientificIntegrityScanEnabled(caps);
-        final List<DestructiveScanner.DestructiveOp> safetyFindings = safetyEnabled
-                ? DestructiveScanner.scan(code, captureScannerContext(caps))
-                : java.util.Collections.<DestructiveScanner.DestructiveOp>emptyList();
 
         if (executeMacroForTest != null) {
             return executeMacroForTest.apply(request, caps);
@@ -4430,6 +4427,9 @@ public class TCPCommandServer {
         final String codeToRun = (validation != null && validation.hasCorrections())
                 ? validation.patchedCode
                 : code;
+        final List<DestructiveScanner.DestructiveOp> safetyFindings = safetyEnabled
+                ? DestructiveScanner.scan(codeToRun, captureScannerContext(caps))
+                : java.util.Collections.<DestructiveScanner.DestructiveOp>emptyList();
         final SessionCodeJournal.DatasetBinding journalDataset =
                 SessionCodeJournal.captureInitiatingDataset();
 
@@ -5810,7 +5810,7 @@ public class TCPCommandServer {
         final long scriptTimeoutMs = resolveTimeoutMs(request, MACRO_TIMEOUT_MS);
         final boolean safetyEnabled = isScientificIntegrityScanEnabled(caps);
         final List<DestructiveScanner.DestructiveOp> safetyFindings = safetyEnabled
-                ? DestructiveScanner.scan(code, captureScannerContext(caps))
+                ? DestructiveScanner.scanElevatedScript(code, captureScannerContext(caps))
                 : java.util.Collections.<DestructiveScanner.DestructiveOp>emptyList();
 
         JsonObject result = new JsonObject();

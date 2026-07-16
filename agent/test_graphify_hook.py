@@ -111,6 +111,132 @@ def test_concurrent_workers_run_one_writer_for_burst(tmp_path: Path) -> None:
     assert graphify_hook._pending_requests(root) == []
 
 
+def test_concurrent_burst_schedules_only_one_detached_worker(
+    tmp_path: Path, monkeypatch
+) -> None:
+    root = _make_root(tmp_path)
+    spawned: list[str] = []
+    spawned_lock = threading.Lock()
+    barrier = threading.Barrier(24)
+
+    def fake_spawn(_root: Path, claim_token: str) -> None:
+        with spawned_lock:
+            spawned.append(claim_token)
+
+    monkeypatch.setattr(graphify_hook, "_spawn_worker", fake_spawn)
+
+    def schedule(index: int) -> None:
+        barrier.wait()
+        assert graphify_hook.schedule_update(
+            root, "post-edit", [f"agent/burst_{index}.py"]
+        )
+
+    schedulers = [threading.Thread(target=schedule, args=(index,)) for index in range(24)]
+    for scheduler in schedulers:
+        scheduler.start()
+    for scheduler in schedulers:
+        scheduler.join(timeout=3.0)
+        assert not scheduler.is_alive()
+
+    assert len(spawned) == 1
+    assert len(graphify_hook._pending_requests(root)) == 24
+    assert graphify_hook._release_worker_claim(root, spawned[0])
+
+
+def test_worker_claim_recovers_dead_owner_and_expired_live_lease(
+    tmp_path: Path,
+) -> None:
+    root = _make_root(tmp_path)
+    claim = graphify_hook._worker_claim_dir(root)
+    claim.mkdir(parents=True)
+    (claim / "owner.json").write_text(
+        json.dumps(
+            {
+                "created_at": 99.0,
+                "heartbeat_at": 99.0,
+                "host": socket.gethostname(),
+                "pid": 2**30,
+                "token": "dead",
+            }
+        ),
+        encoding="utf-8",
+    )
+    dead_recovery = graphify_hook._try_acquire_worker_claim(
+        root, stale_seconds=10.0, now=100.0
+    )
+    assert dead_recovery is not None
+    assert graphify_hook._release_worker_claim(root, dead_recovery)
+
+    claim.mkdir()
+    (claim / "owner.json").write_text(
+        json.dumps(
+            {
+                "created_at": 0.0,
+                "heartbeat_at": 0.0,
+                "host": socket.gethostname(),
+                "pid": os.getpid(),
+                "token": "expired",
+            }
+        ),
+        encoding="utf-8",
+    )
+    lease_recovery = graphify_hook._try_acquire_worker_claim(
+        root, stale_seconds=10.0, now=100.0
+    )
+    assert lease_recovery is not None
+    assert graphify_hook._release_worker_claim(root, lease_recovery)
+
+
+def test_claim_release_recheck_drains_request_queued_during_exit_race(
+    tmp_path: Path, monkeypatch
+) -> None:
+    root = _make_root(tmp_path)
+    graphify_hook._queue_request(root, "initial", ["agent/initial.py"])
+    token = graphify_hook._try_acquire_worker_claim(root)
+    assert token is not None
+    spawned: list[str] = []
+    calls = 0
+
+    monkeypatch.setattr(
+        graphify_hook,
+        "_spawn_worker",
+        lambda _root, claim_token: spawned.append(claim_token),
+    )
+
+    def fake_worker(_root: Path) -> bool:
+        nonlocal calls
+        calls += 1
+        for request in graphify_hook._pending_requests(root):
+            request.unlink()
+        if calls == 1:
+            # The scheduler sees the active claim and correctly declines to
+            # spawn. The exiting worker must release, recheck, and reclaim.
+            assert graphify_hook.schedule_update(
+                root, "exit-race", ["src/ArrivedDuringExit.java"]
+            )
+        return True
+
+    assert graphify_hook._run_claimed_worker(root, token, worker=fake_worker)
+    assert calls == 2
+    assert spawned == []
+    assert graphify_hook._pending_requests(root) == []
+    assert not graphify_hook._worker_claim_dir(root).exists()
+
+
+def test_failed_update_keeps_request_for_later_recovery(tmp_path: Path) -> None:
+    root = _make_root(tmp_path)
+    graphify_hook._queue_request(root, "post-edit", ["agent/retry.py"])
+
+    assert not graphify_hook._worker(
+        root,
+        debounce_seconds=0.0,
+        stale_seconds=60.0,
+        lock_wait_seconds=1.0,
+        run_update=lambda _root, _events: False,
+    )
+    assert len(graphify_hook._pending_requests(root)) == 1
+
+
 def test_failed_update_writes_utf8_actionable_log(tmp_path: Path) -> None:
     root = _make_root(tmp_path)
     command = [

@@ -347,7 +347,7 @@ public class MultiProviderPanel extends JPanel {
                     return new BrowserAuthWizard(providerKey, meta.displayName,
                             meta.signupUrl, cliHintFor(providerKey), credentials, verifier);
                 case "runtime":
-                    return new LocalRuntimeWizard(providerKey, credentials);
+                    return new LocalRuntimeWizard(providerKey, credentials, verifier);
                 case "runtime-models":
                     return new LocalModelDownloadWizard(registry, credentials);
                 case "key":

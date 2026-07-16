@@ -55,6 +55,89 @@ public class DestructiveScannerTest {
     }
 
     // -----------------------------------------------------------------------
+    // Host/JVM code escapes
+    // -----------------------------------------------------------------------
+
+    @Test
+    public void hostCodePrimitivesAreRejectedBeforeFiji() {
+        String[] unsafe = {
+                "exec(\"python\", \"-V\");",
+                "eval(\"script\", \"java.lang.Runtime.getRuntime()\");",
+                "call(\"java.lang.System.exit\", \"0\");",
+                "runMacro(\"/tmp/untrusted.ijm\");",
+                "runMacroFile(\"/tmp/untrusted.ijm\");",
+                "IJ.runMacro(\"print(1);\");",
+                "IJ.runMacroFile(\"/tmp/untrusted.ijm\");",
+                "Ext.install(\"/tmp/extension.jar\");",
+                "run(\"Script...\");",
+                "run(\"Groovy Script\", \"script=[println 1]\");",
+                "run(\"BeanShell Interpreter\");",
+                "run(\"Compile and Run...\");",
+                "doCommand(\"JavaScript Interpreter\");",
+                "run(\"JRuby Interpreter\");",
+                "run(\"Scr\" + \"ipt...\");",
+                "command = \"Script...\"; run(command);"
+        };
+
+        for (String code : unsafe) {
+            List<DestructiveScanner.DestructiveOp> ops =
+                    DestructiveScanner.scan(code, baseCtx());
+            assertEquals("expected one host-code finding for " + code,
+                    1, ops.size());
+            assertEquals(DestructiveScanner.RULE_HOST_CODE, ops.get(0).ruleId);
+            assertEquals(DestructiveScanner.Severity.REJECT, ops.get(0).severity);
+        }
+    }
+
+    @Test
+    public void hostCodeWordsInStringsAndCommentsAreHarmless() {
+        String code = "// exec(\\\"python\\\");\n"
+                + "/* eval(\\\"script\\\", \\\"danger\\\"); "
+                + "Ext.install(\\\"danger\\\"); */\n"
+                + "print(\"call( and IJ.runMacro( are documentation\");\n"
+                + "print(\"run('Script...') is documentation\");\n"
+                + "run(\"Gaussian Blur...\", \"sigma=2\");\n"
+                + "run(\"Descriptor-based registration (2d/3d)\");";
+        assertTrue(DestructiveScanner.scan(code, baseCtx()).isEmpty());
+    }
+
+    @Test
+    public void hostCodeFindingCarriesSourceLine() {
+        String code = "run(\"Gaussian Blur...\", \"sigma=2\");\n"
+                + "call(\"java.lang.System.exit\", \"0\");";
+        List<DestructiveScanner.DestructiveOp> ops =
+                DestructiveScanner.scan(code, baseCtx());
+        assertEquals(1, ops.size());
+        assertEquals(2, ops.get(0).line);
+    }
+
+    @Test
+    public void contextFreeHostRuleStillFailsClosedWithoutImageContext() {
+        List<DestructiveScanner.DestructiveOp> ops = DestructiveScanner.scan(
+                "exec(\"python\", \"-V\");", null);
+        assertEquals(1, ops.size());
+        assertEquals(DestructiveScanner.RULE_HOST_CODE, ops.get(0).ruleId);
+    }
+
+    @Test
+    public void explicitlyElevatedScriptScanDoesNotReapplyMacroHostGate() {
+        assertTrue(DestructiveScanner.scanElevatedScript(
+                "eval(\"arbitrary approved script code\");", baseCtx()).isEmpty());
+    }
+
+    @Test
+    public void elevatedScriptScanRetainsScientificIntegrityRules() {
+        DestructiveScanner.Context ctx = new DestructiveScanner.Context(
+                "/raw/cells.lif", "/raw/AI_Exports",
+                16, true, 0, 0, false, false, noFiles());
+        List<DestructiveScanner.DestructiveOp> ops =
+                DestructiveScanner.scanElevatedScript(
+                        "run(\"Properties...\", \"pixel_width=1\");", ctx);
+        assertEquals(1, ops.size());
+        assertEquals(DestructiveScanner.RULE_CALIBRATION_LOSS, ops.get(0).ruleId);
+    }
+
+    // -----------------------------------------------------------------------
     // Calibration loss
     // -----------------------------------------------------------------------
 

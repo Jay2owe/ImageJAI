@@ -10,6 +10,7 @@ import java.util.List;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
+import static org.junit.Assert.fail;
 
 public class OutboundPromptScrubberTest {
     @Test
@@ -95,6 +96,68 @@ public class OutboundPromptScrubberTest {
         assertTrue(retried.startsWith("\u0015"));
         assertTrue(retried.contains(token));
         assertFalse(retried.contains("retry_subject"));
+    }
+
+    @Test
+    public void oversizedNoNewlineWriteFailsClosedAndPreservesBufferedState() {
+        PathTokenMap map = new PathTokenMap(bytes(10));
+        String raw = "C:\\study\\bounded_subject.lif";
+        String token = map.tokenForPathString(raw);
+        OutboundPromptScrubber scrubber = new OutboundPromptScrubber(map, null);
+        scrubber.filter(("open " + raw).getBytes(StandardCharsets.UTF_8));
+
+        try {
+            scrubber.prepare(new byte[OutboundPromptScrubber.MAX_WRITE_BYTES + 1]);
+            fail("oversized terminal write should be rejected");
+        } catch (OutboundPromptScrubber.PromptLimitException expected) {
+            assertTrue(expected.getMessage().contains("exceeds"));
+        }
+
+        String enter = new String(scrubber.filter(new byte[] {'\r'}),
+                StandardCharsets.UTF_8);
+        assertTrue(enter.startsWith("\u0015"));
+        assertTrue(enter.contains(token));
+        assertFalse(enter.contains("bounded_subject"));
+    }
+
+    @Test
+    public void partialLineCapRollsBackOnlyRejectedChunkAndStillAllowsEditing() {
+        PathTokenMap map = new PathTokenMap(bytes(11));
+        OutboundPromptScrubber scrubber = new OutboundPromptScrubber(map, null);
+        byte[] full = new byte[OutboundPromptScrubber.MAX_PARTIAL_LINE_CHARS];
+        java.util.Arrays.fill(full, (byte) 'a');
+        scrubber.filter(full);
+
+        try {
+            scrubber.prepare(new byte[] {'b'});
+            fail("line beyond the cap should be rejected");
+        } catch (OutboundPromptScrubber.PromptLimitException expected) {
+            // Expected: the rejected byte is not retained.
+        }
+
+        scrubber.filter(new byte[] {'\b'});
+        String enter = new String(scrubber.filter(new byte[] {'\r'}),
+                StandardCharsets.UTF_8);
+        assertEquals("\r", enter);
+    }
+
+    @Test
+    public void rollbackRestoresMixedBackspaceAppendAndLineClearEdits() {
+        PathTokenMap map = new PathTokenMap(bytes(12));
+        String raw = "C:\\study\\rollback_subject.lif";
+        String token = map.tokenForPathString(raw);
+        OutboundPromptScrubber scrubber = new OutboundPromptScrubber(map, null);
+        scrubber.filter(("open " + raw).getBytes(StandardCharsets.UTF_8));
+
+        OutboundPromptScrubber.PreparedWrite failed = scrubber.prepare(
+                new byte[] {'\b', 'X', '\r', 'n', 'e', 'w'});
+        failed.rollback();
+        String retry = new String(scrubber.filter(new byte[] {'\r'}),
+                StandardCharsets.UTF_8);
+
+        assertTrue(retry.contains(token));
+        assertFalse(retry.contains("rollback_subject"));
+        assertFalse(retry.contains("new"));
     }
 
     @Test

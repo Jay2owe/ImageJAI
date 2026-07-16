@@ -8,22 +8,20 @@ refreshed or invalidated. All other events are dropped into a
 module-level queue so future phases (e.g. tools_events.py) can
 expose them to the agent.
 
-Mirrors the reconnect-on-drop pattern from imagej_events in
-agent/ij.py without importing it, so this agent remains
-standalone.
+Uses the same authenticated durable ImageJSession as every Gemma tool call.
+The server uses one-shot sockets for commands and a long-lived socket for the
+stream, but both carry the same installation token, session ID, and GEMMA_CAPS.
 """
 
 from __future__ import annotations
 
-import json
 import queue
 import re
-import socket
 import threading
 import time
 
 from . import active_image
-from .registry import HOST, PORT
+from .registry import imagej_session
 
 
 EVENT_QUEUE: "queue.Queue" = queue.Queue()
@@ -32,7 +30,6 @@ _started = False
 _started_lock = threading.Lock()
 
 RECONNECT_DELAY_S = 1.0
-RECV_CHUNK = 8192
 
 # Short-lived registry of image titles the agent's own macros created.
 # Populated from run_macro's newImages field; read by loop._format_triage_note
@@ -125,10 +122,9 @@ def _run(topics: list[str]) -> None:
     down the chat REPL. On disconnect we wait RECONNECT_DELAY_S
     seconds and try again, matching the helper in agent/ij.py.
     """
-    request = (json.dumps({"command": "subscribe", "topics": topics}) + "\n").encode("utf-8")
     while True:
         try:
-            _stream_once(request)
+            _stream_once(topics)
         except Exception:
             pass
         try:
@@ -137,40 +133,19 @@ def _run(topics: list[str]) -> None:
             return
 
 
-def _stream_once(request: bytes) -> None:
-    """Open one subscription socket and drain it until it closes.
+def _stream_once(topics: list[str], session=None) -> None:
+    """Drain one authenticated subscription until it closes.
 
-    Reads newline-delimited JSON frames, decodes each, dispatches
-    to _handle_frame. Returns when the socket closes or errors;
-    the outer loop decides whether to reconnect.
+    ``session`` is injectable for focused tests. Production always resolves
+    the registry singleton, preventing this legacy subscriber entry point from
+    falling back to an unauthenticated bare ``subscribe`` request.
     """
-    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    s.settimeout(None)
-    try:
-        s.connect((HOST, PORT))
-        s.sendall(request)
-        buf = b""
-        while True:
-            chunk = s.recv(RECV_CHUNK)
-            if not chunk:
-                return
-            buf += chunk
-            while b"\n" in buf:
-                line, buf = buf.split(b"\n", 1)
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    frame = json.loads(line.decode("utf-8"))
-                except ValueError:
-                    continue
-                try:
-                    _handle_frame(frame)
-                except Exception:
-                    pass
-    finally:
+    durable = session or imagej_session()
+    for frame in durable.events(topics, reconnect=False):
+        if isinstance(frame, dict) and frame.get("ok") is False:
+            return
         try:
-            s.close()
+            _handle_frame(frame)
         except Exception:
             pass
 

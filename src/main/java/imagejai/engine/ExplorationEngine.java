@@ -325,7 +325,14 @@ public class ExplorationEngine {
             IJ.log("[ExplorationEngine] " + variant.name + " failed: " + safeMessage(t));
             return result;
         } finally {
-            temporary.closeExactObject();
+            try {
+                temporary.closeExactObject();
+            } finally {
+                // A closed duplicate must not remain strongly reachable until
+                // an optional cleanup() call. Repeated exploration otherwise
+                // retains every ImagePlus for the lifetime of this engine.
+                temporaryObjects.remove(temporary);
+            }
         }
     }
 

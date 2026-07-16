@@ -5,8 +5,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from agent.gemma4_31b import loop, tools_shell
-from agent.gemma4_31b.registry import tools_for_policy
+from agent.gemma4_31b import loop, tools_fiji, tools_recipes, tools_shell
+from agent.gemma4_31b.registry import is_host_code_tool, tools_for_policy
 from agent.providers import router
 from agent.providers.base import HOST_CODE_CAPABILITY, ProviderToolPolicy, fn_to_json_schema
 
@@ -20,6 +20,7 @@ def test_cloud_schema_excludes_host_code_by_default() -> None:
     names = _tool_names(policy)
     assert "run_shell" not in names
     assert "run_script" not in names
+    assert "run_saved_recipe" not in names
     assert "run_macro" in names
 
 
@@ -33,7 +34,8 @@ def test_local_schema_requires_explicit_host_code_capability() -> None:
 
     assert default_policy.is_local is True
     assert "run_shell" not in _tool_names(default_policy)
-    assert {"run_shell", "run_script"} <= _tool_names(enabled_policy)
+    assert "run_saved_recipe" not in _tool_names(default_policy)
+    assert {"run_shell", "run_script", "run_saved_recipe"} <= _tool_names(enabled_policy)
 
 
 def test_loopback_cloud_proxy_is_not_misclassified_as_local() -> None:
@@ -58,6 +60,25 @@ def test_cloud_elevation_requires_capability_and_live_callback() -> None:
     assert "run_shell" not in _tool_names(no_capability, elevated=True)
     assert "run_shell" not in _tool_names(elevated, elevated=False)
     assert "run_shell" in _tool_names(elevated, elevated=True)
+    assert "run_saved_recipe" not in _tool_names(elevated, elevated=False)
+    assert "run_saved_recipe" in _tool_names(elevated, elevated=True)
+
+
+def test_recipe_runner_is_host_code_but_safe_macro_tool_is_not() -> None:
+    assert is_host_code_tool("run_saved_recipe") is True
+    assert is_host_code_tool("run_macro") is False
+
+
+def test_safe_macro_schema_remains_available_without_recipe_runner() -> None:
+    policy = ProviderToolPolicy(provider="groq", is_local=False)
+    names = _tool_names(policy)
+    schema = fn_to_json_schema(tools_fiji.run_macro)["schema"]
+
+    assert "run_macro" in names
+    assert "run_saved_recipe" not in names
+    assert schema["properties"]["code"]["type"] == "string"
+    assert "code" in schema["required"]
+    assert fn_to_json_schema(tools_recipes.run_saved_recipe)["name"] == "run_saved_recipe"
 
 
 class _Ticker:
@@ -109,7 +130,14 @@ def _call(name: str, args: dict) -> object:
     return SimpleNamespace(id="call", name=name, args=args, error=None)
 
 
-def _run_cloud_calls(monkeypatch, calls, approval_callback, tool) -> tuple[_CloudClient, str]:
+def _run_cloud_calls(
+    monkeypatch,
+    calls,
+    approval_callback,
+    tool,
+    *,
+    tool_name: str = "run_shell",
+) -> tuple[_CloudClient, str]:
     client = _CloudClient(calls)
     monkeypatch.setattr(loop, "_ActivityTicker", _Ticker)
     monkeypatch.setattr(loop, "_console_emit", lambda *args, **kwargs: None)
@@ -123,7 +151,7 @@ def _run_cloud_calls(monkeypatch, calls, approval_callback, tool) -> tuple[_Clou
         "llama-3.3-70b-versatile",
         [],
         [tool],
-        {"run_shell": tool},
+        {tool_name: tool},
         loop._resolve_turn_config("run it", None, None, False),
         provider="groq",
         provider_client=client,
@@ -176,6 +204,40 @@ def test_cloud_approval_is_exact_and_applies_to_one_call(monkeypatch) -> None:
     assert "print('one')" in requests[0].preview
     assert "print('two')" in requests[1].preview
     assert client.results == ["executed", "ABORTED: host-code call was denied by the one-call approval callback"]
+
+
+def test_recipe_elevation_is_exact_and_applies_to_one_call(monkeypatch) -> None:
+    executions: list[tuple[str, bool]] = []
+    requests = []
+
+    def run_saved_recipe(recipe_name, dry_run=False):
+        executions.append((recipe_name, dry_run))
+        return "executed {}".format(recipe_name)
+
+    def approve_once(request):
+        requests.append(request)
+        return len(requests) == 1
+
+    calls = [
+        _call("run_saved_recipe", {"recipe_name": "first", "dry_run": False}),
+        _call("run_saved_recipe", {"recipe_name": "second", "dry_run": False}),
+    ]
+    client, _ = _run_cloud_calls(
+        monkeypatch,
+        calls,
+        approve_once,
+        run_saved_recipe,
+        tool_name="run_saved_recipe",
+    )
+
+    assert executions == [("first", False)]
+    assert len(requests) == 2
+    assert json.loads(requests[0].preview)["recipe_name"] == "first"
+    assert json.loads(requests[1].preview)["recipe_name"] == "second"
+    assert client.results == [
+        "executed first",
+        "ABORTED: host-code call was denied by the one-call approval callback",
+    ]
 
 
 def test_run_script_preview_contains_exact_source() -> None:

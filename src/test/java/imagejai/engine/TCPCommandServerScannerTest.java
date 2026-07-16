@@ -8,6 +8,9 @@ import org.junit.Test;
 
 import imagejai.engine.safeMode.DestructiveScanner;
 
+import java.util.HashMap;
+import java.util.Map;
+
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
@@ -36,6 +39,7 @@ public class TCPCommandServerScannerTest {
     @After
     public void tearDown() {
         TCPCommandServer.executeMacroForTest = null;
+        MenuCommandRegistry.setForTesting(new HashMap<String, String>());
     }
 
     /**
@@ -127,6 +131,33 @@ public class TCPCommandServerScannerTest {
                         + " \"code\": \"run(\\\"Enhance Contrast\\\", \\\"saturated=0.35 normalize\\\");\"}");
         JsonObject reply = server.dispatch(req, caps);
         assertTrue("test seam was hit (scanner did not block)", seamHit[0]);
+    }
+
+    @Test
+    public void fuzzyCorrectionIsScannedBeforeCorrectedMacroCanRun() {
+        Map<String, String> commands = new HashMap<String, String>();
+        commands.put("Script...", "ij.plugin.frame.Editor");
+        MenuCommandRegistry.setForTesting(commands);
+
+        TCPCommandServer.AgentCaps caps = new TCPCommandServer.AgentCaps();
+        caps.safeMode = true;
+        caps.structuredErrors = true;
+        caps.fuzzyMatch = true;
+
+        JsonObject req = parse(
+                "{\"command\": \"execute_macro\","
+                        + " \"code\": \"run(\\\"Scrip...\\\");\"}");
+        JsonObject reply = server.dispatch(req, caps);
+
+        assertTrue(reply.get("ok").getAsBoolean());
+        JsonObject result = reply.getAsJsonObject("result");
+        assertFalse(result.get("success").getAsBoolean());
+        JsonObject error = result.getAsJsonObject("error");
+        assertEquals(ErrorReply.CODE_DESTRUCTIVE_OP_BLOCKED,
+                error.get("code").getAsString());
+        assertEquals(DestructiveScanner.RULE_HOST_CODE,
+                error.getAsJsonArray("operations").get(0).getAsJsonObject()
+                        .get("rule_id").getAsString());
     }
 
     // -----------------------------------------------------------------------

@@ -13,14 +13,18 @@ agent/ij.py, so the standalone agent works when the plugin uses a
 non-default TCP port.
 """
 
-import json
 import os
-import socket
+import threading
 
 try:
     from agent.providers.base import HOST_CODE_CAPABILITY, ProviderToolPolicy
 except ImportError:  # pragma: no cover - direct package installs
     from providers.base import HOST_CODE_CAPABILITY, ProviderToolPolicy  # type: ignore
+
+try:
+    from agent.ij import ImageJSession as _BaseImageJSession
+except ImportError:  # pragma: no cover - bundled workspace layout
+    from ij import ImageJSession as _BaseImageJSession  # type: ignore
 
 HOST = os.environ.get("IMAGEJAI_TCP_HOST", "localhost")
 try:
@@ -50,7 +54,83 @@ REGISTRY: list = []
 
 # These tools can execute arbitrary host/JVM code.  Keep this set explicit so
 # a new tool cannot accidentally gain host-code privilege through name matching.
-HOST_CODE_TOOL_NAMES = frozenset({"run_shell", "run_script"})
+HOST_CODE_TOOL_NAMES = frozenset({
+    "run_shell",
+    "run_script",
+    # Recipes can contain script steps that execute arbitrary JVM code. Keep
+    # the whole runner behind host_code + one-call elevation; dry-run callers
+    # use the canonical CLI instead of exposing this mixed-trust tool.
+    "run_saved_recipe",
+})
+
+
+def _compatibility_forbidden() -> dict:
+    return {
+        "ok": False,
+        "error": {
+            "code": "compatibility_forbidden",
+            "message": (
+                "Gemma tools require an authenticated durable ImageJAI session; "
+                "the server offered compatibility mode"
+            ),
+            "category": "authentication",
+            "retry_safe": False,
+        },
+    }
+
+
+class StrictGemmaSession(_BaseImageJSession):
+    """ImageJSession that refuses unauthenticated compatibility negotiation."""
+
+    def hello(self, timeout=10, force=False):
+        # Base ImageJSession caches the server-issued session before returning
+        # from hello(). Keep its re-entrant lock held through strict validation
+        # so a concurrent tool/event request can never observe a compatibility
+        # session in that small interval.
+        with self._lock:
+            response = super().hello(timeout=timeout, force=force)
+            return self._validate_hello_response_locked(response)
+
+    def _validate_hello_response_locked(self, response):
+        """Validate while ``self._lock`` is held (overridable test seam)."""
+        result = response.get("result") if isinstance(response, dict) else None
+        if isinstance(response, dict) and response.get("ok"):
+            if not isinstance(result, dict) or result.get("compatibility") is not False:
+                self.invalidate()
+                return _compatibility_forbidden()
+        return response
+
+
+_SESSION = None
+_SESSION_LOCK = threading.RLock()
+
+
+def _new_imagej_session():
+    return StrictGemmaSession(
+        host=HOST,
+        port=PORT,
+        timeout=TIMEOUT_S,
+        agent="gemma-31b",
+        capabilities=GEMMA_CAPS,
+    )
+
+
+def imagej_session():
+    """Return the one thread-safe durable session shared by tools and events."""
+
+    global _SESSION
+    with _SESSION_LOCK:
+        if _SESSION is None:
+            _SESSION = _new_imagej_session()
+        return _SESSION
+
+
+def _set_session_for_test(session) -> None:
+    """Replace the singleton without touching sockets (focused test seam)."""
+
+    global _SESSION
+    with _SESSION_LOCK:
+        _SESSION = session
 
 
 def tool(func):
@@ -115,58 +195,22 @@ def _rebuild_tool_map() -> dict:
 
 
 def send(command: str, **payload) -> dict:
-    """Send one JSON command to the Fiji TCP server and return the parsed reply.
+    """Send one command through Gemma's authenticated durable session.
 
-    Wire format matches agent/ij.py: a single JSON object terminated
-    by a newline, with {"command": ..., <args>} keys at the top
-    level (flat, not nested under "args"). The server replies with a
-    single newline-terminated JSON object shaped like
-    {"ok": true, "result": {...}} on success or
-    {"ok": false, "error": "..."} on failure.
+    The underlying protocol still uses one socket per request, but the same
+    server-issued session ID, installation token and ``GEMMA_CAPS`` are carried
+    on every socket. Hello/authentication failures are returned unchanged and
+    are never followed by a compatibility or bare-command retry.
     """
     request = {"command": command}
     request.update(payload)
-    data = (json.dumps(request) + "\n").encode("utf-8")
-
-    timed_out = False
-    with socket.create_connection((HOST, PORT), timeout=TIMEOUT_S) as s:
-        s.settimeout(TIMEOUT_S)
-        s.sendall(data)
-        chunks = []
-        while True:
-            try:
-                chunk = s.recv(65536)
-            except socket.timeout:
-                timed_out = True
-                break
-            if not chunk:
-                break
-            chunks.append(chunk)
-            if chunk.endswith(b"\n"):
-                break
-
-    raw = b"".join(chunks).decode("utf-8", errors="replace").strip()
-    if not raw:
-        if timed_out:
-            return {
-                "ok": False,
-                "timeout": True,
-                "error": (
-                    "timed out waiting for reply from Fiji TCP server "
-                    "(the macro may be blocked by a dialog or hung inside Fiji)"
-                ),
-            }
-        return {"ok": False, "error": "empty reply from Fiji TCP server"}
-    try:
-        return json.loads(raw)
-    except ValueError as exc:
-        return {"ok": False, "error": "invalid JSON reply: {}".format(exc), "raw": raw[:500]}
+    session = imagej_session()
+    if command == "hello":
+        return session.hello(timeout=min(TIMEOUT_S, 10.0), force=True)
+    return session.request(request, timeout=TIMEOUT_S)
 
 
 def hello() -> dict:
-    """Send the step 01 handshake on a fresh socket and return the server
-    response. Records Gemma's capabilities (see GEMMA_CAPS) so later-step
-    handlers on the server side can shape their replies for a small-context,
-    vision-free model. On any failure returns the error dict and the caller
-    can fall through to the legacy no-handshake path."""
-    return send("hello", agent="gemma-31b", capabilities=GEMMA_CAPS)
+    """Negotiate Gemma's strict durable session, with no legacy fallback."""
+
+    return imagej_session().hello(timeout=min(TIMEOUT_S, 10.0))

@@ -23,7 +23,40 @@ import sys
 from pathlib import Path
 
 from . import harvest_recipe
-from .registry import tool
+from .registry import imagej_session, tool
+
+
+class _GemmaRecipeTransport:
+    """Recipe-runner adapter over the rich loop's one durable session."""
+
+    def __init__(self, session=None):
+        self._session = session or imagej_session()
+
+    def execute_macro(self, code, timeout=None):
+        return self._session.request(
+            {"command": "execute_macro", "code": code, "source": "rail:recipe"},
+            timeout=timeout or 120,
+        )
+
+    def run_script(self, code, language, timeout=None):
+        return self._session.request(
+            {
+                "command": "run_script",
+                "code": code,
+                "language": language,
+                "source": "rail:recipe",
+            },
+            timeout=timeout or 180,
+        )
+
+    def get_state(self):
+        return self._session.request({"command": "get_state"})
+
+    def get_results(self):
+        return self._session.request({"command": "get_results_table"})
+
+    def capture(self):
+        return self._session.request({"command": "capture_image", "maxSize": 1024})
 
 
 def _agent_module(name: str):
@@ -118,6 +151,7 @@ def run_saved_recipe(recipe_name: str, dry_run: bool = False) -> str:
         receipt = recipe_runner.execute_recipe_file(
             path,
             dry_run=False,
+            transport=_GemmaRecipeTransport(),
             emit=lambda _message: None,
         )
         return json.dumps(receipt, sort_keys=True, default=str)

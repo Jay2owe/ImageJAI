@@ -67,8 +67,57 @@ _SAVE_DETECTORS = [
 ]
 
 
+# ImageJ macro primitives that escape the macro sandbox and execute host/JVM
+# code. Direct calls are matched against a comment/string-masked view so words
+# in documentation and print statements remain harmless. ``run(...)`` needs a
+# second pass with string contents retained because the command name is its
+# first string argument.
+_HOST_CODE_DIRECT = [
+    (
+        "exec",
+        re.compile(r"(?<![\w.])exec\s*\(", re.IGNORECASE),
+    ),
+    (
+        "eval",
+        re.compile(r"(?<![\w.])eval\s*\(", re.IGNORECASE),
+    ),
+    (
+        "call",
+        re.compile(r"(?<![\w.])call\s*\(", re.IGNORECASE),
+    ),
+    (
+        "runMacro",
+        re.compile(r"(?<![\w.])runMacro(?:File)?\s*\(", re.IGNORECASE),
+    ),
+    (
+        "IJ.runMacro",
+        re.compile(r"\bIJ\s*\.\s*runMacro(?:File)?\s*\(", re.IGNORECASE),
+    ),
+    (
+        "Ext.*",
+        re.compile(r"\bExt\s*\.\s*[A-Za-z_][A-Za-z0-9_]*\s*\(", re.IGNORECASE),
+    ),
+]
+_COMMAND_CALL_START = re.compile(
+    r"(?<![\w.])(run|doCommand)\s*\(",
+    re.IGNORECASE,
+)
+_HOST_COMMAND_TOKENS = frozenset(
+    {
+        "script",
+        "interpreter",
+        "groovy",
+        "beanshell",
+        "javascript",
+        "jython",
+        "clojure",
+    }
+)
+_HOST_COMMAND_PHRASES = ("compile and run", "run macro")
+
+
 def check_macro(code: str) -> str | None:
-    """Scan a macro for unsafe save paths and reject them before Fiji runs it.
+    """Scan a macro for host-code escapes and unsafe save paths.
 
     Returns None when the macro is safe to send (no save calls, or
     every save path resolves under the current AI_Exports/). Returns
@@ -77,6 +126,10 @@ def check_macro(code: str) -> str | None:
     """
     if not isinstance(code, str) or not code:
         return None
+
+    host_code_error = check_host_code(code)
+    if host_code_error is not None:
+        return host_code_error
 
     detected = _detect_save_sites(code)
     if not detected:
@@ -120,6 +173,146 @@ def check_macro(code: str) -> str | None:
             )
 
     return None
+
+
+def check_host_code(code: str) -> str | None:
+    """Reject macro-language escapes that can execute host or JVM code.
+
+    This check runs before any Fiji request. Safe ImageJ macro operations stay
+    available to default/cloud providers; only the escape primitives require a
+    separately elevated host-code tool.
+    """
+    if not isinstance(code, str) or not code:
+        return None
+
+    comments_removed, strings_and_comments_masked = _macro_views(code)
+    for label, detector in _HOST_CODE_DIRECT:
+        if detector.search(strings_and_comments_masked):
+            return _host_code_rejection(label)
+
+    # Locate call sites on the fully masked view so text such as
+    # print("run(\"Script...\")") cannot masquerade as an invocation. Parse
+    # the first argument from the comment-free source at the same offset.
+    for match in _COMMAND_CALL_START.finditer(strings_and_comments_masked):
+        command_name = _literal_command_argument(comments_removed, match.end())
+        if command_name is None:
+            return _host_code_rejection(
+                "{}(<dynamic command>)".format(match.group(1))
+            )
+        if _is_host_command_name(command_name):
+            return _host_code_rejection(
+                '{}("{}")'.format(match.group(1), command_name)
+            )
+    return None
+
+
+def _host_code_rejection(primitive: str) -> str:
+    return (
+        "Macro host/JVM code primitive '{}' is not allowed. Refusing before "
+        "Fiji; use an explicitly elevated host-code tool when host execution "
+        "is genuinely required."
+    ).format(primitive)
+
+
+def _literal_command_argument(source: str, offset: int) -> str | None:
+    """Return a single literal first argument, or None for dynamic dispatch."""
+    i = offset
+    while i < len(source) and source[i].isspace():
+        i += 1
+    if i >= len(source) or source[i] not in ('"', "'"):
+        return None
+    quote = source[i]
+    i += 1
+    chars = []
+    escaped = False
+    while i < len(source):
+        char = source[i]
+        if escaped:
+            chars.append(char)
+            escaped = False
+        elif char == "\\":
+            escaped = True
+        elif char == quote:
+            i += 1
+            while i < len(source) and source[i].isspace():
+                i += 1
+            if i < len(source) and source[i] not in (",", ")"):
+                return None
+            return "".join(chars)
+        else:
+            chars.append(char)
+        i += 1
+    return None
+
+
+def _is_host_command_name(command_name: str) -> bool:
+    normalized = re.sub(r"\s+", " ", command_name).strip().casefold()
+    tokens = set(re.findall(r"[a-z0-9]+", normalized))
+    return bool(tokens & _HOST_COMMAND_TOKENS) or any(
+        phrase in normalized for phrase in _HOST_COMMAND_PHRASES
+    )
+
+
+def _macro_views(code: str) -> tuple[str, str]:
+    """Return (comments removed, strings+comments masked), preserving offsets."""
+    comments_removed = list(code)
+    masked = list(code)
+    state = "code"
+    quote = ""
+    escaped = False
+    i = 0
+    while i < len(code):
+        char = code[i]
+        nxt = code[i + 1] if i + 1 < len(code) else ""
+
+        if state == "code":
+            if char == "/" and nxt == "/":
+                comments_removed[i] = masked[i] = " "
+                comments_removed[i + 1] = masked[i + 1] = " "
+                state = "line_comment"
+                i += 2
+                continue
+            if char == "/" and nxt == "*":
+                comments_removed[i] = masked[i] = " "
+                comments_removed[i + 1] = masked[i + 1] = " "
+                state = "block_comment"
+                i += 2
+                continue
+            if char in ('"', "'"):
+                quote = char
+                escaped = False
+                masked[i] = " "
+                state = "string"
+            i += 1
+            continue
+
+        if state == "string":
+            if char not in "\r\n":
+                masked[i] = " "
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == quote:
+                state = "code"
+                quote = ""
+            i += 1
+            continue
+
+        # Preserve newlines so all views retain source line/offset structure.
+        if char not in "\r\n":
+            comments_removed[i] = masked[i] = " "
+        if state == "line_comment" and char in "\r\n":
+            state = "code"
+        elif state == "block_comment" and char == "*" and nxt == "/":
+            comments_removed[i] = masked[i] = " "
+            comments_removed[i + 1] = masked[i + 1] = " "
+            state = "code"
+            i += 2
+            continue
+        i += 1
+
+    return "".join(comments_removed), "".join(masked)
 
 
 def session_id() -> str:

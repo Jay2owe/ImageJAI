@@ -218,8 +218,8 @@ Describe "make_lab_bundle verify-first distribution" {
             $setup = Get-Content -LiteralPath (Join-Path $fixture.Shared "setup-python.ps1") -Raw
             $setup | Should Match '3\.10.*3\.11.*3\.12.*3\.13'
             $setup | Should Match '\.venv'
-            $setup | Should Match 'pip install -e \$targetAgent'
-            $setup | Should Match 'pip install -e \(Join-Path \$targetAgent "gemma4_31b"\)'
+            $setup | Should Match '"install", "-e", \$targetAgent'
+            $setup | Should Match '"install", "-e", \(Join-Path \$targetAgent "gemma4_31b"\)'
             $setup | Should Match 'SetEnvironmentVariable\("IMAGEJAI_PYTHON"'
             $zip = Join-Path $fixture.Shared "ImageJAI-lab-0.3.0.zip"
             Add-Type -AssemblyName System.IO.Compression.FileSystem
@@ -230,6 +230,61 @@ Describe "make_lab_bundle verify-first distribution" {
             } finally {
                 $archive.Dispose()
             }
+        } finally {
+            Remove-BundleFixture $fixture
+        }
+    }
+
+    It "setup restores the old agent when import validation fails after every install step" {
+        $fixture = New-BundleFixture
+        try {
+            $null = Invoke-FixtureBundle -Fixture $fixture
+            Add-Type -AssemblyName System.IO.Compression.FileSystem
+            $extractRoot = Join-Path $fixture.Root "extracted"
+            [System.IO.Compression.ZipFile]::ExtractToDirectory(
+                (Join-Path $fixture.Shared "ImageJAI-lab-0.3.0.zip"), $extractRoot)
+            $bundleRoot = Join-Path $extractRoot "ImageJAI-lab-0.3.0"
+            $setup = Join-Path $bundleRoot "setup-python.ps1"
+            $setupTarget = Join-Path $fixture.Root "setup-target"
+            $oldAgent = Join-Path $setupTarget "agent"
+            Write-FixtureText -Path (Join-Path $oldAgent "old-marker.txt") -Text "preserve me"
+            $state = @{ PipSteps = 0; PipCommands = @(); BackupSeenAtValidation = $false }
+            $runProcess = {
+                param($command, $arguments)
+                $arguments = @($arguments)
+                if ($arguments -contains "venv") {
+                    $createdVenv = $arguments[$arguments.Count - 1]
+                    Write-FixtureText -Path (Join-Path $createdVenv "Scripts\python.exe") -Text "fake"
+                    return [PSCustomObject]@{ ExitCode = 0; Output = @() }
+                }
+                if ($arguments -contains "pip") {
+                    $state.PipSteps++
+                    $state.PipCommands += ($arguments -join " ")
+                    return [PSCustomObject]@{ ExitCode = 0; Output = @("pip ok") }
+                }
+                $pythonCode = if ($arguments.Count -gt 0) { [string]$arguments[-1] } else { "" }
+                if ($pythonCode -like '*agent.providers.agent_cli*') {
+                    $state.BackupSeenAtValidation = @(
+                        Get-ChildItem -LiteralPath $setupTarget -Directory -Filter '.agent-backup-*'
+                    ).Count -eq 1
+                    return [PSCustomObject]@{ ExitCode = 7; Output = @("simulated import failure") }
+                }
+                return [PSCustomObject]@{ ExitCode = 0; Output = @("3.11") }
+            }
+
+            { & $setup -TargetRoot $setupTarget -TestHooks @{ RunProcess = $runProcess } } |
+                Should Throw "dependency validation failed"
+
+            $state.PipSteps | Should Be 4
+            $state.PipCommands[0] | Should Be "-m pip install --upgrade pip"
+            $state.PipCommands[1] | Should Match '^-m pip install -r .+providers\\requirements\.txt$'
+            $state.PipCommands[2] | Should Match '^-m pip install -e .+setup-target\\agent$'
+            $state.PipCommands[3] | Should Match '^-m pip install -e .+setup-target\\agent\\gemma4_31b$'
+            $state.BackupSeenAtValidation | Should Be $true
+            (Get-Content -LiteralPath (Join-Path $oldAgent "old-marker.txt") -Raw) | Should Be "preserve me"
+            (Test-Path -LiteralPath (Join-Path $oldAgent "ij.py")) | Should Be $false
+            @(Get-ChildItem -LiteralPath $setupTarget -Directory -Filter '.agent-backup-*').Count | Should Be 0
+            @(Get-ChildItem -LiteralPath $setupTarget -Directory -Filter '.agent-incoming-*').Count | Should Be 0
         } finally {
             Remove-BundleFixture $fixture
         }

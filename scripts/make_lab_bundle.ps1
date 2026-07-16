@@ -470,19 +470,45 @@ try {
         -RelativeFiles @($allowlist.Files) -ExpectedFiles $expectedBundleFiles
 
     $setupPython = @'
+[CmdletBinding()]
+param(
+    [string]$TargetRoot = "",
+    [hashtable]$TestHooks = @{}
+)
+
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version 2.0
 
 $bundleRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $sourceAgent = Join-Path $bundleRoot "agent"
 $userProfile = [Environment]::GetFolderPath("UserProfile")
-$targetRoot = Join-Path $userProfile "ImageJAI"
+if ([string]::IsNullOrWhiteSpace($TargetRoot)) {
+    $TargetRoot = Join-Path $userProfile "ImageJAI"
+}
+$targetRoot = [System.IO.Path]::GetFullPath($TargetRoot)
 $targetAgent = Join-Path $targetRoot "agent"
 $venvRoot = Join-Path $targetRoot ".venv"
 $venvPython = Join-Path $venvRoot "Scripts\python.exe"
 
 if (-not (Test-Path -LiteralPath (Join-Path $sourceAgent "ij.py") -PathType Leaf)) {
     throw "Run this script from the extracted ImageJAI lab bundle folder."
+}
+
+function Invoke-SetupProcess {
+    param([string]$Command, [string[]]$Arguments)
+    if ($TestHooks.ContainsKey("RunProcess")) {
+        $hookResult = & $TestHooks["RunProcess"] $Command $Arguments
+        if ($null -eq $hookResult -or $null -eq $hookResult.PSObject.Properties["ExitCode"]) {
+            throw "RunProcess test hook must return ExitCode and Output."
+        }
+        return $hookResult
+    }
+    $output = @(& $Command @Arguments 2>&1 | ForEach-Object { [string]$_ })
+    $exitCode = $LASTEXITCODE
+    foreach ($line in $output) {
+        Write-Host $line
+    }
+    return [PSCustomObject]@{ ExitCode = $exitCode; Output = $output }
 }
 
 function Get-SupportedPython {
@@ -498,8 +524,9 @@ function Get-SupportedPython {
             continue
         }
         $arguments = @($candidate.Prefix) + @("-c", "import sys; print('%d.%d' % sys.version_info[:2])")
-        $version = (& $candidate.Command @arguments 2>$null | Select-Object -Last 1)
-        if ($LASTEXITCODE -ne 0 -or $version -notmatch '^(3)\.(10|11|12|13)$') {
+        $probe = Invoke-SetupProcess -Command $candidate.Command -Arguments $arguments
+        $version = @($probe.Output) | Select-Object -Last 1
+        if ($probe.ExitCode -ne 0 -or $version -notmatch '^(3)\.(10|11|12|13)$') {
             continue
         }
         return $candidate
@@ -519,55 +546,82 @@ try {
         Move-Item -LiteralPath $targetAgent -Destination $backupAgent
     }
     Move-Item -LiteralPath $incomingAgent -Destination $targetAgent
+
+    $basePython = Get-SupportedPython
+    if (-not (Test-Path -LiteralPath $venvPython -PathType Leaf)) {
+        $venvArguments = @($basePython.Prefix) + @("-m", "venv", $venvRoot)
+        $venvCreate = Invoke-SetupProcess -Command $basePython.Command -Arguments $venvArguments
+        if ($venvCreate.ExitCode -ne 0) {
+            throw "Python failed to create the dedicated ImageJAI virtual environment."
+        }
+    }
+    $versionProbe = Invoke-SetupProcess -Command $venvPython -Arguments @(
+        "-c", "import sys; print('%d.%d' % sys.version_info[:2])")
+    $venvVersion = @($versionProbe.Output) | Select-Object -Last 1
+    if ($versionProbe.ExitCode -ne 0 -or $venvVersion -notmatch '^3\.(10|11|12|13)$') {
+        throw "The existing ImageJAI virtual environment does not use Python 3.10-3.13. Remove $venvRoot and rerun setup."
+    }
+
+    $pipSteps = @(
+        [PSCustomObject]@{
+            Arguments = @("-m", "pip", "install", "--upgrade", "pip")
+            Error = "Could not upgrade pip in the ImageJAI environment."
+        },
+        [PSCustomObject]@{
+            Arguments = @("-m", "pip", "install", "-r", (Join-Path $targetAgent "providers\requirements.txt"))
+            Error = "Could not install ImageJAI provider dependencies."
+        },
+        [PSCustomObject]@{
+            Arguments = @("-m", "pip", "install", "-e", $targetAgent)
+            Error = "Could not install imagej-use-auto."
+        },
+        [PSCustomObject]@{
+            Arguments = @("-m", "pip", "install", "-e", (Join-Path $targetAgent "gemma4_31b"))
+            Error = "Could not install the bundled Gemma agent."
+        }
+    )
+    foreach ($pipStep in $pipSteps) {
+        $pipResult = Invoke-SetupProcess -Command $venvPython -Arguments $pipStep.Arguments
+        if ($pipResult.ExitCode -ne 0) { throw $pipStep.Error }
+    }
+
+    $previousPythonPath = $env:PYTHONPATH
+    try {
+        $env:PYTHONPATH = if ([string]::IsNullOrWhiteSpace($previousPythonPath)) {
+            $targetRoot
+        } else {
+            $targetRoot + [System.IO.Path]::PathSeparator + $previousPythonPath
+        }
+        $validation = Invoke-SetupProcess -Command $venvPython -Arguments @(
+            "-c", "import agent.providers.agent_cli, gemma4_31b, imagej_use, ij; print('ImageJAI Python environment OK')")
+        if ($validation.ExitCode -ne 0) { throw "ImageJAI dependency validation failed." }
+    } finally {
+        $env:PYTHONPATH = $previousPythonPath
+    }
+
+    [Environment]::SetEnvironmentVariable("IMAGEJAI_PYTHON", $venvPython, "User")
+    $env:IMAGEJAI_PYTHON = $venvPython
 } catch {
+    $failure = $_
     if (Test-Path -LiteralPath $incomingAgent) {
         Remove-Item -LiteralPath $incomingAgent -Recurse -Force -ErrorAction SilentlyContinue
     }
-    if ((Test-Path -LiteralPath $backupAgent) -and -not (Test-Path -LiteralPath $targetAgent)) {
+    if (Test-Path -LiteralPath $backupAgent) {
+        if (Test-Path -LiteralPath $targetAgent) {
+            Remove-Item -LiteralPath $targetAgent -Recurse -Force
+        }
         Move-Item -LiteralPath $backupAgent -Destination $targetAgent
+    } elseif (Test-Path -LiteralPath $targetAgent) {
+        Remove-Item -LiteralPath $targetAgent -Recurse -Force
     }
-    throw
+    throw $failure
 }
+
+# Commit the workspace replacement only after venv creation, every pip step,
+# import validation, and environment configuration have all succeeded.
 if (Test-Path -LiteralPath $backupAgent) {
     Remove-Item -LiteralPath $backupAgent -Recurse -Force
 }
-
-$basePython = Get-SupportedPython
-if (-not (Test-Path -LiteralPath $venvPython -PathType Leaf)) {
-    $venvArguments = @($basePython.Prefix) + @("-m", "venv", $venvRoot)
-    & $basePython.Command @venvArguments
-    if ($LASTEXITCODE -ne 0) {
-        throw "Python failed to create the dedicated ImageJAI virtual environment."
-    }
-}
-$venvVersion = (& $venvPython -c "import sys; print('%d.%d' % sys.version_info[:2])" | Select-Object -Last 1)
-if ($LASTEXITCODE -ne 0 -or $venvVersion -notmatch '^3\.(10|11|12|13)$') {
-    throw "The existing ImageJAI virtual environment does not use Python 3.10-3.13. Remove $venvRoot and rerun setup."
-}
-
-& $venvPython -m pip install --upgrade pip
-if ($LASTEXITCODE -ne 0) { throw "Could not upgrade pip in the ImageJAI environment." }
-& $venvPython -m pip install -r (Join-Path $targetAgent "providers\requirements.txt")
-if ($LASTEXITCODE -ne 0) { throw "Could not install ImageJAI provider dependencies." }
-& $venvPython -m pip install -e $targetAgent
-if ($LASTEXITCODE -ne 0) { throw "Could not install imagej-use-auto." }
-& $venvPython -m pip install -e (Join-Path $targetAgent "gemma4_31b")
-if ($LASTEXITCODE -ne 0) { throw "Could not install the bundled Gemma agent." }
-$previousPythonPath = $env:PYTHONPATH
-try {
-    $env:PYTHONPATH = if ([string]::IsNullOrWhiteSpace($previousPythonPath)) {
-        $targetRoot
-    } else {
-        $targetRoot + [System.IO.Path]::PathSeparator + $previousPythonPath
-    }
-    & $venvPython -c "import agent.providers.agent_cli, gemma4_31b, imagej_use, ij; print('ImageJAI Python environment OK')"
-    if ($LASTEXITCODE -ne 0) { throw "ImageJAI dependency validation failed." }
-} finally {
-    $env:PYTHONPATH = $previousPythonPath
-}
-
-[Environment]::SetEnvironmentVariable("IMAGEJAI_PYTHON", $venvPython, "User")
-$env:IMAGEJAI_PYTHON = $venvPython
 
 Write-Host ""
 Write-Host "ImageJAI agent workspace: $targetAgent"

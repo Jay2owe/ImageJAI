@@ -146,6 +146,26 @@ public class ExplorationEngineTest {
         assertEquals(2, result.objectCount);
     }
 
+    @Test
+    public void repeatedExplorationImmediatelyReleasesClosedTemporaryImages() {
+        ImagePlus original = image("source", 12, 3);
+        WindowManager.setTempCurrentImage(original);
+        FakeCommandEngine command = new FakeCommandEngine();
+        ExplorationEngine engine = new ExplorationEngine(command);
+        Map<String, String> variants = new LinkedHashMap<String, String>();
+        variants.put("plain", "MAKE_NON_BINARY");
+
+        for (int attempt = 0; attempt < 25; attempt++) {
+            ExplorationEngine.ExplorationReport report = engine.explore(variants);
+            assertTrue(report.results.get(0).success);
+            assertEquals("closed duplicate retained after attempt " + attempt,
+                    0, engine.trackedTemporaryCountForTest());
+            command.targets.clear();
+        }
+
+        assertSame(original, WindowManager.getCurrentImage());
+    }
+
     private static final class FakeCommandEngine extends CommandEngine {
         final List<ImagePlus> targets = new java.util.ArrayList<ImagePlus>();
         boolean makeThresholdNonBinary;

@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """Schedule safe, non-blocking Graphify updates for this repository.
 
-Every trigger writes a small request file and starts a detached worker. Workers
-share an atomic directory lock, wait for a quiet debounce window, and serialize
-``python -m graphify update``. The caller always returns promptly; failures are
-recorded under ``.git/graphify-hook-logs``.
+Every trigger writes a small request file. One race-safe claim admits a single
+detached worker for the burst; that worker waits for a quiet debounce window
+and serializes ``python -m graphify update`` behind the writer lock. The caller
+always returns promptly; failures are recorded under
+``.git/graphify-hook-logs`` and their requests remain queued.
 """
 
 from __future__ import annotations
@@ -64,6 +65,7 @@ IGNORED_PARTS = frozenset(
 DEFAULT_DEBOUNCE_SECONDS = 2.0
 DEFAULT_STALE_SECONDS = 30.0 * 60.0
 DEFAULT_LOCK_WAIT_SECONDS = 2.0 * 60.0 * 60.0
+DEFAULT_CLAIM_STALE_SECONDS = 30.0 * 60.0
 UpdateFunction = Callable[[Path, Sequence[str]], bool]
 
 
@@ -77,6 +79,10 @@ def _pending_dir(root: Path) -> Path:
 
 def _lock_dir(root: Path) -> Path:
     return _state_dir(root) / "writer.lock"
+
+
+def _worker_claim_dir(root: Path) -> Path:
+    return _state_dir(root) / "worker.claim"
 
 
 def _log_dir(root: Path) -> Path:
@@ -265,6 +271,131 @@ def _release_lock(root: Path) -> None:
         pass
 
 
+def _read_worker_claim(root: Path) -> dict[str, object] | None:
+    claim = _worker_claim_dir(root)
+    try:
+        value = json.loads((claim / "owner.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def _recover_stale_or_dead_worker_claim(
+    root: Path, stale_seconds: float, now: float
+) -> bool:
+    """Remove only a dead same-host claim or an expired bounded lease."""
+
+    claim = _worker_claim_dir(root)
+    owner = _read_worker_claim(root)
+    if owner is None:
+        try:
+            expired = now - claim.stat().st_mtime >= stale_seconds
+        except OSError:
+            return False
+        if not expired:
+            return False
+    else:
+        try:
+            heartbeat_at = float(owner.get("heartbeat_at", owner["created_at"]))
+            pid = int(owner["pid"])
+            host = str(owner["host"])
+        except (KeyError, TypeError, ValueError):
+            return False
+        dead_same_host = host == socket.gethostname() and not _pid_is_running(pid)
+        expired = now - heartbeat_at >= stale_seconds
+        if not dead_same_host and not expired:
+            return False
+        # Do not delete a claim that was renewed or replaced during recovery.
+        if _read_worker_claim(root) != owner:
+            return False
+    try:
+        owner_path = claim / "owner.json"
+        if owner_path.exists():
+            owner_path.unlink()
+        claim.rmdir()
+    except OSError:
+        return False
+    return True
+
+
+def _try_acquire_worker_claim(
+    root: Path,
+    stale_seconds: float = DEFAULT_CLAIM_STALE_SECONDS,
+    now: float | None = None,
+    pid: int | None = None,
+) -> str | None:
+    """Atomically claim responsibility for draining the pending queue."""
+
+    claim = _worker_claim_dir(root)
+    claim.parent.mkdir(parents=True, exist_ok=True)
+    current = time.time() if now is None else now
+    try:
+        claim.mkdir()
+    except FileExistsError:
+        if not _recover_stale_or_dead_worker_claim(root, stale_seconds, current):
+            return None
+        try:
+            claim.mkdir()
+        except FileExistsError:
+            return None
+    token = uuid.uuid4().hex
+    try:
+        _atomic_write_json(
+            claim / "owner.json",
+            {
+                "created_at": current,
+                "heartbeat_at": current,
+                "host": socket.gethostname(),
+                "pid": os.getpid() if pid is None else pid,
+                "token": token,
+            },
+        )
+    except OSError:
+        shutil.rmtree(claim, ignore_errors=True)
+        return None
+    return token
+
+
+def _adopt_worker_claim(
+    root: Path, token: str, pid: int, now: float | None = None
+) -> bool:
+    """Transfer/renew a claim only when its unguessable token still matches."""
+
+    owner = _read_worker_claim(root)
+    if owner is None or owner.get("token") != token:
+        return False
+    current = time.time() if now is None else now
+    updated = dict(owner)
+    updated["heartbeat_at"] = current
+    updated["host"] = socket.gethostname()
+    updated["pid"] = pid
+    # Re-read immediately before replacement to avoid adopting a new claim.
+    if _read_worker_claim(root) != owner:
+        return False
+    try:
+        _atomic_write_json(_worker_claim_dir(root) / "owner.json", updated)
+    except OSError:
+        return False
+    return True
+
+
+def _release_worker_claim(root: Path, token: str) -> bool:
+    claim = _worker_claim_dir(root)
+    owner = _read_worker_claim(root)
+    if owner is None or owner.get("token") != token:
+        return False
+    retired = claim.with_name(f".{claim.name}.released-{token}")
+    try:
+        # Rename the complete claim atomically. Unlinking owner.json before
+        # rmdir leaves a window where a recovering scheduler can create a new
+        # claim that the old owner then accidentally removes.
+        os.replace(claim, retired)
+    except OSError:
+        return False
+    shutil.rmtree(retired, ignore_errors=True)
+    return True
+
+
 def _graphify_version() -> str:
     for distribution in ("graphifyy", "graphify"):
         try:
@@ -411,25 +542,54 @@ def _worker(
                     continue
                 snapshot = list(requests)
                 success = run_update(root, _request_events(snapshot))
-                # The failure is durable in the UTF-8 log. Clear this snapshot
-                # so multiple waiting workers do not retry the same failure.
+                if not success:
+                    # Failed work remains durable. A later trigger can recover
+                    # it after the failed worker releases its bounded claim.
+                    return False
                 for request in snapshot:
                     try:
                         request.unlink()
                     except FileNotFoundError:
                         pass
-                if not success:
-                    return False
                 # Requests created during the update remain and are debounced.
         finally:
             _release_lock(root)
 
 
-def _spawn_worker(root: Path) -> None:
+def _run_claimed_worker(
+    root: Path,
+    claim_token: str,
+    worker: Callable[..., bool] = _worker,
+) -> bool:
+    """Drain, release, then recheck so admission races cannot strand work."""
+
+    if not _adopt_worker_claim(root, claim_token, os.getpid()):
+        return False
+    token = claim_token
+    while True:
+        success = worker(root)
+        _release_worker_claim(root, token)
+        if not success:
+            return False
+        if not _pending_requests(root):
+            return True
+        # A request may have arrived after the worker's last empty check but
+        # before claim release. Reclaim it here unless a scheduler won first.
+        next_token = _try_acquire_worker_claim(root)
+        if next_token is None:
+            return True
+        token = next_token
+        if not _adopt_worker_claim(root, token, os.getpid()):
+            return False
+
+
+def _spawn_worker(root: Path, claim_token: str) -> None:
     command = [
         sys.executable,
         str(Path(__file__).resolve()),
         "--worker",
+        "--claim-token",
+        claim_token,
         "--root",
         str(root),
     ]
@@ -452,7 +612,17 @@ def _spawn_worker(root: Path) -> None:
         )
     else:
         options["start_new_session"] = True
-    subprocess.Popen(command, **options)
+    try:
+        process = subprocess.Popen(command, **options)
+    except OSError:
+        _release_worker_claim(root, claim_token)
+        raise
+    # The scheduler owns the claim while spawning; transfer it to the child
+    # before this short-lived hook process returns.
+    # If transfer loses a race with child startup, leave the token in place.
+    # The child can still adopt it; otherwise dead/stale recovery will clear
+    # the bounded lease. Releasing here could admit a second live worker.
+    _adopt_worker_claim(root, claim_token, process.pid)
 
 
 def schedule_update(
@@ -469,7 +639,9 @@ def schedule_update(
     if foreground:
         _worker(root)
     else:
-        _spawn_worker(root)
+        claim_token = _try_acquire_worker_claim(root)
+        if claim_token is not None:
+            _spawn_worker(root, claim_token)
     return True
 
 
@@ -487,6 +659,7 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--foreground", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--worker", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--claim-token", default="", help=argparse.SUPPRESS)
     parser.add_argument("--root", type=Path, default=Path(__file__).resolve().parents[1])
     return parser
 
@@ -495,7 +668,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     root = args.root.resolve()
     if args.worker:
-        return 0 if _worker(root) else 1
+        if not args.claim_token:
+            return 1
+        return 0 if _run_claimed_worker(root, args.claim_token) else 1
     paths = list(args.paths)
     if args.paths_from_stdin:
         paths.extend(_read_stdin_paths())

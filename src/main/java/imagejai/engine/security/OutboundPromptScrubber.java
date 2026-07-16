@@ -10,7 +10,9 @@ import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.CopyOnWriteArrayList;
 
 /**
@@ -18,6 +20,19 @@ import java.util.concurrent.CopyOnWriteArrayList;
  * Enter is pressed, replaces any known sensitive substring with its token.
  */
 public final class OutboundPromptScrubber {
+    public static final int MAX_PARTIAL_LINE_CHARS = 65_536;
+    public static final int MAX_WRITE_BYTES = 262_144;
+    public static final int MAX_FILTERED_WRITE_CHARS = 524_288;
+    public static final int MAX_REPLACEMENTS_PER_LINE = 4_096;
+    private static final int MAX_SCRUB_STEPS = 1_048_576;
+
+    /** A rejected write is never forwarded to the PTY. */
+    public static final class PromptLimitException extends IllegalArgumentException {
+        PromptLimitException(String message) {
+            super(message);
+        }
+    }
+
     public interface Notifier {
         void pseudonymised(int replacementCount);
 
@@ -67,6 +82,7 @@ public final class OutboundPromptScrubber {
     private final AuditLog auditLog;
     private final CopyOnWriteArrayList<Notifier> extraNotifiers;
     private final StringBuilder lineBuffer = new StringBuilder();
+    private volatile MatcherSnapshot matcherSnapshot = MatcherSnapshot.empty();
     private boolean nextEnterRaw;
 
     public OutboundPromptScrubber(PathTokenMap pathTokenMap, Notifier notifier) {
@@ -124,18 +140,18 @@ public final class OutboundPromptScrubber {
     public static final class PreparedWrite {
         private final OutboundPromptScrubber owner;
         private final byte[] bytes;
-        private final String priorLine;
+        private final List<Undo> undo;
         private final boolean priorRaw;
         private final List<Scrubbed> scrubbed;
         private final List<String> rawLines;
         private boolean completed;
 
         private PreparedWrite(OutboundPromptScrubber owner, byte[] bytes,
-                              String priorLine, boolean priorRaw,
+                              List<Undo> undo, boolean priorRaw,
                               List<Scrubbed> scrubbed, List<String> rawLines) {
             this.owner = owner;
             this.bytes = bytes;
-            this.priorLine = priorLine;
+            this.undo = undo;
             this.priorRaw = priorRaw;
             this.scrubbed = scrubbed;
             this.rawLines = rawLines;
@@ -154,54 +170,73 @@ public final class OutboundPromptScrubber {
 
     public synchronized PreparedWrite prepare(byte[] bytes) {
         if (bytes == null || bytes.length == 0) {
-            return new PreparedWrite(this, bytes, lineBuffer.toString(), nextEnterRaw,
+            return new PreparedWrite(this, bytes, Collections.<Undo>emptyList(), nextEnterRaw,
                     Collections.<Scrubbed>emptyList(), Collections.<String>emptyList());
         }
-        String priorLine = lineBuffer.toString();
+        if (bytes.length > MAX_WRITE_BYTES) {
+            throw new PromptLimitException("Terminal write exceeds "
+                    + MAX_WRITE_BYTES + " bytes");
+        }
         boolean priorRaw = nextEnterRaw;
+        List<Undo> undo = new ArrayList<Undo>();
         List<Scrubbed> scrubbedEvents = new ArrayList<Scrubbed>();
         List<String> rawEvents = new ArrayList<String>();
         String text = new String(bytes, StandardCharsets.UTF_8);
-        StringBuilder out = new StringBuilder();
-        for (int i = 0; i < text.length(); i++) {
-            char c = text.charAt(i);
-            if (c == '\r' || c == '\n') {
-                String line = lineBuffer.toString();
-                lineBuffer.setLength(0);
-                if (nextEnterRaw) {
-                    nextEnterRaw = false;
-                    rawEvents.add(line);
-                    out.append(c);
-                    continue;
+        StringBuilder out = new StringBuilder(Math.min(
+                text.length() + 64, MAX_FILTERED_WRITE_CHARS));
+        try {
+            for (int i = 0; i < text.length(); i++) {
+                char c = text.charAt(i);
+                if (c == '\r' || c == '\n') {
+                    String line = lineBuffer.toString();
+                    undo.add(new ClearUndo(line));
+                    lineBuffer.setLength(0);
+                    if (nextEnterRaw) {
+                        nextEnterRaw = false;
+                        rawEvents.add(line);
+                        appendBounded(out, c);
+                        continue;
+                    }
+                    Scrubbed scrubbed = scrubOutgoing(line);
+                    if (scrubbed.changed) {
+                        scrubbedEvents.add(scrubbed);
+                        appendBounded(out, '\u0015');
+                        appendBounded(out, scrubbed.text);
+                    }
+                    appendBounded(out, c);
+                } else if (c == '\b' || c == 0x7f) {
+                    if (lineBuffer.length() > 0) {
+                        char removed = lineBuffer.charAt(lineBuffer.length() - 1);
+                        lineBuffer.setLength(lineBuffer.length() - 1);
+                        undo.add(new DeleteUndo(removed));
+                    }
+                    appendBounded(out, c);
+                } else {
+                    if (lineBuffer.length() >= MAX_PARTIAL_LINE_CHARS) {
+                        throw new PromptLimitException("Terminal line exceeds "
+                                + MAX_PARTIAL_LINE_CHARS + " characters");
+                    }
+                    lineBuffer.append(c);
+                    recordAppend(undo);
+                    appendBounded(out, c);
                 }
-                Scrubbed scrubbed = scrubOutgoing(line);
-                if (scrubbed.changed) {
-                    scrubbedEvents.add(scrubbed);
-                    out.append('\u0015'); // terminal line kill before sending replacement
-                    out.append(scrubbed.text);
-                }
-                out.append(c);
-            } else if (c == '\b' || c == 0x7f) {
-                if (lineBuffer.length() > 0) {
-                    lineBuffer.setLength(lineBuffer.length() - 1);
-                }
-                out.append(c);
-            } else {
-                lineBuffer.append(c);
-                out.append(c);
             }
+        } catch (RuntimeException failure) {
+            rollbackUndo(undo);
+            nextEnterRaw = priorRaw;
+            throw failure;
         }
         return new PreparedWrite(this,
                 out.toString().getBytes(StandardCharsets.UTF_8),
-                priorLine, priorRaw, scrubbedEvents, rawEvents);
+                Collections.unmodifiableList(new ArrayList<Undo>(undo)),
+                priorRaw, scrubbedEvents, rawEvents);
     }
 
     private synchronized void complete(PreparedWrite prepared, boolean committed) {
         if (prepared == null || prepared.owner != this || prepared.completed) return;
         prepared.completed = true;
         if (!committed) {
-            lineBuffer.setLength(0);
-            lineBuffer.append(prepared.priorLine);
+            rollbackUndo(prepared.undo);
             nextEnterRaw = prepared.priorRaw;
             return;
         }
@@ -210,6 +245,10 @@ public final class OutboundPromptScrubber {
     }
 
     public synchronized String scrub(String userTyped) {
+        if (userTyped != null && userTyped.length() > MAX_PARTIAL_LINE_CHARS) {
+            throw new PromptLimitException("Terminal line exceeds "
+                    + MAX_PARTIAL_LINE_CHARS + " characters");
+        }
         return scrubOutgoing(userTyped).text;
     }
 
@@ -219,34 +258,94 @@ public final class OutboundPromptScrubber {
 
     private Scrubbed scrubOutgoing(String userTyped) {
         String input = userTyped == null ? "" : userTyped;
-        StringBuilder out = new StringBuilder(input.length());
+        if (input.length() > MAX_PARTIAL_LINE_CHARS) {
+            throw new PromptLimitException("Terminal line exceeds "
+                    + MAX_PARTIAL_LINE_CHARS + " characters");
+        }
+        MatcherSnapshot snapshot = matcherForCurrentVersion();
+        if (snapshot.root.children.isEmpty()) {
+            return new Scrubbed(input, Collections.<Replacement>emptyList());
+        }
+        StringBuilder out = null;
         List<Replacement> replacements = new ArrayList<Replacement>();
-        java.util.List<java.util.Map.Entry<String, String>> entries =
-                pathTokenMap.snapshotSensitiveStringsLongestFirst();
-
+        WorkBudget work = new WorkBudget(MAX_SCRUB_STEPS);
         int i = 0;
         while (i < input.length()) {
-            java.util.Map.Entry<String, String> match = null;
-            for (java.util.Map.Entry<String, String> entry : entries) {
-                String original = entry.getKey();
-                if (original == null || original.isEmpty()) {
-                    continue;
-                }
-                if (startsWithAt(input, original, i)) {
-                    match = entry;
-                    break;
-                }
-            }
+            TrieMatch match = snapshot.root.longestMatch(input, i, work);
             if (match != null) {
-                out.append(match.getValue());
-                i += match.getKey().length();
-                replacements.add(new Replacement(match.getKey(), match.getValue()));
+                if (replacements.size() >= MAX_REPLACEMENTS_PER_LINE) {
+                    throw new PromptLimitException("Terminal line contains too many "
+                            + "sensitive replacements");
+                }
+                if (out == null) {
+                    out = new StringBuilder(Math.min(input.length() + 64,
+                            MAX_FILTERED_WRITE_CHARS));
+                    appendBounded(out, input.substring(0, i));
+                }
+                appendBounded(out, match.replacement);
+                String original = input.substring(i, i + match.length);
+                replacements.add(new Replacement(original, match.replacement));
+                i += match.length;
             } else {
-                out.append(input.charAt(i));
+                if (out != null) appendBounded(out, input.charAt(i));
                 i++;
             }
         }
-        return new Scrubbed(out.toString(), replacements);
+        return out == null
+                ? new Scrubbed(input, Collections.<Replacement>emptyList())
+                : new Scrubbed(out.toString(), replacements);
+    }
+
+    private MatcherSnapshot matcherForCurrentVersion() {
+        long version = pathTokenMap.sensitiveVersion();
+        MatcherSnapshot cached = matcherSnapshot;
+        if (cached.version == version) return cached;
+        synchronized (this) {
+            cached = matcherSnapshot;
+            version = pathTokenMap.sensitiveVersion();
+            if (cached.version == version) return cached;
+            PathTokenMap.SensitiveSnapshot source = pathTokenMap.sensitiveSnapshot();
+            TrieNode root = new TrieNode();
+            for (Map.Entry<String, String> entry : source.entries) {
+                if (entry.getKey() != null && !entry.getKey().isEmpty()) {
+                    root.insert(entry.getKey(), entry.getValue());
+                }
+            }
+            cached = new MatcherSnapshot(source.version, root);
+            matcherSnapshot = cached;
+            return cached;
+        }
+    }
+
+    private static void appendBounded(StringBuilder out, char value) {
+        if (out.length() >= MAX_FILTERED_WRITE_CHARS) {
+            throw new PromptLimitException("Filtered terminal write exceeds "
+                    + MAX_FILTERED_WRITE_CHARS + " characters");
+        }
+        out.append(value);
+    }
+
+    private static void appendBounded(StringBuilder out, String value) {
+        String safe = value == null ? "" : value;
+        if ((long) out.length() + safe.length() > MAX_FILTERED_WRITE_CHARS) {
+            throw new PromptLimitException("Filtered terminal write exceeds "
+                    + MAX_FILTERED_WRITE_CHARS + " characters");
+        }
+        out.append(safe);
+    }
+
+    private static void recordAppend(List<Undo> undo) {
+        if (!undo.isEmpty() && undo.get(undo.size() - 1) instanceof AppendUndo) {
+            ((AppendUndo) undo.get(undo.size() - 1)).count++;
+        } else {
+            undo.add(new AppendUndo(1));
+        }
+    }
+
+    private void rollbackUndo(List<Undo> undo) {
+        for (int i = undo.size() - 1; i >= 0; i--) {
+            undo.get(i).apply(lineBuffer);
+        }
     }
 
     private void notifyPseudonymised(Scrubbed scrubbed) {
@@ -353,12 +452,92 @@ public final class OutboundPromptScrubber {
         }
     }
 
-    private static boolean startsWithAt(String value, String needle, int index) {
-        int n = needle.length();
-        if (index < 0 || n == 0 || index + n > value.length()) {
-            return false;
+    private interface Undo {
+        void apply(StringBuilder buffer);
+    }
+
+    private static final class AppendUndo implements Undo {
+        int count;
+        AppendUndo(int count) { this.count = count; }
+        @Override public void apply(StringBuilder buffer) {
+            buffer.setLength(Math.max(0, buffer.length() - count));
         }
-        return value.regionMatches(index, needle, 0, n);
+    }
+
+    private static final class DeleteUndo implements Undo {
+        final char removed;
+        DeleteUndo(char removed) { this.removed = removed; }
+        @Override public void apply(StringBuilder buffer) { buffer.append(removed); }
+    }
+
+    private static final class ClearUndo implements Undo {
+        final String cleared;
+        ClearUndo(String cleared) { this.cleared = cleared; }
+        @Override public void apply(StringBuilder buffer) { buffer.append(cleared); }
+    }
+
+    private static final class MatcherSnapshot {
+        final long version;
+        final TrieNode root;
+        MatcherSnapshot(long version, TrieNode root) {
+            this.version = version;
+            this.root = root;
+        }
+        static MatcherSnapshot empty() {
+            return new MatcherSnapshot(-1L, new TrieNode());
+        }
+    }
+
+    private static final class TrieMatch {
+        final int length;
+        final String replacement;
+        TrieMatch(int length, String replacement) {
+            this.length = length;
+            this.replacement = replacement;
+        }
+    }
+
+    private static final class WorkBudget {
+        int remaining;
+        WorkBudget(int remaining) { this.remaining = remaining; }
+        void consume() {
+            if (--remaining < 0) {
+                throw new PromptLimitException("Terminal scrub work limit exceeded");
+            }
+        }
+    }
+
+    private static final class TrieNode {
+        final Map<Character, TrieNode> children = new HashMap<Character, TrieNode>();
+        String replacement;
+
+        void insert(String original, String token) {
+            TrieNode node = this;
+            for (int i = 0; i < original.length(); i++) {
+                Character key = Character.valueOf(original.charAt(i));
+                TrieNode next = node.children.get(key);
+                if (next == null) {
+                    next = new TrieNode();
+                    node.children.put(key, next);
+                }
+                node = next;
+            }
+            node.replacement = token;
+        }
+
+        TrieMatch longestMatch(String text, int start, WorkBudget work) {
+            TrieNode node = this;
+            TrieMatch best = null;
+            for (int i = start; i < text.length(); i++) {
+                work.consume();
+                node = node.children.get(Character.valueOf(text.charAt(i)));
+                if (node == null) break;
+                if (node.replacement != null) {
+                    best = new TrieMatch(i - start + 1, node.replacement);
+                }
+            }
+            return best;
+        }
     }
 
     private static final class Scrubbed {

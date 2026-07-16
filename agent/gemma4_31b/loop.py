@@ -599,18 +599,12 @@ def _start_governed_event_subscriber(topics: Any = None) -> None:
 
 
 def _new_governed_event_session() -> Any:
-    try:
-        from agent.ij import ImageJSession
-    except ImportError:  # pragma: no cover - bundled workspace layout
-        from ij import ImageJSession  # type: ignore
-    from .registry import GEMMA_CAPS, HOST, PORT
+    # Events and one-shot tool calls must share the same negotiated session.
+    # A separate event session would carry a different session_id and could
+    # silently diverge in authentication/capabilities from the tool channel.
+    from .registry import imagej_session
 
-    return ImageJSession(
-        host=HOST,
-        port=PORT,
-        agent="imagejai-rich-loop",
-        capabilities=GEMMA_CAPS,
-    )
+    return imagej_session()
 
 
 def _consume_governed_events(

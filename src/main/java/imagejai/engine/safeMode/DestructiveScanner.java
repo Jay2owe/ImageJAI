@@ -20,8 +20,11 @@ import java.util.regex.Pattern;
  * Results state, returning a list of {@link DestructiveOp} findings the
  * caller folds into the destructive-op block / auto-backup pipeline.
  *
- * <p>Seven rules ship in v2:
+ * <p>The scanner includes these scientific-integrity and execution rules:
  * <ul>
+ *   <li>{@code host_code_execution} â€” macro primitives such as
+ *       {@code exec}, {@code eval}, {@code call}, nested macro runners,
+ *       extension calls, and script-interpreter menu commands.</li>
  *   <li>{@code calibration_loss} — {@code run("Properties...")} with
  *       {@code pixel_width=1} or {@code setVoxelSize(_,_,_,"pixel")} on an
  *       image whose calibration is currently non-trivial.</li>
@@ -75,6 +78,7 @@ public final class DestructiveScanner {
     public static final String RULE_AI_EXPORTS_ESCAPE    = "ai_exports_escape";
     public static final String RULE_BIT_DEPTH_NARROWING = "bit_depth_narrowing";
     public static final String RULE_NORMALIZE_CONTRAST  = "normalize_contrast";
+    public static final String RULE_HOST_CODE           = "host_code_execution";
 
     /**
      * Single scanner finding. Plain data — caller decides how to format
@@ -209,6 +213,32 @@ public final class DestructiveScanner {
     static final Pattern ENHANCE_CONTRAST = Pattern.compile(
             "run\\s*\\(\\s*[\"']Enhance Contrast[\"']\\s*,\\s*[\"']([^\"']*)[\"']");
 
+    /** Macro-language escapes that can execute operating-system or JVM code. */
+    static final Pattern HOST_EXEC = Pattern.compile(
+            "(?<![\\w.])exec\\s*\\(", Pattern.CASE_INSENSITIVE);
+    static final Pattern HOST_EVAL = Pattern.compile(
+            "(?<![\\w.])eval\\s*\\(", Pattern.CASE_INSENSITIVE);
+    static final Pattern HOST_CALL = Pattern.compile(
+            "(?<![\\w.])call\\s*\\(", Pattern.CASE_INSENSITIVE);
+    static final Pattern HOST_RUN_MACRO = Pattern.compile(
+            "(?<![\\w.])runMacro(?:File)?\\s*\\(", Pattern.CASE_INSENSITIVE);
+    static final Pattern HOST_IJ_RUN_MACRO = Pattern.compile(
+            "\\bIJ\\s*\\.\\s*runMacro(?:File)?\\s*\\(", Pattern.CASE_INSENSITIVE);
+    static final Pattern HOST_EXTENSION_CALL = Pattern.compile(
+            "\\bExt\\s*\\.\\s*[A-Za-z_][A-Za-z0-9_]*\\s*\\(",
+            Pattern.CASE_INSENSITIVE);
+    static final Pattern COMMAND_CALL_START = Pattern.compile(
+            "(?<![\\w.])(run|doCommand)\\s*\\(",
+            Pattern.CASE_INSENSITIVE);
+
+    private static final String[] HOST_COMMAND_TOKENS = {
+            "script", "interpreter", "groovy", "beanshell", "javascript",
+            "jython", "clojure"
+    };
+    private static final String[] HOST_COMMAND_PHRASES = {
+            "compile and run", "run macro"
+    };
+
     /** Microscopy-format extensions the overwrite rule guards. */
     private static final String[] MICROSCOPY_EXTS = {
             ".lif", ".czi", ".nd2", ".ome.tif", ".ome.tiff", ".tif", ".tiff",
@@ -232,15 +262,38 @@ public final class DestructiveScanner {
      */
     public static List<DestructiveOp> scan(String code, Context ctx) {
         List<DestructiveOp> out = new ArrayList<DestructiveOp>();
-        if (code == null || code.isEmpty() || ctx == null) return out;
+        if (code == null || code.isEmpty()) return out;
 
+        // This rule is context-free and is deliberately first: macro escapes
+        // must be rejected before Fiji gets a chance to interpret the source.
+        scanHostCode(code, out);
+        if (ctx == null) return out;
+
+        scanScientificRules(code, ctx, out);
+        return out;
+    }
+
+    /**
+     * Run only the scientific-integrity rules for an explicitly elevated
+     * {@code run_script} request. Script code is intentionally host-capable;
+     * applying ImageJ macro escape detection there would undo the separate
+     * capability and one-call approval gate before this scanner is reached.
+     */
+    public static List<DestructiveOp> scanElevatedScript(String code, Context ctx) {
+        List<DestructiveOp> out = new ArrayList<DestructiveOp>();
+        if (code == null || code.isEmpty() || ctx == null) return out;
+        scanScientificRules(code, ctx, out);
+        return out;
+    }
+
+    private static void scanScientificRules(String code, Context ctx,
+                                            List<DestructiveOp> out) {
         scanCalibrationLoss(code, ctx, out);
         scanRoiWipe(code, ctx, out);
         scanZProjectOverwrite(code, ctx, out);
         scanMicroscopyOverwrite(code, ctx, out);
         scanBitDepthNarrowing(code, ctx, out);
         scanNormalizeContrast(code, ctx, out);
-        return out;
     }
 
     /**
@@ -300,6 +353,52 @@ public final class DestructiveScanner {
     // -----------------------------------------------------------------------
     // Rules
     // -----------------------------------------------------------------------
+
+    /** Reject macro primitives and menu commands that execute host/JVM code. */
+    private static void scanHostCode(String code, List<DestructiveOp> out) {
+        MacroViews views = macroViews(code);
+        scanHostPattern(code, views.masked, HOST_EXEC, "exec", out);
+        scanHostPattern(code, views.masked, HOST_EVAL, "eval", out);
+        scanHostPattern(code, views.masked, HOST_CALL, "call", out);
+        scanHostPattern(code, views.masked, HOST_RUN_MACRO, "runMacro", out);
+        scanHostPattern(code, views.masked, HOST_IJ_RUN_MACRO, "IJ.runMacro", out);
+        scanHostPattern(code, views.masked, HOST_EXTENSION_CALL, "Ext.*", out);
+
+        // Locate calls on the masked view so run(...) text inside strings is
+        // ignored. The first argument must be one literal command name;
+        // dynamic concatenation/variables could otherwise hide Script... .
+        Matcher commands = COMMAND_CALL_START.matcher(views.masked);
+        while (commands.find()) {
+            String command = literalCommandArgument(
+                    views.commentsRemoved, commands.end());
+            if (command == null) {
+                addHostCodeFinding(code, commands.start(),
+                        commands.group(1) + "(<dynamic command>)", out);
+            } else if (isHostCommandName(command)) {
+                addHostCodeFinding(code, commands.start(),
+                        commands.group(1) + "(\"" + command + "\")", out);
+            }
+        }
+    }
+
+    private static void scanHostPattern(String source, String masked,
+                                        Pattern pattern, String target,
+                                        List<DestructiveOp> out) {
+        Matcher matcher = pattern.matcher(masked);
+        while (matcher.find()) {
+            addHostCodeFinding(source, matcher.start(), target, out);
+        }
+    }
+
+    private static void addHostCodeFinding(String code, int offset,
+                                           String target,
+                                           List<DestructiveOp> out) {
+        out.add(new DestructiveOp(
+                RULE_HOST_CODE, Severity.REJECT, target, lineOf(code, offset),
+                "Macro host/JVM code primitive '" + target
+                        + "' is blocked before Fiji execution; use an explicitly "
+                        + "elevated host-code tool when host execution is required."));
+    }
 
     /**
      * Calibration loss: {@code run("Properties...", "...pixel_width=1...")}
@@ -491,6 +590,128 @@ public final class DestructiveScanner {
     // Helpers
     // -----------------------------------------------------------------------
 
+    private static final class MacroViews {
+        final String commentsRemoved;
+        final String masked;
+
+        MacroViews(String commentsRemoved, String masked) {
+            this.commentsRemoved = commentsRemoved;
+            this.masked = masked;
+        }
+    }
+
+    /** Parse a literal first run/doCommand argument; null means dynamic. */
+    private static String literalCommandArgument(String source, int offset) {
+        int i = offset;
+        while (i < source.length() && Character.isWhitespace(source.charAt(i))) i++;
+        if (i >= source.length()) return null;
+        char quote = source.charAt(i);
+        if (quote != '\"' && quote != '\'') return null;
+        i++;
+        StringBuilder value = new StringBuilder();
+        boolean escaped = false;
+        while (i < source.length()) {
+            char ch = source.charAt(i);
+            if (escaped) {
+                value.append(ch);
+                escaped = false;
+            } else if (ch == '\\') {
+                escaped = true;
+            } else if (ch == quote) {
+                i++;
+                while (i < source.length()
+                        && Character.isWhitespace(source.charAt(i))) i++;
+                if (i < source.length()
+                        && source.charAt(i) != ',' && source.charAt(i) != ')') {
+                    return null;
+                }
+                return value.toString();
+            } else {
+                value.append(ch);
+            }
+            i++;
+        }
+        return null;
+    }
+
+    private static boolean isHostCommandName(String command) {
+        String normalized = command.replaceAll("\\s+", " ")
+                .trim().toLowerCase(Locale.ROOT);
+        String[] tokens = normalized.split("[^a-z0-9]+");
+        for (String token : tokens) {
+            for (String blocked : HOST_COMMAND_TOKENS) {
+                if (blocked.equals(token)) return true;
+            }
+        }
+        return containsAny(normalized, HOST_COMMAND_PHRASES);
+    }
+
+    /** Produce source views with comments and string literals safely masked. */
+    private static MacroViews macroViews(String code) {
+        char[] commentsRemoved = code.toCharArray();
+        char[] masked = code.toCharArray();
+        int state = 0; // 0 code, 1 string, 2 line comment, 3 block comment
+        char quote = 0;
+        boolean escaped = false;
+        int i = 0;
+        while (i < code.length()) {
+            char ch = code.charAt(i);
+            char next = i + 1 < code.length() ? code.charAt(i + 1) : 0;
+            if (state == 0) {
+                if (ch == '/' && next == '/') {
+                    commentsRemoved[i] = masked[i] = ' ';
+                    commentsRemoved[i + 1] = masked[i + 1] = ' ';
+                    state = 2;
+                    i += 2;
+                    continue;
+                }
+                if (ch == '/' && next == '*') {
+                    commentsRemoved[i] = masked[i] = ' ';
+                    commentsRemoved[i + 1] = masked[i + 1] = ' ';
+                    state = 3;
+                    i += 2;
+                    continue;
+                }
+                if (ch == '\"' || ch == '\'') {
+                    quote = ch;
+                    escaped = false;
+                    masked[i] = ' ';
+                    state = 1;
+                }
+                i++;
+                continue;
+            }
+            if (state == 1) {
+                if (ch != '\r' && ch != '\n') masked[i] = ' ';
+                if (escaped) {
+                    escaped = false;
+                } else if (ch == '\\') {
+                    escaped = true;
+                } else if (ch == quote) {
+                    state = 0;
+                    quote = 0;
+                }
+                i++;
+                continue;
+            }
+
+            if (ch != '\r' && ch != '\n') {
+                commentsRemoved[i] = masked[i] = ' ';
+            }
+            if (state == 2 && (ch == '\r' || ch == '\n')) {
+                state = 0;
+            } else if (state == 3 && ch == '*' && next == '/') {
+                commentsRemoved[i] = masked[i] = ' ';
+                commentsRemoved[i + 1] = masked[i + 1] = ' ';
+                state = 0;
+                i += 2;
+                continue;
+            }
+            i++;
+        }
+        return new MacroViews(new String(commentsRemoved), new String(masked));
+    }
+
     /** 1-based line containing {@code charOffset}. Naive — same as MacroAnalyser. */
     static int lineOf(String code, int charOffset) {
         if (code == null || charOffset <= 0) return 1;
@@ -621,6 +842,14 @@ public final class DestructiveScanner {
     private static boolean endsWithAny(String lowered, String[] suffixes) {
         for (String s : suffixes) {
             if (lowered.endsWith(s)) return true;
+        }
+        return false;
+    }
+
+    private static boolean containsAny(String lowered, String[] fragments) {
+        if (lowered == null) return false;
+        for (String fragment : fragments) {
+            if (lowered.contains(fragment)) return true;
         }
         return false;
     }
