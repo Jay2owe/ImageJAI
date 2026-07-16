@@ -22,17 +22,31 @@ _VALID_FAMILIES = frozenset({
 })
 _VALID_CONTEXT_SIZES = ("small", "medium", "large")
 _VALID_RELIABILITY = ("high", "medium", "low")
+MAX_CONTEXT_FILE_BYTES = 1024 * 1024
+MAX_REGISTRY_BYTES = 2 * 1024 * 1024
+MAX_REGISTRY_MODELS = 512
 _ORIGINAL_SAFE_LOAD = yaml.safe_load
 _REGISTRY_CACHE_KEY: tuple | None = None
 _REGISTRY_CACHE: dict[tuple[str, str], dict] | None = None
 
 
-def _read(path: Path) -> str:
+def _read_bounded(path: Path, limit: int) -> str:
     if not path.exists():
         raise FileNotFoundError(
             f"context overlay missing: {path} (relative to agent/contexts/)"
         )
-    return path.read_text(encoding="utf-8").rstrip()
+    size = path.stat().st_size
+    if size > limit:
+        raise ValueError(f"context input exceeds {limit} byte limit: {path}")
+    with path.open("rb") as handle:
+        payload = handle.read(limit + 1)
+    if len(payload) > limit:
+        raise ValueError(f"context input exceeds {limit} byte limit: {path}")
+    return payload.decode("utf-8").rstrip()
+
+
+def _read(path: Path) -> str:
+    return _read_bounded(path, MAX_CONTEXT_FILE_BYTES)
 
 
 def load_registry() -> dict[tuple[str, str], dict]:
@@ -60,10 +74,14 @@ def load_registry() -> dict[tuple[str, str], dict]:
             and _REGISTRY_CACHE is not None):
         return dict(_REGISTRY_CACHE)
 
-    cfg = yaml.safe_load(REGISTRY.read_text(encoding="utf-8"))
+    cfg = yaml.safe_load(_read_bounded(REGISTRY, MAX_REGISTRY_BYTES))
     models = cfg.get("models") if isinstance(cfg, dict) else None
     if not isinstance(models, list):
         raise ValueError("model registry must contain a 'models' list")
+    if len(models) > MAX_REGISTRY_MODELS:
+        raise ValueError(
+            f"model registry exceeds {MAX_REGISTRY_MODELS} model limit"
+        )
 
     by_key: dict[tuple[str, str], dict] = {}
     for index, spec in enumerate(models):

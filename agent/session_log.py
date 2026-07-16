@@ -150,6 +150,8 @@ class SessionLogger(object):
         self.entries = []
         self._lock = threading.RLock()
         self.start_time = datetime.now()
+        self.client_session_id = os.environ.get(
+            "IMAGEJAI_SESSION_ID", "").strip()
         self.session_id = "%s-%s" % (
             self.start_time.strftime("%Y%m%d_%H%M%S_%f"),
             secrets.token_hex(16),
@@ -227,6 +229,8 @@ class SessionLogger(object):
             "total_commands": len(entries),
             "entries": entries,
         }
+        if self.client_session_id:
+            log_data["client_session_id"] = self.client_session_id
         payload = json.dumps(log_data, indent=2, ensure_ascii=False,
                              sort_keys=True) + "\n"
         payload_size = len(payload.encode("utf-8"))

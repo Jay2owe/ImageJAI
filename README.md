@@ -31,7 +31,7 @@ The audit trail is written to `AI_Exports/imagejai_audit.csv`, and the launcher 
 
 ## Install
 
-1. Download `imagej-ai-0.2.0.jar`
+1. Download `imagej-ai-0.3.0.jar`
 2. Copy to your `Fiji.app/plugins/` directory
 3. Restart Fiji
 4. Go to **Plugins > AI Assistant**
@@ -43,7 +43,7 @@ The audit trail is written to `AI_Exports/imagejai_audit.csv`, and the launcher 
 
 ## Requirements
 
-- Fiji (ImageJ2) with Java 8+
+- Fiji (ImageJ2) running Java 11 or newer
 - An LLM backend (Gemini API key, Ollama, or OpenAI-compatible endpoint)
 - No other dependencies — everything else ships with Fiji
 
@@ -67,7 +67,7 @@ The audit trail is written to `AI_Exports/imagejai_audit.csv`, and the launcher 
 ## Build from Source
 
 ```bash
-# Requires Maven 3.6+ and JDK 8+
+# Requires Maven 3.6+ and JDK 11+ (JDK 25 is used for local release builds)
 mvn clean package -q
 
 # Build and deploy to local Fiji
@@ -146,7 +146,9 @@ echo '{"command": "probe_command", "plugin": "Gaussian Blur..."}' | nc localhost
 echo '{"command": "get_progress"}' | nc localhost 7746
 ```
 
-Available commands: `ping`, `execute_macro`, `get_state`, `get_image_info`, `get_results_table`, `capture_image`, `run_pipeline`, `explore_thresholds`, `get_state_context`, `batch`, `get_log`, `get_histogram`, `get_open_windows`, `get_metadata`, `get_pixels`, `3d_viewer`, `get_dialogs`, `close_dialogs`, `probe_command`, `run_script`, `interact_dialog`, `get_progress`
+<!-- BEGIN GENERATED COMMAND SUMMARY -->
+ImageJAI 0.3.0 exposes **61 TCP commands** (60 request/response plus 1 live stream). `agent/ij.py` provides convenience helpers for 44; the other 17 are explicitly available through `imagej_command({...})`. See the generated [`docs/COMMAND_API.md`](docs/COMMAND_API.md) or the canonical [`agent/command_manifest.json`](agent/command_manifest.json).
+<!-- END GENERATED COMMAND SUMMARY -->
 
 The `run_script` command executes Groovy/Jython/JavaScript code directly inside Fiji's JVM — enabling access to any Java API, Swing component manipulation, and plugin internals that macros can't reach.
 
@@ -162,7 +164,7 @@ This is completely optional — the plugin works fully without it.
 
 The `agent/` directory contains a complete AI agent toolkit for controlling ImageJ via the TCP server:
 
-- **`ij.py`** — Python CLI helper for all TCP commands (macro, capture, state, script, probe, UI interaction, progress, etc.)
+- **`ij.py`** — Python CLI helper with convenience wrappers plus a documented raw-command escape hatch
 - **`pixels.py`** — Python-side pixel analysis (stats, cell detection, line profiles)
 - **`scan_plugins.py`** — Discover all installed Fiji commands and update sites
 - **`probe_plugin.py`** — Probe plugin dialogs for parameters, cache results, batch-probe
@@ -171,7 +173,7 @@ The `agent/` directory contains a complete AI agent toolkit for controlling Imag
 - **`practice.py`** — Autonomous self-improvement on sample images
 - **`train_agent.py`** — Train the agent on a lab's specific images
 - **`recipes/`** — YAML analysis recipes (colocalization, cell counting, CTCF, 3D rendering, etc.)
-- **`references/`** — 50+ expert reference documents covering microscopy, analysis methods, plugins, statistics, and neuroscience workflows
+- **`references/`** — 60 expert reference documents covering microscopy, analysis methods, plugins, statistics, and neuroscience workflows
 
 ## Context Hook (Claude Code Integration)
 

@@ -224,6 +224,15 @@ def test_session_ids_are_strong_and_failed_macros_never_replay(tmp_path):
     assert "Also No" not in replay
 
 
+def test_session_log_persists_launcher_correlation_id(monkeypatch, tmp_path):
+    monkeypatch.setenv("IMAGEJAI_SESSION_ID", "launch-session-123")
+    logger = session_log.SessionLogger()
+    path = tmp_path / "session.json"
+    logger.save(str(path))
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    assert payload["client_session_id"] == "launch-session-123"
+
+
 def test_atomic_session_save_preserves_original_and_concurrent_files_are_valid(tmp_path):
     path = tmp_path / "session.json"
     path.write_text("original", encoding="utf-8")

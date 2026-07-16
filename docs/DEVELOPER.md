@@ -5,10 +5,9 @@
 Requirements:
 
 - Maven 3.6 or newer.
-- A modern JDK. The project is compiled as Java 11 bytecode (see
-  `pom.xml`). Only the embedded terminal backend (pty4j / JediTerm) is
-  gated to Java 11+; on older runtimes agents launch in an external
-  terminal window.
+- JDK 11 or newer; local release builds use JDK 25. The whole plugin is
+  compiled as Java 11 bytecode (see `pom.xml`) and therefore requires a
+  Fiji/ImageJ runtime on Java 11 or newer.
 
 Commands:
 
@@ -17,7 +16,7 @@ mvn clean test -Denforcer.skip=true
 mvn clean package -DskipTests -Denforcer.skip=true
 ```
 
-The uploadable plugin jar is `target/imagej-ai-0.2.0.jar`. Do not upload
+The uploadable plugin jar is `target/imagej-ai-0.3.0.jar`. Do not upload
 `*-sources.jar`, `*-tests.jar`, or `original-*.jar`.
 
 ## Runtime Dependencies
@@ -54,7 +53,7 @@ keep these out of public commits:
 1. Confirm `pom.xml`, `README.md`, and `Constants.VERSION` agree.
 2. Run `mvn clean test -Denforcer.skip=true`.
 3. Run `mvn clean package -DskipTests -Denforcer.skip=true`.
-4. Inspect `target/imagej-ai-0.2.0.jar` for `plugins.config` and plugin classes.
+4. Inspect `target/imagej-ai-0.3.0.jar` for `plugins.config` and plugin classes.
 5. Confirm the jar does not contain `META-INF/maven/**`.
 6. Run `mvn dependency:tree -Dscope=runtime -Denforcer.skip=true` and confirm
    no private project dependency is listed.

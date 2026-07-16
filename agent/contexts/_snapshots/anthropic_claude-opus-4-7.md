@@ -11,9 +11,9 @@ notes about your specific model family. Everything in this file is
 true for all agents.
 
 The Fiji TCP command server listens on `localhost:7746`. JSON in,
-JSON out. Around forty commands cover macro execution, state
-inspection, plugin probing, screenshot capture, results-table reads,
-dialog interaction, and a live event stream.
+<!-- BEGIN GENERATED COMMAND COUNT -->
+JSON out. The 61-command surface covers macro execution, state inspection, plugin probing, screenshot capture, results-table reads, dialog interaction, undo branches, and a live event stream. Python convenience helpers cover 44 commands; use `imagej_command({...})` for the 17 commands documented as raw-only.
+<!-- END GENERATED COMMAND COUNT -->
 
 ---
 

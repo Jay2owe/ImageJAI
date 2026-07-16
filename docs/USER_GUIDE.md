@@ -5,11 +5,13 @@ Plugins > AI Assistant.
 
 ## Install
 
-1. Download `imagej-ai-0.2.0.jar` from the GitHub Actions artifact or a
+1. Download `imagej-ai-0.3.0.jar` from the GitHub Actions artifact or a
    GitHub release.
 2. Copy the jar into `Fiji.app/plugins/`.
 3. Restart Fiji.
 4. Open Plugins > AI Assistant.
+
+ImageJAI 0.3.0 requires Fiji/ImageJ running Java 11 or newer.
 
 ## First Run
 
@@ -41,6 +43,9 @@ Common commands include:
 - `get_dialogs`
 - `interact_dialog`
 - `get_results_table`
+
+The complete generated list of 61 commands, including the live event stream
+and Python convenience/raw coverage, is in [COMMAND_API.md](COMMAND_API.md).
 
 The server is intended for local use. Do not expose the port to a network.
 

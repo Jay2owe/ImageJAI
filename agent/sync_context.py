@@ -56,7 +56,7 @@ BANNER = (
 def sync() -> list[tuple[str, str]]:
     """Regenerate every CLI context file deterministically and atomically."""
     generated: list[tuple[str, str]] = []
-    for filename, model_id in AGENT_FILES.items():
+    for filename, model_id in sorted(AGENT_FILES.items()):
         content = BANNER + loader.load_context(model_id)
         target = os.path.join(SCRIPT_DIR, filename)
         try:

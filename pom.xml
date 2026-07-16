@@ -223,6 +223,13 @@
                     <include>ollama_model_sizes.json</include>
                 </includes>
             </resource>
+            <resource>
+                <directory>agent</directory>
+                <targetPath>imagejai</targetPath>
+                <includes>
+                    <include>command_manifest.json</include>
+                </includes>
+            </resource>
         </resources>
         <plugins>
             <plugin>

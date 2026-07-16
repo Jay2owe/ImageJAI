@@ -91,8 +91,38 @@ TIMEOUT = 60
 SESSION_ID = os.environ.get("IMAGEJAI_SESSION_ID", "").strip()
 MODEL_ENDPOINT = os.environ.get("IMAGEJAI_MODEL_ENDPOINT", "").strip()
 
-# REGRESSION GUARD: Past extensions added CLI/raw TCP commands without importable helpers, tests, or docs.
-# The fix: every stable agent-facing command must have a helper in __all__, CLI routing through it, and API tests.
+
+def _load_command_manifest():
+    """Load the same command contract that is packaged in the plugin jar."""
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                        "command_manifest.json")
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            manifest = json.load(handle)
+    except (OSError, ValueError) as exc:
+        raise RuntimeError("cannot load ImageJAI command manifest %s: %s"
+                           % (path, exc))
+    commands = manifest.get("commands") if isinstance(manifest, dict) else None
+    if (not isinstance(commands, list)
+            or manifest.get("schema_version") != 1
+            or manifest.get("product_version") != "0.3.0"
+            or manifest.get("protocol") != "ImageJAI TCP JSONL"):
+        raise RuntimeError("invalid ImageJAI command manifest: %s" % path)
+    names = [entry.get("name") for entry in commands
+             if isinstance(entry, dict)]
+    if (len(names) != len(commands) or len(set(names)) != len(names)
+            or names != sorted(names)):
+        raise RuntimeError("ImageJAI command manifest names must be sorted and unique")
+    return manifest
+
+
+COMMAND_MANIFEST = _load_command_manifest()
+COMMANDS_BY_NAME = {
+    entry["name"]: entry for entry in COMMAND_MANIFEST["commands"]
+}
+
+# Convenience coverage is declared in command_manifest.json. Commands marked
+# raw remain supported through imagej_command() and are documented that way.
 __all__ = [
     "ImageJSession",
     "imagej_command",
@@ -152,6 +182,19 @@ __all__ = [
     "imagej_events",
 ]
 
+_DECLARED_CONVENIENCE_HELPERS = frozenset(
+    helper
+    for descriptor in COMMAND_MANIFEST["commands"]
+    if descriptor.get("python", {}).get("coverage") == "convenience"
+    for helper in descriptor.get("python", {}).get("helpers", [])
+)
+_MISSING_EXPORTED_HELPERS = _DECLARED_CONVENIENCE_HELPERS.difference(__all__)
+if _MISSING_EXPORTED_HELPERS:
+    raise RuntimeError(
+        "command manifest convenience helpers missing from ij.__all__: %s"
+        % sorted(_MISSING_EXPORTED_HELPERS)
+    )
+
 # Step 01 (docs/tcp_upgrade): capabilities Claude's ij.py declares on first
 # contact. Claude Code hooks already inject per-turn session state, so pulse
 # is disabled here — a server-side pulse would duplicate what the hook feeds.
@@ -183,16 +226,13 @@ _SESSION_FAILURE_CODES = frozenset([
     "session_token_mismatch",
 ])
 
-# Phase 1: commands eligible for hash-based dedup. Server echoes a "hash"
-# field; we persist (hash, payload) per command and attach if_none_match on
-# the next call. Unchanged responses come back as {"ok": true, "unchanged": true, "hash": ...}.
-READONLY_COMMANDS = frozenset([
-    "ping", "get_state", "get_image_info", "get_log", "get_results_table",
-    "get_histogram", "get_open_windows", "get_metadata", "get_dialogs",
-    "get_state_context", "get_progress", "get_friction_log",
-    "get_friction_patterns", "intent_list",
-    "job_status", "job_list",
-])
+# Commands eligible for hash-based deduplication are declared once in the
+# manifest. The server echoes a hash; the client persists (hash, payload) and
+# attaches if_none_match on the next call.
+READONLY_COMMANDS = frozenset(
+    name for name, descriptor in COMMANDS_BY_NAME.items()
+    if descriptor.get("dedup_hash") is True
+)
 
 # Disk-backed cache so one-shot `python ij.py <cmd>` invocations benefit from
 # dedup across invocations, not just within a single process. Kept in a

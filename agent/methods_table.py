@@ -24,7 +24,6 @@ Design notes:
 """
 
 import argparse
-import glob
 import json
 import os
 import platform
@@ -35,7 +34,45 @@ import tempfile
 
 AGENT_DIR = os.path.dirname(os.path.abspath(__file__))
 TMP_DIR = os.path.join(AGENT_DIR, ".tmp")
-IMAGEJAI_VERSION = "1.0.0-pre"  # bump on release; CITATION.cff is canonical
+
+
+def _manifest_product_version():
+    path = os.path.join(AGENT_DIR, "command_manifest.json")
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            value = json.load(handle).get("product_version")
+    except (OSError, ValueError, AttributeError) as exc:
+        raise RuntimeError("cannot read ImageJAI product version from %s: %s"
+                           % (path, exc))
+    if not isinstance(value, str) or not value.strip():
+        raise RuntimeError("command manifest has no product_version: %s" % path)
+    return value.strip()
+
+
+IMAGEJAI_VERSION = _manifest_product_version()
+MAX_INPUT_BYTES = 64 * 1024 * 1024
+MAX_SESSION_LOG_CANDIDATES = 512
+
+
+def load_json_file(path):
+    """Read a methods/session input with a fixed upper bound."""
+    size = os.path.getsize(path)
+    if size > MAX_INPUT_BYTES:
+        raise ValueError("methods input exceeds %d byte limit: %s"
+                         % (MAX_INPUT_BYTES, path))
+    with open(path, "rb") as handle:
+        payload = handle.read(MAX_INPUT_BYTES + 1)
+    if len(payload) > MAX_INPUT_BYTES:
+        raise ValueError("methods input exceeds %d byte limit: %s"
+                         % (MAX_INPUT_BYTES, path))
+    return json.loads(payload.decode("utf-8"))
+
+
+def resolve_bundle_log_path(bundle_path, log_path):
+    """Resolve an offline bundle's relative log reference beside the bundle."""
+    if not log_path or os.path.isabs(log_path):
+        return log_path
+    return os.path.join(os.path.dirname(os.path.abspath(bundle_path)), log_path)
 
 
 def atomic_write_text(path, text):
@@ -119,14 +156,40 @@ def fetch_state():
     return resp.get("result") if resp.get("ok") else None
 
 
-def latest_session_log():
-    """Find the newest session_*.json under agent/.tmp/. Return (path, dict)."""
-    pattern = os.path.join(TMP_DIR, "session_*.json")
-    files = sorted(glob.glob(pattern), key=os.path.getmtime, reverse=True)
-    for p in files:
+def latest_session_log(client_session_id=None):
+    """Return the newest log for a launcher session, or the newest log.
+
+    If a launcher session is supplied, never attach another agent's log just
+    because it was modified more recently.
+    """
+    files = []
+    try:
+        with os.scandir(TMP_DIR) as entries:
+            for entry in entries:
+                if (not entry.name.startswith("session_")
+                        or not entry.name.endswith(".json")
+                        or not entry.is_file()):
+                    continue
+                try:
+                    files.append((entry.stat().st_mtime, entry.path))
+                except OSError:
+                    continue
+                if len(files) > MAX_SESSION_LOG_CANDIDATES:
+                    raise ValueError(
+                        "session log candidates exceed %d file limit"
+                        % MAX_SESSION_LOG_CANDIDATES)
+    except FileNotFoundError:
+        return None, None
+    files.sort(key=lambda item: (-item[0], item[1]))
+    for _modified, p in files:
         try:
-            with open(p, "r", encoding="utf-8") as f:
-                return p, json.load(f)
+            data = load_json_file(p)
+            if not isinstance(data, dict):
+                raise ValueError("session log root is not an object")
+            if (client_session_id
+                    and data.get("client_session_id") != client_session_id):
+                continue
+            return p, data
         except (IOError, OSError, ValueError):
             continue
     return None, None
@@ -255,10 +318,12 @@ def extract_fields(session, metadata, graph, info):
     put("Exposure time", ", ".join(exposure) if exposure else None)
     if info:
         dims = "%sx%sx%sx%sx%s" % (info.get("width", "?"), info.get("height", "?"),
-                                   info.get("nSlices", "?"), info.get("nChannels", "?"),
-                                   info.get("nFrames", "?"))
+                                   info.get("nSlices", info.get("slices", "?")),
+                                   info.get("nChannels", info.get("channels", "?")),
+                                   info.get("nFrames", info.get("frames", "?")))
         put("Image dimensions (X x Y x Z x C x T)", dims)
-        put("Bit depth", str(info.get("bitDepth", "?")) + "-bit")
+        bit_depth = info.get("bitDepth") or _bit_depth_from_type(info.get("type"))
+        put("Bit depth", (str(bit_depth) + "-bit") if bit_depth else None)
     else:
         put("Image dimensions (X x Y x Z x C x T)", None)
         put("Bit depth", None)
@@ -287,11 +352,31 @@ def extract_fields(session, metadata, graph, info):
     # Software
     put("ImageJAI version", IMAGEJAI_VERSION)
     put("Fiji / ImageJ version", (info or {}).get("imagejVersion"))
+    put("TCP session ID", (info or {}).get("tcpSessionId"))
+    put("Agent launch session ID", (info or {}).get("clientSessionId"))
+    put("Session log ID", (info or {}).get("sessionLogId"))
+    put("Session log path", (info or {}).get("sessionLogPath"))
+    put("Initiating dataset title", (info or {}).get("title"))
+    put("Initiating dataset path", (info or {}).get("filePath"))
+    put("Initiating dataset identity", (info or {}).get("identity"))
+    put("Initiating dataset hash", (info or {}).get("hash"))
     put("Operating system", platform.platform())
     put("Replayable macro export",
         "session_log.export_macro() — see agent/.tmp/replay_*.ijm")
 
     return fields
+
+
+def _bit_depth_from_type(image_type):
+    """Translate the real get_state.activeImage `type` field to bit depth."""
+    if not isinstance(image_type, str):
+        return None
+    match = re.search(r"(8|16|24|32)\s*[- ]?bit", image_type, re.I)
+    if match:
+        return int(match.group(1))
+    if image_type.upper() in ("RGB", "RGB COLOR"):
+        return 24
+    return None
 
 
 def _summarise_session(session):
@@ -392,25 +477,40 @@ def main():
                     help="initiating dataset captured by the server at admission")
     args = ap.parse_args()
 
+    initiating = None
+    if args.dataset_json:
+        initiating = json.loads(args.dataset_json)
+        if not isinstance(initiating, dict):
+            raise ValueError("--dataset-json must decode to an object")
+    initiating_client_session = (initiating or {}).get("clientSessionId")
+
     if args.from_file:
-        with open(args.from_file, "r", encoding="utf-8") as f:
-            bundle = json.load(f)
+        bundle = load_json_file(args.from_file)
         session = bundle.get("session")
         metadata = bundle.get("metadata")
         graph = bundle.get("graph")
         info = bundle.get("info")
-        header_path = args.from_file
+        header_path = bundle.get("session_log_path") or bundle.get("log_path")
+        header_path = resolve_bundle_log_path(args.from_file, header_path)
     else:
-        path, session = latest_session_log()
+        path, session = latest_session_log(initiating_client_session)
         metadata = fetch_metadata()
         graph = fetch_graph()
         state = fetch_state()
         info = (state or {}).get("activeImage") if state else None
         header_path = path
 
-    if args.dataset_json:
-        initiating = json.loads(args.dataset_json)
-        live = info if isinstance(info, dict) else {}
+    info = dict(info) if isinstance(info, dict) else {}
+    if header_path:
+        info["sessionLogPath"] = os.path.abspath(header_path)
+    if isinstance(session, dict) and session.get("session_id"):
+        info["sessionLogId"] = session["session_id"]
+    client_session_id = os.environ.get("IMAGEJAI_SESSION_ID", "").strip()
+    if client_session_id:
+        info.setdefault("clientSessionId", client_session_id)
+
+    if initiating is not None:
+        live = info
         bound_path = initiating.get("filePath")
         live_path = live.get("filePath")
         same_dataset = False
@@ -424,7 +524,12 @@ def main():
             # the subprocess was starting. Unknown metadata is safer than
             # confidently attaching another image's acquisition details.
             metadata = None
-            live = {}
+            preserved_provenance = {
+                key: live[key] for key in (
+                    "sessionLogPath", "sessionLogId", "clientSessionId"
+                ) if key in live
+            }
+            live = preserved_provenance
         info = dict(live)
         info.update({key: value for key, value in initiating.items()
                      if value is not None and value != -1})

@@ -58,7 +58,7 @@ Conflict watchlist:
 | 20 | completed | `40958a5` | 5/5 headless accessibility and 20/20 focused Stage 19/20 regression tests passed; the 951-test run had only five Stage 22 intent failures queued for correction |
 | 21 | completed | `04928c0` | 4/4 visual lifecycle, 57/57 focused UI, and 957/957 full Maven tests passed; theme contrast, focus, ProviderCard accessibility, and one-shot dialog disposal are covered |
 | 22 | completed | `528dc30`, `0f94425` | 22 focused Java and 3 generator tests passed; 398 IDs/16,860 phrases load exactly, repeat generation is byte-stable, the bounded matcher benchmark passed at 112/115 (97.4%), and the corrective full Maven run passed |
-| 23 | pending | - | - |
+| 23 | completed | `d3cbe77`, `24ecd6b`, `98c6906` | 123/123 security companion tests, 40/40 bounded scan/cache tests, and 1,039/1,039 full Maven tests passed; cross-cutting socket, parser, job, capture, audit, event, UI, filesystem, token, path, and visual-scope bounds are enforced |
 | 24 | completed | `91ffbaa` | 24/24 runner/session and 120/120 context tests passed; AgentLauncher integration, Python compilation, whitespace audit, and offline structured doctor behavior passed |
 | 25 | pending | - | - |
 | 26 | pending | - | - |

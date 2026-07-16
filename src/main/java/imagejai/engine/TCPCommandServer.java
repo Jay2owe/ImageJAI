@@ -52,6 +52,7 @@ import java.nio.charset.Charset;
 import java.nio.charset.CharacterCodingException;
 import java.nio.charset.CodingErrorAction;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.security.MessageDigest;
@@ -111,68 +112,8 @@ public class TCPCommandServer {
 
     private static final Gson GSON = new GsonBuilder().create();
     private static final Charset UTF8 = Charset.forName("UTF-8");
-    private static final List<String> KNOWN_COMMANDS = Collections.unmodifiableList(
-            Arrays.asList(
-                    "hello",
-                    "ping",
-                    "emit_methods_table",
-                    "execute_macro",
-                    "get_state",
-                    "get_image_info",
-                    "get_results_table",
-                    "capture_image",
-                    "request_visual",
-                    "open_image",
-                    "open_image_by_token",
-                    "browse_pending_brief",
-                    "get_pending_brief",
-                    "run_pipeline",
-                    "explore_thresholds",
-                    "get_state_context",
-                    "get_log",
-                    "get_histogram",
-                    "get_open_windows",
-                    "get_metadata",
-                    "batch",
-                    "run",
-                    "get_pixels",
-                    "3d_viewer",
-                    "get_dialogs",
-                    "close_dialogs",
-                    "close_windows",
-                    "probe_command",
-                    "list_commands",
-                    "run_script",
-                    "interact_dialog",
-                    "get_progress",
-                    "get_friction_log",
-                    "get_friction_patterns",
-                    "clear_friction_log",
-                    "intent",
-                    "intent_teach",
-                    "intent_list",
-                    "intent_forget",
-                    "gui_action",
-                    "execute_macro_async",
-                    "job_status",
-                    "job_cancel",
-                    "job_list",
-                    "list_reactive_rules",
-                    "reactive_stats",
-                    "reactive_enable",
-                    "reactive_disable",
-                    "reactive_reload",
-                    "get_roi_state",
-                    "get_display_state",
-                    "get_console",
-                    "get_image_graph",
-                    "ledger_lookup",
-                    "ledger_confirm",
-                    "rewind",
-                    "branch",
-                    "branch_list",
-                    "branch_switch",
-                    "branch_delete"));
+    private static final List<String> KNOWN_COMMANDS =
+            CommandManifest.requestResponseNames();
     // 10-minute synchronous-macro ceiling. Long enough for batch 3D Object
     // Counter runs on dense masks without blocking the TCP thread forever.
     // Callers can override per-request with `"timeout_ms": N` (pass 0 or a
@@ -191,6 +132,7 @@ public class TCPCommandServer {
     public static final int MAX_CAPTURE_DIMENSION = 4096;
     public static final int MAX_CAPTURE_PNG_BYTES = 16 * 1024 * 1024;
     public static final int MAX_PROCESS_OUTPUT_BYTES = 1024 * 1024;
+    public static final long METHODS_PROCESS_TIMEOUT_MS = 30_000L;
     public static final int MAX_HANDSHAKE_IDENTITY_CHARS = 256;
     public static final int MAX_HANDSHAKE_OUTPUT_FORMAT_CHARS = 64;
     public static final int MAX_ACCEPT_EVENT_TOPICS = 64;
@@ -361,18 +303,8 @@ public class TCPCommandServer {
      * {@code job_list} etc.) stay excluded because a repeat fetch of those
      * often means "tell me what changed" and dedup would defeat the intent.
      */
-    private static final Set<String> DEDUP_COMMANDS = new HashSet<String>(Arrays.asList(
-            "get_state",
-            "get_image_info",
-            "get_results_table",
-            "get_log",
-            "get_histogram",
-            "get_open_windows",
-            "get_metadata",
-            "get_dialogs",
-            "get_roi_state",
-            "get_display_state"
-    ));
+    private static final Set<String> DEDUP_COMMANDS =
+            new HashSet<String>(CommandManifest.hashDedupNames());
 
     /**
      * Server version string emitted in the {@code hello} handshake response.
@@ -390,6 +322,7 @@ public class TCPCommandServer {
         String agent = "unknown";
         String agentId = null;
         String sessionId = "";
+        String clientSessionId = "";
         String modelEndpoint = "";
         // True when the connecting client presented the correct shared token
         // in its hello handshake. Read by dispatchCore to gate non-hello
@@ -2398,7 +2331,7 @@ public class TCPCommandServer {
         } else if ("ping".equals(command)) {
             return handlePing();
         } else if ("emit_methods_table".equals(command)) {
-            return handleEmitMethodsTable(request);
+            return handleEmitMethodsTable(request, caps);
         } else if ("execute_macro".equals(command)) {
             return handleExecuteMacro(request, caps);
         } else if ("get_state".equals(command)) {
@@ -2955,6 +2888,7 @@ public class TCPCommandServer {
                 : new JsonObject();
         c.sessionId = optString(request, "session_id",
                 optString(caps, "session_id", ""));
+        c.clientSessionId = optString(request, "client_session_id", "");
         c.modelEndpoint = optString(request, "model_endpoint",
                 optString(caps, "model_endpoint", ""));
         c.vision       = optBool(caps, "vision", false);
@@ -2964,6 +2898,10 @@ public class TCPCommandServer {
         if (helloFieldError != null) return helloFieldError;
         helloFieldError = validateHelloField(
                 "session_id", c.sessionId, MAX_HANDSHAKE_IDENTITY_CHARS);
+        if (helloFieldError != null) return helloFieldError;
+        helloFieldError = validateHelloField(
+                "client_session_id", c.clientSessionId,
+                MAX_HANDSHAKE_IDENTITY_CHARS);
         if (helloFieldError != null) return helloFieldError;
         helloFieldError = validateHelloField(
                 "model_endpoint", c.modelEndpoint, MAX_HANDSHAKE_IDENTITY_CHARS);
@@ -3061,7 +2999,9 @@ public class TCPCommandServer {
             c.ledger = false;
         }
         int sockPort = (sock != null) ? sock.getPort() : 0;
-        c.agentId = optString(caps, "agent_id", c.agent + "-" + sockPort);
+        c.agentId = optString(caps, "agent_id",
+                !c.clientSessionId.isEmpty()
+                        ? c.clientSessionId : c.agent + "-" + sockPort);
         helloFieldError = validateHelloField(
                 "agent_id", c.agentId, MAX_HANDSHAKE_IDENTITY_CHARS);
         if (helloFieldError != null) return helloFieldError;
@@ -7156,13 +7096,14 @@ public class TCPCommandServer {
      *
      * <p>Response shape: {@code {"ok":true,"result":{"path":"AI_Exports/methods.md","fieldCoverage":"21/33"}}}.
      */
-    JsonObject handleEmitMethodsTable(JsonObject request) {
+    JsonObject handleEmitMethodsTable(JsonObject request, AgentCaps caps) {
         final SessionCodeJournal.DatasetBinding initiatingDataset =
                 SessionCodeJournal.captureInitiatingDataset();
         try {
+            Path methodsScript = resolveMethodsTableScript();
             List<String> command = new ArrayList<String>();
-            command.add("python");
-            command.add("agent/methods_table.py");
+            command.add(resolvePythonExecutable());
+            command.add(methodsScript.toString());
             JsonObject datasetJson = new JsonObject();
             if (initiatingDataset.identity != null) {
                 datasetJson.addProperty("identity", initiatingDataset.identity);
@@ -7180,6 +7121,7 @@ public class TCPCommandServer {
             datasetJson.addProperty("nChannels", initiatingDataset.channels);
             datasetJson.addProperty("nFrames", initiatingDataset.frames);
             datasetJson.addProperty("bitDepth", initiatingDataset.bitDepth);
+            attachMethodsSessionMetadata(datasetJson, caps);
             command.add("--dataset-json");
             command.add(datasetJson.toString());
             if (initiatingDataset.sourcePath != null) {
@@ -7190,28 +7132,20 @@ public class TCPCommandServer {
                     command.add(parent.resolve("AI_Exports").resolve("methods.md").toString());
                 }
             }
-            ProcessBuilder pb = new ProcessBuilder(command);
-            pb.redirectErrorStream(true);
-            Process proc = pb.start();
-            ByteArrayOutputStream retained = new ByteArrayOutputStream(8192);
-            long totalOutputBytes = 0L;
-            try (InputStream processOutput = proc.getInputStream()) {
-                byte[] buffer = new byte[8192];
-                int read;
-                while ((read = processOutput.read(buffer)) != -1) {
-                    totalOutputBytes += read;
-                    int remaining = MAX_PROCESS_OUTPUT_BYTES - retained.size();
-                    if (remaining > 0) {
-                        retained.write(buffer, 0, Math.min(remaining, read));
-                    }
-                }
+            BoundedProcessRunner.Result execution = BoundedProcessRunner.run(
+                    command, METHODS_PROCESS_TIMEOUT_MS, MAX_PROCESS_OUTPUT_BYTES);
+            String output = execution.output;
+            if (execution.timedOut) {
+                return errorResponse("methods_table.py timed out after "
+                        + METHODS_PROCESS_TIMEOUT_MS + " ms; process terminated="
+                        + execution.terminated + ": " + output.trim()
+                        + (execution.outputTruncated
+                        ? " [output truncated at " + MAX_PROCESS_OUTPUT_BYTES + " bytes]"
+                        : ""));
             }
-            int exit = proc.waitFor();
-            String output = new String(retained.toByteArray(), StandardCharsets.UTF_8);
-            boolean outputTruncated = totalOutputBytes > MAX_PROCESS_OUTPUT_BYTES;
-            if (exit != 0) {
-                return errorResponse("methods_table.py exited " + exit + ": "
-                        + output.trim() + (outputTruncated
+            if (execution.exitCode != 0) {
+                return errorResponse("methods_table.py exited " + execution.exitCode + ": "
+                        + output.trim() + (execution.outputTruncated
                         ? " [output truncated at " + MAX_PROCESS_OUTPUT_BYTES + " bytes]"
                         : ""));
             }
@@ -7236,14 +7170,61 @@ public class TCPCommandServer {
                 result.addProperty("datasetHash", initiatingDataset.hash);
             }
             result.addProperty("output", output.trim());
-            result.addProperty("output_truncated", outputTruncated);
-            result.addProperty("output_total_bytes", totalOutputBytes);
+            result.addProperty("output_truncated", execution.outputTruncated);
+            result.addProperty("output_total_bytes", execution.totalOutputBytes);
             return successResponse(result);
         } catch (IOException | InterruptedException e) {
             if (e instanceof InterruptedException) {
                 Thread.currentThread().interrupt();
             }
             return errorResponse("emit_methods_table failed: " + e.getMessage());
+        }
+    }
+
+    static void attachMethodsSessionMetadata(JsonObject datasetJson, AgentCaps caps) {
+        datasetJson.addProperty("imagejVersion", IJ.getVersion());
+        if (caps == null) return;
+        if (caps.sessionId != null && !caps.sessionId.trim().isEmpty()) {
+            datasetJson.addProperty("tcpSessionId", caps.sessionId.trim());
+        }
+        if (caps.clientSessionId != null && !caps.clientSessionId.trim().isEmpty()) {
+            datasetJson.addProperty("clientSessionId", caps.clientSessionId.trim());
+        }
+    }
+
+    static String resolvePythonExecutable() {
+        String configured = System.getenv("IMAGEJAI_PYTHON");
+        if (configured != null && !configured.trim().isEmpty()) {
+            return configured.trim();
+        }
+        String os = System.getProperty("os.name", "").toLowerCase(Locale.ROOT);
+        return os.contains("win") ? "python" : "python3";
+    }
+
+    static Path resolveMethodsTableScript() throws IOException {
+        List<Path> workspaces = new ArrayList<Path>();
+        addWorkspaceCandidate(workspaces,
+                System.getProperty("imagejai.agent.workspace"));
+        addWorkspaceCandidate(workspaces, System.getenv("IMAGEJAI_AGENT_WORKSPACE"));
+        String userDir = System.getProperty("user.dir");
+        if (userDir != null && !userDir.trim().isEmpty()) {
+            workspaces.add(Paths.get(userDir).resolve("agent"));
+        }
+        String userHome = System.getProperty("user.home");
+        if (userHome != null && !userHome.trim().isEmpty()) {
+            workspaces.add(Paths.get(userHome).resolve("ImageJAI").resolve("agent"));
+        }
+        for (Path workspace : workspaces) {
+            Path script = workspace.toAbsolutePath().normalize().resolve("methods_table.py");
+            if (Files.isRegularFile(script)) return script;
+        }
+        throw new IOException("methods_table.py not found; configure "
+                + "imagejai.agent.workspace or IMAGEJAI_AGENT_WORKSPACE");
+    }
+
+    private static void addWorkspaceCandidate(List<Path> workspaces, String value) {
+        if (value != null && !value.trim().isEmpty()) {
+            workspaces.add(Paths.get(value.trim()));
         }
     }
 
