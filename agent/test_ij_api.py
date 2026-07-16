@@ -111,6 +111,37 @@ def capture_imagej_command(monkeypatch):
     return calls
 
 
+class ScriptedSession:
+    def __init__(self, responses=(), frames=()):
+        self.responses = list(responses)
+        self.frames = list(frames)
+        self.requests = []
+        self.event_calls = []
+
+    def request(self, command, timeout=None):
+        self.requests.append((dict(command), timeout))
+        assert self.responses, "unexpected request"
+        response = self.responses.pop(0)
+        if isinstance(response, BaseException):
+            raise response
+        return response
+
+    def events(self, topics, reconnect, read_timeout):
+        self.event_calls.append((topics, reconnect, read_timeout))
+        for frame in self.frames:
+            if isinstance(frame, BaseException):
+                raise frame
+            yield frame
+
+
+@pytest.fixture
+def isolated_read_cache(monkeypatch, tmp_path):
+    monkeypatch.setattr(ij, "_CACHE_DIR", str(tmp_path))
+    monkeypatch.setattr(ij, "_CACHE_FILE", str(tmp_path / "cache.json"))
+    monkeypatch.setattr(ij, "_READONLY_CACHE", {})
+    monkeypatch.setattr(ij, "_READONLY_CACHE_DIRTY", False)
+
+
 def test_new_helpers_are_public():
     for name in [
         "run_script",
@@ -311,6 +342,233 @@ def test_imagej_events_has_one_public_implementation():
     ]
 
     assert len(definitions) == 1
+
+
+def test_read_cache_key_canonicalizes_semantic_args_and_excludes_framing():
+    first = ij._readonly_cache_key(
+        " LOCALHOST ",
+        "7746",
+        {
+            "command": "get_console",
+            "tail": 25,
+            "filter": {"stderr": True, "stdout": False},
+            "session_id": "session-a",
+            "token": "secret-a",
+            "if_none_match": "hash-a",
+        },
+    )
+    same = ij._readonly_cache_key(
+        "localhost",
+        7746,
+        {
+            "filter": {"stdout": False, "stderr": True},
+            "tail": 25,
+            "command": "get_console",
+            "session_id": "session-b",
+            "token": "secret-b",
+        },
+    )
+
+    assert first == same
+    assert first != ij._readonly_cache_key(
+        "localhost", 7746, {"command": "get_console", "tail": 26})
+    assert first != ij._readonly_cache_key(
+        "other-host", 7746, {"command": "get_console", "tail": 25,
+                             "filter": {"stderr": True, "stdout": False}})
+    assert first != ij._readonly_cache_key(
+        "localhost", 7747, {"command": "get_console", "tail": 25,
+                             "filter": {"stderr": True, "stdout": False}})
+
+
+def test_read_cache_isolated_by_endpoint_and_semantic_args(
+        monkeypatch, isolated_read_cache):
+    server_a = ScriptedSession(responses=[
+        {"ok": True, "hash": "hash-a", "result": {"text": "a"}},
+        {"ok": True, "unchanged": True},
+        {"ok": True, "hash": "hash-a-50", "result": {"text": "a50"}},
+    ])
+    server_b = ScriptedSession(responses=[
+        {"ok": True, "hash": "hash-b", "result": {"text": "b"}},
+    ])
+    sessions = {("server", 8001): server_a, ("server", 8002): server_b}
+    monkeypatch.setattr(ij, "_session_for", lambda host, port: sessions[(host, port)])
+
+    first = ij.imagej_command(
+        {"command": "get_console", "tail": 25}, host="server", port=8001)
+    replay = ij.imagej_command(
+        {"tail": 25, "command": "get_console"}, host="server", port=8001)
+    other_args = ij.imagej_command(
+        {"command": "get_console", "tail": 50}, host="server", port=8001)
+    other_server = ij.imagej_command(
+        {"command": "get_console", "tail": 25}, host="server", port=8002)
+
+    assert first["result"] == {"text": "a"}
+    assert replay == {
+        "ok": True,
+        "result": {"text": "a"},
+        "hash": "hash-a",
+        "cached": True,
+    }
+    assert other_args["result"] == {"text": "a50"}
+    assert other_server["result"] == {"text": "b"}
+    assert server_a.requests[0][0] == {"command": "get_console", "tail": 25}
+    assert server_a.requests[1][0]["if_none_match"] == "hash-a"
+    assert "if_none_match" not in server_a.requests[2][0]
+    assert "if_none_match" not in server_b.requests[0][0]
+
+
+def test_read_cache_never_resolves_an_unrelated_explicit_hash(
+        monkeypatch, isolated_read_cache):
+    session = ScriptedSession(responses=[
+        {"ok": True, "hash": "local-hash", "result": {"value": "old"}},
+        {"ok": True, "unchanged": True},
+        {"ok": True, "hash": "fresh-hash", "result": {"value": "fresh"}},
+    ])
+    monkeypatch.setattr(ij, "_session_for", lambda host, port: session)
+    command = {"command": "get_state"}
+
+    ij.imagej_command(command, host="server", port=8001)
+    response = ij.imagej_command(
+        {"command": "get_state", "if_none_match": "foreign-hash"},
+        host="server",
+        port=8001,
+    )
+
+    assert response["result"] == {"value": "fresh"}
+    assert session.requests[1][0]["if_none_match"] == "foreign-hash"
+    assert session.requests[2][0] == command
+
+
+def test_read_cache_persistence_is_versioned_and_round_trips(
+        isolated_read_cache):
+    key = ij._readonly_cache_key(
+        "server", 8001, {"command": "job_status", "job_id": "job-a"})
+    ij._READONLY_CACHE[key] = ("job-hash", {"state": "running"})
+    ij._READONLY_CACHE_DIRTY = True
+
+    ij._flush_cache()
+
+    payload = json.loads(Path(ij._CACHE_FILE).read_text(encoding="utf-8"))
+    assert payload["version"] == ij._CACHE_SCHEMA_VERSION
+    assert payload["entries"] == {
+        key: ["job-hash", {"state": "running"}]
+    }
+    assert ij._load_cache_from_disk() == {
+        key: ("job-hash", {"state": "running"})
+    }
+
+
+@pytest.mark.parametrize("payload", [
+    {"job_status": ["old-hash", {"state": "completed"}]},
+    {"version": 1, "entries": {}},
+    {"version": 999, "entries": {}},
+    {"version": 2, "entries": {"not-a-canonical-key": ["hash", {}]}},
+    {"version": 2, "entries": {}, "unexpected": True},
+])
+def test_read_cache_rejects_legacy_unknown_or_malformed_schemas(
+        isolated_read_cache, payload):
+    Path(ij._CACHE_FILE).write_text(json.dumps(payload), encoding="utf-8")
+
+    assert ij._load_cache_from_disk() == {}
+
+
+def test_job_status_routes_to_the_supplied_endpoint(monkeypatch):
+    calls = capture_imagej_command(monkeypatch)
+
+    ij.job_status("job-a", host="remote-host", port=8801)
+
+    assert calls == [
+        (
+            {"command": "job_status", "job_id": "job-a"},
+            (),
+            {"host": "remote-host", "port": 8801},
+        )
+    ]
+
+
+def test_wait_for_job_treats_timed_out_as_terminal_on_non_default_endpoint(
+        monkeypatch):
+    status_calls = []
+
+    def fake_status(job_id, host, port):
+        status_calls.append((job_id, host, port))
+        return {"ok": True, "result": {"state": "timed_out"}}
+
+    monkeypatch.setattr(ij, "job_status", fake_status)
+    monkeypatch.setattr(
+        ij, "_session_for",
+        lambda host, port: pytest.fail("terminal status must not subscribe"))
+
+    result = ij.wait_for_job(
+        "job-timeout", host="remote-host", port=8801, timeout=10)
+
+    assert result["result"]["state"] == "timed_out"
+    assert status_calls == [("job-timeout", "remote-host", 8801)]
+
+
+def test_wait_for_job_handles_terminal_event_before_subscription_ack(
+        monkeypatch):
+    statuses = iter([
+        {"ok": True, "result": {"state": "running"}},
+        {"ok": True, "result": {"state": "completed"}},
+    ])
+    status_calls = []
+    session = ScriptedSession(frames=[
+        {"event": "job.completed", "data": {"job_id": "job-a"}},
+        {"event": "subscribed", "data": {"topics": ["job.*"]}},
+    ])
+
+    def fake_status(job_id, host, port):
+        status_calls.append((job_id, host, port))
+        return next(statuses)
+
+    monkeypatch.setattr(ij, "job_status", fake_status)
+    monkeypatch.setattr(ij, "_session_for", lambda host, port: session)
+
+    result = ij.wait_for_job(
+        "job-a", host="remote-host", port=8801, timeout=10)
+
+    assert result["result"]["state"] == "completed"
+    assert status_calls == [
+        ("job-a", "remote-host", 8801),
+        ("job-a", "remote-host", 8801),
+    ]
+
+
+def test_wait_for_job_polling_keeps_endpoint_and_uses_monotonic_deadline(
+        monkeypatch):
+    statuses = iter([
+        {"ok": True, "result": {"state": "running"}},
+        {"ok": True, "result": {"state": "running"}},
+        {"ok": True, "result": {"state": "timed_out"}},
+    ])
+    status_calls = []
+    session = ScriptedSession(frames=[])
+
+    def fake_status(job_id, host, port):
+        status_calls.append((job_id, host, port))
+        return next(statuses)
+
+    monkeypatch.setattr(ij, "job_status", fake_status)
+    monkeypatch.setattr(ij, "_session_for", lambda host, port: session)
+    monkeypatch.setattr(
+        time, "time",
+        lambda: pytest.fail("wait_for_job must use time.monotonic"))
+
+    result = ij.wait_for_job(
+        "job-a",
+        host="remote-host",
+        port=8801,
+        timeout=10,
+        poll_interval=0,
+    )
+
+    assert result["result"]["state"] == "timed_out"
+    assert status_calls == [
+        ("job-a", "remote-host", 8801),
+        ("job-a", "remote-host", 8801),
+        ("job-a", "remote-host", 8801),
+    ]
 
 
 def test_run_script_defaults_to_groovy_with_cli_timeout(monkeypatch):

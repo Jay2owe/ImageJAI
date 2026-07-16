@@ -248,18 +248,104 @@ READONLY_COMMANDS = frozenset(
 # the in-memory layer is authoritative during a single run.
 _CACHE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".tmp")
 _CACHE_FILE = os.path.join(_CACHE_DIR, "ij_client_cache.json")
+_CACHE_SCHEMA_VERSION = 2
+_CACHE_FRAMING_FIELDS = frozenset((
+    "if_none_match",
+    "session_id",
+    "token",
+    "client_session_id",
+    "model_endpoint",
+))
+
+
+def _readonly_cache_key(host, port, cmd):
+    """Return a stable endpoint-and-request key, or None if it is unsafe.
+
+    Cache identity includes the server endpoint and every semantic request
+    argument. Protocol/session framing is deliberately omitted. JSON's sorted
+    object keys make otherwise equivalent request dicts share one entry while
+    list order and JSON value types retain their wire meaning.
+    """
+    if not isinstance(cmd, dict):
+        return None
+    command = cmd.get("command")
+    if command not in READONLY_COMMANDS:
+        return None
+    try:
+        endpoint_port = int(port)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    endpoint_host = str(host).strip().casefold()
+    if not endpoint_host or endpoint_port < 1 or endpoint_port > 65535:
+        return None
+    semantic_args = {
+        key: value for key, value in cmd.items()
+        if key != "command" and key not in _CACHE_FRAMING_FIELDS
+    }
+    identity = {
+        "server": {"host": endpoint_host, "port": endpoint_port},
+        "command": command,
+        "args": semantic_args,
+    }
+    try:
+        return json.dumps(identity, sort_keys=True, separators=(",", ":"),
+                          ensure_ascii=True, allow_nan=False)
+    except (TypeError, ValueError, OverflowError):
+        # An argument that cannot be represented as strict JSON cannot be
+        # matched safely across calls. The request path remains uncached.
+        return None
+
+
+def _valid_cache_key(key):
+    try:
+        identity = json.loads(key)
+    except (TypeError, ValueError):
+        return False
+    if not isinstance(identity, dict) or set(identity) != {
+            "server", "command", "args"}:
+        return False
+    server = identity.get("server")
+    structurally_valid = (
+        isinstance(server, dict)
+        and set(server) == {"host", "port"}
+        and isinstance(server.get("host"), str)
+        and bool(server.get("host"))
+        and isinstance(server.get("port"), int)
+        and not isinstance(server.get("port"), bool)
+        and 1 <= server.get("port") <= 65535
+        and identity.get("command") in READONLY_COMMANDS
+        and isinstance(identity.get("args"), dict)
+    )
+    if not structurally_valid:
+        return False
+    try:
+        canonical = json.dumps(identity, sort_keys=True, separators=(",", ":"),
+                               ensure_ascii=True, allow_nan=False)
+    except (TypeError, ValueError, OverflowError):
+        return False
+    return key == canonical
 
 
 def _load_cache_from_disk():
     try:
         with open(_CACHE_FILE, "r", encoding="utf-8") as f:
             data = json.load(f)
-        if not isinstance(data, dict):
+        # Version 1 keyed only by command name. It cannot be migrated without
+        # risking cross-server or cross-argument replay, so invalidate it.
+        if (not isinstance(data, dict)
+                or set(data) != {"version", "entries"}
+                or data.get("version") != _CACHE_SCHEMA_VERSION
+                or not isinstance(data.get("entries"), dict)):
             return {}
         out = {}
-        for k, v in data.items():
-            if isinstance(v, list) and len(v) == 2:
-                out[k] = (v[0], v[1])
+        for k, v in data["entries"].items():
+            if (not _valid_cache_key(k)
+                    or not isinstance(v, list)
+                    or len(v) != 2
+                    or not isinstance(v[0], str)
+                    or not v[0]):
+                return {}
+            out[k] = (v[0], v[1])
         return out
     except (IOError, OSError, ValueError):
         return {}
@@ -270,15 +356,18 @@ def _save_cache_to_disk(cache):
         os.makedirs(_CACHE_DIR, exist_ok=True)
         tmp = _CACHE_FILE + ".tmp"
         serial = {k: [v[0], v[1]] for k, v in cache.items()}
+        payload = {"version": _CACHE_SCHEMA_VERSION, "entries": serial}
         with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(serial, f)
+            json.dump(payload, f, sort_keys=True, separators=(",", ":"),
+                      allow_nan=False)
         os.replace(tmp, _CACHE_FILE)
-    except (IOError, OSError):
+    except (IOError, OSError, TypeError, ValueError):
         pass
 
 
-# In-memory cache: cmd_name -> (hash, result). Seeded from disk so a fresh
-# subprocess can reuse a previous call's hash on its very first request.
+# In-memory cache: canonical endpoint/request key -> (hash, result). Seeded
+# from disk so a fresh subprocess can reuse a previous call on its first
+# request without crossing servers or semantic argument sets.
 _READONLY_CACHE = _load_cache_from_disk()
 _READONLY_CACHE_DIRTY = False
 
@@ -296,11 +385,9 @@ def imagej_command(cmd, host=HOST, port=PORT, timeout=TIMEOUT):
     {"cached": true} so callers can't tell the difference."""
     # Phase 1: hash dedup — only for well-formed readonly requests that don't
     # already carry an explicit if_none_match (respect caller override).
-    cmd_name = None
-    if isinstance(cmd, dict):
-        cmd_name = cmd.get("command")
-    if cmd_name in READONLY_COMMANDS and "if_none_match" not in cmd:
-        cached = _READONLY_CACHE.get(cmd_name)
+    cache_key = _readonly_cache_key(host, port, cmd)
+    if cache_key is not None and "if_none_match" not in cmd:
+        cached = _READONLY_CACHE.get(cache_key)
         if cached is not None:
             cmd = dict(cmd)  # don't mutate caller's dict
             cmd["if_none_match"] = cached[0]
@@ -309,26 +396,32 @@ def imagej_command(cmd, host=HOST, port=PORT, timeout=TIMEOUT):
 
     # Phase 1: resolve unchanged responses from cache; refresh cache on hash.
     global _READONLY_CACHE_DIRTY
-    if cmd_name in READONLY_COMMANDS and isinstance(resp, dict) and resp.get("ok"):
+    if cache_key is not None and isinstance(resp, dict) and resp.get("ok"):
         if resp.get("unchanged"):
-            cached = _READONLY_CACHE.get(cmd_name)
-            if cached is not None:
+            cached = _READONLY_CACHE.get(cache_key)
+            if cached is not None and cmd.get("if_none_match") == cached[0]:
                 return {
                     "ok": True,
                     "result": cached[1],
                     "hash": cached[0],
                     "cached": True,
                 }
-            # Cache miss on unchanged shouldn't happen in normal flow, but be
-            # defensive: drop the if_none_match and re-request.
+            # Never resolve an explicit/stale hash with unrelated local data.
+            # Re-request once without conditional framing and then store only
+            # a full response. A broken peer that again says unchanged is
+            # surfaced as-is instead of recursing forever.
             retry_cmd = dict(cmd)
             retry_cmd.pop("if_none_match", None)
-            return imagej_command(retry_cmd, host=host, port=port, timeout=timeout)
+            resp = _session_for(host, port).request(retry_cmd, timeout=timeout)
+            if not (isinstance(resp, dict) and resp.get("ok")):
+                return resp
+            if resp.get("unchanged"):
+                return resp
         h = resp.get("hash")
-        if h:
-            prev = _READONLY_CACHE.get(cmd_name)
+        if isinstance(h, str) and h:
+            prev = _READONLY_CACHE.get(cache_key)
             if prev is None or prev[0] != h:
-                _READONLY_CACHE[cmd_name] = (h, resp.get("result"))
+                _READONLY_CACHE[cache_key] = (h, resp.get("result"))
                 _READONLY_CACHE_DIRTY = True
 
     return resp
@@ -1124,7 +1217,8 @@ def reactive_stats():
 # Phase 3: async job helpers
 # ---------------------------------------------------------------------------
 
-_JOB_TERMINAL_STATES = frozenset(("completed", "failed", "cancelled"))
+_JOB_TERMINAL_STATES = frozenset(
+    ("completed", "failed", "cancelled", "timed_out"))
 
 
 def submit_async(code):
@@ -1133,8 +1227,12 @@ def submit_async(code):
     return imagej_command({"command": "execute_macro_async", "code": code})
 
 
-def job_status(job_id):
-    return imagej_command({"command": "job_status", "job_id": job_id})
+def job_status(job_id, host=HOST, port=PORT):
+    return imagej_command(
+        {"command": "job_status", "job_id": job_id},
+        host=host,
+        port=port,
+    )
 
 
 def job_cancel(job_id):
@@ -1160,7 +1258,9 @@ def _terminal_status(resp):
 
 def wait_for_job(job_id, timeout=None, host=HOST, port=PORT,
                  poll_interval=0.5, reconnect=True):
-    """Block until a job reaches a terminal state (completed/failed/cancelled).
+    """Block until a job reaches a terminal state.
+
+    Terminal states are completed, failed, cancelled, and timed_out.
 
     Prefers the Phase 2 subscription channel: subscribes to ``job.*`` and
     filters on job_id. If the subscription socket fails or drops, falls back
@@ -1170,24 +1270,25 @@ def wait_for_job(job_id, timeout=None, host=HOST, port=PORT,
     ``{"ok": false, "error": "timeout", "job_id": ...}`` if ``timeout`` elapses.
     """
     import time as _time
-    deadline = (_time.time() + timeout) if timeout is not None else None
+    deadline = (_time.monotonic() + timeout) if timeout is not None else None
 
     # Fast path: if the job is already terminal, skip the subscription dance.
-    initial = job_status(job_id)
+    initial = job_status(job_id, host=host, port=port)
     term = _terminal_status(initial)
     if term is not None:
         return term
-    if not initial.get("ok"):
+    if not isinstance(initial, dict) or not initial.get("ok"):
         return initial  # unknown job — surface error immediately
 
     # Try the shared authenticated subscription client first.
     try:
-        read_timeout = None if deadline is None else max(0.01, deadline - _time.time())
+        read_timeout = (None if deadline is None
+                        else max(0.01, deadline - _time.monotonic()))
         subscribed = False
         for frame in _session_for(host, port).events(
                 topics=["job.*"], reconnect=False,
                 read_timeout=read_timeout):
-            if deadline is not None and _time.time() >= deadline:
+            if deadline is not None and _time.monotonic() >= deadline:
                 return {"ok": False, "error": "timeout", "job_id": job_id}
             if not isinstance(frame, dict):
                 continue
@@ -1198,7 +1299,7 @@ def wait_for_job(job_id, timeout=None, host=HOST, port=PORT,
                 subscribed = True
                 # Registration happens before the ack. This closes the poll /
                 # subscribe race while any concurrent completion stays queued.
-                recheck = job_status(job_id)
+                recheck = job_status(job_id, host=host, port=port)
                 term = _terminal_status(recheck)
                 if term is not None:
                     return term
@@ -1206,24 +1307,30 @@ def wait_for_job(job_id, timeout=None, host=HOST, port=PORT,
             data = frame.get("data") or {}
             if data.get("job_id") == job_id \
                     and event in ("job.completed", "job.failed"):
-                return job_status(job_id)
+                return job_status(job_id, host=host, port=port)
     except (socket.error, OSError, ConnectionError):
         if not reconnect:
             return {"ok": False, "error": "connection failed"}
 
     # Polling fallback — also reached if the subscription socket dropped.
     while True:
-        if deadline is not None and _time.time() >= deadline:
+        now = _time.monotonic()
+        if deadline is not None and now >= deadline:
             return {"ok": False, "error": "timeout", "job_id": job_id}
         try:
-            cur = job_status(job_id)
+            cur = job_status(job_id, host=host, port=port)
         except Exception:
             cur = {"ok": False, "error": "poll failed"}
         term = _terminal_status(cur)
         if term is not None:
             return term
         try:
-            _time.sleep(poll_interval)
+            sleep_for = poll_interval
+            if deadline is not None:
+                sleep_for = min(sleep_for,
+                                max(0.0, deadline - _time.monotonic()))
+            if sleep_for > 0:
+                _time.sleep(sleep_for)
         except KeyboardInterrupt:
             return {"ok": False, "error": "interrupted", "job_id": job_id}
 

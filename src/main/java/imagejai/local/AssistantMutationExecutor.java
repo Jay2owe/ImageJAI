@@ -17,6 +17,7 @@ import imagejai.engine.safeMode.RoiAutoBackup;
 
 import javax.swing.SwingUtilities;
 import java.io.File;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Set;
 import java.util.concurrent.RejectedExecutionException;
@@ -43,6 +44,8 @@ public final class AssistantMutationExecutor implements AutoCloseable {
     private final AtomicReference<MutationCoordinator.Handle<?>> active =
             new AtomicReference<MutationCoordinator.Handle<?>>();
     private final ThreadLocal<Boolean> insideMutation = new ThreadLocal<Boolean>();
+    private final ThreadLocal<DestructiveScanner.Context> mutationScannerContext =
+            new ThreadLocal<DestructiveScanner.Context>();
     private final boolean ownsCoordinator;
 
     public AssistantMutationExecutor(Settings settings, String ownerSession,
@@ -74,7 +77,9 @@ public final class AssistantMutationExecutor implements AutoCloseable {
             SessionCodeJournal.DatasetBinding journalDataset =
                     SessionCodeJournal.captureInitiatingDataset();
             try {
-                if (settings.safeModeEnabled) enforceSafety(code, false);
+                // Nested assistant mutations bypass the coordinator lifecycle,
+                // so the mandatory macro boundary must run explicitly here.
+                enforceSafety(code, false, mutationScannerContext.get());
                 ExecutionResult result = operation.run();
                 journalNested(journalDataset, code, started, result != null && result.isSuccess(),
                         result == null ? "No execution result" : result.getError());
@@ -121,10 +126,11 @@ public final class AssistantMutationExecutor implements AutoCloseable {
         if (operation == null) {
             throw new IllegalArgumentException("operation is required");
         }
-        final boolean safeMode = settings.safeModeEnabled;
         final String callId = ownerSession + "-" + callSequence.incrementAndGet();
         final String mutationCode = code == null ? "" : code;
         final ImagePlus imageAtAdmission = WindowManager.getCurrentImage();
+        final DestructiveScanner.Context scannerContextAtAdmission =
+                scannerContext(imageAtAdmission);
         final SessionCodeJournal.DatasetBinding journalDataset =
                 SessionCodeJournal.captureInitiatingDataset();
 
@@ -136,7 +142,8 @@ public final class AssistantMutationExecutor implements AutoCloseable {
 
             @Override
             public void checkSafety() throws Exception {
-                enforceSafety(mutationCode, explicitApprovalRequired);
+                enforceSafety(mutationCode, explicitApprovalRequired,
+                        scannerContextAtAdmission);
             }
 
             @Override
@@ -174,16 +181,21 @@ public final class AssistantMutationExecutor implements AutoCloseable {
                 .sourceKind(source)
                 .code(mutationCode)
                 .timeoutMs(Math.max(0L, timeoutMs))
-                .safetyEnabled(safeMode)
+                // Host-code escapes and macro filesystem access are mandatory
+                // regardless of Safe Mode. enforceSafety() applies the optional
+                // scientific rules only when Safe Mode is enabled.
+                .safetyEnabled(true)
                 .undoEnabled(true)
                 .provenanceEnabled(true)
                 .operation(new MutationCoordinator.Operation<T>() {
                     @Override
                     public T run() throws Exception {
                         insideMutation.set(Boolean.TRUE);
+                        mutationScannerContext.set(scannerContextAtAdmission);
                         try {
                             return operation.run();
                         } finally {
+                            mutationScannerContext.remove();
                             insideMutation.remove();
                         }
                     }
@@ -254,19 +266,27 @@ public final class AssistantMutationExecutor implements AutoCloseable {
         undo.pushFrame(frame);
     }
 
-    private void enforceSafety(String code, boolean explicitApprovalRequired)
+    private void enforceSafety(String code, boolean explicitApprovalRequired,
+                               DestructiveScanner.Context admittedContext)
             throws Exception {
-        if (explicitApprovalRequired) {
+        if (settings.safeModeEnabled && explicitApprovalRequired) {
             throw new MutationCoordinator.SafetyException(
                     "Action requires approval: disable Safe Mode for this intentional run.");
         }
+        DestructiveScanner.Context context = admittedContext == null
+                ? scannerContext(WindowManager.getCurrentImage()) : admittedContext;
         List<DestructiveScanner.DestructiveOp> findings =
-                DestructiveScanner.scan(code, scannerContext());
+                new ArrayList<DestructiveScanner.DestructiveOp>(
+                        settings.safeModeEnabled
+                                ? DestructiveScanner.scan(code, context)
+                                : DestructiveScanner.scan(code, null));
+        findings.addAll(DestructiveScanner.scanMacroFilesystem(
+                code, context.aiExportsRoot));
         List<DestructiveScanner.DestructiveOp> rejected =
                 DestructiveScanner.rejections(findings);
         if (!rejected.isEmpty()) {
             StringBuilder message = new StringBuilder(
-                    "Macro blocked by safe-mode scanner: ");
+                    "Macro blocked by safety scanner: ");
             for (int i = 0; i < rejected.size(); i++) {
                 if (i > 0) message.append("; ");
                 DestructiveScanner.DestructiveOp op = rejected.get(i);
@@ -292,7 +312,7 @@ public final class AssistantMutationExecutor implements AutoCloseable {
         return Boolean.TRUE.equals(insideMutation.get());
     }
 
-    private DestructiveScanner.Context scannerContext() {
+    private DestructiveScanner.Context scannerContext(ImagePlus admittedImage) {
         String activePath = null;
         String exportsRoot = null;
         int bitDepth = 0;
@@ -300,13 +320,19 @@ public final class AssistantMutationExecutor implements AutoCloseable {
         int roiCount = 0;
         int resultRows = 0;
         try {
-            ImagePlus image = WindowManager.getCurrentImage();
+            ImagePlus image = admittedImage;
             if (image != null) {
                 bitDepth = image.getBitDepth();
                 ij.io.FileInfo info = image.getOriginalFileInfo();
                 if (info != null && info.directory != null && info.fileName != null) {
                     activePath = info.directory + info.fileName;
-                    exportsRoot = new File(info.directory, "AI_Exports").getPath();
+                    // Keep this derivation byte-for-byte equivalent to the TCP
+                    // command server so both assistant surfaces authorize the
+                    // same literal export paths before canonical containment.
+                    exportsRoot = info.directory.endsWith("/")
+                            || info.directory.endsWith("\\")
+                            ? info.directory + "AI_Exports"
+                            : info.directory + File.separator + "AI_Exports";
                 }
                 ij.measure.Calibration calibration = image.getCalibration();
                 if (calibration != null) {

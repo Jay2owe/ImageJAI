@@ -41,4 +41,12 @@ public class CommandManifestTest {
         assertEquals(CommandManifest.requestResponseNames(),
                 TCPCommandServer.knownCommands());
     }
+
+    @Test
+    public void handlerSupportedTimeoutsAreDeclaredInRequestSchemas() {
+        assertTrue(CommandManifest.descriptor("get_pixels")
+                .requestFields.contains("timeout_ms"));
+        assertTrue(CommandManifest.descriptor("rewind")
+                .requestFields.contains("timeout_ms"));
+    }
 }

@@ -1062,7 +1062,7 @@ def _update_async_job_state(tool_name: str, result, async_job_active: bool) -> b
         state = str(payload.get("state") or "").strip().lower() if isinstance(payload, dict) else ""
         if state in {"queued", "running", "started"}:
             return True
-        if state in {"completed", "failed", "cancelled"}:
+        if state in {"completed", "failed", "cancelled", "timed_out"}:
             return False
         return async_job_active
     if tool_name == "cancel_job":

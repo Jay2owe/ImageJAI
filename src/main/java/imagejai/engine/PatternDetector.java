@@ -188,12 +188,12 @@ public final class PatternDetector {
             }
         }
         if (recentMacros.size() < REPEAT_ERROR_THRESHOLD) return Optional.empty();
-        String firstArgs = recentMacros.get(0).canonicalArgs;
+        String firstArgs = recentMacros.get(0).argsDigest;
         String firstErr  = recentMacros.get(0).responseErrorCode;
         if (firstErr == null || firstErr.isEmpty()) return Optional.empty();
         for (SessionStats.CmdLog c : recentMacros) {
             if (c.responseErrorCode == null || !c.responseErrorCode.equals(firstErr)) return Optional.empty();
-            if (c.canonicalArgs == null || !c.canonicalArgs.equals(firstArgs)) return Optional.empty();
+            if (c.argsDigest == null || !c.argsDigest.equals(firstArgs)) return Optional.empty();
         }
         stats.markFired(KIND_REPEAT_ERROR_IDENTICAL_MACRO, now);
         return Optional.of(new Hint(
@@ -234,7 +234,7 @@ public final class PatternDetector {
             SessionStats.CmdLog c = hist.get(i);
             if (!"execute_macro".equals(c.cmd)) continue;
             if (!c.isFailure()) continue;
-            String candidate = extractPluginName(c.canonicalArgs);
+            String candidate = extractPluginName(c.argsSummary);
             if (candidate == null) continue;
             if (pluginName == null) {
                 pluginName = candidate;
@@ -242,7 +242,7 @@ public final class PatternDetector {
                 // A different plugin broke the streak — bail out.
                 break;
             }
-            distinctArgs.add(c.canonicalArgs);
+            distinctArgs.add(c.argsDigest);
             failureCount++;
         }
         if (pluginName == null) return Optional.empty();

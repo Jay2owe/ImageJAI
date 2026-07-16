@@ -149,8 +149,11 @@ def test_job_status_marks_async_new_images(monkeypatch):
                 "result": {
                     "job_id": "job-1",
                     "state": "completed",
-                    "output": "",
-                    "newImages": ["mean_2", "laplacian"],
+                    "result": {
+                        "success": True,
+                        "output": "",
+                        "newImages": ["mean_2", "laplacian"],
+                    },
                 },
             }
         raise AssertionError("unexpected command {}".format(command))
@@ -252,8 +255,7 @@ def test_run_macro_async_uses_patched_code_and_surfaces_lint_warning(monkeypatch
                 "result": {
                     "job_id": "job-1",
                     "state": "completed",
-                    "output": "",
-                    "newImages": [],
+                    "result": {"success": True, "output": "", "newImages": []},
                 },
             }
         raise AssertionError("unexpected command {}".format(command))
@@ -269,7 +271,9 @@ def test_run_macro_async_uses_patched_code_and_surfaces_lint_warning(monkeypatch
         {"code": 'part = replace(part, "Median\\.\\.\\. \\(radius=", "");'},
     )
     assert resp["lint_warnings"] == "WARNING: auto-fixed replace target"
-    assert resp["result"]["output"].startswith("WARNING: auto-fixed replace target")
+    assert resp["result"]["result"]["output"].startswith(
+        "WARNING: auto-fixed replace target"
+    )
 
 
 def test_lint_script_blocks_groovy_hallucinated_ij_run_name():

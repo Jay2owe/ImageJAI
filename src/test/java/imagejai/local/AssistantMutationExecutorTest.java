@@ -2,24 +2,40 @@ package imagejai.local;
 
 import ij.ImagePlus;
 import ij.WindowManager;
+import ij.io.FileInfo;
 import ij.process.ByteProcessor;
 import ij.measure.ResultsTable;
 import imagejai.config.Settings;
 import imagejai.engine.ExecutionResult;
 import imagejai.engine.CommandEngine;
+import imagejai.engine.MutationCoordinator;
 import imagejai.engine.SessionCodeJournal;
+import imagejai.engine.safeMode.DestructiveScanner;
 import org.junit.After;
+import org.junit.Rule;
 import org.junit.Test;
+import org.junit.rules.TemporaryFolder;
 
 import javax.swing.SwingUtilities;
+import java.io.File;
+import java.nio.file.Path;
 import java.util.Collections;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 
+import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 
 public class AssistantMutationExecutorTest {
+
+    private static final String[] MANDATORY_BOUNDARY_MACROS = new String[] {
+            "call(\"java.lang.System.getProperty\", \"user.home\");",
+            "text = File.openAsString(\"C:/private/subjects.csv\");"
+    };
+
+    @Rule
+    public TemporaryFolder temporary = new TemporaryFolder();
 
     @After
     public void clearImage() {
@@ -63,6 +79,137 @@ public class AssistantMutationExecutorTest {
                 .anyMatch(entry -> code.equals(entry.code)
                         && "assistant-test".equals(entry.source)));
         executor.close();
+    }
+
+    @Test
+    public void mandatoryBoundaryCoversDirectAssistantPathWithSafeModeOnAndOff() {
+        for (boolean safeMode : new boolean[] {true, false}) {
+            for (String unsafeMacro : MANDATORY_BOUNDARY_MACROS) {
+                AssistantMutationExecutor executor = executor(safeMode);
+                AtomicBoolean ran = new AtomicBoolean();
+                try {
+                    ExecutionResult result = executor.executeMacro(unsafeMacro, () -> {
+                        ran.set(true);
+                        return success();
+                    });
+
+                    assertFalse(result.isSuccess());
+                    assertMandatoryRejection(result.getError(), unsafeMacro);
+                    assertFalse(ran.get());
+                } finally {
+                    executor.close();
+                }
+            }
+        }
+    }
+
+    @Test
+    public void mandatoryBoundaryCoversNestedAssistantPathWithSafeModeOnAndOff() {
+        for (boolean safeMode : new boolean[] {true, false}) {
+            for (String unsafeMacro : MANDATORY_BOUNDARY_MACROS) {
+                AssistantMutationExecutor executor = executor(safeMode);
+                AtomicBoolean nestedRan = new AtomicBoolean();
+                try {
+                    ExecutionResult result = executor.executeMacro("// outer intent", () ->
+                            executor.executeMacro(unsafeMacro, () -> {
+                                nestedRan.set(true);
+                                return success();
+                            }));
+
+                    assertFalse(result.isSuccess());
+                    assertMandatoryRejection(result.getError(), unsafeMacro);
+                    assertFalse(nestedRan.get());
+                } finally {
+                    executor.close();
+                }
+            }
+        }
+    }
+
+    @Test
+    public void mandatoryBoundaryRechecksAssistantRetryWithSafeModeOnAndOff() {
+        for (boolean safeMode : new boolean[] {true, false}) {
+            for (String correctedUnsafeMacro : MANDATORY_BOUNDARY_MACROS) {
+                AssistantMutationExecutor executor = executor(safeMode);
+                AtomicBoolean retryRan = new AtomicBoolean();
+                try {
+                    ExecutionResult firstAttempt = executor.executeMacro(
+                            "// original failed macro", () -> ExecutionResult.failure(
+                                    "synthetic compile failure", 1L));
+                    assertFalse(firstAttempt.isSuccess());
+
+                    ExecutionResult retry = executor.executeMacro(
+                            correctedUnsafeMacro, () -> {
+                                retryRan.set(true);
+                                return success();
+                            });
+
+                    assertFalse(retry.isSuccess());
+                    assertMandatoryRejection(retry.getError(), correctedUnsafeMacro);
+                    assertFalse(retryRan.get());
+                } finally {
+                    executor.close();
+                }
+            }
+        }
+    }
+
+    @Test
+    public void mandatoryBoundaryCoversAssistantPipelineWithSafeModeOnAndOff() {
+        for (boolean safeMode : new boolean[] {true, false}) {
+            for (String unsafeStep : MANDATORY_BOUNDARY_MACROS) {
+                AssistantMutationExecutor executor = executor(safeMode);
+                AtomicBoolean pipelineRan = new AtomicBoolean();
+                try {
+                    String pipelineMacro = "// Pipeline step 1\nsetMinAndMax(0, 255);\n"
+                            + "// Pipeline step 2\n" + unsafeStep;
+                    MutationCoordinator.Completion<Void> completion = executor.execute(
+                            pipelineMacro, () -> {
+                                pipelineRan.set(true);
+                                return null;
+                            }, 5_000L);
+
+                    assertEquals(MutationCoordinator.State.FAILED, completion.state());
+                    assertTrue(completion.error()
+                            instanceof MutationCoordinator.SafetyException);
+                    assertMandatoryRejection(completion.error().getMessage(), unsafeStep);
+                    assertFalse(pipelineRan.get());
+                } finally {
+                    executor.close();
+                }
+            }
+        }
+    }
+
+    @Test
+    public void literalOutputInsideActiveAiExportsIsAllowedInBothSafeModes()
+            throws Exception {
+        Path imageDir = temporary.newFolder("active-image").toPath();
+        ImagePlus image = new ImagePlus("file-backed", new ByteProcessor(2, 2));
+        FileInfo info = new FileInfo();
+        info.directory = imageDir.toString() + File.separator;
+        info.fileName = "sample.tif";
+        image.setFileInfo(info);
+        WindowManager.setTempCurrentImage(image);
+        String output = imageDir.resolve("AI_Exports").resolve("result.csv")
+                .toString().replace('\\', '/');
+        String macro = "File.saveString(\"result\", \"" + output + "\");";
+
+        for (boolean safeMode : new boolean[] {true, false}) {
+            AssistantMutationExecutor executor = executor(safeMode);
+            AtomicBoolean ran = new AtomicBoolean();
+            try {
+                ExecutionResult result = executor.executeMacro(macro, () -> {
+                    ran.set(true);
+                    return success();
+                });
+
+                assertTrue(result.getError(), result.isSuccess());
+                assertTrue(ran.get());
+            } finally {
+                executor.close();
+            }
+        }
     }
 
     @Test
@@ -215,6 +362,20 @@ public class AssistantMutationExecutorTest {
     private static ExecutionResult success() {
         return ExecutionResult.success("", null,
                 Collections.<String>emptyList(), 1L);
+    }
+
+    private static AssistantMutationExecutor executor(boolean safeMode) {
+        Settings settings = new Settings();
+        settings.safeModeEnabled = safeMode;
+        return new AssistantMutationExecutor(settings, "test", "assistant-test");
+    }
+
+    private static void assertMandatoryRejection(String message, String macro) {
+        String expectedRule = macro.contains("File.")
+                ? DestructiveScanner.RULE_MACRO_FILESYSTEM
+                : DestructiveScanner.RULE_HOST_CODE;
+        assertTrue("expected " + expectedRule + " in: " + message,
+                message != null && message.contains(expectedRule));
     }
 
     private static String repeat(char value, int count) {

@@ -180,6 +180,42 @@ public class ResponseDedupCacheTest {
                 ResponseDedupCache.canonicalArgs(twenty));
     }
 
+    @Test
+    public void requestIdentityAndRetainedKeysHaveFixedByteBudgets() {
+        ResponseDedupCache cache = new ResponseDedupCache();
+        JsonObject body = parse("{\"result\":{\"x\":1}}");
+        for (int i = 0; i < 1000; i++) {
+            JsonObject request = new JsonObject();
+            request.addProperty("command", "get_log");
+            request.addProperty("caller_controlled", repeat('x', 20_000) + i);
+            String identity = ResponseDedupCache.canonicalArgs(request);
+            assertEquals(ResponseDedupCache.DIGEST_HEX_CHARS, identity.length());
+            cache.checkOrStore("get_log", identity, body);
+        }
+        assertTrue(cache.size() <= ResponseDedupCache.DEFAULT_MAX_ENTRIES);
+        assertTrue(cache.retainedKeyBytes()
+                <= ResponseDedupCache.DEFAULT_MAX_RETAINED_KEY_BYTES);
+    }
+
+    @Test
+    public void canonicalHashRejectsExtremeDepthWithoutStackOverflowOrRetention() {
+        JsonArray root = new JsonArray();
+        JsonArray cursor = root;
+        for (int i = 0; i < 1000; i++) {
+            JsonArray child = new JsonArray();
+            cursor.add(child);
+            cursor = child;
+        }
+        assertEquals("over-depth canonical input is deliberately unhashable",
+                "", ResponseDedupCache.hash(root));
+
+        ResponseDedupCache cache = new ResponseDedupCache();
+        JsonObject body = new JsonObject();
+        body.add("deep", root);
+        assertFalse(cache.checkOrStore("get_state", "args", body).isPresent());
+        assertEquals(0, cache.size());
+    }
+
     /** Hash output is stable and hex-shaped. */
     @Test
     public void hashIsStableHex() {
@@ -211,5 +247,11 @@ public class ResponseDedupCacheTest {
         assertNotEquals(
                 ResponseDedupCache.hash(a),
                 ResponseDedupCache.hash(b));
+    }
+
+    private static String repeat(char value, int count) {
+        StringBuilder out = new StringBuilder(count);
+        for (int i = 0; i < count; i++) out.append(value);
+        return out.toString();
     }
 }

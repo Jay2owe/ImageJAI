@@ -5,6 +5,8 @@ import com.google.gson.JsonObject;
 import org.junit.Test;
 
 import java.io.ByteArrayInputStream;
+import java.io.BufferedReader;
+import java.io.InputStreamReader;
 import java.nio.charset.CharacterCodingException;
 import java.nio.charset.StandardCharsets;
 import java.net.InetAddress;
@@ -12,6 +14,7 @@ import java.net.InetSocketAddress;
 import java.net.Socket;
 import java.net.ServerSocket;
 import java.io.IOException;
+import java.io.OutputStream;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CountDownLatch;
@@ -108,6 +111,88 @@ public class TCPCommandServerResourceBoundsTest {
         assertTrue(out.get("value_truncated").getAsBoolean());
         assertEquals(6L, out.get("value_original_bytes").getAsLong());
         assertEquals(5L, out.get("value_returned_bytes").getAsLong());
+    }
+
+    @Test
+    public void deeplyNestedValidJsonGetsStructuredWireErrorAndServerSurvives()
+            throws Exception {
+        TCPCommandServer server = new TCPCommandServer(0, null, null, null, null);
+        server.setServerTokenForTest("test-token-with-at-least-thirty-two-characters");
+        try {
+            server.start(null);
+            awaitRunning(server);
+            StringBuilder request = new StringBuilder();
+            request.append("{\"command\":\"ping\",\"unknown\":");
+            for (int i = 0; i < 4096; i++) request.append('[');
+            request.append('0');
+            for (int i = 0; i < 4096; i++) request.append(']');
+            request.append('}');
+
+            JsonObject rejected = rawExchange(server.getPort(), request.toString());
+            assertFalse(rejected.get("ok").getAsBoolean());
+            assertEquals("invalid_request", rejected.getAsJsonObject("error")
+                    .get("code").getAsString());
+
+            JsonObject ping = rawExchange(server.getPort(), "{\"command\":\"ping\"}");
+            assertTrue("worker must survive parser/shape rejection",
+                    ping.get("ok").getAsBoolean());
+            assertEquals("pong", ping.get("result").getAsString());
+        } finally {
+            server.stop();
+        }
+    }
+
+    @Test
+    public void unknownCommandAndExcessTopLevelFieldsAreStructuredInvalidRequests() {
+        TCPCommandServer server = new TCPCommandServer(0, null, null, null, null);
+        try {
+            JsonObject unknown = new JsonObject();
+            unknown.addProperty("command", "definitely_not_a_command");
+            assertEquals("invalid_request", server.dispatch(unknown,
+                    new TCPCommandServer.AgentCaps()).getAsJsonObject("error")
+                    .get("code").getAsString());
+
+            JsonObject fields = new JsonObject();
+            fields.addProperty("command", "ping");
+            for (int i = 0; i < TCPCommandServer.MAX_REQUEST_TOP_LEVEL_FIELDS; i++) {
+                fields.addProperty("unknown_" + i, i);
+            }
+            JsonObject rejected = server.dispatch(fields,
+                    new TCPCommandServer.AgentCaps());
+            assertEquals("invalid_request", rejected.getAsJsonObject("error")
+                    .get("code").getAsString());
+
+            JsonObject singleUnknown = new JsonObject();
+            singleUnknown.addProperty("command", "ping");
+            singleUnknown.addProperty("unused", "ignored-before-this-fix");
+            JsonObject unknownField = server.dispatch(singleUnknown,
+                    new TCPCommandServer.AgentCaps());
+            assertEquals("invalid_request", unknownField.getAsJsonObject("error")
+                    .get("code").getAsString());
+            assertTrue(unknownField.getAsJsonObject("error").get("message")
+                    .getAsString().contains("Unknown field 'unused'"));
+
+            JsonObject knownFramingFields = new JsonObject();
+            knownFramingFields.addProperty("command", "ping");
+            knownFramingFields.addProperty("session_id", "session");
+            knownFramingFields.addProperty("token", "token");
+            knownFramingFields.addProperty("if_none_match", "digest");
+            knownFramingFields.addProperty("force", true);
+            assertTrue(server.dispatch(knownFramingFields,
+                    new TCPCommandServer.AgentCaps()).get("ok").getAsBoolean());
+
+            JsonObject pixelsWithTimeout = new JsonObject();
+            pixelsWithTimeout.addProperty("command", "get_pixels");
+            pixelsWithTimeout.addProperty("timeout_ms", 1000);
+            assertEquals(null, TCPCommandServer.validateRequestShape(pixelsWithTimeout));
+
+            JsonObject rewindWithTimeout = new JsonObject();
+            rewindWithTimeout.addProperty("command", "rewind");
+            rewindWithTimeout.addProperty("timeout_ms", 1000);
+            assertEquals(null, TCPCommandServer.validateRequestShape(rewindWithTimeout));
+        } finally {
+            server.stop();
+        }
     }
 
     @Test
@@ -233,5 +318,19 @@ public class TCPCommandServerResourceBoundsTest {
         long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5L);
         while (!server.isRunning() && System.nanoTime() < deadline) Thread.sleep(10L);
         assertTrue(server.isRunning());
+    }
+
+    private static JsonObject rawExchange(int port, String request) throws Exception {
+        try (Socket socket = new Socket(InetAddress.getLoopbackAddress(), port)) {
+            socket.setSoTimeout(5000);
+            OutputStream output = socket.getOutputStream();
+            output.write((request + "\n").getBytes(StandardCharsets.UTF_8));
+            output.flush();
+            BufferedReader reader = new BufferedReader(new InputStreamReader(
+                    socket.getInputStream(), StandardCharsets.UTF_8));
+            String line = reader.readLine();
+            assertTrue("server must return a JSON response", line != null);
+            return com.google.gson.JsonParser.parseString(line).getAsJsonObject();
+        }
     }
 }

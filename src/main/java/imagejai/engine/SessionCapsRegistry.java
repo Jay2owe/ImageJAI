@@ -20,6 +20,10 @@ final class SessionCapsRegistry<C> {
 
     static final int DEFAULT_CAPACITY = 1024;
     static final long DEFAULT_TTL_MILLIS = 30L * 60L * 1000L;
+    static final int MAX_SESSION_ID_BYTES = 128;
+    static final int TOKEN_DIGEST_BYTES = 32;
+    static final long DEFAULT_MAX_RETAINED_IDENTITY_BYTES =
+            (long) DEFAULT_CAPACITY * (MAX_SESSION_ID_BYTES + TOKEN_DIGEST_BYTES);
 
     interface Ticker {
         long nanoTime();
@@ -121,6 +125,7 @@ final class SessionCapsRegistry<C> {
     private final IdSource idSource;
     private final Map<String, Entry<C>> entries =
             new HashMap<String, Entry<C>>();
+    private long retainedIdentityBytes;
     private volatile boolean accepting = true;
 
     SessionCapsRegistry() {
@@ -167,10 +172,14 @@ final class SessionCapsRegistry<C> {
         long expiresEpoch = addSaturated(wallClock.currentTimeMillis(), ttlMillis);
         for (int attempt = 0; attempt < 16; attempt++) {
             String id = idSource.nextId();
-            if (id == null || id.length() < 32) continue;
+            if (id == null || id.length() < 32
+                    || id.length() > MAX_SESSION_ID_BYTES) continue;
+            int idBytes = id.getBytes(StandardCharsets.UTF_8).length;
+            if (idBytes > MAX_SESSION_ID_BYTES) continue;
             Entry<C> entry = new Entry<C>(caps, digest, expiresNanos, expiresEpoch);
             if (!entries.containsKey(id)) {
                 entries.put(id, entry);
+                retainedIdentityBytes += idBytes + digest.length;
                 return new Created<C>(id, expiresEpoch, caps);
             }
         }
@@ -183,7 +192,7 @@ final class SessionCapsRegistry<C> {
         Entry<C> entry = entries.get(id);
         if (entry == null) return Lookup.of(Status.UNKNOWN);
         if (ticker.nanoTime() - entry.expiresAtNanos >= 0L) {
-            entries.remove(id);
+            removeEntry(id, entry);
             return Lookup.of(Status.EXPIRED);
         }
         if (!MessageDigest.isEqual(entry.tokenDigest, digest(token))) {
@@ -195,16 +204,23 @@ final class SessionCapsRegistry<C> {
     synchronized void revokeAll() {
         accepting = false;
         entries.clear();
+        retainedIdentityBytes = 0L;
     }
 
     synchronized void activate() {
         entries.clear();
+        retainedIdentityBytes = 0L;
         accepting = true;
     }
 
     synchronized int size() {
         removeExpired(ticker.nanoTime());
         return entries.size();
+    }
+
+    synchronized long retainedIdentityBytes() {
+        removeExpired(ticker.nanoTime());
+        return retainedIdentityBytes;
     }
 
     private void removeExpired(long nowNanos) {
@@ -214,9 +230,23 @@ final class SessionCapsRegistry<C> {
             Map.Entry<String, Entry<C>> item = iterator.next();
             Entry<C> entry = item.getValue();
             if (nowNanos - entry.expiresAtNanos >= 0L) {
+                retainedIdentityBytes -= identityBytes(item.getKey(), entry);
                 iterator.remove();
             }
         }
+        if (retainedIdentityBytes < 0L) retainedIdentityBytes = 0L;
+    }
+
+    private void removeEntry(String id, Entry<C> entry) {
+        entries.remove(id);
+        retainedIdentityBytes -= identityBytes(id, entry);
+        if (retainedIdentityBytes < 0L) retainedIdentityBytes = 0L;
+    }
+
+    private static long identityBytes(String id, Entry<?> entry) {
+        return (id == null ? 0L : id.getBytes(StandardCharsets.UTF_8).length)
+                + (entry == null || entry.tokenDigest == null
+                ? 0L : entry.tokenDigest.length);
     }
 
     private static byte[] digest(String token) {

@@ -13,6 +13,18 @@ from . import visual_diff
 from .registry import send, tool
 
 _ASYNC_TRACK: dict[str, dict] = {}
+_TERMINAL_STATES = frozenset({"completed", "failed", "cancelled", "timed_out"})
+
+
+def _unwrap_job_response(resp):
+    """Return ``(job, execution_result)`` for the canonical JobRegistry shape."""
+    if not isinstance(resp, dict) or not resp.get("ok"):
+        return None, None
+    job = resp.get("result")
+    if not isinstance(job, dict):
+        return None, None
+    execution = job.get("result")
+    return job, execution if isinstance(execution, dict) else None
 
 
 def _error_text(resp: object) -> str:
@@ -28,19 +40,25 @@ def _error_text(resp: object) -> str:
 
 
 def _prepend_warning_to_response(resp, warning):
-    """Attach a visual-diff warning to result.output when possible."""
+    """Attach a warning to the nested JobRegistry execution result."""
     if not isinstance(resp, dict):
         return resp
     new = dict(resp)
-    result = new.get("result")
-    if isinstance(result, dict):
-        new_result = dict(result)
-        existing = new_result.get("output")
+    job = new.get("result")
+    if isinstance(job, dict):
+        new_job = dict(job)
+        execution = new_job.get("result")
+        if not isinstance(execution, dict):
+            new["warning"] = warning
+            return new
+        new_execution = dict(execution)
+        existing = new_execution.get("output")
         if isinstance(existing, str) and existing:
-            new_result["output"] = warning + "\n" + existing
+            new_execution["output"] = warning + "\n" + existing
         else:
-            new_result["output"] = warning
-        new["result"] = new_result
+            new_execution["output"] = warning
+        new_job["result"] = new_execution
+        new["result"] = new_job
     else:
         new["warning"] = warning
     return new
@@ -110,22 +128,48 @@ def job_status(job_id: str) -> dict:
     resp = send("job_status", job_id=job_id)
     if not isinstance(resp, dict) or not resp.get("ok"):
         return resp
-    result = resp.get("result")
-    if not isinstance(result, dict):
+    job, execution = _unwrap_job_response(resp)
+    if not isinstance(job, dict):
         return resp
 
-    state = str(result.get("state") or "")
+    state = str(job.get("state") or "").strip().lower()
     tracked = _ASYNC_TRACK.get(job_id)
     lint_warnings = tracked.get("lint_warnings") if isinstance(tracked, dict) else None
-    if isinstance(lint_warnings, str) and state in {"completed", "failed", "cancelled"}:
+    if isinstance(lint_warnings, str) and state in _TERMINAL_STATES:
         resp = _prepend_warning_to_response(resp, lint_warnings)
         if isinstance(resp, dict):
             resp = dict(resp)
             resp["lint_warnings"] = lint_warnings
     if state == "completed" and isinstance(tracked, dict):
+        if not isinstance(execution, dict):
+            safety.audit_log(
+                "macro",
+                tracked.get("code", ""),
+                success=False,
+                metadata={
+                    "job_id": job_id,
+                    "async": True,
+                    "state": state,
+                    "postprocess_error": "missing nested execution result",
+                },
+            )
+            safety.friction_log({
+                "event": "macro_failed",
+                "job_id": job_id,
+                "code": tracked.get("code", ""),
+                "error": "completed job missing nested execution result",
+                "state": state,
+            })
+            safety.note_execution(False)
+            _ASYNC_TRACK.pop(job_id, None)
+            failed = dict(resp)
+            failed["postprocess_error"] = (
+                "completed job missing nested execution result"
+            )
+            return failed
         safety.audit_log("macro", tracked.get("code", ""), success=True, metadata={"job_id": job_id, "async": True})
         safety.note_execution(True)
-        _job_new = result.get("newImages") if isinstance(result, dict) else None
+        _job_new = execution.get("newImages") if isinstance(execution, dict) else None
         new_images = [str(t) for t in _job_new if t is not None] if isinstance(_job_new, list) else []
         for title in new_images:
             if title.strip():
@@ -154,7 +198,7 @@ def job_status(job_id: str) -> dict:
                         "numbers": report.get("numbers", {}),
                     })
         _ASYNC_TRACK.pop(job_id, None)
-    elif state in {"failed", "cancelled"} and isinstance(tracked, dict):
+    elif state in {"failed", "cancelled", "timed_out"} and isinstance(tracked, dict):
         safety.audit_log(
             "macro",
             tracked.get("code", ""),

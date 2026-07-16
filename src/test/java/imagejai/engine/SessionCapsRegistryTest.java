@@ -137,6 +137,35 @@ public class SessionCapsRegistryTest {
                 registry.lookup(created.id(), "token").status());
     }
 
+    @Test
+    public void oversizedGeneratedIdsAreSkippedAndIdentityBytesStayGloballyBounded()
+            throws Exception {
+        FakeClock clock = new FakeClock();
+        final AtomicInteger ids = new AtomicInteger();
+        SessionCapsRegistry<String> registry = new SessionCapsRegistry<String>(
+                2, 1000L, clock, clock, new SessionCapsRegistry.IdSource() {
+                    @Override public String nextId() {
+                        int next = ids.incrementAndGet();
+                        if (next == 1) {
+                            StringBuilder huge = new StringBuilder();
+                            for (int i = 0; i < 10_000; i++) huge.append('x');
+                            return huge.toString();
+                        }
+                        return String.format("%032d", next);
+                    }
+                });
+
+        registry.create("one", "token");
+        registry.create("two", "token");
+        assertTrue(registry.retainedIdentityBytes()
+                <= 2L * (SessionCapsRegistry.MAX_SESSION_ID_BYTES
+                        + SessionCapsRegistry.TOKEN_DIGEST_BYTES));
+
+        clock.nanos += 1_000_000_001L;
+        assertEquals(0, registry.size());
+        assertEquals(0L, registry.retainedIdentityBytes());
+    }
+
     private static <C> SessionCapsRegistry<C> registry(
             int capacity, long ttlMillis, final FakeClock clock) {
         final AtomicInteger ids = new AtomicInteger();

@@ -37,7 +37,7 @@ The table lists command-specific fields. Every request also carries `command`; a
 | `get_metadata` | read only | hash cache: optional `if_none_match` | `object` | session optional | `get_metadata` | Read governed image properties and calibration metadata. |
 | `get_open_windows` | read only | hash cache: optional `if_none_match` | `object` | session optional | `get_open_windows` | List open image and non-image windows. |
 | `get_pending_brief` | mutation | none | `object` | session optional | raw: `imagej_command` | Consume the pending file-selection brief. Use imagej_command({...}) from Python. |
-| `get_pixels` | read only | optional: `x`, `y`, `width`, `height`, `slice`, `allSlices` | `object` | session optional | `get_pixels` | Read bounded raw pixels from the active image. |
+| `get_pixels` | read only | optional: `x`, `y`, `width`, `height`, `slice`, `allSlices`, `timeout_ms` | `object` | session optional | `get_pixels` | Read bounded raw pixels from the active image. |
 | `get_progress` | read only | hash cache: optional `if_none_match` | `object` | session optional | `get_progress` | Read Fiji progress and status text. |
 | `get_results_table` | read only | hash cache: optional `if_none_match` | `object` | session optional | `get_results_table` | Read the Results table as CSV. |
 | `get_roi_state` | read only | hash cache: optional `if_none_match` | `object` | session optional | `get_roi_state` | Read ROI Manager state. |
@@ -66,7 +66,7 @@ The table lists command-specific fields. Every request also carries `command`; a
 | `reactive_reload` | mutation | none | `object` | session optional | `reactive_reload` | Reload reactive rule files. |
 | `reactive_stats` | read only | hash cache: optional `if_none_match` | `object` | session optional | `reactive_stats` | Read reactive rule hit statistics. |
 | `request_visual` | mutation | optional: `reason` | `object` | session optional | raw: `imagej_command` | Request user consent for a governed visual capture. Use imagej_command({...}) from Python. |
-| `rewind` | mutation | optional: `image_title`, `to_call_id`, `n` | `object` | session optional; `undo` | raw: `imagej_command` | Restore a prior undo frame. Use imagej_command({...}) from Python. |
+| `rewind` | mutation | optional: `image_title`, `to_call_id`, `n`, `timeout_ms` | `object` | session optional; `undo` | raw: `imagej_command` | Restore a prior undo frame. Use imagej_command({...}) from Python. |
 | `run` | mutation | required: `chain`; optional: `halt_on_error` | `object` | session optional | `run_chain` | Execute a pipe-delimited command chain. |
 | `run_pipeline` | mutation | required: `steps`; optional: `timeout_ms`, `autoDismissPhantoms` | `object` | session optional | `run_pipeline` | Execute a structured macro pipeline. |
 | `run_script` | mutation | required: `code`; optional: `language`, `source`, `timeout_ms`, `autoDismissPhantoms` | `object` | session optional | `run_script`, `run_groovy`, `run_jython` | Execute Groovy, Jython or JavaScript inside Fiji. |

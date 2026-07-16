@@ -95,7 +95,14 @@ def test_run_macro_async_job_status_logs_success_and_visual_diff(monkeypatch):
         if command == "execute_macro_async":
             return {"ok": True, "result": {"job_id": "j1"}}
         if command == "job_status":
-            return {"ok": True, "result": {"job_id": "j1", "state": "completed", "output": "done"}}
+            return {
+                "ok": True,
+                "result": {
+                    "job_id": "j1",
+                    "state": "completed",
+                    "result": {"success": True, "output": "done", "newImages": []},
+                },
+            }
         raise AssertionError("unexpected command {}".format(command))
 
     monkeypatch.setattr(tools_jobs, "send", fake_send)
@@ -113,7 +120,7 @@ def test_run_macro_async_job_status_logs_success_and_visual_diff(monkeypatch):
     assert kwargs["success"] is True
     assert kwargs["metadata"]["job_id"] == "j1"
     assert resp["visual_diff"]["consistent"] is False
-    assert resp["result"]["output"].startswith("VISUAL DIFF WARNING:")
+    assert resp["result"]["result"]["output"].startswith("VISUAL DIFF WARNING:")
     assert "j1" not in tools_jobs._ASYNC_TRACK
 
 

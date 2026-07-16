@@ -76,6 +76,37 @@ def _get_image_info() -> dict:
     return result
 
 
+def _validate_region(x: int, y: int, width: int, height: int):
+    """Validate one zero-based rectangle against the current image bounds."""
+    info = _get_image_info()
+    if "error" in info:
+        return info
+    image_width = int(info.get("width", 0))
+    image_height = int(info.get("height", 0))
+    if image_width <= 0 or image_height <= 0:
+        return _error("active image has zero size")
+    if x < 0 or y < 0 or x + width > image_width or y + height > image_height:
+        return _error(
+            "region [{}, {}, {}, {}] is outside active image bounds {}x{}".format(
+                x, y, width, height, image_width, image_height
+            )
+        )
+    return None
+
+
+def _geometry_matches(meta: dict, x: int, y: int, width: int, height: int) -> bool:
+    """Return whether Fiji returned exactly the requested pixel rectangle."""
+    return all(
+        int(meta.get(key, -1)) == value
+        for key, value in (
+            ("x", x),
+            ("y", y),
+            ("width", width),
+            ("height", height),
+        )
+    )
+
+
 def _decode_pixels(resp):
     """Decode a get_pixels reply into (float32 2D ndarray, meta dict).
 
@@ -313,6 +344,9 @@ def get_pixels_array(slice: int, region: list) -> list:
             return _error("region must be [x, y, width, height] with integer values")
         if rw <= 0 or rh <= 0:
             return _error("region width and height must be positive")
+        bounds_error = _validate_region(rx, ry, rw, rh)
+        if bounds_error is not None:
+            return bounds_error
         kwargs["x"] = rx
         kwargs["y"] = ry
         kwargs["width"] = rw
@@ -322,6 +356,10 @@ def get_pixels_array(slice: int, region: list) -> list:
     arr, meta = _decode_pixels(_safe_send("get_pixels", **kwargs))
     if arr is None:
         return meta
+    if "x" in kwargs and not _geometry_matches(
+        meta, kwargs["x"], kwargs["y"], kwargs["width"], kwargs["height"]
+    ):
+        return _error("Fiji returned clamped pixel geometry; image state changed")
     return arr.tolist()
 
 
@@ -344,9 +382,14 @@ def region_stats(x: int, y: int, width: int, height: int) -> dict:
         return _error("x, y, width, height must all be integers")
     if w_i <= 0 or h_i <= 0:
         return _error("width and height must be positive")
+    bounds_error = _validate_region(x_i, y_i, w_i, h_i)
+    if bounds_error is not None:
+        return bounds_error
     arr, meta = _decode_pixels(_safe_send("get_pixels", x=x_i, y=y_i, width=w_i, height=h_i))
     if arr is None:
         return meta
+    if not _geometry_matches(meta, x_i, y_i, w_i, h_i):
+        return _error("Fiji returned clamped pixel geometry; image state changed")
     flat = arr.ravel()
     return {
         "x": x_i,
@@ -379,6 +422,24 @@ def line_profile(x1: int, y1: int, x2: int, y2: int) -> list:
         y2_i = int(y2)
     except (TypeError, ValueError):
         return _error("x1, y1, x2, y2 must all be integers")
+    info = _get_image_info()
+    if "error" in info:
+        return info
+    image_width = int(info.get("width", 0))
+    image_height = int(info.get("height", 0))
+    if image_width <= 0 or image_height <= 0:
+        return _error("active image has zero size")
+    if not (
+        0 <= x1_i < image_width
+        and 0 <= x2_i < image_width
+        and 0 <= y1_i < image_height
+        and 0 <= y2_i < image_height
+    ):
+        return _error(
+            "line endpoints must be inside active image bounds {}x{}".format(
+                image_width, image_height
+            )
+        )
     bx = min(x1_i, x2_i)
     by = min(y1_i, y2_i)
     bw = max(x1_i, x2_i) - bx + 1
@@ -388,11 +449,13 @@ def line_profile(x1: int, y1: int, x2: int, y2: int) -> list:
     arr, meta = _decode_pixels(_safe_send("get_pixels", x=bx, y=by, width=bw, height=bh))
     if arr is None:
         return meta
+    if not _geometry_matches(meta, bx, by, bw, bh):
+        return _error("Fiji returned clamped pixel geometry; image state changed")
     dx = float(x2_i - x1_i)
     dy = float(y2_i - y1_i)
     length = math.hypot(dx, dy)
     if length == 0:
-        return []
+        return [float(arr[0, 0])]
     n = int(round(length)) + 1
     arr_h, arr_w = arr.shape
     profile: list = []

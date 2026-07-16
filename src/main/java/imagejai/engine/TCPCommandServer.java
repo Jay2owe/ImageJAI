@@ -62,9 +62,11 @@ import java.awt.Dialog;
 import java.awt.Frame;
 import java.awt.Rectangle;
 import java.awt.Window;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.Deque;
 import java.util.Enumeration;
 import java.util.HashSet;
 import java.util.List;
@@ -114,6 +116,10 @@ public class TCPCommandServer {
     private static final Charset UTF8 = Charset.forName("UTF-8");
     private static final List<String> KNOWN_COMMANDS =
             CommandManifest.requestResponseNames();
+    private static final Set<String> COMMON_REQUEST_FIELDS =
+            Collections.unmodifiableSet(new HashSet<String>(Arrays.asList(
+                    "token", "session_id", "client_session_id", "model_endpoint",
+                    "if_none_match", "force", "note")));
     // 10-minute synchronous-macro ceiling. Long enough for batch 3D Object
     // Counter runs on dense masks without blocking the TCP thread forever.
     // Callers can override per-request with `"timeout_ms": N` (pass 0 or a
@@ -137,6 +143,18 @@ public class TCPCommandServer {
     public static final int MAX_HANDSHAKE_OUTPUT_FORMAT_CHARS = 64;
     public static final int MAX_ACCEPT_EVENT_TOPICS = 64;
     public static final int MAX_ACCEPT_EVENT_TOPIC_CHARS = 128;
+    public static final int MAX_REQUEST_JSON_DEPTH = 64;
+    public static final int MAX_REQUEST_JSON_NODES = 16_384;
+    public static final int MAX_REQUEST_CONTAINER_ENTRIES = 4_096;
+    public static final int MAX_REQUEST_TOP_LEVEL_FIELDS = 128;
+    public static final int MAX_REQUEST_KEY_CHARS = 256;
+    public static final int MAX_REQUEST_JSON_BYTES = Constants.TCP_MAX_MESSAGE_SIZE;
+    public static final long MAX_PER_SESSION_TELEMETRY_BYTES =
+            (long) ResponseDedupCache.DEFAULT_MAX_RETAINED_KEY_BYTES
+                    + SessionStats.MAX_RETAINED_BYTES;
+    public static final long MAX_GLOBAL_SESSION_TELEMETRY_BYTES =
+            (long) SessionCapsRegistry.DEFAULT_CAPACITY
+                    * MAX_PER_SESSION_TELEMETRY_BYTES;
     private static final long COMPOUND_RESPONSE_OVERHEAD_BYTES = 2048L;
 
     /**
@@ -1129,9 +1147,22 @@ public class TCPCommandServer {
                     throw new IllegalArgumentException("Request must be a JSON object");
                 }
                 request = parsed.getAsJsonObject();
+            } catch (StackOverflowError tooDeepForParser) {
+                writeOutbound(writer, "error", GSON.toJson(invalidRequest(
+                        "JSON nesting exceeds the supported request depth")));
+                return;
             } catch (Exception e) {
-                writeOutbound(writer, "error", errorJson("Invalid JSON: "
-                        + e.getMessage()));
+                writeOutbound(writer, "error", GSON.toJson(invalidRequest(
+                        "Invalid JSON: " + safeExceptionMessage(e))));
+                return;
+            }
+
+            // This is deliberately the first operation after parsing. No
+            // Gson serialisation, recursive canonicalisation, authentication
+            // lookup, or command dispatch sees an unbounded caller tree.
+            String shapeError = validateRequestShape(request);
+            if (shapeError != null) {
+                writeOutbound(writer, "error", GSON.toJson(invalidRequest(shapeError)));
                 return;
             }
 
@@ -1149,13 +1180,14 @@ public class TCPCommandServer {
 
         } catch (RequestTooLargeException e) {
             if (writer != null) {
-                writeOutbound(writer, "error", errorJson("Request too large (max "
-                        + Constants.TCP_MAX_MESSAGE_SIZE + " UTF-8 bytes)"));
+                writeOutbound(writer, "error", GSON.toJson(invalidRequest(
+                        "Request too large (max "
+                                + Constants.TCP_MAX_MESSAGE_SIZE + " UTF-8 bytes)")));
             }
         } catch (CharacterCodingException e) {
             if (writer != null) {
-                writeOutbound(writer, "error", errorJson(
-                        "Request is not valid UTF-8"));
+                writeOutbound(writer, "error", GSON.toJson(invalidRequest(
+                        "Request is not valid UTF-8")));
             }
         } catch (Exception e) {
             System.err.println("[ImageJAI-TCP] Client error: " + e.getMessage());
@@ -1759,6 +1791,156 @@ public class TCPCommandServer {
         RequestTooLargeException() { super("request byte limit exceeded"); }
     }
 
+    /**
+     * Iteratively validate an already-parsed request tree. Returns a bounded
+     * diagnostic on rejection, or {@code null} when the shape is safe.
+     */
+    static String validateRequestShape(JsonElement root) {
+        if (root == null || !root.isJsonObject()) {
+            return "Request must be a JSON object";
+        }
+        JsonObject top = root.getAsJsonObject();
+        if (top.size() > MAX_REQUEST_TOP_LEVEL_FIELDS) {
+            return "Request has too many top-level fields (max "
+                    + MAX_REQUEST_TOP_LEVEL_FIELDS + ")";
+        }
+        Deque<RequestNode> pending = new ArrayDeque<RequestNode>();
+        pending.push(new RequestNode(root, 1));
+        int nodes = 0;
+        long estimatedJsonBytes = 0L;
+        while (!pending.isEmpty()) {
+            RequestNode node = pending.pop();
+            if (++nodes > MAX_REQUEST_JSON_NODES) {
+                return "Request JSON is too complex (max "
+                        + MAX_REQUEST_JSON_NODES + " values)";
+            }
+            if (node.depth > MAX_REQUEST_JSON_DEPTH) {
+                return "Request JSON nesting exceeds max depth "
+                        + MAX_REQUEST_JSON_DEPTH;
+            }
+            JsonElement element = node.element;
+            if (element == null || element.isJsonNull()) continue;
+            if (element.isJsonPrimitive()) {
+                JsonPrimitive primitive = element.getAsJsonPrimitive();
+                estimatedJsonBytes += primitive.isString()
+                        ? escapedJsonStringBytes(primitive.getAsString())
+                        : utf8Length(primitive.toString());
+                if (estimatedJsonBytes > MAX_REQUEST_JSON_BYTES) {
+                    return "Request JSON exceeds max "
+                            + MAX_REQUEST_JSON_BYTES + " UTF-8 bytes";
+                }
+                continue;
+            }
+            if (element.isJsonArray()) {
+                JsonArray array = element.getAsJsonArray();
+                if (array.size() > MAX_REQUEST_CONTAINER_ENTRIES) {
+                    return "Request array exceeds max "
+                            + MAX_REQUEST_CONTAINER_ENTRIES + " entries";
+                }
+                estimatedJsonBytes += 2L + Math.max(0, array.size() - 1);
+                if (estimatedJsonBytes > MAX_REQUEST_JSON_BYTES) {
+                    return "Request JSON exceeds max "
+                            + MAX_REQUEST_JSON_BYTES + " UTF-8 bytes";
+                }
+                for (JsonElement child : array) {
+                    pending.push(new RequestNode(child, node.depth + 1));
+                }
+                continue;
+            }
+            JsonObject object = element.getAsJsonObject();
+            if (object.size() > MAX_REQUEST_CONTAINER_ENTRIES) {
+                return "Request object exceeds max "
+                        + MAX_REQUEST_CONTAINER_ENTRIES + " fields";
+            }
+            estimatedJsonBytes += 2L + Math.max(0, object.size() - 1);
+            if (estimatedJsonBytes > MAX_REQUEST_JSON_BYTES) {
+                return "Request JSON exceeds max "
+                        + MAX_REQUEST_JSON_BYTES + " UTF-8 bytes";
+            }
+            for (Map.Entry<String, JsonElement> entry : object.entrySet()) {
+                String key = entry.getKey();
+                if (key == null || key.length() > MAX_REQUEST_KEY_CHARS) {
+                    return "Request field name exceeds max "
+                            + MAX_REQUEST_KEY_CHARS + " characters";
+                }
+                estimatedJsonBytes += escapedJsonStringBytes(key) + 1L;
+                if (estimatedJsonBytes > MAX_REQUEST_JSON_BYTES) {
+                    return "Request JSON exceeds max "
+                            + MAX_REQUEST_JSON_BYTES + " UTF-8 bytes";
+                }
+                pending.push(new RequestNode(entry.getValue(), node.depth + 1));
+            }
+        }
+
+        JsonElement command = top.get("command");
+        if (command == null || !command.isJsonPrimitive()
+                || !command.getAsJsonPrimitive().isString()) {
+            return "Missing or invalid 'command' string field";
+        }
+        String commandName = command.getAsString();
+        if (commandName.isEmpty()
+                || utf8Length(commandName) > SessionStats.MAX_COMMAND_BYTES) {
+            return "Command name length must be 1.."
+                    + SessionStats.MAX_COMMAND_BYTES;
+        }
+        CommandManifest.Descriptor descriptor = CommandManifest.descriptor(commandName);
+        if (descriptor == null) return "Unknown command: " + commandName;
+        for (String field : top.keySet()) {
+            if (!"command".equals(field)
+                    && !COMMON_REQUEST_FIELDS.contains(field)
+                    && !descriptor.requestFields.contains(field)) {
+                return "Unknown field '" + field + "' for command '"
+                        + commandName + "'";
+            }
+        }
+        return null;
+    }
+
+    private static long escapedJsonStringBytes(String value) {
+        if (value == null) return 2L;
+        long bytes = 2L; // quotes
+        for (int offset = 0; offset < value.length();) {
+            int codePoint = value.codePointAt(offset);
+            if (codePoint == '"' || codePoint == '\\'
+                    || codePoint == '\b' || codePoint == '\f'
+                    || codePoint == '\n' || codePoint == '\r'
+                    || codePoint == '\t') {
+                bytes += 2L;
+            } else if (codePoint < 0x20
+                    || codePoint == '<' || codePoint == '>'
+                    || codePoint == '&' || codePoint == '='
+                    || codePoint == '\'') {
+                bytes += 6L;
+            } else {
+                bytes += codePoint <= 0x7f ? 1L
+                        : codePoint <= 0x7ff ? 2L
+                        : codePoint <= 0xffff ? 3L : 4L;
+            }
+            if (bytes > MAX_REQUEST_JSON_BYTES) return bytes;
+            offset += Character.charCount(codePoint);
+        }
+        return bytes;
+    }
+
+    private static String safeExceptionMessage(Throwable failure) {
+        if (failure == null) return "invalid input";
+        String message = failure.getMessage();
+        if (message == null || message.trim().isEmpty()) {
+            message = failure.getClass().getSimpleName();
+        }
+        return message.length() <= 240 ? message : message.substring(0, 240);
+    }
+
+    private static final class RequestNode {
+        final JsonElement element;
+        final int depth;
+
+        RequestNode(JsonElement element, int depth) {
+            this.element = element;
+            this.depth = depth;
+        }
+    }
+
     /** Package-private exact UTF-8 request reader used by boundary tests. */
     static RequestLine readUtf8Line(InputStream input, int maxBytes)
             throws IOException, CharacterCodingException {
@@ -1806,14 +1988,21 @@ public class TCPCommandServer {
     // -----------------------------------------------------------------------
 
     JsonObject dispatch(JsonObject request, AgentCaps caps) {
+        String shapeError = validateRequestShape(request);
+        if (shapeError != null) return invalidRequest(shapeError);
         return dispatchInternal(request, caps == null ? DEFAULT_CAPS : caps, null);
     }
 
     private JsonObject dispatch(JsonObject request, Socket sock) {
+        String shapeError = validateRequestShape(request);
+        if (shapeError != null) return invalidRequest(shapeError);
         if (sock == null) {
             return dispatchInternal(request, DEFAULT_CAPS, null);
         }
         String command = optString(request, "command", "");
+        if (!KNOWN_COMMANDS.contains(command)) {
+            return invalidRequest("Unknown command: " + command);
+        }
         if ("hello".equals(command)) {
             return dispatchInternal(request, DEFAULT_CAPS, sock);
         }
@@ -1843,7 +2032,7 @@ public class TCPCommandServer {
         final int requestBytes = jsonBytes(request);
         JsonElement cmdElement = request.get("command");
         if (cmdElement == null || !cmdElement.isJsonPrimitive()) {
-            return errorResponse("Missing 'command' field");
+            return invalidRequest("Missing or invalid 'command' string field");
         }
         String command = cmdElement.getAsString();
 
@@ -2315,20 +2504,21 @@ public class TCPCommandServer {
                                     JsonObject response, AgentCaps caps) {
         SessionStats stats = caps.stats;
         long now = System.currentTimeMillis();
-        String canonicalArgs = ResponseDedupCache.canonicalArgs(request);
+        String argsDigest = ResponseDedupCache.canonicalArgs(request);
+        String argsSummary = summariseArgs(request);
         String errorCode = extractErrorCode(response);
 
         // Track probe_command results so probe_before_run_missed can suppress
         // the hint once the agent has already probed the plugin.
         if ("probe_command".equals(command) && request != null) {
-            JsonElement nameEl = request.get("name");
-            if (nameEl == null) nameEl = request.get("command");
+            JsonElement nameEl = request.get("plugin");
+            if (nameEl == null) nameEl = request.get("name");
             if (nameEl != null && nameEl.isJsonPrimitive()) {
                 stats.noteProbed(nameEl.getAsString());
             }
         }
 
-        stats.record(command, canonicalArgs, now, errorCode);
+        stats.recordDigest(command, argsDigest, argsSummary, now, errorCode);
 
         if (!caps.patternHints) return;
         List<PatternDetector.Hint> hints = PatternDetector.check(stats, now);
@@ -2497,7 +2687,7 @@ public class TCPCommandServer {
         } else if ("branch_delete".equals(command)) {
             return handleBranchDelete(request, caps);
         } else {
-            return errorResponse("Unknown command: " + command);
+            return invalidRequest("Unknown command: " + command);
         }
     }
 
@@ -2653,17 +2843,19 @@ public class TCPCommandServer {
         }
         // Strip volatile keys (usedMB, freeMB, percent, ...) before hashing so
         // a fresh memory reading on an otherwise-identical get_state doesn't
-        // bust the cache. Reuses HASH_EXCLUDED_KEYS and the canonicalise()
-        // helper already trusted by the if_none_match layer.
+        // bust the cache. The iterative digest omits HASH_EXCLUDED_KEYS
+        // without constructing a recursive canonical copy.
         JsonObject hashInput = new JsonObject();
         hashInput.addProperty("command", command);
         JsonElement resultEl = response.get("result");
         if (resultEl != null) {
-            hashInput.add("result", canonicalise(resultEl));
+            hashInput.add("result", resultEl);
         }
         String args = ResponseDedupCache.canonicalArgs(request);
+        String freshHash = ResponseDedupCache.hash(hashInput, HASH_EXCLUDED_KEYS);
         java.util.Optional<JsonObject> dedup =
-                caps.dedupCache.checkOrStore(command, args, hashInput);
+                caps.dedupCache.checkOrStoreHash(
+                        command, args, freshHash, System.currentTimeMillis());
         if (!dedup.isPresent()) {
             return response;
         }
@@ -2678,13 +2870,13 @@ public class TCPCommandServer {
     }
 
     /**
-     * For readonly responses: compute an MD5 hash over the canonical JSON of
+     * For readonly responses: compute a stable truncated SHA-256 identity of
      * the {@code result} field and either (a) return the full payload plus
      * {@code hash}, or (b) if the caller's {@code if_none_match} matches,
      * strip the payload and return {@code unchanged: true}.
      *
-     * <p>The hash is computed over a canonicalised copy of the result
-     * (volatile fields stripped, JsonObject keys sorted) so that logically
+     * <p>The hash is computed iteratively over the result (volatile fields
+     * stripped, JsonObject keys sorted) so that logically
      * identical state always hashes identically even though the wire payload
      * preserves insertion order.
      */
@@ -2696,7 +2888,8 @@ public class TCPCommandServer {
         }
 
         JsonElement result = response.get("result");
-        String hash = md5Hex(canonicalForHash(result));
+        String hash = canonicalForHash(result);
+        if (hash.isEmpty()) return response;
 
         String ifNone = null;
         JsonElement ifNoneEl = request.get("if_none_match");
@@ -2723,31 +2916,7 @@ public class TCPCommandServer {
      */
     private static String canonicalForHash(JsonElement el) {
         if (el == null) return "";
-        return GSON.toJson(canonicalise(el));
-    }
-
-    private static JsonElement canonicalise(JsonElement el) {
-        if (el == null || el.isJsonNull()) return JsonNull.INSTANCE;
-        if (el.isJsonPrimitive()) return el;
-        if (el.isJsonArray()) {
-            JsonArray src = el.getAsJsonArray();
-            JsonArray dst = new JsonArray();
-            for (int i = 0; i < src.size(); i++) dst.add(canonicalise(src.get(i)));
-            return dst;
-        }
-        // Object — sort keys, strip volatile.
-        JsonObject src = el.getAsJsonObject();
-        java.util.TreeMap<String, JsonElement> sorted = new java.util.TreeMap<String, JsonElement>();
-        for (Map.Entry<String, JsonElement> e : src.entrySet()) {
-            String k = e.getKey();
-            if (HASH_EXCLUDED_KEYS.contains(k)) continue;
-            sorted.put(k, canonicalise(e.getValue()));
-        }
-        JsonObject dst = new JsonObject();
-        for (Map.Entry<String, JsonElement> e : sorted.entrySet()) {
-            dst.add(e.getKey(), e.getValue());
-        }
-        return dst;
+        return ResponseDedupCache.hash(el, HASH_EXCLUDED_KEYS);
     }
 
     private void recordFrictionIfFailure(String command, JsonObject request, JsonObject response, AgentCaps caps) {
@@ -2872,22 +3041,6 @@ public class TCPCommandServer {
             }
         }
         return sb.toString();
-    }
-
-    private static String md5Hex(String s) {
-        try {
-            MessageDigest md = MessageDigest.getInstance("MD5");
-            byte[] bytes = md.digest(s.getBytes(StandardCharsets.UTF_8));
-            StringBuilder sb = new StringBuilder(bytes.length * 2);
-            for (byte b : bytes) {
-                int v = b & 0xff;
-                if (v < 0x10) sb.append('0');
-                sb.append(Integer.toHexString(v));
-            }
-            return sb.toString();
-        } catch (Exception e) {
-            return "";
-        }
     }
 
     // -----------------------------------------------------------------------
@@ -7940,6 +8093,18 @@ public class TCPCommandServer {
         error.addProperty("message", message);
         error.addProperty("category", "authentication");
         error.addProperty("retry_safe", false);
+        response.add("error", error);
+        return response;
+    }
+
+    private JsonObject invalidRequest(String message) {
+        JsonObject response = new JsonObject();
+        response.addProperty("ok", false);
+        JsonObject error = new JsonObject();
+        error.addProperty("code", "invalid_request");
+        error.addProperty("message", message == null ? "Invalid request" : message);
+        error.addProperty("category", "validation");
+        error.addProperty("retry_safe", true);
         response.add("error", error);
         return response;
     }

@@ -28,9 +28,11 @@ from pathlib import Path
 try:
     from .tcp_frames import recv_bounded
     from .agentconsole_tcp import send_agentconsole
+    from .legacy_tool_policy import allowed_tools_for_model, dispatch_tool_for_model
 except ImportError:
     from tcp_frames import recv_bounded
     from agentconsole_tcp import send_agentconsole
+    from legacy_tool_policy import allowed_tools_for_model, dispatch_tool_for_model  # type: ignore
 
 try:
     import ollama
@@ -301,12 +303,13 @@ def _run_tool_loop(model: str, text: str) -> tuple[bool, str, Exception | None]:
     the loop aborted before producing a meaningful answer.
     """
     messages = [{"role": "user", "content": text}]
+    schema_tools = allowed_tools_for_model(model, ALL_TOOLS)
     try:
         for _ in range(MAX_ROUNDS):
             resp = ollama.chat(
                 model=model,
                 messages=messages,
-                tools=ALL_TOOLS,
+                tools=schema_tools,
                 stream=False,
                 keep_alive="5m",
                 options={"temperature": 0.2, "num_predict": 256},
@@ -323,13 +326,8 @@ def _run_tool_loop(model: str, text: str) -> tuple[bool, str, Exception | None]:
             for tc in msg.tool_calls:
                 name = tc.function.name
                 args = tc.function.arguments
-                if name not in TOOL_MAP:
-                    log.warning("Gemma called unknown tool: %s", name)
-                    messages.append({"role": "tool", "content": f"ERROR: unknown tool '{name}'"})
-                    continue
-
                 log.info("Tool call: %s(%s)", name, json.dumps(args))
-                result = TOOL_MAP[name](**args)
+                result = dispatch_tool_for_model(model, name, args, TOOL_MAP)
                 log.info("Tool result: %s", result[:200])
                 messages.append({"role": "tool", "content": str(result)})
 

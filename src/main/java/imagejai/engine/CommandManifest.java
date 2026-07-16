@@ -134,6 +134,7 @@ final class CommandManifest {
                 JsonArray optional = requireStringArray(request, "optional", name);
                 ensureDisjoint(required, optional, name);
                 validateAnyOf(request, name);
+                Set<String> requestFields = requestFields(request, required, optional);
                 JsonObject reply = requireObject(command, "reply", name);
                 string(reply, "type");
                 requireStringArray(command, "capabilities", name);
@@ -150,7 +151,7 @@ final class CommandManifest {
                     throw invalid(name + ": raw coverage must document imagej_command only");
                 }
                 descriptors.add(new Descriptor(name, transport, classification,
-                        authentication, hashDedup));
+                        authentication, hashDedup, requestFields));
             }
             return new CommandManifest(productVersion, descriptors);
         } catch (IOException e) {
@@ -222,6 +223,23 @@ final class CommandManifest {
         }
     }
 
+    private static Set<String> requestFields(JsonObject request, JsonArray required,
+                                             JsonArray optional) {
+        Set<String> fields = new HashSet<String>();
+        addStrings(fields, required);
+        addStrings(fields, optional);
+        if (request.has("required_any_of")) {
+            for (JsonElement group : request.getAsJsonArray("required_any_of")) {
+                addStrings(fields, group.getAsJsonArray());
+            }
+        }
+        return Collections.unmodifiableSet(fields);
+    }
+
+    private static void addStrings(Set<String> target, JsonArray values) {
+        for (JsonElement value : values) target.add(value.getAsString());
+    }
+
     private static int integer(JsonObject object, String field) {
         JsonElement element = object.get(field);
         if (element == null || !element.isJsonPrimitive()) throw invalid(field + " is required");
@@ -263,14 +281,17 @@ final class CommandManifest {
         final String classification;
         final String authentication;
         final boolean hashDedup;
+        final Set<String> requestFields;
 
         private Descriptor(String name, String transport, String classification,
-                           String authentication, boolean hashDedup) {
+                           String authentication, boolean hashDedup,
+                           Set<String> requestFields) {
             this.name = name;
             this.transport = transport;
             this.classification = classification;
             this.authentication = authentication;
             this.hashDedup = hashDedup;
+            this.requestFields = requestFields;
         }
     }
 }
