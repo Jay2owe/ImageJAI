@@ -31,6 +31,39 @@ from ij import imagej_command
 AGENT_DIR = os.path.dirname(os.path.abspath(__file__))
 TMP_DIR = os.path.join(AGENT_DIR, ".tmp")
 _ATOMIC_PATH_LOCKS = {}
+_ATOMIC_PATH_LOCKS_GUARD = threading.Lock()
+MAX_SESSION_ENTRIES = 10000
+MAX_ENTRY_BYTES = 2 * 1024 * 1024
+MAX_SESSION_BYTES = 64 * 1024 * 1024
+
+
+class SessionLogLimitError(ValueError):
+    """Structured persistence bound failure."""
+
+    def __init__(self, code, message, limit, actual):
+        super(SessionLogLimitError, self).__init__(message)
+        self.code = code
+        self.limit = limit
+        self.actual = actual
+
+    def as_dict(self):
+        return {"code": self.code, "message": str(self),
+                "limit": self.limit, "actual": self.actual}
+
+
+class SessionLogCorruptionError(IOError):
+    """Signals that an existing invalid session was preserved, not replaced."""
+
+    code = "CORRUPT_SESSION_QUARANTINED"
+
+    def __init__(self, quarantine_path):
+        super(SessionLogCorruptionError, self).__init__(
+            "invalid session quarantined; refusing replacement: %s" % quarantine_path)
+        self.quarantine_path = quarantine_path
+
+    def as_dict(self):
+        return {"code": self.code, "message": str(self),
+                "quarantine_path": self.quarantine_path}
 
 
 def _response_succeeded(response, error=None):
@@ -43,13 +76,16 @@ def _response_succeeded(response, error=None):
     return True
 
 
-def _atomic_write(path, text):
+def _atomic_write(path, text, preflight=None):
     """Write text with same-directory replace so a failed write keeps the old file."""
     directory = os.path.dirname(os.path.abspath(path))
     os.makedirs(directory, exist_ok=True)
     normalized = os.path.normcase(os.path.abspath(path))
-    lock = _ATOMIC_PATH_LOCKS.setdefault(normalized, threading.Lock())
+    with _ATOMIC_PATH_LOCKS_GUARD:
+        lock = _ATOMIC_PATH_LOCKS.setdefault(normalized, threading.Lock())
     with lock:
+        if preflight is not None:
+            preflight(path)
         temp_path = None
         try:
             with tempfile.NamedTemporaryFile(
@@ -70,6 +106,43 @@ def _atomic_write(path, text):
                     pass
 
 
+def _json_bytes(value):
+    return len(json.dumps(value, ensure_ascii=False, sort_keys=True).encode("utf-8"))
+
+
+def _validate_entries(entries):
+    if len(entries) > MAX_SESSION_ENTRIES:
+        raise SessionLogLimitError(
+            "SESSION_ENTRY_LIMIT", "session entry limit exceeded",
+            MAX_SESSION_ENTRIES, len(entries))
+    for index, entry in enumerate(entries):
+        size = _json_bytes(entry)
+        if size > MAX_ENTRY_BYTES:
+            raise SessionLogLimitError(
+                "SESSION_ENTRY_TOO_LARGE",
+                "session entry %d exceeds the byte limit" % index,
+                MAX_ENTRY_BYTES, size)
+
+
+def _quarantine_if_invalid_session(path):
+    """Preserve an invalid prior session before publishing a replacement."""
+    if not os.path.isfile(path):
+        return None
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            existing = json.load(handle)
+        if (not isinstance(existing, dict)
+                or existing.get("schema_version") != 2
+                or not isinstance(existing.get("entries"), list)):
+            raise ValueError("invalid session schema")
+        return None
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        quarantine = "%s.corrupt-%d-%s" % (
+            path, time.time_ns(), secrets.token_hex(16))
+        os.replace(path, quarantine)
+        raise SessionLogCorruptionError(quarantine)
+
+
 class SessionLogger(object):
     """Logs all ImageJ TCP commands and responses with timestamps."""
 
@@ -81,6 +154,7 @@ class SessionLogger(object):
             self.start_time.strftime("%Y%m%d_%H%M%S_%f"),
             secrets.token_hex(16),
         )
+        self._blocked_paths = set()
         os.makedirs(TMP_DIR, exist_ok=True)
 
     def send(self, cmd):
@@ -119,7 +193,16 @@ class SessionLogger(object):
         entry["entry_id"] = secrets.token_hex(16)
         entry["success"] = _response_succeeded(entry.get("response"), entry.get("error"))
         entry["command"] = copy.deepcopy(entry["command"])
+        entry_size = _json_bytes(entry)
+        if entry_size > MAX_ENTRY_BYTES:
+            raise SessionLogLimitError(
+                "SESSION_ENTRY_TOO_LARGE", "session entry exceeds the byte limit",
+                MAX_ENTRY_BYTES, entry_size)
         with self._lock:
+            if len(self.entries) >= MAX_SESSION_ENTRIES:
+                raise SessionLogLimitError(
+                    "SESSION_ENTRY_LIMIT", "session entry limit exceeded",
+                    MAX_SESSION_ENTRIES, len(self.entries) + 1)
             self.entries.append(entry)
         return response
 
@@ -135,6 +218,7 @@ class SessionLogger(object):
 
         with self._lock:
             entries = copy.deepcopy(self.entries)
+        _validate_entries(entries)
         log_data = {
             "schema_version": 2,
             "session_id": self.session_id,
@@ -143,8 +227,21 @@ class SessionLogger(object):
             "total_commands": len(entries),
             "entries": entries,
         }
-        payload = json.dumps(log_data, indent=2, ensure_ascii=False) + "\n"
-        _atomic_write(path, payload)
+        payload = json.dumps(log_data, indent=2, ensure_ascii=False,
+                             sort_keys=True) + "\n"
+        payload_size = len(payload.encode("utf-8"))
+        if payload_size > MAX_SESSION_BYTES:
+            raise SessionLogLimitError(
+                "SESSION_FILE_TOO_LARGE", "session file exceeds the byte limit",
+                MAX_SESSION_BYTES, payload_size)
+        normalized = os.path.normcase(os.path.abspath(path))
+        if normalized in self._blocked_paths:
+            raise SessionLogCorruptionError("previously quarantined for %s" % path)
+        try:
+            _atomic_write(path, payload, _quarantine_if_invalid_session)
+        except SessionLogCorruptionError:
+            self._blocked_paths.add(normalized)
+            raise
 
         return path
 

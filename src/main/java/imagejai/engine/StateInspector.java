@@ -3,12 +3,17 @@ package imagejai.engine;
 import com.google.gson.JsonObject;
 import ij.IJ;
 import ij.ImagePlus;
+import ij.ImageStack;
 import ij.WindowManager;
 import ij.measure.Calibration;
 import ij.measure.ResultsTable;
 import ij.plugin.frame.RoiManager;
 
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 
 /**
@@ -65,7 +70,9 @@ public class StateInspector {
         if (ids == null) {
             return images;
         }
-        for (int id : ids) {
+        int[] sortedIds = ids.clone();
+        Arrays.sort(sortedIds);
+        for (int id : sortedIds) {
             ImagePlus imp = WindowManager.getImage(id);
             if (imp != null) {
                 images.add(buildImageInfo(imp));
@@ -129,6 +136,111 @@ public class StateInspector {
             sb.append("  ... and ").append(roiCount - 20).append(" more\n");
         }
         return sb.toString();
+    }
+
+    /**
+     * Stable SHA-256 identity of every logical C/Z/T plane and measurement
+     * calibration. Titles, active-plane selection and the default locale are
+     * deliberately excluded.
+     */
+    public static String datasetHash(ImagePlus imp) {
+        if (imp == null) return null;
+        try {
+            MessageDigest digest = MessageDigest.getInstance("SHA-256");
+            updateString(digest, "ImageJAI-dataset-v1");
+            updateInt(digest, imp.getWidth());
+            updateInt(digest, imp.getHeight());
+            updateInt(digest, imp.getType());
+            updateInt(digest, imp.getNChannels());
+            updateInt(digest, imp.getNSlices());
+            updateInt(digest, imp.getNFrames());
+            updateInt(digest, imp.getStackSize());
+
+            Calibration cal = imp.getCalibration();
+            if (cal == null) {
+                updateInt(digest, 0);
+            } else {
+                updateInt(digest, 1);
+                updateLong(digest, Double.doubleToLongBits(cal.pixelWidth));
+                updateLong(digest, Double.doubleToLongBits(cal.pixelHeight));
+                updateLong(digest, Double.doubleToLongBits(cal.pixelDepth));
+                updateLong(digest, Double.doubleToLongBits(cal.xOrigin));
+                updateLong(digest, Double.doubleToLongBits(cal.yOrigin));
+                updateLong(digest, Double.doubleToLongBits(cal.zOrigin));
+                updateLong(digest, Double.doubleToLongBits(cal.frameInterval));
+                updateString(digest, cal.getUnit());
+                updateString(digest, cal.getValueUnit());
+            }
+
+            ImageStack stack = imp.getStack();
+            int channels = Math.max(1, imp.getNChannels());
+            int slices = Math.max(1, imp.getNSlices());
+            int frames = Math.max(1, imp.getNFrames());
+            for (int t = 1; t <= frames; t++) {
+                for (int z = 1; z <= slices; z++) {
+                    for (int c = 1; c <= channels; c++) {
+                        updateInt(digest, c);
+                        updateInt(digest, z);
+                        updateInt(digest, t);
+                        updatePixels(digest, stack.getPixels(imp.getStackIndex(c, z, t)));
+                    }
+                }
+            }
+            return hex(digest.digest());
+        } catch (NoSuchAlgorithmException impossible) {
+            throw new IllegalStateException("SHA-256 unavailable", impossible);
+        }
+    }
+
+    private static void updatePixels(MessageDigest digest, Object pixels) {
+        if (pixels instanceof byte[]) {
+            digest.update((byte[]) pixels);
+        } else if (pixels instanceof short[]) {
+            for (short value : (short[]) pixels) updateInt16(digest, value & 0xffff);
+        } else if (pixels instanceof int[]) {
+            for (int value : (int[]) pixels) updateInt(digest, value);
+        } else if (pixels instanceof float[]) {
+            for (float value : (float[]) pixels) {
+                updateInt(digest, Float.floatToRawIntBits(value));
+            }
+        } else {
+            throw new IllegalArgumentException("unsupported pixel array: "
+                    + (pixels == null ? "null" : pixels.getClass().getName()));
+        }
+    }
+
+    private static void updateString(MessageDigest digest, String value) {
+        byte[] bytes = (value == null ? "" : value).getBytes(StandardCharsets.UTF_8);
+        updateInt(digest, bytes.length);
+        digest.update(bytes);
+    }
+
+    private static void updateInt16(MessageDigest digest, int value) {
+        digest.update((byte) (value >>> 8));
+        digest.update((byte) value);
+    }
+
+    private static void updateInt(MessageDigest digest, int value) {
+        digest.update((byte) (value >>> 24));
+        digest.update((byte) (value >>> 16));
+        digest.update((byte) (value >>> 8));
+        digest.update((byte) value);
+    }
+
+    private static void updateLong(MessageDigest digest, long value) {
+        updateInt(digest, (int) (value >>> 32));
+        updateInt(digest, (int) value);
+    }
+
+    private static String hex(byte[] bytes) {
+        char[] chars = new char[bytes.length * 2];
+        final char[] digits = "0123456789abcdef".toCharArray();
+        for (int i = 0; i < bytes.length; i++) {
+            int value = bytes[i] & 0xff;
+            chars[i * 2] = digits[value >>> 4];
+            chars[i * 2 + 1] = digits[value & 0xf];
+        }
+        return new String(chars);
     }
 
     /**

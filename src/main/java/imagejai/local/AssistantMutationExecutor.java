@@ -71,15 +71,17 @@ public final class AssistantMutationExecutor implements AutoCloseable {
         }
         if (Boolean.TRUE.equals(insideMutation.get())) {
             long started = System.currentTimeMillis();
+            SessionCodeJournal.DatasetBinding journalDataset =
+                    SessionCodeJournal.captureInitiatingDataset();
             try {
                 if (settings.safeModeEnabled) enforceSafety(code, false);
                 ExecutionResult result = operation.run();
-                journalNested(code, started, result != null && result.isSuccess(),
+                journalNested(journalDataset, code, started, result != null && result.isSuccess(),
                         result == null ? "No execution result" : result.getError());
                 return result == null
                         ? ExecutionResult.failure("No execution result", 0L) : result;
             } catch (Exception e) {
-                journalNested(code, started, false, e.getMessage());
+                journalNested(journalDataset, code, started, false, e.getMessage());
                 return ExecutionResult.failure(e.getMessage(),
                         System.currentTimeMillis() - started);
             }
@@ -123,6 +125,8 @@ public final class AssistantMutationExecutor implements AutoCloseable {
         final String callId = ownerSession + "-" + callSequence.incrementAndGet();
         final String mutationCode = code == null ? "" : code;
         final ImagePlus imageAtAdmission = WindowManager.getCurrentImage();
+        final SessionCodeJournal.DatasetBinding journalDataset =
+                SessionCodeJournal.captureInitiatingDataset();
 
         MutationCoordinator.Lifecycle<T> lifecycle = new MutationCoordinator.Lifecycle<T>() {
             private Set<String> titlesBefore;
@@ -160,7 +164,7 @@ public final class AssistantMutationExecutor implements AutoCloseable {
                 }
                 String failure = completion.error() == null
                         ? null : completion.error().getMessage();
-                SessionCodeJournal.INSTANCE.record("ijm", mutationCode, source, 0L,
+                SessionCodeJournal.INSTANCE.record(journalDataset, "ijm", mutationCode, source, 0L,
                         completion.startedAtMs(), completion.elapsedMs(), success, failure);
             }
         };
@@ -269,8 +273,9 @@ public final class AssistantMutationExecutor implements AutoCloseable {
         }
     }
 
-    private void journalNested(String code, long started, boolean success, String failure) {
-        SessionCodeJournal.INSTANCE.record("ijm", code, source, 0L, started,
+    private void journalNested(SessionCodeJournal.DatasetBinding dataset, String code,
+                               long started, boolean success, String failure) {
+        SessionCodeJournal.INSTANCE.record(dataset, "ijm", code, source, 0L, started,
                 System.currentTimeMillis() - started, success, failure);
     }
 

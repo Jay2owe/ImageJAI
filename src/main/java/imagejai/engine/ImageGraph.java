@@ -18,7 +18,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.Comparator;
-import java.util.concurrent.atomic.AtomicLong;
+import java.util.UUID;
 
 /**
  * Step 13 (docs/tcp_upgrade/13_provenance_graph.md): session-scoped image
@@ -77,7 +77,6 @@ public final class ImageGraph {
     private static final Object IDENTITY_LOCK = new Object();
     private static final IdentityHashMap<ImagePlus, String> IMAGE_IDENTITIES =
             new IdentityHashMap<ImagePlus, String>();
-    private static final AtomicLong NEXT_IMAGE_ID = new AtomicLong(0L);
 
     /** Immutable node snapshot. {@link #closed} is mutable state set via
      *  {@link ImageGraph#markClosedByTitle(String)}; all other fields are
@@ -480,7 +479,7 @@ public final class ImageGraph {
                             boolean inPlace) {
         seqCounter++;
         idCounter++;
-        String id = "n" + idCounter;
+        String id = "n-" + UUID.randomUUID().toString();
         Node n = new Node(id, title, origin, macro, parents, seqCounter,
                 System.currentTimeMillis(), imageIdentity, inPlace);
         nodes.put(id, n);
@@ -604,7 +603,7 @@ public final class ImageGraph {
         synchronized (IDENTITY_LOCK) {
             String identity = IMAGE_IDENTITIES.get(imp);
             if (identity == null) {
-                identity = "img-" + NEXT_IMAGE_ID.incrementAndGet();
+                identity = "img-" + UUID.randomUUID().toString();
                 IMAGE_IDENTITIES.put(imp, identity);
             }
             return identity;

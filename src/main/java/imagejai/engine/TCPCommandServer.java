@@ -4210,6 +4210,8 @@ public class TCPCommandServer {
         final String codeToRun = (validation != null && validation.hasCorrections())
                 ? validation.patchedCode
                 : code;
+        final SessionCodeJournal.DatasetBinding journalDataset =
+                SessionCodeJournal.captureInitiatingDataset();
 
         // Step 10: snapshot the set of modal dialogs on screen BEFORE the
         // macro runs. Any new modal that is still present after the call
@@ -4604,7 +4606,7 @@ public class TCPCommandServer {
         // wire, no event stream changes, no new response fields.
         try {
             String source = request.has("source") ? request.get("source").getAsString() : "tcp";
-            SessionCodeJournal.INSTANCE.record("ijm", code, source,
+            SessionCodeJournal.INSTANCE.record(journalDataset, "ijm", code, source,
                     macroId, startTime, elapsed, success, failureMessage);
         } catch (Throwable t) {
             IJ.log("[ImageJAI-Journal] record failed: " + t);
@@ -5588,6 +5590,8 @@ public class TCPCommandServer {
             return errorResponse("ScriptEngine not found for language: " + language
                     + ". Available: groovy, jython, javascript");
         }
+        final SessionCodeJournal.DatasetBinding journalDataset =
+                SessionCodeJournal.captureInitiatingDataset();
 
         // Step 09: histogram snapshot before the script runs. Same contract
         // as handleExecuteMacro — on-by-default, skipped for huge images,
@@ -5754,7 +5758,7 @@ public class TCPCommandServer {
             String scriptFailure = blockingFailure != null
                     ? blockingFailure
                     : (scriptError != null ? String.valueOf(scriptError.getMessage()) : null);
-            SessionCodeJournal.INSTANCE.record(language, code, source,
+            SessionCodeJournal.INSTANCE.record(journalDataset, language, code, source,
                     0L, startTime, elapsed, scriptSuccess, scriptFailure);
         } catch (Throwable t) {
             IJ.log("[ImageJAI-Journal] record failed: " + t);
@@ -6776,9 +6780,40 @@ public class TCPCommandServer {
      * <p>Response shape: {@code {"ok":true,"result":{"path":"AI_Exports/methods.md","fieldCoverage":"21/33"}}}.
      */
     JsonObject handleEmitMethodsTable(JsonObject request) {
+        final SessionCodeJournal.DatasetBinding initiatingDataset =
+                SessionCodeJournal.captureInitiatingDataset();
         try {
-            ProcessBuilder pb = new ProcessBuilder(
-                    "python", "agent/methods_table.py");
+            List<String> command = new ArrayList<String>();
+            command.add("python");
+            command.add("agent/methods_table.py");
+            JsonObject datasetJson = new JsonObject();
+            if (initiatingDataset.identity != null) {
+                datasetJson.addProperty("identity", initiatingDataset.identity);
+            }
+            if (initiatingDataset.hash != null) {
+                datasetJson.addProperty("hash", initiatingDataset.hash);
+            }
+            datasetJson.addProperty("title", initiatingDataset.title);
+            if (initiatingDataset.sourcePath != null) {
+                datasetJson.addProperty("filePath", initiatingDataset.sourcePath);
+            }
+            datasetJson.addProperty("width", initiatingDataset.width);
+            datasetJson.addProperty("height", initiatingDataset.height);
+            datasetJson.addProperty("nSlices", initiatingDataset.slices);
+            datasetJson.addProperty("nChannels", initiatingDataset.channels);
+            datasetJson.addProperty("nFrames", initiatingDataset.frames);
+            datasetJson.addProperty("bitDepth", initiatingDataset.bitDepth);
+            command.add("--dataset-json");
+            command.add(datasetJson.toString());
+            if (initiatingDataset.sourcePath != null) {
+                Path source = Paths.get(initiatingDataset.sourcePath).toAbsolutePath().normalize();
+                Path parent = source.getParent();
+                if (parent != null) {
+                    command.add("--out");
+                    command.add(parent.resolve("AI_Exports").resolve("methods.md").toString());
+                }
+            }
+            ProcessBuilder pb = new ProcessBuilder(command);
             pb.redirectErrorStream(true);
             Process proc = pb.start();
             StringBuilder sb = new StringBuilder();
@@ -6809,6 +6844,12 @@ public class TCPCommandServer {
             JsonObject result = new JsonObject();
             if (path != null) result.addProperty("path", path);
             if (coverage != null) result.addProperty("fieldCoverage", coverage);
+            if (initiatingDataset.identity != null) {
+                result.addProperty("datasetIdentity", initiatingDataset.identity);
+            }
+            if (initiatingDataset.hash != null) {
+                result.addProperty("datasetHash", initiatingDataset.hash);
+            }
             result.addProperty("output", output.trim());
             return successResponse(result);
         } catch (IOException | InterruptedException e) {
@@ -7070,6 +7111,8 @@ public class TCPCommandServer {
         final String codeToRun = validation != null && validation.hasCorrections()
                 ? validation.patchedCode : code;
         final String source = optString(request, "source", "tcp-async");
+        final SessionCodeJournal.DatasetBinding journalDataset =
+                SessionCodeJournal.captureInitiatingDataset();
         final long timeoutMs = resolveTimeoutMs(request, MACRO_TIMEOUT_MS);
         final boolean safetyEnabled = isScientificIntegrityScanEnabled(caps);
         final boolean undoEnabled = caps != null && caps.undo;
@@ -7127,7 +7170,7 @@ public class TCPCommandServer {
                         && completion.result().isSuccess();
                 String failure = completion.error() == null
                         ? null : completion.error().getMessage();
-                SessionCodeJournal.INSTANCE.record("ijm", codeToRun, source, 0L,
+                SessionCodeJournal.INSTANCE.record(journalDataset, "ijm", codeToRun, source, 0L,
                         completion.startedAtMs(), completion.elapsedMs(), success, failure);
             }
         };

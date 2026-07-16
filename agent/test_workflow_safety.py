@@ -232,6 +232,7 @@ def test_atomic_session_save_preserves_original_and_concurrent_files_are_valid(t
     with pytest.raises(TypeError):
         broken.save(str(path))
     assert path.read_text(encoding="utf-8") == "original"
+    path.unlink()
 
     def save_one(index):
         logger = session_log.SessionLogger()
@@ -244,6 +245,38 @@ def test_atomic_session_save_preserves_original_and_concurrent_files_are_valid(t
     assert payload["schema_version"] == 2
     assert payload["total_commands"] == 1
     assert payload["entries"][0]["index"] in range(32)
+
+
+def test_corrupt_session_is_quarantined_before_replacement(tmp_path):
+    path = tmp_path / "session.json"
+    path.write_text("{corrupt", encoding="utf-8")
+    logger = session_log.SessionLogger()
+    logger.entries = [{"command": {"command": "ping"}, "response": {"ok": True}}]
+
+    with pytest.raises(session_log.SessionLogCorruptionError) as caught:
+        logger.save(str(path))
+
+    assert caught.value.code == "CORRUPT_SESSION_QUARANTINED"
+    assert not path.exists()
+    quarantined = list(tmp_path.glob("session.json.corrupt-*"))
+    assert len(quarantined) == 1
+    assert quarantined[0].read_text(encoding="utf-8") == "{corrupt"
+    with pytest.raises(session_log.SessionLogCorruptionError):
+        logger.save(str(path))
+    assert not path.exists()
+
+
+def test_session_bounds_fail_with_structured_error(tmp_path, monkeypatch):
+    monkeypatch.setattr(session_log, "MAX_ENTRY_BYTES", 64)
+    logger = session_log.SessionLogger()
+    logger.entries = [{"command": {"command": "ping", "payload": "x" * 100}}]
+
+    with pytest.raises(session_log.SessionLogLimitError) as caught:
+        logger.save(str(tmp_path / "bounded.json"))
+
+    assert caught.value.code == "SESSION_ENTRY_TOO_LARGE"
+    assert caught.value.as_dict()["limit"] == 64
+    assert not (tmp_path / "bounded.json").exists()
 
 
 def test_macro_lint_handles_literals_comments_and_documented_hazards():

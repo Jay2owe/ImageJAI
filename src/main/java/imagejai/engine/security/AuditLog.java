@@ -25,6 +25,8 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.TreeMap;
+import java.util.TreeSet;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -204,10 +206,12 @@ public final class AuditLog {
             return emptySummary(csvPath);
         }
 
-        List<String> lines = Files.readAllLines(csvPath, StandardCharsets.UTF_8);
-        Map<String, Integer> commandCounts = new LinkedHashMap<String, Integer>();
-        Map<String, Integer> postureCounts = new LinkedHashMap<String, Integer>();
-        Set<String> fields = new LinkedHashSet<String>();
+        List<CsvRecord> records = readCsvRecords(csvPath);
+        Map<String, Integer> commandCounts = new TreeMap<String, Integer>();
+        Map<String, Integer> postureCounts = new TreeMap<String, Integer>();
+        Set<String> fields = new TreeSet<String>();
+        List<String> malformedDiagnostics = new ArrayList<String>();
+        int malformedRows = 0;
 
         int rows = 0;
         long bytesOut = 0L;
@@ -220,7 +224,8 @@ public final class AuditLog {
         Instant first = null;
         Instant last = null;
 
-        for (String line : lines) {
+        for (CsvRecord record : records) {
+            String line = record.text;
             if (line == null || line.trim().isEmpty() || HEADER.equals(line.trim())) {
                 continue;
             }
@@ -228,6 +233,11 @@ public final class AuditLog {
             try {
                 row = AuditRow.fromCsvLine(line);
             } catch (IllegalArgumentException badLine) {
+                malformedRows++;
+                if (malformedDiagnostics.size() < 100) {
+                    malformedDiagnostics.add("line " + record.startLine + ": "
+                            + badLine.getMessage());
+                }
                 continue;
             }
             rows++;
@@ -262,7 +272,8 @@ public final class AuditLog {
         return new AuditSummary(csvPath, rows, first, last, bytesOut, bytesIn,
                 redactedRows, visualGrants, visualConsumes, postureEvents,
                 downshifts,
-                commandCounts, postureCounts, fields);
+                commandCounts, postureCounts, fields, malformedRows,
+                malformedDiagnostics);
     }
 
     private void remember(AuditRow row) {
@@ -363,6 +374,7 @@ public final class AuditLog {
                     channel.position(channel.size());
                     write(channel, row.toCsvLine() + System.lineSeparator());
                 }
+                channel.force(true);
             } finally {
                 lock.release();
             }
@@ -401,6 +413,47 @@ public final class AuditLog {
         ByteBuffer buffer = ByteBuffer.wrap(text.getBytes(StandardCharsets.UTF_8));
         while (buffer.hasRemaining()) {
             channel.write(buffer);
+        }
+    }
+
+    private static List<CsvRecord> readCsvRecords(Path path) throws IOException {
+        String text = Files.readString(path, StandardCharsets.UTF_8);
+        List<CsvRecord> records = new ArrayList<CsvRecord>();
+        StringBuilder current = new StringBuilder();
+        boolean quoted = false;
+        int line = 1;
+        int startLine = 1;
+        for (int i = 0; i < text.length(); i++) {
+            char c = text.charAt(i);
+            if (c == '"') {
+                if (quoted && i + 1 < text.length() && text.charAt(i + 1) == '"') {
+                    current.append(c).append(c);
+                    i++;
+                    continue;
+                }
+                quoted = !quoted;
+                current.append(c);
+            } else if ((c == '\n' || c == '\r') && !quoted) {
+                if (c == '\r' && i + 1 < text.length() && text.charAt(i + 1) == '\n') i++;
+                records.add(new CsvRecord(startLine, current.toString()));
+                current.setLength(0);
+                line++;
+                startLine = line;
+            } else {
+                current.append(c);
+                if (c == '\n') line++;
+            }
+        }
+        if (current.length() > 0 || quoted) records.add(new CsvRecord(startLine, current.toString()));
+        return records;
+    }
+
+    private static final class CsvRecord {
+        final int startLine;
+        final String text;
+        CsvRecord(int startLine, String text) {
+            this.startLine = startLine;
+            this.text = text;
         }
     }
 
@@ -470,7 +523,9 @@ public final class AuditLog {
             if (root == null) {
                 int[] ids = WindowManager.getIDList();
                 if (ids != null) {
-                    for (int id : ids) {
+                    int[] sorted = ids.clone();
+                    java.util.Arrays.sort(sorted);
+                    for (int id : sorted) {
                         root = imageDirectory(WindowManager.getImage(id));
                         if (root != null) {
                             break;

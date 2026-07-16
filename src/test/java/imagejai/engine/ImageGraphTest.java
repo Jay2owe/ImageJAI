@@ -381,7 +381,7 @@ public class ImageGraphTest {
     @Test
     public void resetClearsEverything() {
         ImageGraph g = new ImageGraph();
-        g.addOpenedImage("a");
+        String beforeReset = g.addOpenedImage("a").id;
         g.reset();
 
         assertEquals(0, g.size());
@@ -389,6 +389,8 @@ public class ImageGraphTest {
         JsonObject snap = g.snapshot();
         assertEquals(0, snap.getAsJsonArray("nodes").size());
         assertEquals(0, snap.getAsJsonArray("edges").size());
+        assertFalse("reset must not recycle a provenance id",
+                beforeReset.equals(g.addOpenedImage("a").id));
     }
 
     // ------------------------------------------------------------------

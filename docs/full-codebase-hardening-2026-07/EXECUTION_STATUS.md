@@ -55,7 +55,7 @@ Conflict watchlist:
 | 17 | completed | `20ca91d` | 24 workflow/cache/lint tests passed; practice dry-run and Python compilation passed; trainer/practice restore images, active cursor, Results, ROIs, measurements, redirect, and BlackBackground on success/failure |
 | 18 | completed | `cdf13d1` | 120 context/runtime tests passed; zero-polling integration passed twice; generated contexts byte-stable; full offline suite exceeded the 120 s stage check and is deferred to convergence |
 | 19 | completed | `40ffd0c` | Latest sources compiled directly and 81/81 focused terminal/discovery/credential tests passed; an earlier 929-test Maven run had only six concurrent Stage 22 intent failures |
-| 20 | pending | - | - |
+| 20 | completed | `40958a5` | 5/5 headless accessibility and 20/20 focused Stage 19/20 regression tests passed; the 951-test run had only five Stage 22 intent failures queued for correction |
 | 21 | pending | - | - |
 | 22 | completed | `528dc30` | 22 focused Java and 3 generator tests passed; 398 IDs/16,860 phrases load exactly, repeat generation is byte-stable, and the bounded matcher benchmark passed at 112/115 (97.4%) |
 | 23 | pending | - | - |

@@ -5,6 +5,8 @@ import java.time.Instant;
 import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
@@ -27,6 +29,8 @@ public final class AuditSummary {
     private final Map<String, Integer> commandCounts;
     private final Map<String, Integer> postureCounts;
     private final Set<String> fieldsRedacted;
+    private final int malformedRows;
+    private final List<String> malformedDiagnostics;
 
     public AuditSummary(Path sourcePath,
                         int totalRows,
@@ -44,7 +48,8 @@ public final class AuditSummary {
         this(sourcePath, totalRows, firstTimestampUtc, lastTimestampUtc,
                 totalBytesOut, totalBytesIn, redactedRows, visualGrantRows,
                 visualConsumeRows, postureEventRows, postureEventRows,
-                commandCounts, postureCounts, fieldsRedacted);
+                commandCounts, postureCounts, fieldsRedacted, 0,
+                Collections.<String>emptyList());
     }
 
     public AuditSummary(Path sourcePath,
@@ -61,6 +66,29 @@ public final class AuditSummary {
                         Map<String, Integer> commandCounts,
                         Map<String, Integer> postureCounts,
                         Set<String> fieldsRedacted) {
+        this(sourcePath, totalRows, firstTimestampUtc, lastTimestampUtc,
+                totalBytesOut, totalBytesIn, redactedRows, visualGrantRows,
+                visualConsumeRows, postureEventRows, downshiftRows,
+                commandCounts, postureCounts, fieldsRedacted, 0,
+                Collections.<String>emptyList());
+    }
+
+    public AuditSummary(Path sourcePath,
+                        int totalRows,
+                        Instant firstTimestampUtc,
+                        Instant lastTimestampUtc,
+                        long totalBytesOut,
+                        long totalBytesIn,
+                        int redactedRows,
+                        int visualGrantRows,
+                        int visualConsumeRows,
+                        int postureEventRows,
+                        int downshiftRows,
+                        Map<String, Integer> commandCounts,
+                        Map<String, Integer> postureCounts,
+                        Set<String> fieldsRedacted,
+                        int malformedRows,
+                        List<String> malformedDiagnostics) {
         this.sourcePath = sourcePath;
         this.totalRows = Math.max(0, totalRows);
         this.firstTimestampUtc = firstTimestampUtc;
@@ -75,6 +103,10 @@ public final class AuditSummary {
         this.commandCounts = immutableMap(commandCounts);
         this.postureCounts = immutableMap(postureCounts);
         this.fieldsRedacted = immutableSet(fieldsRedacted);
+        this.malformedRows = Math.max(0, malformedRows);
+        this.malformedDiagnostics = Collections.unmodifiableList(
+                malformedDiagnostics == null ? new ArrayList<String>()
+                        : new ArrayList<String>(malformedDiagnostics));
     }
 
     public Path sourcePath() {
@@ -161,6 +193,14 @@ public final class AuditSummary {
         return fieldsRedacted;
     }
 
+    public int malformedRows() {
+        return malformedRows;
+    }
+
+    public List<String> malformedDiagnostics() {
+        return malformedDiagnostics;
+    }
+
     private static Map<String, Integer> immutableMap(Map<String, Integer> values) {
         Map<String, Integer> out = new LinkedHashMap<String, Integer>();
         if (values != null) {
@@ -194,12 +234,14 @@ public final class AuditSummary {
                 && visualConsumeRows == that.visualConsumeRows
                 && postureEventRows == that.postureEventRows
                 && downshiftRows == that.downshiftRows
+                && malformedRows == that.malformedRows
                 && Objects.equals(sourcePath, that.sourcePath)
                 && Objects.equals(firstTimestampUtc, that.firstTimestampUtc)
                 && Objects.equals(lastTimestampUtc, that.lastTimestampUtc)
                 && commandCounts.equals(that.commandCounts)
                 && postureCounts.equals(that.postureCounts)
-                && fieldsRedacted.equals(that.fieldsRedacted);
+                && fieldsRedacted.equals(that.fieldsRedacted)
+                && malformedDiagnostics.equals(that.malformedDiagnostics);
     }
 
     @Override
@@ -207,6 +249,7 @@ public final class AuditSummary {
         return Objects.hash(sourcePath, totalRows, firstTimestampUtc,
                 lastTimestampUtc, totalBytesOut, totalBytesIn, redactedRows,
                 visualGrantRows, visualConsumeRows, postureEventRows, downshiftRows,
-                commandCounts, postureCounts, fieldsRedacted);
+                commandCounts, postureCounts, fieldsRedacted, malformedRows,
+                malformedDiagnostics);
     }
 }

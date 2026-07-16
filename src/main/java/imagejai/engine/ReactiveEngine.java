@@ -730,6 +730,8 @@ public class ReactiveEngine {
                                       final String code, final boolean undoEnabled,
                                       MutationCoordinator.Operation<T> operation)
             throws Exception {
+        final SessionCodeJournal.DatasetBinding journalDataset =
+                SessionCodeJournal.captureInitiatingDataset();
         MutationCoordinator.Lifecycle<T> lifecycle =
                 new MutationCoordinator.Lifecycle<T>() {
             @Override public void checkSafety() throws Exception {
@@ -748,6 +750,20 @@ public class ReactiveEngine {
             @Override public void onCompletion(
                     MutationCoordinator.Completion<T> completion) {
                 mutationPolicy.onCompletion(rule.name, sourceKind, code, completion);
+                if ("reactive-macro".equals(sourceKind)
+                        || "reactive-intent".equals(sourceKind)) {
+                    boolean success = completion.state()
+                            == MutationCoordinator.State.SUCCEEDED;
+                    Throwable error = completion.error();
+                    try {
+                        SessionCodeJournal.INSTANCE.record(journalDataset, "ijm",
+                                code == null ? "" : code, "reactive:" + rule.name,
+                                0L, completion.startedAtMs(), completion.elapsedMs(),
+                                success, error == null ? null : error.getMessage());
+                    } catch (Throwable t) {
+                        logWarn("Reactive journal record failed: " + t.getMessage());
+                    }
+                }
             }
         };
         MutationCoordinator.Request.Builder<T> requestBuilder =
@@ -1373,15 +1389,7 @@ public class ReactiveEngine {
         @Override public void afterMutation(String ruleName, String sourceKind, String code,
                                             MutationCoordinator.Outcome<?> outcome) {}
         @Override public void onCompletion(String ruleName, String sourceKind, String code,
-                                           MutationCoordinator.Completion<?> completion) {
-            if (!isImageMutation(sourceKind)) return;
-            boolean success = completion.state() == MutationCoordinator.State.SUCCEEDED;
-            Throwable error = completion.error();
-            SessionCodeJournal.INSTANCE.record("ijm", code == null ? "" : code,
-                    "reactive:" + ruleName, 0L, completion.startedAtMs(),
-                    completion.elapsedMs(), success,
-                    error == null ? null : error.getMessage());
-        }
+                                           MutationCoordinator.Completion<?> completion) {}
 
         private static boolean isImageMutation(String sourceKind) {
             return "reactive-macro".equals(sourceKind)

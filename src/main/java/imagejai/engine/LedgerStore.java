@@ -5,19 +5,11 @@ import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 
-import java.io.BufferedReader;
-import java.io.BufferedWriter;
 import java.io.IOException;
-import java.io.InputStreamReader;
-import java.io.OutputStreamWriter;
-import java.io.Reader;
-import java.io.Writer;
 import java.nio.charset.StandardCharsets;
-import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
-import java.nio.file.StandardCopyOption;
 import java.security.MessageDigest;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -25,6 +17,7 @@ import java.util.Comparator;
 import java.util.HashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.TreeMap;
@@ -58,6 +51,10 @@ final class LedgerStore {
     /** Hard cap on entries retained; LRU-evict by {@code lastSeen} above this. */
     static final int MAX_ENTRIES = 10_000;
 
+    static final long MAX_STORE_BYTES = 64L * 1024L * 1024L;
+    static final int MAX_FIELD_BYTES = 1024 * 1024;
+    static final int MAX_AGENTS_PER_ENTRY = 1_000;
+
     /** SHA-256 truncated to 128 bits → 32 hex chars. */
     private static final int FINGERPRINT_HEX_LEN = 32;
 
@@ -70,23 +67,43 @@ final class LedgerStore {
     private static final Pattern RUN_CALL =
             Pattern.compile("run\\s*\\(\\s*[\"']([^\"']+)[\"']");
 
-    /** One immutable-ish ledger entry. Fields are mutated under {@link #lock}. */
+    /** Immutable ledger entry. Updates replace the map value under {@link #lock}. */
     static final class Entry {
         final String fingerprint;
-        String macroPrefix;
-        String errorCode;
-        String errorFragment;
-        String confirmedFix;
-        String exampleMacro;
-        final Set<String> confirmedBy = new LinkedHashSet<String>();
-        int timesSeen;
-        int confirmationsTrue;
-        int confirmationsFalse;
-        long firstSeen;
-        long lastSeen;
+        final String macroPrefix;
+        final String errorCode;
+        final String errorFragment;
+        final String confirmedFix;
+        final String exampleMacro;
+        final Set<String> confirmedBy;
+        final int timesSeen;
+        final int confirmationsTrue;
+        final int confirmationsFalse;
+        final long firstSeen;
+        final long lastSeen;
 
         Entry(String fingerprint) {
+            this(fingerprint, null, null, null, null, null,
+                    Collections.<String>emptySet(), 0, 0, 0, 0L, 0L);
+        }
+
+        Entry(String fingerprint, String macroPrefix, String errorCode,
+              String errorFragment, String confirmedFix, String exampleMacro,
+              Set<String> confirmedBy, int timesSeen, int confirmationsTrue,
+              int confirmationsFalse, long firstSeen, long lastSeen) {
             this.fingerprint = fingerprint;
+            this.macroPrefix = macroPrefix;
+            this.errorCode = errorCode;
+            this.errorFragment = errorFragment;
+            this.confirmedFix = confirmedFix;
+            this.exampleMacro = exampleMacro;
+            this.confirmedBy = Collections.unmodifiableSet(
+                    new LinkedHashSet<String>(confirmedBy));
+            this.timesSeen = timesSeen;
+            this.confirmationsTrue = confirmationsTrue;
+            this.confirmationsFalse = confirmationsFalse;
+            this.firstSeen = firstSeen;
+            this.lastSeen = lastSeen;
         }
 
         /** Serialise to a {@link JsonObject} in the on-disk / API shape. */
@@ -111,28 +128,37 @@ final class LedgerStore {
 
         static Entry fromJson(JsonObject o) {
             String fp = optString(o, "fingerprint", null);
-            if (fp == null || fp.isEmpty()) return null;
-            Entry e = new Entry(fp);
-            e.macroPrefix      = optString(o, "macroPrefix", null);
-            e.errorCode        = optString(o, "errorCode", null);
-            e.errorFragment    = optString(o, "errorFragment", null);
-            e.confirmedFix     = optString(o, "confirmedFix", null);
-            e.exampleMacro     = optString(o, "exampleMacro", null);
-            e.timesSeen        = optInt(o, "timesSeen", 0);
-            e.confirmationsTrue  = optInt(o, "confirmationsTrue", 0);
-            e.confirmationsFalse = optInt(o, "confirmationsFalse", 0);
-            e.firstSeen        = optLong(o, "firstSeen", 0L);
-            e.lastSeen         = optLong(o, "lastSeen", 0L);
+            if (fp == null || fp.isEmpty()) throw new IllegalArgumentException("missing fingerprint");
+            LinkedHashSet<String> agents = new LinkedHashSet<String>();
             JsonElement by = o.get("confirmedBy");
-            if (by != null && by.isJsonArray()) {
+            if (by != null && !by.isJsonArray()) {
+                throw new IllegalArgumentException("confirmedBy is not an array");
+            }
+            if (by != null) {
                 for (JsonElement el : by.getAsJsonArray()) {
-                    if (el != null && el.isJsonPrimitive()) {
-                        try { e.confirmedBy.add(el.getAsString()); }
-                        catch (Exception ignore) {}
+                    if (el == null || !el.isJsonPrimitive()) {
+                        throw new IllegalArgumentException("confirmedBy contains non-string value");
                     }
+                    agents.add(el.getAsString());
                 }
             }
-            return e;
+            return new Entry(fp,
+                    optString(o, "macroPrefix", null), optString(o, "errorCode", null),
+                    optString(o, "errorFragment", null), optString(o, "confirmedFix", null),
+                    optString(o, "exampleMacro", null), agents,
+                    requiredNonNegativeInt(o, "timesSeen"),
+                    requiredNonNegativeInt(o, "confirmationsTrue"),
+                    requiredNonNegativeInt(o, "confirmationsFalse"),
+                    requiredNonNegativeLong(o, "firstSeen"),
+                    requiredNonNegativeLong(o, "lastSeen"));
+        }
+    }
+
+    static final class PersistenceException extends IllegalStateException {
+        final String code;
+        PersistenceException(String code, String message) {
+            super(message);
+            this.code = code;
         }
     }
 
@@ -144,6 +170,9 @@ final class LedgerStore {
     private final Path path;
     /** In-memory fallback flag — flips true if disk IO fails at load or save. */
     private boolean memoryOnly = false;
+    private boolean writeBlocked = false;
+    private String loadError;
+    private Path quarantinedPath;
 
     LedgerStore(Path path) {
         this.path = path;
@@ -162,6 +191,12 @@ final class LedgerStore {
 
     /** Visible for tests — best-effort memory-only warning after IO failure. */
     boolean isMemoryOnly() { return memoryOnly; }
+
+    boolean isWriteBlocked() { return writeBlocked; }
+
+    String loadError() { return loadError; }
+
+    Path quarantinedPath() { return quarantinedPath; }
 
     /** Visible for tests. */
     int size() {
@@ -182,9 +217,14 @@ final class LedgerStore {
      */
     List<Entry> lookup(String errorCode, String errorFragment,
                        String macroPrefix, int max) {
+        if (max <= 0) return Collections.emptyList();
         String fp = fingerprint(errorCode, errorFragment, macroPrefix);
         List<Entry> out = new ArrayList<Entry>();
         synchronized (lock) {
+            if (writeBlocked) {
+                throw new PersistenceException("CORRUPT_STORE_BLOCKED",
+                        "ledger is unavailable after load failure: " + loadError);
+            }
             Entry direct = entries.get(fp);
             if (direct != null) out.add(direct);
             // Fuzzy fallback: same errorCode + errorFragment normalised, any
@@ -208,11 +248,12 @@ final class LedgerStore {
                 int ca = confidenceRank(a);
                 int cb = confidenceRank(b);
                 if (ca != cb) return Integer.compare(cb, ca);
-                return Integer.compare(b.timesSeen, a.timesSeen);
+                int seen = Integer.compare(b.timesSeen, a.timesSeen);
+                return seen != 0 ? seen : a.fingerprint.compareTo(b.fingerprint);
             }
         });
         if (out.size() > max) out = new ArrayList<Entry>(out.subList(0, max));
-        return out;
+        return Collections.unmodifiableList(out);
     }
 
     /**
@@ -232,44 +273,52 @@ final class LedgerStore {
                   String exampleMacro,
                   String agentId,
                   boolean worked) {
+        requireField("fingerprint", fingerprint, 256);
+        requireField("errorCode", errorCode, MAX_FIELD_BYTES);
+        requireField("errorFragment", errorFragment, MAX_FIELD_BYTES);
+        requireField("macroPrefix", macroPrefix, MAX_FIELD_BYTES);
+        requireField("fix", fix, MAX_FIELD_BYTES);
+        requireField("exampleMacro", exampleMacro, MAX_FIELD_BYTES);
+        requireField("agentId", agentId, 16 * 1024);
         if (fingerprint == null || fingerprint.isEmpty()) {
             fingerprint = fingerprint(errorCode, errorFragment, macroPrefix);
         }
         long now = System.currentTimeMillis();
         synchronized (lock) {
-            Entry e = entries.get(fingerprint);
-            if (e == null) {
-                e = new Entry(fingerprint);
-                e.errorCode     = errorCode == null ? "" : errorCode;
-                e.errorFragment = errorFragment == null ? "" : errorFragment;
-                e.macroPrefix   = macroPrefix == null ? "" : macroPrefix;
-                e.firstSeen     = now;
-                if (worked && fix != null && !fix.isEmpty()) {
-                    e.confirmedFix = fix;
-                }
-                if (exampleMacro != null && !exampleMacro.isEmpty()) {
-                    e.exampleMacro = exampleMacro;
-                }
-                entries.put(fingerprint, e);
-            } else {
-                // Existing entry: refresh the fix if this call carried a
-                // stronger one AND reports success.
-                if (worked && fix != null && !fix.isEmpty()
-                        && (e.confirmedFix == null || e.confirmedFix.isEmpty())) {
-                    e.confirmedFix = fix;
-                }
-                if ((e.exampleMacro == null || e.exampleMacro.isEmpty())
-                        && exampleMacro != null && !exampleMacro.isEmpty()) {
-                    e.exampleMacro = exampleMacro;
-                }
+            if (writeBlocked) {
+                throw new PersistenceException("CORRUPT_STORE_BLOCKED",
+                        "ledger writes are blocked after load failure: " + loadError);
             }
-            e.timesSeen++;
-            if (worked) e.confirmationsTrue++;
-            else e.confirmationsFalse++;
-            if (agentId != null && !agentId.isEmpty()) {
-                e.confirmedBy.add(agentId);
+            Entry old = entries.get(fingerprint);
+            LinkedHashSet<String> agents = new LinkedHashSet<String>();
+            if (old != null) agents.addAll(old.confirmedBy);
+            if (agentId != null && !agentId.isEmpty()) agents.add(agentId);
+            if (agents.size() > MAX_AGENTS_PER_ENTRY) {
+                throw new PersistenceException("ENTRY_LIMIT_EXCEEDED",
+                        "confirmedBy exceeds " + MAX_AGENTS_PER_ENTRY + " agents");
             }
-            e.lastSeen = now;
+            String confirmedFix = old == null ? null : old.confirmedFix;
+            if (worked && fix != null && !fix.isEmpty()
+                    && (confirmedFix == null || confirmedFix.isEmpty())) {
+                confirmedFix = fix;
+            }
+            String example = old == null ? null : old.exampleMacro;
+            if ((example == null || example.isEmpty())
+                    && exampleMacro != null && !exampleMacro.isEmpty()) {
+                example = exampleMacro;
+            }
+            Entry e = new Entry(fingerprint,
+                    old == null ? valueOrEmpty(macroPrefix) : old.macroPrefix,
+                    old == null ? valueOrEmpty(errorCode) : old.errorCode,
+                    old == null ? valueOrEmpty(errorFragment) : old.errorFragment,
+                    confirmedFix, example, agents,
+                    incrementChecked(old == null ? 0 : old.timesSeen, "timesSeen"),
+                    incrementChecked(old == null ? 0 : old.confirmationsTrue,
+                            worked ? "confirmationsTrue" : null),
+                    incrementChecked(old == null ? 0 : old.confirmationsFalse,
+                            worked ? null : "confirmationsFalse"),
+                    old == null ? now : old.firstSeen, now);
+            entries.put(fingerprint, e);
             evictIfOversized();
             save();
             return e;
@@ -337,7 +386,7 @@ final class LedgerStore {
                 .replaceAll("(?i)line\\s+\\d+", "line ?")
                 .replaceAll("(?i)at line\\s+\\d+", "at line ?")
                 .replaceAll("\\d+", "?")
-                .toLowerCase();
+                .toLowerCase(Locale.ROOT);
         return s.trim().replaceAll("\\s+", " ");
     }
 
@@ -351,14 +400,14 @@ final class LedgerStore {
         Matcher matcher = RUN_CALL.matcher(m);
         List<String> names = new ArrayList<String>();
         while (matcher.find() && names.size() < 2) {
-            names.add(matcher.group(1).trim().toLowerCase());
+            names.add(matcher.group(1).trim().toLowerCase(Locale.ROOT));
         }
         if (names.isEmpty()) {
             // Fall back to the first non-empty line so macros without run()
             // calls still produce a stable (if coarser) signature.
             String[] lines = m.trim().split("\\r?\\n");
             for (String line : lines) {
-                String t = line.trim().toLowerCase();
+                String t = line.trim().toLowerCase(Locale.ROOT);
                 if (!t.isEmpty()) return t;
             }
             return "";
@@ -381,7 +430,7 @@ final class LedgerStore {
         } catch (Exception e) {
             // SHA-256 is guaranteed — fall back to a stable string hash so we
             // never NPE out on the hot path.
-            return String.format("%032x", (long) payload.hashCode());
+            return String.format(Locale.ROOT, "%032x", (long) payload.hashCode());
         }
     }
 
@@ -393,39 +442,55 @@ final class LedgerStore {
         synchronized (lock) {
             entries.clear();
             if (path == null || !Files.exists(path)) return;
-            try (Reader r = new InputStreamReader(Files.newInputStream(path),
-                    StandardCharsets.UTF_8);
-                 BufferedReader br = new BufferedReader(r)) {
-                JsonElement root = JsonParser.parseReader(br);
-                if (root == null || !root.isJsonObject()) return;
-                JsonElement entriesEl = root.getAsJsonObject().get("entries");
-                if (entriesEl == null || !entriesEl.isJsonArray()) return;
-                for (JsonElement el : entriesEl.getAsJsonArray()) {
-                    if (el == null || !el.isJsonObject()) continue;
-                    Entry e = Entry.fromJson(el.getAsJsonObject());
-                    if (e != null) entries.put(e.fingerprint, e);
+            try {
+                String raw = SafeFileIO.readUtf8Bounded(path, MAX_STORE_BYTES);
+                JsonElement root = JsonParser.parseString(raw);
+                if (root == null || !root.isJsonObject()) {
+                    throw new IllegalArgumentException("root is not an object");
                 }
+                JsonObject object = root.getAsJsonObject();
+                if (!object.has("version") || object.get("version").getAsInt() != FORMAT_VERSION) {
+                    throw new IllegalArgumentException("unsupported or missing version");
+                }
+                JsonElement entriesEl = object.get("entries");
+                if (entriesEl == null || !entriesEl.isJsonArray()) {
+                    throw new IllegalArgumentException("entries is not an array");
+                }
+                if (entriesEl.getAsJsonArray().size() > MAX_ENTRIES) {
+                    throw new IllegalArgumentException("entries exceeds " + MAX_ENTRIES);
+                }
+                Map<String, Entry> loaded = new HashMap<String, Entry>();
+                for (JsonElement el : entriesEl.getAsJsonArray()) {
+                    if (el == null || !el.isJsonObject()) {
+                        throw new IllegalArgumentException("entry is not an object");
+                    }
+                    Entry e = Entry.fromJson(el.getAsJsonObject());
+                    validateLoadedEntry(e);
+                    if (loaded.put(e.fingerprint, e) != null) {
+                        throw new IllegalArgumentException("duplicate fingerprint: " + e.fingerprint);
+                    }
+                }
+                entries.putAll(loaded);
                 memoryOnly = false;
-            } catch (IOException ex) {
-                memoryOnly = true;
-                System.err.println("[ImageJAI-Ledger] load failed: " + ex.getMessage());
-            } catch (RuntimeException ex) {
-                memoryOnly = true;
-                System.err.println("[ImageJAI-Ledger] parse failed: " + ex.getMessage());
+                writeBlocked = false;
+                loadError = null;
+            } catch (IOException | RuntimeException ex) {
+                markCorrupt(ex);
             }
         }
     }
 
     /** Persist the in-memory state. Callers already hold {@link #lock}. */
     private void save() {
-        if (path == null) { memoryOnly = true; return; }
+        if (writeBlocked) {
+            throw new PersistenceException("CORRUPT_STORE_BLOCKED",
+                    "refusing to overwrite a store that failed validation");
+        }
+        if (path == null) {
+            memoryOnly = true;
+            throw new PersistenceException("NO_STORE_PATH", "ledger path is unavailable");
+        }
         try {
-            Path dir = path.getParent();
-            if (dir != null) Files.createDirectories(dir);
-            Path tmp = (dir == null)
-                    ? Paths.get(path.toString() + ".tmp")
-                    : dir.resolve(path.getFileName().toString() + ".tmp");
-
             JsonObject root = new JsonObject();
             root.addProperty("version", FORMAT_VERSION);
             JsonArray arr = new JsonArray();
@@ -434,32 +499,38 @@ final class LedgerStore {
             // key by (lastSeen, fingerprint).
             TreeMap<String, Entry> sorted = new TreeMap<String, Entry>();
             for (Entry e : entries.values()) {
-                sorted.put(String.format("%020d-%s", e.lastSeen, e.fingerprint), e);
+                sorted.put(String.format(Locale.ROOT, "%020d-%s", e.lastSeen, e.fingerprint), e);
             }
             for (Entry e : sorted.values()) arr.add(e.toJson());
             root.add("entries", arr);
-
-            try (Writer w = new OutputStreamWriter(Files.newOutputStream(tmp),
-                    StandardCharsets.UTF_8);
-                 BufferedWriter bw = new BufferedWriter(w)) {
-                bw.write(root.toString());
+            String json = root.toString();
+            if (json.getBytes(StandardCharsets.UTF_8).length > MAX_STORE_BYTES) {
+                throw new IOException("serialized store exceeds " + MAX_STORE_BYTES + " bytes");
             }
-            try {
-                Files.move(tmp, path, StandardCopyOption.ATOMIC_MOVE,
-                        StandardCopyOption.REPLACE_EXISTING);
-            } catch (AtomicMoveNotSupportedException fallback) {
-                // Windows across drives can't atomic-move. REPLACE_EXISTING
-                // alone is not torn-write-safe but is the best we can do.
-                Files.move(tmp, path, StandardCopyOption.REPLACE_EXISTING);
-            }
+            SafeFileIO.writeUtf8Atomically(path, json);
             memoryOnly = false;
         } catch (IOException ex) {
             memoryOnly = true;
-            System.err.println("[ImageJAI-Ledger] save failed: " + ex.getMessage());
+            throw new PersistenceException("STORE_WRITE_FAILED",
+                    "ledger save failed: " + ex.getMessage());
         } catch (SecurityException ex) {
             memoryOnly = true;
-            System.err.println("[ImageJAI-Ledger] save denied: " + ex.getMessage());
+            throw new PersistenceException("STORE_WRITE_DENIED",
+                    "ledger save denied: " + ex.getMessage());
         }
+    }
+
+    private void markCorrupt(Exception ex) {
+        memoryOnly = true;
+        writeBlocked = true;
+        loadError = ex.getClass().getSimpleName() + ": " + ex.getMessage();
+        try {
+            quarantinedPath = SafeFileIO.quarantine(path, loadError);
+        } catch (IOException quarantineFailure) {
+            loadError += "; quarantine failed: " + quarantineFailure.getMessage();
+        }
+        System.err.println("[ImageJAI-Ledger] invalid store quarantined; writes blocked: "
+                + loadError);
     }
 
     private void evictIfOversized() {
@@ -471,7 +542,8 @@ final class LedgerStore {
         Collections.sort(all, new Comparator<Entry>() {
             @Override
             public int compare(Entry a, Entry b) {
-                return Long.compare(a.lastSeen, b.lastSeen);
+                int time = Long.compare(a.lastSeen, b.lastSeen);
+                return time != 0 ? time : a.fingerprint.compareTo(b.fingerprint);
             }
         });
         int toRemove = entries.size() - MAX_ENTRIES;
@@ -504,5 +576,57 @@ final class LedgerStore {
         JsonElement el = o.get(key);
         if (el == null || !el.isJsonPrimitive()) return def;
         try { return el.getAsLong(); } catch (Exception e) { return def; }
+    }
+
+    private static int requiredNonNegativeInt(JsonObject o, String key) {
+        if (o == null || !o.has(key)) throw new IllegalArgumentException("missing " + key);
+        int value;
+        try { value = o.get(key).getAsInt(); }
+        catch (Exception e) { throw new IllegalArgumentException("invalid " + key, e); }
+        if (value < 0) throw new IllegalArgumentException("negative " + key);
+        return value;
+    }
+
+    private static long requiredNonNegativeLong(JsonObject o, String key) {
+        if (o == null || !o.has(key)) throw new IllegalArgumentException("missing " + key);
+        long value;
+        try { value = o.get(key).getAsLong(); }
+        catch (Exception e) { throw new IllegalArgumentException("invalid " + key, e); }
+        if (value < 0L) throw new IllegalArgumentException("negative " + key);
+        return value;
+    }
+
+    private static void validateLoadedEntry(Entry e) {
+        requireField("fingerprint", e.fingerprint, 256);
+        requireField("macroPrefix", e.macroPrefix, MAX_FIELD_BYTES);
+        requireField("errorCode", e.errorCode, MAX_FIELD_BYTES);
+        requireField("errorFragment", e.errorFragment, MAX_FIELD_BYTES);
+        requireField("confirmedFix", e.confirmedFix, MAX_FIELD_BYTES);
+        requireField("exampleMacro", e.exampleMacro, MAX_FIELD_BYTES);
+        if (e.confirmedBy.size() > MAX_AGENTS_PER_ENTRY) {
+            throw new IllegalArgumentException("too many confirmedBy values");
+        }
+        for (String agent : e.confirmedBy) requireField("confirmedBy", agent, 16 * 1024);
+    }
+
+    private static void requireField(String name, String value, int maxBytes) {
+        if (value == null) return;
+        int bytes = value.getBytes(StandardCharsets.UTF_8).length;
+        if (bytes > maxBytes) {
+            throw new PersistenceException("ENTRY_LIMIT_EXCEEDED",
+                    name + " exceeds " + maxBytes + " UTF-8 bytes");
+        }
+    }
+
+    private static int incrementChecked(int current, String fieldToIncrement) {
+        if (fieldToIncrement == null) return current;
+        if (current == Integer.MAX_VALUE) {
+            throw new PersistenceException("COUNTER_OVERFLOW", fieldToIncrement + " overflow");
+        }
+        return current + 1;
+    }
+
+    private static String valueOrEmpty(String value) {
+        return value == null ? "" : value;
     }
 }

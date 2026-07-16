@@ -31,10 +31,35 @@ import platform
 import re
 import subprocess
 import sys
+import tempfile
 
 AGENT_DIR = os.path.dirname(os.path.abspath(__file__))
 TMP_DIR = os.path.join(AGENT_DIR, ".tmp")
 IMAGEJAI_VERSION = "1.0.0-pre"  # bump on release; CITATION.cff is canonical
+
+
+def atomic_write_text(path, text):
+    """Publish a complete UTF-8 document without exposing a partial file."""
+    directory = os.path.dirname(os.path.abspath(path))
+    os.makedirs(directory, exist_ok=True)
+    temp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(
+                mode="w", encoding="utf-8", dir=directory,
+                prefix=os.path.basename(path) + ".", suffix=".tmp",
+                delete=False) as handle:
+            temp_path = handle.name
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp_path, path)
+        temp_path = None
+    finally:
+        if temp_path:
+            try:
+                os.unlink(temp_path)
+            except OSError:
+                pass
 
 
 def strip_envelope(s):
@@ -363,6 +388,8 @@ def main():
     ap.add_argument("--from-file", metavar="PATH",
                     help="offline: read {session,metadata,graph,info} dict from JSON")
     ap.add_argument("--out", metavar="PATH", help="override output path")
+    ap.add_argument("--dataset-json", metavar="JSON",
+                    help="initiating dataset captured by the server at admission")
     args = ap.parse_args()
 
     if args.from_file:
@@ -381,6 +408,27 @@ def main():
         info = (state or {}).get("activeImage") if state else None
         header_path = path
 
+    if args.dataset_json:
+        initiating = json.loads(args.dataset_json)
+        live = info if isinstance(info, dict) else {}
+        bound_path = initiating.get("filePath")
+        live_path = live.get("filePath")
+        same_dataset = False
+        if bound_path and live_path:
+            same_dataset = (os.path.normcase(os.path.abspath(bound_path))
+                            == os.path.normcase(os.path.abspath(live_path)))
+        elif initiating.get("identity") and live.get("identity"):
+            same_dataset = initiating["identity"] == live["identity"]
+        if not same_dataset:
+            # Never describe the dataset that happened to become current while
+            # the subprocess was starting. Unknown metadata is safer than
+            # confidently attaching another image's acquisition details.
+            metadata = None
+            live = {}
+        info = dict(live)
+        info.update({key: value for key, value in initiating.items()
+                     if value is not None and value != -1})
+
     fields = extract_fields(session, metadata, graph, info)
     text, populated, total = render(fields, header_path)
 
@@ -391,8 +439,7 @@ def main():
         return 0
 
     out, fallback = (args.out, False) if args.out else output_path(metadata, info)
-    with open(out, "w", encoding="utf-8") as f:
-        f.write(text)
+    atomic_write_text(out, text)
     if fallback:
         sys.stderr.write("warning: no active image; wrote to fallback %s\n" % out)
     print("emitted methods.md: %d/%d WG11 fields populated, %d marked [unknown] -> %s"

@@ -10,6 +10,8 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Instant;
 import java.util.Collections;
+import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
@@ -239,6 +241,38 @@ public class AuditLogTest {
         assertEquals("third", recent.get(1).command());
         assertEquals(0, log.recent(0).size());
         log.shutdownAndAwait(100);
+    }
+
+    @Test
+    public void formulaLikeCellsAreProtectedButRoundTripLosslessly() {
+        AuditRow dangerous = row("=SUM(A1:A2)", "+cmd", "@capture", "-1+2");
+        String csv = dangerous.toCsvLine();
+
+        assertTrue(csv.contains("'=SUM(A1:A2)"));
+        assertTrue(csv.contains("'+cmd"));
+        assertTrue(csv.contains("'@capture"));
+        assertTrue(csv.contains("'-1+2"));
+        assertEquals(dangerous, AuditRow.fromCsvLine(csv));
+    }
+
+    @Test
+    public void summaryReportsMalformedRowsAndKeepsDeterministicOrdering() throws Exception {
+        Path csv = tmp.newFolder("malformed").toPath().resolve(AuditLog.FILE_NAME);
+        AuditRow z = row("s", "z-command", "", "line one\nline two");
+        AuditRow a = row("s", "a-command", "", "");
+        String invalid = "not-a-time,s,ping,pseudonymised,model,source,1,2,hash,false,,note";
+        Files.writeString(csv, AuditLog.HEADER + "\n" + z.toCsvLine() + "\n"
+                + a.toCsvLine() + "\n" + invalid + "\n\"unterminated",
+                StandardCharsets.UTF_8);
+
+        AuditSummary summary = AuditLog.summaryFor(csv);
+
+        assertEquals(2, summary.totalRows());
+        assertEquals(2, summary.malformedRows());
+        assertEquals(2, summary.malformedDiagnostics().size());
+        assertTrue(summary.malformedDiagnostics().get(0).contains("line"));
+        assertEquals(Arrays.asList("a-command", "z-command"),
+                new ArrayList<String>(summary.commandCounts().keySet()));
     }
 
     private static AuditRow row(String session, String command,
