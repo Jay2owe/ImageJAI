@@ -122,6 +122,7 @@ public class AgentLauncher {
     static final String CLOUD_OLLAMA_REFUSAL =
             "On-premises mode cannot use cloud-hosted Ollama models. "
           + "Switch to a local tag (e.g. gemma3:27b) or change the posture for this folder.";
+    static final String AGENT_WORKSPACE_ENV = "IMAGEJAI_AGENT_WORKSPACE";
 
     private final String agentWorkspace;
     private final int tcpPort;
@@ -354,6 +355,7 @@ public class AgentLauncher {
         Map<String, String> env = new LinkedHashMap<>();
         env.put("IMAGEJAI_TCP_PORT", String.valueOf(tcpPort));
         env.put("IMAGEJAI_SAFE_MODE", settings.safeModeEnabled ? "1" : "0");
+        addRunnerEnvironment(env);
         addRecipeEnvironment(env);
         addAuditEnvironment(env, agent);
 
@@ -394,10 +396,20 @@ public class AgentLauncher {
         env.put("TERM", "xterm-256color");
         env.put("COLORTERM", "truecolor");
         env.put("TERMINAL_EMULATOR", "JetBrains-JediTerm");
+        addRunnerEnvironment(env);
         addRecipeEnvironment(env);
         addAuditEnvironment(env, agent);
 
         return new AgentLaunchSpec(agent, cmd, new File(agentWorkspace), env);
+    }
+
+    private void addRunnerEnvironment(Map<String, String> env) {
+        if (agentWorkspace == null || agentWorkspace.trim().isEmpty()) {
+            return;
+        }
+        env.put(AGENT_WORKSPACE_ENV,
+                new File(agentWorkspace).getAbsoluteFile().toPath()
+                        .normalize().toString());
     }
 
     /**

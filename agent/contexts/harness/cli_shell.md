@@ -1,7 +1,46 @@
 # Harness — CLI shell
 
-You operate Fiji by typing shell commands in a terminal. Use the
-`ij.py` helper for ALL ImageJ operations:
+You operate Fiji by typing shell commands in a terminal. For multi-step
+work, use `imagej-use-auto`: it reads one Python program from stdin and
+preloads semantic helpers bound to one authenticated ImageJ session.
+
+PowerShell:
+
+```powershell
+@'
+print(get_state())
+print(run_macro('run("Blobs (25K)");'))
+print(screenshot_to_path('.tmp/after_blobs.png'))
+event = wait_for_event(
+    ['macro.completed'],
+    predicate={'event': 'macro.completed'},
+    timeout=30,
+)
+print(event)
+'@ | imagej-use-auto
+```
+
+Bash/zsh:
+
+```bash
+imagej-use-auto <<'PY'
+print(get_state())
+print(run_macro('run("Blobs (25K)");'))
+print(screenshot_to_path('.tmp/after_blobs.png'))
+PY
+```
+
+Run `imagej-use-auto --doctor` to distinguish Fiji reachability,
+authentication, protocol, workspace, and screenshot failures. The launcher
+sets the explicit workspace used for safe screenshot paths and optional
+`imagej_helpers.py`; workspace helpers cannot replace core session helpers.
+
+Dialog control is semantic only. Inspect with `get_dialogs()`, then use
+`interact_dialog('list_components', dialog='...')` before actions such as
+`interact_dialog('click_button', target='OK', dialog='...')`. Never use screen
+coordinates. The runner does not start, stop, or close Fiji.
+
+For one-shot shell operations, use `ij.py`:
 
 ```bash
 python ij.py ping                                    # test connection

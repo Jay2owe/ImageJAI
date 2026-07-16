@@ -49,7 +49,7 @@ Conflict watchlist:
 | 11 | completed | `4d43c8a` | 67/67 focused undo/exploration tests passed; all Stage 11 tests passed inside the 911-test integrated run, with only six concurrent Stage 22 intent failures remaining |
 | 12 | completed | `eb451ca` | 61 focused image/state/integration tests passed; the 890-test run had only four then-in-progress Stage 11 undo failures, all subsequently green in Stage 11's integrated rerun |
 | 13 | completed | `b0a5617` | 37/37 focused reactive, event-bus, and stable duplicate-title identity tests passed; admission/deadlines, policy/coordinator/provenance, capture containment, quarantine, retention, diagnostics, and stable image/dialog lifecycles are implemented |
-| 14 | pending | - | - |
+| 14 | completed | `23a2417` | 69/69 expanded focused Java tests, 29/29 final affected Java tests, and 15/15 Python provenance/session tests passed; the 951-test run had only five Stage 22 failures queued for correction |
 | 15 | completed | `ff6bf39` | 16 contract/legacy tests passed; all 28 recipes validate and whole-directory dry-run; unsafe file traversal/symlink escapes and unsupported later steps block before Fiji mutation |
 | 16 | completed | `6ad41c7` | 37 helper regressions passed; compact 4M-pixel buffer and randomized exact-median check passed |
 | 17 | completed | `20ca91d` | 24 workflow/cache/lint tests passed; practice dry-run and Python compilation passed; trainer/practice restore images, active cursor, Results, ROIs, measurements, redirect, and BlackBackground on success/failure |

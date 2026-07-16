@@ -395,8 +395,26 @@ class ImageJSession:
 
             try:
                 resp = self._exchange(req, timeout)
-            except (socket.error, OSError, ValueError) as exc:
-                return {"ok": False, "error": "hello failed: {}".format(exc)}
+            except (socket.error, OSError) as exc:
+                return {
+                    "ok": False,
+                    "error": {
+                        "code": "transport_unreachable",
+                        "message": "hello failed: {}".format(exc),
+                        "category": "transport",
+                        "retry_safe": True,
+                    },
+                }
+            except ValueError as exc:
+                return {
+                    "ok": False,
+                    "error": {
+                        "code": "invalid_hello",
+                        "message": "Server hello was not valid JSON: {}".format(exc),
+                        "category": "protocol",
+                        "retry_safe": False,
+                    },
+                }
 
             result = resp.get("result") if isinstance(resp, dict) else None
             session_id = result.get("session_id") if isinstance(result, dict) else None
@@ -472,7 +490,7 @@ class ImageJSession:
         return resp
 
     def events(self, topics=None, reconnect=True, reconnect_delay=2.0,
-               read_timeout=None):
+               read_timeout=None, deadline=None):
         """Yield authenticated event frames for this durable session.
 
         A stream uses a long-lived socket, but its authorization still comes
@@ -512,7 +530,15 @@ class ImageJSession:
                 request["model_endpoint"] = self.model_endpoint
 
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.settimeout(read_timeout)
+            effective_read_timeout = read_timeout
+            if deadline is not None:
+                remaining = deadline - _time.monotonic()
+                if remaining <= 0:
+                    return
+                effective_read_timeout = (
+                    remaining if read_timeout is None
+                    else min(read_timeout, remaining))
+            sock.settimeout(effective_read_timeout)
             saw_protocol_error = False
             try:
                 sock.connect((self.host, self.port))
@@ -533,6 +559,13 @@ class ImageJSession:
                         except (UnicodeDecodeError, ValueError):
                             continue
                         yield frame
+                        if deadline is not None:
+                            remaining = deadline - _time.monotonic()
+                            if remaining <= 0:
+                                return
+                            sock.settimeout(
+                                remaining if read_timeout is None
+                                else min(read_timeout, remaining))
                         if isinstance(frame, dict) and frame.get("ok") is False:
                             saw_protocol_error = True
                             code = _response_error_code(frame)
@@ -554,6 +587,81 @@ class ImageJSession:
                 _time.sleep(reconnect_delay)
             except KeyboardInterrupt:
                 return
+
+    # Bound helpers keep imagej-use-auto on this exact authenticated session.
+    # They intentionally mirror the stable module-level API without going
+    # through the process-global session cache.
+    def ping(self):
+        return self.request({"command": "ping"})
+
+    def get_state(self):
+        return self.request({"command": "get_state"})
+
+    def get_image_info(self):
+        return self.request({"command": "get_image_info"})
+
+    def get_results_table(self):
+        return self.request({"command": "get_results_table"})
+
+    def run_macro(self, code):
+        return self.request({"command": "execute_macro", "code": code})
+
+    def run_script(self, code, language="groovy", timeout=180):
+        return self.request({
+            "command": "run_script",
+            "language": language,
+            "code": code,
+        }, timeout=timeout)
+
+    def capture_image(self, max_size=1024):
+        return self.request({"command": "capture_image", "maxSize": max_size})
+
+    def get_dialogs(self):
+        return self.request({"command": "get_dialogs"})
+
+    def interact_dialog(self, action, **kwargs):
+        command = dict(kwargs)
+        command["command"] = "interact_dialog"
+        command["action"] = action
+        return self.request(command)
+
+    def wait_for_event(self, topics=None, predicate=None, timeout=60):
+        """Wait for one governed event on this session.
+
+        ``predicate`` may be a callable or a nested mapping whose values must
+        be present in the event. Subscription acknowledgements and heartbeat
+        frames are transport metadata and are never returned as events.
+        """
+        import time as _time
+
+        if timeout is None or timeout <= 0:
+            return None
+        deadline = _time.monotonic() + timeout
+        stream = self.events(
+            topics=topics, reconnect=False, read_timeout=timeout,
+            deadline=deadline)
+        try:
+            for frame in stream:
+                if _is_event_transport_frame(frame):
+                    continue
+                if predicate is None:
+                    return frame
+                if callable(predicate):
+                    if predicate(frame):
+                        return frame
+                elif isinstance(predicate, dict):
+                    if _mapping_contains(frame, predicate):
+                        return frame
+                else:
+                    raise TypeError("event predicate must be callable, dict, or None")
+                remaining = deadline - _time.monotonic()
+                if remaining <= 0:
+                    return None
+        finally:
+            close = getattr(stream, "close", None)
+            if close is not None:
+                close()
+        return None
 
     def _dialog_fallback(self):
         try:
@@ -599,6 +707,29 @@ def _response_error_code(resp):
         return None
     error = resp.get("error")
     return error.get("code") if isinstance(error, dict) else None
+
+
+def _is_event_transport_frame(frame):
+    if not isinstance(frame, dict):
+        return False
+    frame_type = frame.get("type") or frame.get("event")
+    return frame_type in ("subscribed", "heartbeat")
+
+
+def _mapping_contains(value, expected):
+    """Return whether ``value`` recursively contains the expected mapping."""
+    if not isinstance(value, dict):
+        return False
+    for key, expected_value in expected.items():
+        if key not in value:
+            return False
+        actual = value[key]
+        if isinstance(expected_value, dict):
+            if not _mapping_contains(actual, expected_value):
+                return False
+        elif actual != expected_value:
+            return False
+    return True
 
 
 _SESSIONS = {}

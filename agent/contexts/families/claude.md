@@ -29,10 +29,10 @@ Claude:
 python ij.py capabilities
 ```
 
-Every new socket is independent today — `ij.py` opens one socket
-per command, so the hello response is informational. Future
-steps will key caps off the agent id and persist them across
-commands.
+The Java server still closes each command socket after one reply, but
+`ImageJSession` preserves the authenticated protocol session across those
+sockets. `imagej-use-auto` negotiates once and binds every preloaded helper,
+including governed event waits, to that same durable session.
 
 ## Style
 
