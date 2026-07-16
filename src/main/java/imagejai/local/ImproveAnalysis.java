@@ -25,6 +25,12 @@ public final class ImproveAnalysis {
 
     public static List<MissBucket> fromJournal(FrictionLogJournal journal,
                                                IntentMatcher matcher) {
+        return fromJournal(journal, matcher, Integer.MAX_VALUE);
+    }
+
+    public static List<MissBucket> fromJournal(FrictionLogJournal journal,
+                                               IntentMatcher matcher,
+                                               int maxBuckets) {
         if (journal == null || matcher == null) {
             return java.util.Collections.emptyList();
         }
@@ -58,8 +64,17 @@ public final class ImproveAnalysis {
             }
         }
 
-        List<MissBucket> out = new ArrayList<MissBucket>();
-        for (BucketAccumulator bucket : buckets.values()) {
+        List<BucketAccumulator> rankedBuckets = new ArrayList<BucketAccumulator>(buckets.values());
+        rankedBuckets.sort(Comparator
+                .comparingInt((BucketAccumulator bucket) -> bucket.count).reversed()
+                .thenComparing(Comparator.comparingLong(
+                        (BucketAccumulator bucket) -> bucket.lastSeenMs).reversed())
+                .thenComparing(bucket -> bucket.phrase));
+
+        int limit = Math.max(0, Math.min(maxBuckets, rankedBuckets.size()));
+        List<MissBucket> out = new ArrayList<MissBucket>(limit);
+        for (int i = 0; i < limit; i++) {
+            BucketAccumulator bucket = rankedBuckets.get(i);
             Optional<RankedPhrase> closest = Optional.empty();
             List<RankedPhrase> ranked = matcher.topK(bucket.phrase, 1);
             if (!ranked.isEmpty() && ranked.get(0).score() >= CLOSEST_INTENT_FLOOR) {
@@ -67,10 +82,6 @@ public final class ImproveAnalysis {
             }
             out.add(new MissBucket(bucket.phrase, bucket.count, bucket.lastSeenMs, closest));
         }
-        out.sort(Comparator
-                .comparingInt(MissBucket::count).reversed()
-                .thenComparing(Comparator.comparingLong(MissBucket::lastSeenMs).reversed())
-                .thenComparing(MissBucket::phrase));
         return out;
     }
 

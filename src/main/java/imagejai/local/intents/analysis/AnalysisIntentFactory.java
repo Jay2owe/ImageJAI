@@ -50,6 +50,8 @@ public final class AnalysisIntentFactory {
         intents.add(new OpenGaussianBlurDialogIntent());
         intents.add(new OpenSubtractBackgroundDialogIntent());
 
+        intents.addAll(ReviewedAnalysisAliases.createAll());
+
         return intents;
     }
 }

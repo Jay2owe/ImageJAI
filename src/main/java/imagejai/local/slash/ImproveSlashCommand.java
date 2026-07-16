@@ -13,6 +13,8 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
 
+import javax.swing.SwingUtilities;
+
 public class ImproveSlashCommand implements SlashCommand {
     private static final int MAX_BUCKETS = 20;
 
@@ -52,11 +54,10 @@ public class ImproveSlashCommand implements SlashCommand {
         if (journal == null) {
             return AssistantReply.text("No friction journal is configured.");
         }
-        List<MissBucket> buckets = ImproveAnalysis.fromJournal(journal, context.matcher());
-        if (buckets.isEmpty()) {
-            return AssistantReply.text("No misses to improve from.");
+        if (SwingUtilities.isEventDispatchThread()) {
+            return AssistantReply.text(
+                    "Cannot run /improve on the Swing event thread; run it from the chat input so it uses the background assistant worker.");
         }
-
         Path yaml = intentsYamlPath == null ? IntentsYamlWriter.defaultIntentsPath() : intentsYamlPath;
         yaml = yaml.toAbsolutePath().normalize();
         if (!Files.exists(yaml)) {
@@ -68,8 +69,13 @@ public class ImproveSlashCommand implements SlashCommand {
                     + " is not a regular file.");
         }
 
-        List<MissBucket> top = buckets.subList(0, Math.min(MAX_BUCKETS, buckets.size()));
-        ImproveSession session = ImproveSession.start(top, yaml, writer);
+        List<MissBucket> buckets = ImproveAnalysis.fromJournal(
+                journal, context.matcher(), MAX_BUCKETS);
+        if (buckets.isEmpty()) {
+            return AssistantReply.text("No misses to improve from.");
+        }
+
+        ImproveSession session = ImproveSession.start(buckets, yaml, writer);
         context.startImproveSession(session);
         return AssistantReply.text(session.firstPrompt());
     }

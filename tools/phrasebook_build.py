@@ -354,6 +354,19 @@ def existing_phrasebook(path: Path) -> Dict[str, object]:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def preservation_baseline(output: Path, intents_file: Path) -> Dict[str, object]:
+    """Use the canonical phrasebook when a default build targets a new file."""
+    if output.exists():
+        return existing_phrasebook(output)
+    try:
+        uses_default_intents = intents_file.resolve() == DEFAULT_INTENTS.resolve()
+    except OSError:
+        uses_default_intents = False
+    if uses_default_intents and DEFAULT_PHRASEBOOK.exists():
+        return existing_phrasebook(DEFAULT_PHRASEBOOK)
+    return {"version": 1, "intents": []}
+
+
 def build_phrasebook(
     intents: Sequence[IntentDef],
     provider: LlmProvider,
@@ -517,6 +530,25 @@ def merge_selected_intent(existing: Dict[str, object], generated: Dict[str, obje
     return {"version": 1, "intents": merged}
 
 
+def intent_ids(document: Dict[str, object]) -> set[str]:
+    return {
+        entry["id"]
+        for entry in document.get("intents", [])
+        if isinstance(entry, dict) and isinstance(entry.get("id"), str)
+    }
+
+
+def validate_id_preservation(existing: Dict[str, object],
+                             generated: Dict[str, object]) -> None:
+    """Reject accidental canonical-ID deletion with a deterministic diff."""
+    removed = sorted(intent_ids(existing) - intent_ids(generated))
+    if removed:
+        raise ValueError(
+            "generation removed canonical intent IDs without --prune-unlisted: "
+            + ", ".join(removed)
+        )
+
+
 def remove_existing_phrase_collisions(existing: Dict[str, object],
                                       generated: Dict[str, object]) -> Dict[str, object]:
     existing_phrases: set[str] = set()
@@ -539,6 +571,17 @@ def remove_existing_phrase_collisions(existing: Dict[str, object],
             copy["phrases"] = phrases
             filtered.append(copy)
     return {"version": 1, "intents": filtered}
+
+
+def without_intent_ids(document: Dict[str, object], excluded: set[str]) -> Dict[str, object]:
+    return {
+        "version": 1,
+        "intents": [
+            entry
+            for entry in document.get("intents", [])
+            if isinstance(entry, dict) and entry.get("id") not in excluded
+        ],
+    }
 
 
 def java_load_check(json_path: Path) -> None:
@@ -613,7 +656,12 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--provider", choices=("mock", "gemini", "claude", "codex"), default=os.environ.get("LOCAL_ASSISTANT_LLM_PROVIDER", "gemini"))
     parser.add_argument("--model", help="Provider model override")
     parser.add_argument("--dry-run", action="store_true", help="Print generated JSON to stdout without writing")
-    parser.add_argument("--keep", action="store_true", help="Keep existing intent entries instead of regenerating them")
+    parser.add_argument("--keep", action="store_true", help="Reuse existing phrases for listed intent IDs instead of regenerating them")
+    parser.add_argument(
+        "--prune-unlisted",
+        action="store_true",
+        help="DESTRUCTIVE: remove existing IDs that are absent from the selected intents input",
+    )
     parser.add_argument("--resume", action="store_true", help="Reuse intents from <output>.partial.json that already have at least --minimum phrases. Combine with mid-run failure recovery.")
     parser.add_argument("--minimum", type=int, default=40, help="Minimum unique normalised phrases per intent")
     parser.add_argument("--java-load-check", action="store_true", help="After writing, verify the output through IntentLibrary.load()")
@@ -628,7 +676,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         # not throw away work already done. Skipped on --dry-run.
         checkpoint_path = None if args.dry_run else args.output.with_suffix(args.output.suffix + ".partial")
         if args.menu_dump:
-            existing_output = existing_phrasebook(args.output)
+            existing_output = preservation_baseline(args.output, args.intents_file)
             existing_ids = {
                 entry["id"]
                 for entry in existing_output.get("intents", [])
@@ -643,11 +691,22 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             phrasebook = merge_selected_intent(existing_output, generated)
         else:
             intents = select_intents(load_intents(args.intents_file), args.intent)
-            existing = existing_phrasebook(args.output) if args.keep else None
-            phrasebook = build_phrasebook(intents, provider, minimum=args.minimum, existing=existing,
+            existing_output = preservation_baseline(args.output, args.intents_file)
+            reusable = existing_output if args.keep else None
+            generated = build_phrasebook(intents, provider, minimum=args.minimum, existing=reusable,
                                           keep=args.keep, resume=args.resume, checkpoint_path=checkpoint_path)
-            if args.intent and not args.dry_run and args.output.exists():
-                phrasebook = merge_selected_intent(existing_phrasebook(args.output), phrasebook)
+            # Preserve every canonical ID by default, even during a full build.
+            # Pruning requires the deliberately named destructive flag.
+            if args.prune_unlisted or (args.dry_run and args.intent):
+                phrasebook = generated
+            else:
+                # Existing IDs that are not being regenerated are canonical.
+                # Keep their phrase ownership and discard colliding generated
+                # variants before merging, rather than mutating preserved rows.
+                preserved = without_intent_ids(existing_output, intent_ids(generated))
+                generated = remove_existing_phrase_collisions(preserved, generated)
+                phrasebook = merge_selected_intent(existing_output, generated)
+                validate_id_preservation(existing_output, phrasebook)
         validate_schema(phrasebook, require_normalised_phrases=not bool(args.menu_dump))
         check_cross_intent_collisions(phrasebook)
         rendered = json.dumps(phrasebook, indent=2, ensure_ascii=False) + "\n"
@@ -659,8 +718,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 print(rendered, end="")
             return 0
         args.output.parent.mkdir(parents=True, exist_ok=True)
-        args.output.write_text(rendered, encoding="utf-8")
-        print(f"wrote {args.output}")
+        previous = args.output.read_text(encoding="utf-8") if args.output.exists() else None
+        if previous == rendered:
+            print(f"unchanged {args.output}")
+        else:
+            args.output.write_text(rendered, encoding="utf-8")
+            print(f"wrote {args.output}")
         # Run completed cleanly; checkpoint no longer needed.
         if checkpoint_path and checkpoint_path.exists():
             try:

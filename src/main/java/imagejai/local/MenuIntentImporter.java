@@ -13,6 +13,7 @@ import java.util.regex.Pattern;
  */
 public final class MenuIntentImporter {
 
+    private static final String DESCRIPTION_PREFIX = "Open menu command: ";
     private static final Pattern NON_ALNUM = Pattern.compile("[^a-z0-9]+");
     private static final Pattern EDGE_DOTS = Pattern.compile("^\\.+|\\.+$");
     private static final Pattern TRAILING_DOTS = Pattern.compile("\\.+$");
@@ -58,6 +59,19 @@ public final class MenuIntentImporter {
         }
         String lower = value.toLowerCase(Locale.ROOT);
         return EDGE_DOTS.matcher(NON_ALNUM.matcher(lower).replaceAll(".")).replaceAll("");
+    }
+
+    /** Build the same reviewed menu handler from a canonical phrasebook row. */
+    static Intent fromPhrasebook(String id, String description) {
+        if (id == null || !id.startsWith("menu.") || description == null
+                || !description.startsWith(DESCRIPTION_PREFIX)) {
+            return null;
+        }
+        String commandName = description.substring(DESCRIPTION_PREFIX.length()).trim();
+        if (commandName.length() == 0 || !id.equals("menu." + slugify(commandName))) {
+            return null;
+        }
+        return new MenuIntent(id, commandName);
     }
 
     private static void addCommandPhrases(IntentLibrary library, String id,

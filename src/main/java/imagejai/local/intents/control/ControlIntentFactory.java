@@ -85,6 +85,7 @@ public final class ControlIntentFactory {
         intents.add(new CommandsIntent());
         intents.add(new CurrentAgentIntent());
         intents.add(new VersionIntent());
+        intents.addAll(ReviewedControlAliases.createAll());
         return intents;
     }
 }

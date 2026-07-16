@@ -7,11 +7,15 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.regex.Pattern;
+
+import javax.swing.SwingUtilities;
 
 /**
  * Tier-1 matcher backed by the baked phrasebook hash map.
@@ -19,11 +23,35 @@ import java.util.regex.Pattern;
 public class IntentMatcher {
 
     private static final Pattern PUNCT = Pattern.compile("[^a-z0-9 ]");
+    private static final Pattern PUNCT_EXCEPT_DECIMAL = Pattern.compile("[^a-z0-9. ]");
     private static final Pattern WS = Pattern.compile("\\s+");
     private static final double SUGGESTION_FLOOR = 0.70;
+    private static final int MAX_TOP_K = 20;
+    private static final Comparator<RankedPhrase> RANK_ORDER =
+            new Comparator<RankedPhrase>() {
+                @Override
+                public int compare(RankedPhrase a, RankedPhrase b) {
+                    int byScore = Double.compare(b.score(), a.score());
+                    if (byScore != 0) {
+                        return byScore;
+                    }
+                    int byLength = Integer.compare(a.phrase().length(), b.phrase().length());
+                    if (byLength != 0) {
+                        return byLength;
+                    }
+                    int byIntent = a.intentId().compareTo(b.intentId());
+                    if (byIntent != 0) {
+                        return byIntent;
+                    }
+                    return a.phrase().compareTo(b.phrase());
+                }
+            };
 
     private final IntentLibrary library;
     private final Settings settings;
+    private final Map<String, String> exactPhrases;
+    private final List<PreparedPhrase> corpus;
+    private final AtomicInteger lastCandidateEvaluations = new AtomicInteger();
 
     public IntentMatcher() {
         this(IntentLibrary.load(), new Settings());
@@ -36,10 +64,24 @@ public class IntentMatcher {
     public IntentMatcher(IntentLibrary library, Settings settings) {
         this.library = library == null ? IntentLibrary.load() : library;
         this.settings = settings == null ? new Settings() : settings;
+        Map<String, String> exact = new LinkedHashMap<String, String>();
+        List<PreparedPhrase> prepared = new ArrayList<PreparedPhrase>();
+        Map<String, String> phraseToIntent = this.library.phraseToIntentId();
+        for (String rawPhrase : this.library.allPhrases()) {
+            String phrase = normalise(rawPhrase);
+            String intentId = phraseToIntent.get(phrase);
+            if (phrase.length() == 0 || intentId == null) {
+                continue;
+            }
+            exact.put(phrase, intentId);
+            prepared.add(new PreparedPhrase(phrase, sortTokens(phrase), intentId));
+        }
+        this.exactPhrases = Collections.unmodifiableMap(exact);
+        this.corpus = Collections.unmodifiableList(prepared);
     }
 
     public Optional<MatchedIntent> match(String input) {
-        String intentId = library.phraseToIntentId().get(normalise(input));
+        String intentId = exactPhrases.get(normalise(input));
         if (intentId != null) {
             return Optional.of(new MatchedIntent(
                     intentId,
@@ -57,42 +99,44 @@ public class IntentMatcher {
 
     public List<RankedPhrase> topK(String input, int k) {
         if (k <= 0) {
+            lastCandidateEvaluations.set(0);
             return Collections.emptyList();
         }
         String key = normalise(input);
         if (key.length() == 0) {
+            lastCandidateEvaluations.set(0);
             return Collections.emptyList();
         }
-
-        List<RankedPhrase> ranked = new ArrayList<RankedPhrase>();
-        Map<String, String> phraseToIntent = library.phraseToIntentId();
-        String sortedKey = sortTokens(key);
-        for (String phrase : library.allPhrases()) {
-            String intentId = phraseToIntent.get(phrase);
-            double score = similarity(key, sortedKey, phrase);
-            ranked.add(new RankedPhrase(phrase, intentId, score));
+        if (SwingUtilities.isEventDispatchThread()) {
+            throw new IllegalStateException(
+                    "Fuzzy intent matching must run off the Swing event thread");
         }
 
-        Collections.sort(ranked, new Comparator<RankedPhrase>() {
-            @Override
-            public int compare(RankedPhrase a, RankedPhrase b) {
-                int byScore = Double.compare(b.score(), a.score());
-                if (byScore != 0) {
-                    return byScore;
-                }
-                int byLength = Integer.compare(a.phrase().length(), b.phrase().length());
-                if (byLength != 0) {
-                    return byLength;
-                }
-                return a.phrase().compareTo(b.phrase());
+        int limit = Math.min(k, MAX_TOP_K);
+        Map<String, RankedPhrase> bestByIntent = new HashMap<String, RankedPhrase>();
+        String sortedKey = sortTokens(key);
+        int evaluations = 0;
+        for (PreparedPhrase phrase : corpus) {
+            double score = similarity(key, sortedKey, phrase);
+            evaluations++;
+            RankedPhrase candidate = new RankedPhrase(
+                    phrase.phrase, phrase.intentId, score);
+            RankedPhrase previous = bestByIntent.get(phrase.intentId);
+            if (previous == null || RANK_ORDER.compare(candidate, previous) < 0) {
+                bestByIntent.put(phrase.intentId, candidate);
             }
-        });
+        }
+        lastCandidateEvaluations.set(evaluations);
+
+        List<RankedPhrase> ranked = new ArrayList<RankedPhrase>(limit);
+        for (RankedPhrase candidate : bestByIntent.values()) {
+            insertBounded(ranked, candidate, limit);
+        }
 
         if (ranked.isEmpty() || ranked.get(0).score() < SUGGESTION_FLOOR) {
             return Collections.emptyList();
         }
-        int limit = Math.min(k, ranked.size());
-        return Collections.unmodifiableList(new ArrayList<RankedPhrase>(ranked.subList(0, limit)));
+        return Collections.unmodifiableList(ranked);
     }
 
     public Match2Result match2(String input, double margin) {
@@ -120,7 +164,7 @@ public class IntentMatcher {
             return Match2Result.confident(best);
         }
 
-        String exactIntentId = library.phraseToIntentId().get(normalise(input));
+        String exactIntentId = exactPhrases.get(normalise(input));
         if (exactIntentId != null) {
             if (exactIntentId.equals(runner.intentId())
                     && Math.abs(best.score() - runner.score()) < 0.0000001) {
@@ -185,13 +229,51 @@ public class IntentMatcher {
         return -1;
     }
 
-    private static double similarity(String key, String sortedKey, String phrase) {
-        double direct = FuzzyMatcher.jaroWinkler(key, phrase);
-        String sortedPhrase = sortTokens(phrase);
-        if (sortedKey.equals(key) && sortedPhrase.equals(phrase)) {
+    private static double similarity(String key, String sortedKey, PreparedPhrase phrase) {
+        double direct = FuzzyMatcher.jaroWinkler(key, phrase.phrase);
+        if (sortedKey.equals(key) && phrase.sortedTokens.equals(phrase.phrase)) {
             return direct;
         }
-        return Math.max(direct, FuzzyMatcher.jaroWinkler(sortedKey, sortedPhrase));
+        return Math.max(direct, FuzzyMatcher.jaroWinkler(sortedKey, phrase.sortedTokens));
+    }
+
+    private static void insertBounded(List<RankedPhrase> ranked,
+                                      RankedPhrase candidate, int limit) {
+        if (limit <= 0) {
+            return;
+        }
+        int index = 0;
+        while (index < ranked.size()
+                && RANK_ORDER.compare(candidate, ranked.get(index)) >= 0) {
+            index++;
+        }
+        if (index >= limit) {
+            return;
+        }
+        ranked.add(index, candidate);
+        if (ranked.size() > limit) {
+            ranked.remove(ranked.size() - 1);
+        }
+    }
+
+    int corpusSizeForTest() {
+        return corpus.size();
+    }
+
+    int lastCandidateEvaluationsForTest() {
+        return lastCandidateEvaluations.get();
+    }
+
+    private static final class PreparedPhrase {
+        final String phrase;
+        final String sortedTokens;
+        final String intentId;
+
+        PreparedPhrase(String phrase, String sortedTokens, String intentId) {
+            this.phrase = phrase;
+            this.sortedTokens = sortedTokens;
+            this.intentId = intentId;
+        }
     }
 
     private static String sortTokens(String input) {
@@ -215,46 +297,108 @@ public class IntentMatcher {
         Map<String, String> slots = new HashMap<String, String>();
         String raw = input == null ? "" : input;
         String key = normalise(raw);
+        String numericKey = normaliseNumbers(raw);
         if ("image.switch_channel".equals(intentId)) {
             putFirstInt(slots, "channel", key);
         } else if ("image.jump_slice".equals(intentId)) {
             putFirstInt(slots, "slice", key);
         } else if ("image.jump_frame".equals(intentId)) {
             putFirstInt(slots, "frame", key);
-        } else if ("image.scale_by_factor".equals(intentId)) {
+        } else if ("image.scale_by_factor".equals(intentId)
+                || "image.scale".equals(intentId)) {
             if (key.contains("half")) {
                 slots.put("factor", "0.5");
             } else if (key.contains("double")) {
                 slots.put("factor", "2");
             } else {
-                putFirstDouble(slots, "factor", key);
+                putFirstDouble(slots, "factor", numericKey);
             }
         } else if ("display.zoom".equals(intentId)) {
-            putFirstDouble(slots, "percent", key);
+            putFirstDouble(slots, "percent", numericKey);
         } else if ("image.set_scale".equals(intentId)) {
-            extractScaleSlots(slots, key);
+            extractScaleSlots(slots, numericKey);
         } else if ("image.make_substack".equals(intentId)) {
             extractSubstackSlots(slots, key);
+        } else if ("image.save_as".equals(intentId)) {
+            extractSaveFormat(slots, key);
+        } else if ("image.z_project".equals(intentId)) {
+            extractProjection(slots, key);
+        } else if ("image.convert_type".equals(intentId)) {
+            extractImageType(slots, key);
         } else if ("preprocess.subtract_background".equals(intentId)
                 || "preprocess.median_filter".equals(intentId)
                 || "preprocess.mean_filter".equals(intentId)
                 || "preprocess.variance".equals(intentId)
+                || "preprocess.variance_filter".equals(intentId)
                 || "preprocess.unsharp_mask".equals(intentId)) {
-            putFirstDouble(slots, "radius", key);
+            putFirstDouble(slots, "radius", numericKey);
         } else if ("preprocess.gaussian_blur".equals(intentId)) {
-            putFirstDouble(slots, "sigma", key);
+            putFirstDouble(slots, "sigma", numericKey);
         } else if ("preprocess.bandpass_filter".equals(intentId)) {
-            extractBandpassSlots(slots, key);
-        } else if ("segmentation.auto_threshold".equals(intentId)) {
+            extractBandpassSlots(slots, numericKey);
+        } else if ("segmentation.auto_threshold".equals(intentId)
+                || "segment.auto_threshold".equals(intentId)) {
             extractThresholdSlots(slots, key);
-        } else if ("segmentation.compare_thresholds".equals(intentId)) {
+        } else if ("segmentation.compare_thresholds".equals(intentId)
+                || "segment.compare_thresholds".equals(intentId)) {
             extractThresholdMethods(slots, key);
-        } else if ("segmentation.find_maxima".equals(intentId)) {
-            putFirstDouble(slots, "prominence", key);
-        } else if ("measurement.set_measurements".equals(intentId)) {
+        } else if ("segmentation.find_maxima".equals(intentId)
+                || "segment.find_maxima".equals(intentId)) {
+            putFirstDouble(slots, "prominence", numericKey);
+        } else if ("segment.count_particles".equals(intentId)) {
+            if (key.contains("nuclei") || key.contains("nucleus") || key.contains("dapi")) {
+                slots.put("object_type", "nuclei");
+            } else if (key.contains("cell")) {
+                slots.put("object_type", "cells");
+            }
+        } else if ("measurement.set_measurements".equals(intentId)
+                || "measure.set_measurements".equals(intentId)) {
             extractMeasurementKeys(slots, raw);
         }
         return slots;
+    }
+
+    private static String normaliseNumbers(String input) {
+        String s = input == null ? "" : input.toLowerCase(Locale.ROOT);
+        s = PUNCT_EXCEPT_DECIMAL.matcher(s).replaceAll(" ");
+        return WS.matcher(s).replaceAll(" ").trim();
+    }
+
+    private static void extractSaveFormat(Map<String, String> slots, String key) {
+        if (key.contains("png")) {
+            slots.put("format", "png");
+        } else if (key.contains("jpeg") || key.contains("jpg")) {
+            slots.put("format", "jpeg");
+        } else if (key.contains("tiff") || key.contains("tif")) {
+            slots.put("format", "tiff");
+        }
+    }
+
+    private static void extractProjection(Map<String, String> slots, String key) {
+        if (key.contains("standard deviation") || key.contains("std dev")
+                || key.contains("stdev") || key.contains(" sd ")) {
+            slots.put("projection", "sd");
+        } else if (key.contains("mean") || key.contains("average") || key.contains("avg")) {
+            slots.put("projection", "mean");
+        } else if (key.contains("sum")) {
+            slots.put("projection", "sum");
+        } else if (key.contains("max")) {
+            slots.put("projection", "max");
+        }
+    }
+
+    private static void extractImageType(Map<String, String> slots, String key) {
+        if (key.contains("composite")) {
+            slots.put("image_type", "composite");
+        } else if (key.contains("rgb") || key.contains("color") || key.contains("colour")) {
+            slots.put("image_type", "rgb");
+        } else if (key.contains("32 bit") || key.contains("32bit")) {
+            slots.put("image_type", "32bit");
+        } else if (key.contains("16 bit") || key.contains("16bit")) {
+            slots.put("image_type", "16bit");
+        } else if (key.contains("8 bit") || key.contains("8bit")) {
+            slots.put("image_type", "8bit");
+        }
     }
 
     private static void putFirstInt(Map<String, String> slots, String name, String key) {
@@ -354,7 +498,8 @@ public class IntentMatcher {
 
     private static void extractMeasurementKeys(Map<String, String> slots, String raw) {
         String text = raw == null ? "" : raw.trim();
-        java.util.regex.Matcher matcher = Pattern.compile("(?i)set measurements?\\s+(.+)").matcher(text);
+        java.util.regex.Matcher matcher = Pattern.compile(
+                "(?i)(?:set|add|choose) measurements?\\s+(.+)").matcher(text);
         if (matcher.find()) {
             slots.put("keys", matcher.group(1).replace(" and ", ","));
         }

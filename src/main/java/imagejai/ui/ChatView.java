@@ -29,6 +29,10 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.function.Consumer;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.ThreadFactory;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -41,6 +45,19 @@ import java.util.regex.Pattern;
  * prompts via TCP.
  */
 public class ChatView extends JPanel implements ChatPanelController, ChatSurface {
+
+    private static final ThreadPoolExecutor AUTOCOMPLETE_EXECUTOR =
+            new ThreadPoolExecutor(
+                    1, 1, 0L, TimeUnit.MILLISECONDS,
+                    new ArrayBlockingQueue<Runnable>(1),
+                    new ThreadFactory() {
+                        public Thread newThread(Runnable task) {
+                            Thread thread = new Thread(task, "ImageJAI-IntentSuggestions");
+                            thread.setDaemon(true);
+                            return thread;
+                        }
+                    },
+                    new ThreadPoolExecutor.DiscardOldestPolicy());
 
     /**
      * Callback interface for when the user sends a message.
@@ -60,6 +77,7 @@ public class ChatView extends JPanel implements ChatPanelController, ChatSurface
     private final List<ChatPanel.ChatListener> listeners = new ArrayList<ChatPanel.ChatListener>();
     private final List<Runnable> conversationClearListeners = new ArrayList<Runnable>();
     private final AtomicLong localConversationGeneration = new AtomicLong();
+    private final AtomicLong autocompleteGeneration = new AtomicLong();
     private volatile boolean localAssistantBusy;
 
     private JTextPane messageArea;
@@ -869,11 +887,31 @@ public class ChatView extends JPanel implements ChatPanelController, ChatSurface
             clearAutocompleteChips();
             return;
         }
-        List<RankedPhrase> chips = localAssistant.topK(text, 3);
-        chipRow.setCandidates(chips);
+        final String requestedText = text;
+        final long generation = autocompleteGeneration.incrementAndGet();
+        AUTOCOMPLETE_EXECUTOR.execute(new Runnable() {
+            @Override
+            public void run() {
+                final List<RankedPhrase> chips = localAssistant.topK(requestedText, 3);
+                SwingUtilities.invokeLater(new Runnable() {
+                    @Override
+                    public void run() {
+                        if (generation != autocompleteGeneration.get()
+                                || inputArea == null
+                                || !requestedText.equals(inputArea.getText())
+                                || !isLocalAssistantSelected()
+                                || !inputArea.isEnabled()) {
+                            return;
+                        }
+                        chipRow.setCandidates(chips);
+                    }
+                });
+            }
+        });
     }
 
     private void clearAutocompleteChips() {
+        autocompleteGeneration.incrementAndGet();
         if (chipRow != null) {
             chipRow.setCandidates(new ArrayList<RankedPhrase>());
         }

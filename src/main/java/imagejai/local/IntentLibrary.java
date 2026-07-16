@@ -17,8 +17,11 @@ import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import java.util.TreeSet;
 
 /**
  * Registry of built-in Local Assistant intents.
@@ -28,6 +31,8 @@ public class IntentLibrary {
     private final Map<String, Intent> intents = new LinkedHashMap<String, Intent>();
     private final Map<String, String> phraseToIntentId = new LinkedHashMap<String, String>();
     private final List<String> phrases = new ArrayList<String>();
+    private Set<String> phrasebookIntentIds = Collections.emptySet();
+    private Set<String> canonicalHandlerIds = Collections.emptySet();
 
     public IntentLibrary() {
         this(new Settings());
@@ -36,6 +41,7 @@ public class IntentLibrary {
     public IntentLibrary(Settings settings) {
         registerBuiltIns();
         loadPhrasebookResource();
+        validatePhrasebookContract();
         MenuIntentImporter.importInto(this, settings != null && settings.expandMenuPhrasebook);
     }
 
@@ -56,7 +62,6 @@ public class IntentLibrary {
         for (Intent intent : AnalysisIntentFactory.createAll()) {
             register(intent);
         }
-        addPhrase("the next image", "image.next_open_image");
         addSlashAliases();
         addPhrase("help", "slash.help");
     }
@@ -89,6 +94,14 @@ public class IntentLibrary {
         return Collections.unmodifiableList(phrases);
     }
 
+    public Set<String> phrasebookIntentIds() {
+        return phrasebookIntentIds;
+    }
+
+    public Set<String> canonicalHandlerIds() {
+        return canonicalHandlerIds;
+    }
+
     public void register(Intent intent) {
         if (intent == null) {
             return;
@@ -106,16 +119,32 @@ public class IntentLibrary {
             Reader reader = new InputStreamReader(in, StandardCharsets.UTF_8);
             Phrasebook phrasebook = new Gson().fromJson(reader, Phrasebook.class);
             if (phrasebook == null || phrasebook.intents == null) {
-                return;
+                throw new IllegalStateException("Invalid /phrasebook.json: missing intents");
             }
+            Set<String> ids = new LinkedHashSet<String>();
             for (PhrasebookIntent entry : phrasebook.intents) {
                 if (entry == null || entry.id == null || entry.phrases == null) {
-                    continue;
+                    throw new IllegalStateException("Invalid /phrasebook.json intent entry");
+                }
+                if (!ids.add(entry.id)) {
+                    throw new IllegalStateException(
+                            "Invalid /phrasebook.json: duplicate intent ID " + entry.id);
+                }
+                if (entry.id.startsWith("menu.") && byId(entry.id) == null) {
+                    Intent menuIntent = MenuIntentImporter.fromPhrasebook(
+                            entry.id, entry.description);
+                    if (menuIntent == null) {
+                        throw new IllegalStateException(
+                                "Invalid /phrasebook.json menu intent mapping: " + entry.id);
+                    }
+                    register(menuIntent);
                 }
                 for (String phrase : entry.phrases) {
                     addPhrase(phrase, entry.id);
                 }
             }
+            phrasebookIntentIds = Collections.unmodifiableSet(
+                    new LinkedHashSet<String>(ids));
         } catch (JsonSyntaxException e) {
             throw new IllegalStateException("Invalid /phrasebook.json", e);
         } finally {
@@ -125,6 +154,29 @@ public class IntentLibrary {
                 // Nothing useful to recover here; the stream was already read.
             }
         }
+    }
+
+    private void validatePhrasebookContract() {
+        Set<String> handlers = new LinkedHashSet<String>(intents.keySet());
+        String mismatch = contractMismatch(phrasebookIntentIds, handlers);
+        if (mismatch != null) {
+            throw new IllegalStateException(mismatch);
+        }
+        canonicalHandlerIds = Collections.unmodifiableSet(handlers);
+    }
+
+    static String contractMismatch(Set<String> phrasebookIds,
+                                   Set<String> registeredHandlerIds) {
+        Set<String> missingHandlers = new TreeSet<String>(phrasebookIds);
+        missingHandlers.removeAll(registeredHandlerIds);
+        Set<String> missingPhrasebookEntries = new TreeSet<String>(registeredHandlerIds);
+        missingPhrasebookEntries.removeAll(phrasebookIds);
+        if (missingHandlers.isEmpty() && missingPhrasebookEntries.isEmpty()) {
+            return null;
+        }
+        return "Phrasebook/handler ID mismatch: phrasebook IDs without handlers="
+                + missingHandlers + "; registered handler IDs without phrasebook entries="
+                + missingPhrasebookEntries;
     }
 
     private void addPhrase(String phrase, String intentId) {

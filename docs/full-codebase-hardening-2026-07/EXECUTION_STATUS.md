@@ -47,7 +47,7 @@ Conflict watchlist:
 | 09 | completed | `0f3f10f` | 863 Maven tests and focused coordinator/lifecycle/pipeline/batch/subprocess/source-tag regressions passed; no duplicate TCP mutation lock or per-handler executor remains |
 | 10 | completed | `1c6684d` | Focused Stage 10 tests and the full Maven suite passed; assistant mutations now share the coordinator, launch policy is enforced, settings save/cancel is transactional, and clear/listener lifecycle races are covered |
 | 11 | completed | `4d43c8a` | 67/67 focused undo/exploration tests passed; all Stage 11 tests passed inside the 911-test integrated run, with only six concurrent Stage 22 intent failures remaining |
-| 12 | pending | - | - |
+| 12 | completed | `eb451ca` | 61 focused image/state/integration tests passed; the 890-test run had only four then-in-progress Stage 11 undo failures, all subsequently green in Stage 11's integrated rerun |
 | 13 | completed | `b0a5617` | 37/37 focused reactive, event-bus, and stable duplicate-title identity tests passed; admission/deadlines, policy/coordinator/provenance, capture containment, quarantine, retention, diagnostics, and stable image/dialog lifecycles are implemented |
 | 14 | pending | - | - |
 | 15 | completed | `ff6bf39` | 16 contract/legacy tests passed; all 28 recipes validate and whole-directory dry-run; unsafe file traversal/symlink escapes and unsupported later steps block before Fiji mutation |

@@ -13,12 +13,42 @@ import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.Locale;
 import java.util.Optional;
+import java.util.Arrays;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Set;
+import java.util.concurrent.atomic.AtomicReference;
+
+import javax.swing.SwingUtilities;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
+import static org.junit.Assert.assertNull;
 
 public class IntentMatcherBenchmarkTest {
+
+    @Test
+    public void phrasebookAndCanonicalHandlerIdsAreExactlyEqual() {
+        IntentLibrary library = IntentLibrary.load();
+
+        assertEquals(library.phrasebookIntentIds(), library.canonicalHandlerIds());
+        assertFalse(library.phrasebookIntentIds().isEmpty());
+    }
+
+    @Test
+    public void contractMismatchReportsBothSortedSetDifferences() {
+        Set<String> phrasebook = new LinkedHashSet<String>(
+                Arrays.asList("z.missing_handler", "shared", "a.missing_handler"));
+        Set<String> handlers = new LinkedHashSet<String>(
+                Arrays.asList("shared", "z.missing_phrase", "a.missing_phrase"));
+
+        assertEquals(
+                "Phrasebook/handler ID mismatch: phrasebook IDs without handlers="
+                        + "[a.missing_handler, z.missing_handler]; registered handler IDs "
+                        + "without phrasebook entries=[a.missing_phrase, z.missing_phrase]",
+                IntentLibrary.contractMismatch(phrasebook, handlers));
+    }
 
     @Test
     public void reportsTop1Accuracy() throws IOException {
@@ -130,6 +160,80 @@ public class IntentMatcherBenchmarkTest {
     }
 
     @Test
+    public void topKScansCorpusOnceAndKeepsOnlyBoundedDistinctIntents() {
+        IntentMatcher matcher = new IntentMatcher(IntentLibrary.load());
+
+        List<RankedPhrase> ranked = matcher.topK("pixle siz", 10_000);
+
+        assertEquals(matcher.corpusSizeForTest(),
+                matcher.lastCandidateEvaluationsForTest());
+        assertTrue(ranked.size() <= 20);
+        Set<String> ids = new LinkedHashSet<String>();
+        for (RankedPhrase candidate : ranked) {
+            assertTrue("one best phrase per intent", ids.add(candidate.intentId()));
+        }
+    }
+
+    @Test
+    public void tiesAreDeterministicAcrossRunsAndDefaultLocales() {
+        IntentLibrary library = IntentLibrary.load();
+        library.addPhraseIfAbsent("tie xxxx", "test.z");
+        library.addPhraseIfAbsent("tie yyyy", "test.a");
+        Locale original = Locale.getDefault();
+        String expected = null;
+        try {
+            for (Locale locale : Arrays.asList(
+                    Locale.US, new Locale("tr", "TR"), Locale.JAPAN, Locale.FRANCE)) {
+                Locale.setDefault(locale);
+                IntentMatcher matcher = new IntentMatcher(library);
+                String actual = signature(matcher.topK("tie qqqq", 20));
+                if (expected == null) {
+                    expected = actual;
+                } else {
+                    assertEquals(expected, actual);
+                }
+                assertTrue(actual.indexOf("test.a:") < actual.indexOf("test.z:"));
+            }
+        } finally {
+            Locale.setDefault(original);
+        }
+    }
+
+    @Test
+    public void fuzzyMatchingRefusesToRunOnSwingEventThread() throws Exception {
+        final IntentMatcher matcher = new IntentMatcher(IntentLibrary.load());
+        final AtomicReference<Throwable> failure = new AtomicReference<Throwable>();
+
+        SwingUtilities.invokeAndWait(new Runnable() {
+            public void run() {
+                try {
+                    matcher.topK("pixle siz", 3);
+                } catch (Throwable error) {
+                    failure.set(error);
+                }
+            }
+        });
+
+        assertTrue(failure.get() instanceof IllegalStateException);
+        assertTrue(failure.get().getMessage().contains("off the Swing event thread"));
+
+        final AtomicReference<Optional<IntentMatcher.MatchedIntent>> exact =
+                new AtomicReference<Optional<IntentMatcher.MatchedIntent>>();
+        final AtomicReference<Throwable> exactFailure = new AtomicReference<Throwable>();
+        SwingUtilities.invokeAndWait(new Runnable() {
+            public void run() {
+                try {
+                    exact.set(matcher.match("pixel size"));
+                } catch (Throwable error) {
+                    exactFailure.set(error);
+                }
+            }
+        });
+        assertNull(exactFailure.get());
+        assertTrue(exact.get().isPresent());
+    }
+
+    @Test
     public void slotAwareControlIntentsExtractNumbersAndRanges() {
         IntentLibrary library = IntentLibrary.load();
         IntentMatcher matcher = new IntentMatcher(library);
@@ -147,6 +251,31 @@ public class IntentMatcherBenchmarkTest {
         assertEquals("100", scale.slots().get("pixels"));
         assertEquals("10", scale.slots().get("distance"));
         assertEquals("um", scale.slots().get("unit"));
+
+        IntentMatcher.MatchedIntent factor = matcher.match("scale by 0.5").get();
+        assertEquals("image.scale_by_factor", factor.intentId());
+        assertEquals("0.5", factor.slots().get("factor"));
+    }
+
+    @Test
+    public void reviewedAggregateIdsDispatchThroughExplicitSlots() {
+        IntentMatcher matcher = new IntentMatcher(IntentLibrary.load());
+
+        IntentMatcher.MatchedIntent save = matcher.match("can i save this as png").get();
+        assertEquals("image.save_as", save.intentId());
+        assertEquals("png", save.slots().get("format"));
+
+        IntentMatcher.MatchedIntent projection = matcher.match("do a stdev projection").get();
+        assertEquals("image.z_project", projection.intentId());
+        assertEquals("sd", projection.slots().get("projection"));
+
+        IntentMatcher.MatchedIntent type = matcher.match("16 bit gray").get();
+        assertEquals("image.convert_type", type.intentId());
+        assertEquals("16bit", type.slots().get("image_type"));
+
+        IntentMatcher.MatchedIntent objects = matcher.match("count dapi").get();
+        assertEquals("segment.count_particles", objects.intentId());
+        assertEquals("nuclei", objects.slots().get("object_type"));
     }
 
     @Test
@@ -183,5 +312,15 @@ public class IntentMatcherBenchmarkTest {
     private static boolean candidateHasIntent(Match2Result result, String intentId) {
         return (result.best() != null && intentId.equals(result.best().intentId()))
                 || (result.runnerUp() != null && intentId.equals(result.runnerUp().intentId()));
+    }
+
+    private static String signature(List<RankedPhrase> ranked) {
+        StringBuilder out = new StringBuilder();
+        for (RankedPhrase candidate : ranked) {
+            out.append(candidate.intentId()).append(':')
+                    .append(candidate.phrase()).append(':')
+                    .append(Double.doubleToLongBits(candidate.score())).append('|');
+        }
+        return out.toString();
     }
 }
