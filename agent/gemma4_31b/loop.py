@@ -2033,13 +2033,11 @@ def _one_turn(
                 _bound_history(messages)
                 for post_note in _post_tool_system_notes(name, args, result_text, turn_state):
                     messages.append({"role": "system", "content": post_note})
+                    # Post-tool notes are private recovery guidance for the
+                    # model, not assistant responses for the user.
                     preview_len = 140
                     preview = post_note[:preview_len] + (
                         "…" if len(post_note) > preview_len else ""
-                    )
-                    _console_emit(
-                        "  \033[95m↯ post-tool note: {}\033[0m".format(preview),
-                        reserve_status_line=True,
                     )
                 signature = (name, _canonical_json(args), result_text)
                 if signature == last_tool_signature:

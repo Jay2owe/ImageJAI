@@ -228,3 +228,41 @@ def test_only_one_mid_turn_flip_happens_for_multiple_errors(monkeypatch):
     assert friction_events == [
         {"event": "turn_config", "mode": "recover", "thinking": True, "source": "recover"}
     ]
+
+
+def test_repeated_tool_error_guidance_is_model_only(monkeypatch):
+    emitted: list[str] = []
+    model_rounds: list[list[object]] = []
+    responses = [
+        _response(tool_calls=[_tool_call("run_macro", {"macro": "first"})]),
+        _response(tool_calls=[_tool_call("run_macro", {"macro": "second"})]),
+        _response(content="recovered"),
+    ]
+
+    def fake_chat_interruptible(**kwargs):
+        model_rounds.append(list(kwargs["messages"]))
+        return responses.pop(0)
+
+    _patch_one_turn_dependencies(monkeypatch, fake_chat_interruptible)
+    monkeypatch.setattr(
+        loop,
+        "_console_emit",
+        lambda text, **kwargs: emitted.append(text),
+    )
+
+    reply, had_failure = loop._one_turn(
+        "model",
+        [],
+        [object()],
+        {"run_macro": lambda macro: "ERROR: Macro Error in line 1: stale dialog"},
+        loop._resolve_turn_config("plain request", None, None, False),
+    )
+
+    assert "recovered" in reply
+    assert had_failure is True
+    assert any(
+        isinstance(message, dict) and message.get("role") == "system"
+        and "Two tool calls in a row returned the same error" in message.get("content", "")
+        for message in model_rounds[-1]
+    )
+    assert not any("post-tool note" in line for line in emitted)
