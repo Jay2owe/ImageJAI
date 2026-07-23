@@ -6,6 +6,8 @@
 
 ```text
 ↯ post-tool note: Two tool calls in a row returned the same error. STOP submitting variants. Next calls: close_dialogs({}), then get_open_windows({}), then ge… remove this response to an agent submitting the same thing twice
+
+no it shouldnt be getting that guidance. dont hide stuff because i might miss things that are destroying the accuracy
 ```
 
-<!-- F1: internal duplicate-error recovery note leaked into terminal output → plan §1, applied -->
+<!-- F1: duplicate-error directive removed from model and terminal; other guidance remains visible → correction §1, applied -->

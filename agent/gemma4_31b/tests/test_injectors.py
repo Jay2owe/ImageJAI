@@ -15,13 +15,11 @@ from gemma4_31b.loop import (  # noqa: E402
     _hallucination_reflector_injector,
     _multiseries_note,
     _no_image_reflex_injector,
-    _normalise_tool_error,
     _post_tool_system_notes,
     _pre_dispatch_abort_note,
     _recipe_before_loop_note,
     _sample_image_note,
     _selectimage_anchor_note,
-    _stale_error_loop_injector,
 )
 
 
@@ -148,58 +146,6 @@ def test_selectimage_anchor_note_silent_on_general_question():
 # --- Post-tool injectors ----------------------------------------------------
 
 
-def test_normalise_tool_error_strips_line_numbers():
-    a = _normalise_tool_error("ERROR: Macro Error in line 12: foo")
-    b = _normalise_tool_error("ERROR: Macro Error in line 47: foo")
-    assert a == b
-
-
-def test_normalise_tool_error_none_on_success():
-    assert _normalise_tool_error("success output") is None
-
-
-def test_stale_error_loop_fires_on_repeat():
-    state: dict = {}
-    first = _stale_error_loop_injector(
-        "run_macro", {}, "ERROR: Macro Error in line 1: undefined variable", state
-    )
-    second = _stale_error_loop_injector(
-        "run_macro", {}, "ERROR: Macro Error in line 1: undefined variable", state
-    )
-    assert first is None
-    assert second is not None
-    assert "STOP submitting" in second
-
-
-def test_stale_error_loop_silent_on_different_errors():
-    state: dict = {}
-    _stale_error_loop_injector(
-        "run_macro", {}, "ERROR: Macro Error line 1: foo", state
-    )
-    second = _stale_error_loop_injector(
-        "run_macro", {}, "ERROR: Macro Error line 1: bar", state
-    )
-    assert second is None
-
-
-def test_stale_error_loop_resets_on_success():
-    state: dict = {}
-    _stale_error_loop_injector("run_macro", {}, "ERROR: boom", state)
-    _stale_error_loop_injector("run_macro", {}, "success ok", state)
-    # After a success, the previous error should be cleared; the next
-    # identical error must not trip the "two in a row" rule.
-    second = _stale_error_loop_injector("run_macro", {}, "ERROR: boom", state)
-    assert second is None
-
-
-def test_stale_error_loop_ignores_unrelated_tools():
-    state: dict = {}
-    note = _stale_error_loop_injector(
-        "get_open_windows", {}, "ERROR: transport failed", state
-    )
-    assert note is None
-
-
 def test_hallucination_reflector_captures_command_name():
     result = 'ERROR: Unrecognized command: "Laplacian" in macro'
     note = _hallucination_reflector_injector("run_macro", {}, result, {})
@@ -235,17 +181,23 @@ def test_no_image_reflex_silent_on_success():
 
 
 def test_post_tool_dispatcher_runs_all_injectors():
-    # An Unrecognized command error should trip BOTH the hallucination
-    # reflector (first time seeing it) AND leave turn_state primed for the
-    # stale-error detector on a repeat.
     state: dict = {}
     result = 'ERROR: Unrecognized command: "Laplacian"'
     notes = _post_tool_system_notes("run_macro", {}, result, state)
     assert any("Laplacian" in n for n in notes)
-    # Stale-error shouldn't fire yet — only one occurrence.
-    assert not any("STOP submitting" in n for n in notes)
     notes2 = _post_tool_system_notes("run_macro", {}, result, state)
-    assert any("STOP submitting" in n for n in notes2)
+    assert any("Laplacian" in n for n in notes2)
+
+
+def test_post_tool_dispatcher_does_not_inject_duplicate_error_guidance():
+    state: dict = {}
+    result = "ERROR: Macro Error in line 1: undefined variable"
+
+    first = _post_tool_system_notes("run_macro", {}, result, state)
+    second = _post_tool_system_notes("run_macro", {}, result, state)
+
+    assert first == []
+    assert second == []
 
 
 def test_post_tool_dispatcher_survives_injector_exception(monkeypatch):

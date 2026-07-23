@@ -1841,8 +1841,7 @@ def _one_turn(
     async_job_active = False
     think_capability_state = think_capability_state or {"supported": True, "logged": False}
     # Scratchpad shared across post-tool injectors within this turn.
-    # Injectors can read/write any key; example: _stale_error_loop_injector
-    # uses turn_state["last_tool_error"] to compare consecutive errors.
+    # Injectors can read or write keys when they need turn-local context.
     turn_state: dict = {}
     tool_policy = _resolve_tool_policy(provider, provider_client, provider_opts)
     approval_callback = (provider_opts or {}).get("host_code_approval")
@@ -2024,6 +2023,10 @@ def _one_turn(
                 result_text = _bounded_tool_result(name, _format_tool_result(result))
                 if result_text.startswith("ERROR:"):
                     _flip_turn_config_to_recover(turn_config)
+                result_preview_len = 140
+                result_preview = result_text[:result_preview_len] + (
+                    "…" if len(result_text) > result_preview_len else ""
+                )
                 display_text = result_text
                 if len(display_text) > 20480:
                     hidden = len(display_text) - 20480
@@ -2033,11 +2036,13 @@ def _one_turn(
                 _bound_history(messages)
                 for post_note in _post_tool_system_notes(name, args, result_text, turn_state):
                     messages.append({"role": "system", "content": post_note})
-                    # Post-tool notes are private recovery guidance for the
-                    # model, not assistant responses for the user.
-                    preview_len = 140
-                    preview = post_note[:preview_len] + (
-                        "…" if len(post_note) > preview_len else ""
+                    post_note_preview_len = 140
+                    post_note_preview = post_note[:post_note_preview_len] + (
+                        "…" if len(post_note) > post_note_preview_len else ""
+                    )
+                    _console_emit(
+                        "  \033[95m↯ post-tool note: {}\033[0m".format(post_note_preview),
+                        reserve_status_line=True,
                     )
                 signature = (name, _canonical_json(args), result_text)
                 if signature == last_tool_signature:
@@ -2052,7 +2057,7 @@ def _one_turn(
                             "tool": name,
                             "args": _canonical_json(args),
                             "repeat_count": identical_tool_repeats,
-                            "result_preview": preview,
+                            "result_preview": result_preview,
                         }
                     )
                     elapsed = time.time() - turn_start
@@ -2305,42 +2310,6 @@ def _selectimage_anchor_note(user_text: str) -> str | None:
 # ---------------------------------------------------------------------------
 
 
-def _normalise_tool_error(result_text: str) -> str | None:
-    """Normalise a tool error string for same-error comparison."""
-    if not isinstance(result_text, str) or not result_text.startswith("ERROR:"):
-        return None
-    first_line = result_text.splitlines()[0] if result_text else ""
-    stripped = re.sub(r"\bline\s+\d+\b", "line <N>", first_line, flags=re.IGNORECASE)
-    stripped = re.sub(r"\s+", " ", stripped).strip().lower()
-    return stripped or None
-
-
-def _stale_error_loop_injector(
-    tool_name: str,
-    args: dict,
-    result_text: str,
-    turn_state: dict,
-) -> str | None:
-    """Fire when two macro/script calls in a row returned the same error."""
-    if tool_name not in {"run_macro", "run_script", "run_macro_async", "job_status"}:
-        return None
-    current = _normalise_tool_error(result_text)
-    if current is None:
-        turn_state["last_tool_error"] = None
-        return None
-    previous = turn_state.get("last_tool_error")
-    turn_state["last_tool_error"] = current
-    if previous is None or previous != current:
-        return None
-    return (
-        "Two tool calls in a row returned the same error. STOP submitting "
-        "variants. Next calls: close_dialogs({}), then get_open_windows({}), "
-        "then get_log({}). If the error's line number doesn't match your last "
-        "macro, a previous dialog is still blocking the queue — the error is "
-        "stale."
-    )
-
-
 def _hallucination_reflector_injector(
     tool_name: str,
     args: dict,
@@ -2396,7 +2365,6 @@ def _nresults_zero_injector(
 
 
 _POST_TOOL_INJECTORS: tuple = (
-    _stale_error_loop_injector,
     _hallucination_reflector_injector,
     _no_image_reflex_injector,
     # _nresults_zero_injector,  # disabled — see docs/ollama/future-injectors.md
