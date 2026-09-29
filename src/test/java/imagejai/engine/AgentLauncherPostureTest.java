@@ -349,7 +349,12 @@ public class AgentLauncherPostureTest {
 
         AgentLaunchSpec spec = launcher.buildExternalLaunchSpec(maliciousName);
 
-        assertFalse(spec.agentCommand.toString().contains("&"));
+        String executedScript = spec.agentCommand.get(spec.agentCommand.size() - 1);
+        assertFalse("an untrusted terminal title must not reach the executed script",
+                executedScript.contains("whoami"));
+        if (System.getProperty("os.name", "").toLowerCase().contains("win")) {
+            assertFalse(spec.agentCommand.toString().contains("&"));
+        }
     }
 
     @Test

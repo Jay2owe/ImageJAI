@@ -378,10 +378,26 @@ public class UiAutomationServiceTest {
 
     @Test
     public void focusIsCountedOnceWhenTheRequestIsAccepted() throws Exception {
-        // The other side of the pair, so the fix cannot be "always report 0".
-        JsonObject result = act(sigma, UiNode.ACTION_FOCUS, null, null)
+        // Acceptance is asynchronous and depends on the host window manager.
+        // Keep the real hierarchy, but make acceptance deterministic so this
+        // tests dispatch accounting on desktops and virtual Linux displays.
+        final AtomicInteger requests = new AtomicInteger();
+        final JTextField acceptingField = new JTextField("accept focus", 8) {
+            @Override public boolean requestFocusInWindow() {
+                requests.incrementAndGet();
+                return true;
+            }
+        };
+        SwingUtilities.invokeAndWait(new Runnable() {
+            @Override public void run() {
+                ((JPanel) frame.getContentPane().getComponent(0)).add(acceptingField);
+                frame.pack();
+            }
+        });
+        JsonObject result = act(acceptingField, UiNode.ACTION_FOCUS, null, null)
                 .getAsJsonObject("result");
         assertEquals(1, result.getAsJsonObject("dispatch").get("count").getAsInt());
+        assertEquals("one focus request was delivered", 1, requests.get());
     }
 
     @Test
