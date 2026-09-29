@@ -158,8 +158,9 @@ public class PathTokenMapTest {
     public void aPathThePlatformCannotParseThrowsRatherThanReturningNull() {
         PathTokenMap map = new PathTokenMap(bytes(9));
         try {
-            map.tokenForPathString("C:\\study\\run?3.tif");
-            fail("expected InvalidPathException for a path Windows rejects");
+            // A NUL is invalid on every supported platform; '?' is valid on Unix.
+            map.tokenForPathString("study/run\u0000.tif");
+            fail("expected InvalidPathException for a path containing NUL");
         } catch (InvalidPathException expected) {
             // The contract callers must handle.
         }

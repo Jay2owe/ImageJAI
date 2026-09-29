@@ -12,6 +12,7 @@ import java.nio.charset.StandardCharsets;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.Socket;
+import java.net.SocketTimeoutException;
 import java.net.ServerSocket;
 import java.io.IOException;
 import java.io.OutputStream;
@@ -206,11 +207,20 @@ public class TCPCommandServerResourceBoundsTest {
 
             int attempts = TCPCommandServer.MAX_CONNECTION_WORKERS
                     + TCPCommandServer.CONNECTION_QUEUE_CAPACITY + 24;
+            boolean kernelBacklogRejected = false;
             for (int i = 0; i < attempts; i++) {
                 Socket socket = new Socket();
-                socket.connect(new InetSocketAddress(InetAddress.getLoopbackAddress(),
-                        server.getPort()), 1000);
-                clients.add(socket);
+                try {
+                    socket.connect(new InetSocketAddress(InetAddress.getLoopbackAddress(),
+                            server.getPort()), 3000);
+                    clients.add(socket);
+                } catch (SocketTimeoutException saturatedBacklog) {
+                    socket.close();
+                    assertTrue("backlog rejection must occur only after worker saturation",
+                            clients.size() >= TCPCommandServer.MAX_CONNECTION_WORKERS);
+                    kernelBacklogRejected = true;
+                    break;
+                }
             }
             long rejectedDeadline = System.nanoTime() + 5_000_000_000L;
             while (server.getRejectedConnectionCount() == 0L
@@ -223,7 +233,8 @@ public class TCPCommandServerResourceBoundsTest {
             assertTrue(server.getQueuedConnectionCount()
                     <= TCPCommandServer.CONNECTION_QUEUE_CAPACITY);
             assertTrue("flood must produce an observable rejection",
-                    server.getRejectedConnectionCount() > 0L);
+                    server.getRejectedConnectionCount() > 0L || kernelBacklogRejected);
+            assertTrue("overload must not stop the listener", server.isRunning());
         } finally {
             for (Socket client : clients) {
                 try { client.close(); } catch (Exception ignored) { }

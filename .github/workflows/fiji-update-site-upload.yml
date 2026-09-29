@@ -90,7 +90,9 @@ jobs:
       - name: Build and test
         shell: bash
         run: |
-          mvn -B clean test -Denforcer.skip=true
+          sudo apt-get update -qq
+          sudo apt-get install -y xvfb xterm
+          xvfb-run -a mvn -B clean test -Denforcer.skip=true
 
       - name: Build plugin artifact
         shell: bash
@@ -148,6 +150,12 @@ jobs:
           fi
           echo "Remote lock cleared or absent."
 
+      - name: Configure update site metadata
+        shell: bash
+        run: |
+          "$FIJI_LAUNCHER" --update edit-update-site "$IMAGEJ_UPDATE_SITE_NAME" "$IMAGEJ_UPDATE_SITE_URL" "webdav:$IMAGEJ_UPLOAD_USER:$IMAGEJ_UPLOAD_PASSWORD" .
+          "$FIJI_LAUNCHER" --update update
+
       - name: Stage artifact into Fiji
         shell: bash
         run: |
@@ -174,12 +182,6 @@ jobs:
           cp "$artifact" "Fiji.app/$INSTALL_DIR/$install_name"
           echo "RELATIVE_TARGET=$INSTALL_DIR/$install_name" >> "$GITHUB_ENV"
           find Fiji.app/plugins Fiji.app/jars Fiji.app/scripts -maxdepth 2 -type f 2>/dev/null | sort
-
-      - name: Configure update site metadata
-        shell: bash
-        run: |
-          "$FIJI_LAUNCHER" --update edit-update-site "$IMAGEJ_UPDATE_SITE_NAME" "$IMAGEJ_UPDATE_SITE_URL" "webdav:$IMAGEJ_UPLOAD_USER:$IMAGEJ_UPLOAD_PASSWORD" .
-          "$FIJI_LAUNCHER" --update update
 
       - name: Upload to Fiji update site
         shell: bash

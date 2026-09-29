@@ -2,6 +2,8 @@ package imagejai.engine;
 
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
+import imagejai.config.PrivacyPosture;
+import imagejai.config.Settings;
 import ij.ImagePlus;
 import ij.process.ByteProcessor;
 import org.junit.Test;
@@ -221,6 +223,10 @@ public class TCPCommandServerEdtMutationLifecycleTest {
     @Test
     public void openWaitsNonblockingForImagePublishedAfterEdtWrapperExit()
             throws Exception {
+        PrivacyPosture previousPosture = PostureController.getInstance().current();
+        Settings privacySettings = new Settings();
+        privacySettings.setPrivacyPosture(PrivacyPosture.PSEUDONYMISED);
+        PostureController.getInstance().configure(privacySettings);
         TCPCommandServer server = newServer();
         TCPCommandServer.AgentCaps caps = caps("async-open-session");
         Path requested = Paths.get("async-open.tif").toAbsolutePath().normalize();
@@ -273,6 +279,9 @@ public class TCPCommandServerEdtMutationLifecycleTest {
                     "async-open.tif".equals(opened.get("title").getAsString()));
         } finally {
             server.stop();
+            Settings restoredPrivacy = new Settings();
+            restoredPrivacy.setPrivacyPosture(previousPosture);
+            PostureController.getInstance().configure(restoredPrivacy);
         }
     }
 
