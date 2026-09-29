@@ -13,9 +13,13 @@ Usage:
     log.save()  # saves JSON log to .tmp/session_YYYYMMDD_HHMMSS.json
 """
 
+import copy
 import json
 import os
+import secrets
 import sys
+import tempfile
+import threading
 import time
 from datetime import datetime
 
@@ -26,6 +30,117 @@ from ij import imagej_command
 
 AGENT_DIR = os.path.dirname(os.path.abspath(__file__))
 TMP_DIR = os.path.join(AGENT_DIR, ".tmp")
+_ATOMIC_PATH_LOCKS = {}
+_ATOMIC_PATH_LOCKS_GUARD = threading.Lock()
+MAX_SESSION_ENTRIES = 10000
+MAX_ENTRY_BYTES = 2 * 1024 * 1024
+MAX_SESSION_BYTES = 64 * 1024 * 1024
+
+
+class SessionLogLimitError(ValueError):
+    """Structured persistence bound failure."""
+
+    def __init__(self, code, message, limit, actual):
+        super(SessionLogLimitError, self).__init__(message)
+        self.code = code
+        self.limit = limit
+        self.actual = actual
+
+    def as_dict(self):
+        return {"code": self.code, "message": str(self),
+                "limit": self.limit, "actual": self.actual}
+
+
+class SessionLogCorruptionError(IOError):
+    """Signals that an existing invalid session was preserved, not replaced."""
+
+    code = "CORRUPT_SESSION_QUARANTINED"
+
+    def __init__(self, quarantine_path):
+        super(SessionLogCorruptionError, self).__init__(
+            "invalid session quarantined; refusing replacement: %s" % quarantine_path)
+        self.quarantine_path = quarantine_path
+
+    def as_dict(self):
+        return {"code": self.code, "message": str(self),
+                "quarantine_path": self.quarantine_path}
+
+
+def _response_succeeded(response, error=None):
+    """Return true only for an explicitly successful server exchange."""
+    if error is not None or not isinstance(response, dict) or response.get("ok") is not True:
+        return False
+    result = response.get("result")
+    if isinstance(result, dict) and result.get("success") is False:
+        return False
+    return True
+
+
+def _atomic_write(path, text, preflight=None):
+    """Write text with same-directory replace so a failed write keeps the old file."""
+    directory = os.path.dirname(os.path.abspath(path))
+    os.makedirs(directory, exist_ok=True)
+    normalized = os.path.normcase(os.path.abspath(path))
+    with _ATOMIC_PATH_LOCKS_GUARD:
+        lock = _ATOMIC_PATH_LOCKS.setdefault(normalized, threading.Lock())
+    with lock:
+        if preflight is not None:
+            preflight(path)
+        temp_path = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                    mode="w", encoding="utf-8", dir=directory,
+                    prefix=os.path.basename(path) + ".", suffix=".tmp",
+                    delete=False) as handle:
+                temp_path = handle.name
+                handle.write(text)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temp_path, path)
+            temp_path = None
+        finally:
+            if temp_path:
+                try:
+                    os.unlink(temp_path)
+                except OSError:
+                    pass
+
+
+def _json_bytes(value):
+    return len(json.dumps(value, ensure_ascii=False, sort_keys=True).encode("utf-8"))
+
+
+def _validate_entries(entries):
+    if len(entries) > MAX_SESSION_ENTRIES:
+        raise SessionLogLimitError(
+            "SESSION_ENTRY_LIMIT", "session entry limit exceeded",
+            MAX_SESSION_ENTRIES, len(entries))
+    for index, entry in enumerate(entries):
+        size = _json_bytes(entry)
+        if size > MAX_ENTRY_BYTES:
+            raise SessionLogLimitError(
+                "SESSION_ENTRY_TOO_LARGE",
+                "session entry %d exceeds the byte limit" % index,
+                MAX_ENTRY_BYTES, size)
+
+
+def _quarantine_if_invalid_session(path):
+    """Preserve an invalid prior session before publishing a replacement."""
+    if not os.path.isfile(path):
+        return None
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            existing = json.load(handle)
+        if (not isinstance(existing, dict)
+                or existing.get("schema_version") != 2
+                or not isinstance(existing.get("entries"), list)):
+            raise ValueError("invalid session schema")
+        return None
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        quarantine = "%s.corrupt-%d-%s" % (
+            path, time.time_ns(), secrets.token_hex(16))
+        os.replace(path, quarantine)
+        raise SessionLogCorruptionError(quarantine)
 
 
 class SessionLogger(object):
@@ -33,8 +148,15 @@ class SessionLogger(object):
 
     def __init__(self):
         self.entries = []
+        self._lock = threading.RLock()
         self.start_time = datetime.now()
-        self.session_id = self.start_time.strftime("%Y%m%d_%H%M%S")
+        self.client_session_id = os.environ.get(
+            "IMAGEJAI_SESSION_ID", "").strip()
+        self.session_id = "%s-%s" % (
+            self.start_time.strftime("%Y%m%d_%H%M%S_%f"),
+            secrets.token_hex(16),
+        )
+        self._blocked_paths = set()
         os.makedirs(TMP_DIR, exist_ok=True)
 
     def send(self, cmd):
@@ -70,7 +192,20 @@ class SessionLogger(object):
                 "error": str(e),
             }
 
-        self.entries.append(entry)
+        entry["entry_id"] = secrets.token_hex(16)
+        entry["success"] = _response_succeeded(entry.get("response"), entry.get("error"))
+        entry["command"] = copy.deepcopy(entry["command"])
+        entry_size = _json_bytes(entry)
+        if entry_size > MAX_ENTRY_BYTES:
+            raise SessionLogLimitError(
+                "SESSION_ENTRY_TOO_LARGE", "session entry exceeds the byte limit",
+                MAX_ENTRY_BYTES, entry_size)
+        with self._lock:
+            if len(self.entries) >= MAX_SESSION_ENTRIES:
+                raise SessionLogLimitError(
+                    "SESSION_ENTRY_LIMIT", "session entry limit exceeded",
+                    MAX_SESSION_ENTRIES, len(self.entries) + 1)
+            self.entries.append(entry)
         return response
 
     def save(self, path=None):
@@ -83,16 +218,34 @@ class SessionLogger(object):
             path = os.path.join(TMP_DIR, "session_%s.json" % self.session_id)
         os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
 
+        with self._lock:
+            entries = copy.deepcopy(self.entries)
+        _validate_entries(entries)
         log_data = {
+            "schema_version": 2,
             "session_id": self.session_id,
             "start_time": self.start_time.isoformat(),
             "end_time": datetime.now().isoformat(),
-            "total_commands": len(self.entries),
-            "entries": self.entries,
+            "total_commands": len(entries),
+            "entries": entries,
         }
-
-        with open(path, "w") as f:
-            json.dump(log_data, f, indent=2)
+        if self.client_session_id:
+            log_data["client_session_id"] = self.client_session_id
+        payload = json.dumps(log_data, indent=2, ensure_ascii=False,
+                             sort_keys=True) + "\n"
+        payload_size = len(payload.encode("utf-8"))
+        if payload_size > MAX_SESSION_BYTES:
+            raise SessionLogLimitError(
+                "SESSION_FILE_TOO_LARGE", "session file exceeds the byte limit",
+                MAX_SESSION_BYTES, payload_size)
+        normalized = os.path.normcase(os.path.abspath(path))
+        if normalized in self._blocked_paths:
+            raise SessionLogCorruptionError("previously quarantined for %s" % path)
+        try:
+            _atomic_write(path, payload, _quarantine_if_invalid_session)
+        except SessionLogCorruptionError:
+            self._blocked_paths.add(normalized)
+            raise
 
         return path
 
@@ -116,24 +269,23 @@ class SessionLogger(object):
         lines.append("")
 
         macro_count = 0
-        for entry in self.entries:
+        with self._lock:
+            entries = copy.deepcopy(self.entries)
+        for entry in entries:
             cmd = entry.get("command", {})
-            if cmd.get("command") == "execute_macro" and "code" in cmd:
+            succeeded = entry.get("success")
+            if succeeded is None:
+                succeeded = _response_succeeded(entry.get("response"), entry.get("error"))
+            if cmd.get("command") == "execute_macro" and "code" in cmd and succeeded:
                 macro_count += 1
                 lines.append("// Step %d (%s)" % (macro_count, entry.get("timestamp", "?")))
-                # Check if it succeeded
-                resp = entry.get("response")
-                if resp and resp.get("ok"):
-                    result = resp.get("result", {})
-                    if isinstance(result, dict) and not result.get("success", True):
-                        lines.append("// WARNING: this step failed during the session")
                 code = cmd["code"].strip()
                 lines.append(code)
                 # Ensure trailing newline after code block
                 if not code.endswith("\n"):
                     lines.append("")
 
-            elif cmd.get("command") == "run_pipeline" and "steps" in cmd:
+            elif cmd.get("command") == "run_pipeline" and "steps" in cmd and succeeded:
                 macro_count += 1
                 lines.append("// Pipeline (%s)" % entry.get("timestamp", "?"))
                 for i, step in enumerate(cmd["steps"]):
@@ -144,8 +296,7 @@ class SessionLogger(object):
         if macro_count == 0:
             return None
 
-        with open(path, "w") as f:
-            f.write("\n".join(lines))
+        _atomic_write(path, "\n".join(lines) + "\n")
 
         return path
 

@@ -246,3 +246,37 @@ def test_main_no_results_message_and_exit_code(monkeypatch, capsys):
 
     assert excinfo.value.code == 1
     assert capsys.readouterr().out == "No results table available in ImageJ.\n"
+
+
+@pytest.mark.parametrize(
+    "csv_text, message",
+    [
+        ("Area,Mean\nnan,2\n", "non-finite"),
+        ("Area,Mean\ninf,2\n", "non-finite"),
+        ("Area,Mean\n-1,2\n", "negative"),
+        ("Major,Minor\n2,3\n", "Minor exceeds Major"),
+        ("Min,Mean,Max\n5,2,4\n", "impossible Min/Mean/Max"),
+        ("Count,Area\n-2,1\n", "negative"),
+    ],
+)
+def test_audit_rejects_invalid_numeric_domains(csv_text, message):
+    result = auditor.audit_results(csv_text)
+
+    assert result["status"] == "fail"
+    validity = next(c for c in result["checks"] if c["check"] == "numeric_validity")
+    assert message in validity["message"]
+
+
+@pytest.mark.parametrize("pixel_size", [0, -1, float("nan"), float("inf")])
+def test_audit_rejects_invalid_pixel_size(pixel_size):
+    result = auditor.audit_results("Area\n10\n", pixel_size=pixel_size, unit="um")
+
+    assert result["status"] == "fail"
+    assert result["checks"][0]["check"] == "audit_parameters"
+
+
+def test_unknown_named_check_is_a_failure_not_an_empty_pass():
+    result = auditor.audit_results("Area\n10\n", check="definitely_not_a_check")
+
+    assert result["status"] == "fail"
+    assert result["checks"][0]["check"] == "unknown_check"

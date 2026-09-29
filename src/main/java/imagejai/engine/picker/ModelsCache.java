@@ -1,12 +1,21 @@
 package imagejai.engine.picker;
 
-import java.io.BufferedReader;
+import imagejai.engine.LaunchPolicy;
+
 import java.io.BufferedWriter;
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.io.InputStream;
+import java.net.URI;
+import java.net.URISyntaxException;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.DirectoryStream;
+import java.nio.file.FileSystemException;
 import java.nio.file.Files;
+import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
+import java.nio.file.attribute.BasicFileAttributes;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.format.DateTimeParseException;
@@ -40,6 +49,18 @@ public final class ModelsCache {
 
     /** TTL after which {@link #isFresh(String, Instant)} returns {@code false}. */
     public static final Duration TTL = Duration.ofHours(24);
+    public static final int MAX_CACHE_BYTES = 1024 * 1024;
+    public static final int MAX_MODELS = 2048;
+    /** Age after which an orphaned {@code *.tmp} file is swept away. */
+    private static final long STALE_TEMP_MILLIS = 60L * 60L * 1000L;
+
+    interface InputOpener {
+        InputStream open(Path path) throws IOException;
+    }
+
+    interface PathProbe {
+        BasicFileAttributes readAttributes(Path path) throws IOException;
+    }
 
     /** One provider's cache slot — loaded snapshot. */
     public static final class Snapshot {
@@ -61,9 +82,22 @@ public final class ModelsCache {
     }
 
     private final Path rootDir;
+    private final InputOpener inputOpener;
+    private final PathProbe pathProbe;
+    private int lastRejectedModelCount;
 
     public ModelsCache(Path rootDir) {
+        this(rootDir, Files::newInputStream, ModelsCache::readAttributes);
+    }
+
+    ModelsCache(Path rootDir, InputOpener inputOpener) {
+        this(rootDir, inputOpener, ModelsCache::readAttributes);
+    }
+
+    ModelsCache(Path rootDir, InputOpener inputOpener, PathProbe pathProbe) {
         this.rootDir = Objects.requireNonNull(rootDir, "rootDir");
+        this.inputOpener = Objects.requireNonNull(inputOpener, "inputOpener");
+        this.pathProbe = Objects.requireNonNull(pathProbe, "pathProbe");
     }
 
     public Path rootDir() {
@@ -71,11 +105,24 @@ public final class ModelsCache {
     }
 
     public Path pathFor(String providerId) {
-        return rootDir.resolve(providerId + ".json");
+        return rootDir.resolve(LaunchPolicy.requireProviderId(providerId) + ".json");
     }
 
     public boolean has(String providerId) {
-        return Files.exists(pathFor(providerId));
+        Path path = pathFor(providerId);
+        try {
+            BasicFileAttributes attributes = pathProbe.readAttributes(path);
+            if (!attributes.isRegularFile()) {
+                throw new CacheReadException("not_regular", path,
+                        "Model cache is not a regular file.");
+            }
+            return true;
+        } catch (NoSuchFileException ex) {
+            return false;
+        } catch (IOException ex) {
+            throw new CacheReadException("unreadable", path,
+                    "Could not inspect model cache: " + message(ex), ex);
+        }
     }
 
     /** Return {@code true} iff a snapshot exists and is younger than {@link #TTL}. */
@@ -90,57 +137,172 @@ public final class ModelsCache {
     /** Read the cached snapshot for one provider, or {@code null} when absent. */
     public Snapshot read(String providerId) {
         Path path = pathFor(providerId);
-        if (!Files.exists(path)) {
-            return null;
-        }
-        try (BufferedReader r = Files.newBufferedReader(path, StandardCharsets.UTF_8)) {
-            StringBuilder sb = new StringBuilder();
-            String line;
-            while ((line = r.readLine()) != null) {
-                sb.append(line);
+        try {
+            BasicFileAttributes attributes = pathProbe.readAttributes(path);
+            if (!attributes.isRegularFile()) {
+                throw new CacheReadException("not_regular", path,
+                        "Model cache is not a regular file.");
             }
-            return parse(providerId, sb.toString());
-        } catch (IOException ex) {
+        } catch (NoSuchFileException ex) {
             return null;
+        } catch (IOException ex) {
+            throw new CacheReadException("unreadable", path,
+                    "Could not inspect model cache: " + message(ex), ex);
+        }
+        try (InputStream in = inputOpener.open(path)) {
+            byte[] bytes = readBounded(in, path);
+            Snapshot parsed = parse(providerId, new String(bytes, StandardCharsets.UTF_8));
+            if (parsed == null) {
+                throw new IllegalArgumentException("Cache JSON is malformed.");
+            }
+            return parsed;
+        } catch (NoSuchFileException ex) {
+            return null;
+        } catch (IOException ex) {
+            throw new CacheReadException("unreadable", path,
+                    "Could not read model cache: " + message(ex), ex);
+        } catch (ModelCountLimitException ex) {
+            throw new CacheReadException("model_cap", path,
+                    "Model cache exceeds safety cap of " + MAX_MODELS + " models.", ex);
+        } catch (RuntimeException ex) {
+            if (ex instanceof CacheReadException) {
+                throw ex;
+            }
+            throw new CacheReadException("malformed", path,
+                    "Could not parse model cache: " + message(ex), ex);
         }
     }
 
     /**
      * Persist a fresh snapshot atomically (write to a tmp file then rename so
      * a torn write never replaces a known-good cache).
+     *
+     * <p>Model ids the launch policy refuses are skipped, not fatal: OpenRouter
+     * publishes alias ids such as {@code ~vendor/model-latest} that cannot be
+     * handed to a launcher, and one of those must not cost the whole provider
+     * its cache. {@link #parse} already drops the same ids on read. Use
+     * {@link #lastRejectedModelCount()} to report how many were skipped.
+     *
+     * <p>The temporary file is always removed when the write or the rename
+     * fails, so an unreachable provider cannot litter the cache directory.
      */
     public void write(String providerId,
                       Instant fetchedAt,
                       String endpoint,
                       Set<String> modelIds) throws IOException {
-        if (!Files.exists(rootDir)) {
-            Files.createDirectories(rootDir);
+        providerId = LaunchPolicy.requireProviderId(providerId);
+        Set<String> ids = new LinkedHashSet<String>();
+        int rejected = 0;
+        if (modelIds != null) {
+            for (String id : modelIds) {
+                String safeId;
+                try {
+                    safeId = LaunchPolicy.requireModelId(id);
+                } catch (IllegalArgumentException unusable) {
+                    rejected++;
+                    continue;
+                }
+                if (ids.size() >= MAX_MODELS) {
+                    throw new IllegalArgumentException("Model cache exceeds safety cap of "
+                            + MAX_MODELS + " models.");
+                }
+                ids.add(safeId);
+            }
         }
+        lastRejectedModelCount = rejected;
+
+        Files.createDirectories(rootDir);
+        sweepStaleTempFiles();
         Path target = pathFor(providerId);
         Path tmp = Files.createTempFile(rootDir, providerId + "-", ".tmp");
-        Set<String> ids = modelIds == null
-                ? Collections.<String>emptySet()
-                : new LinkedHashSet<String>(modelIds);
-        try (BufferedWriter w = new BufferedWriter(
-                Files.newBufferedWriter(tmp, StandardCharsets.UTF_8))) {
-            w.write("{\n");
-            w.write("  \"provider\": " + jsonString(providerId) + ",\n");
-            w.write("  \"fetched_at\": " + jsonString(fetchedAt.toString()) + ",\n");
-            w.write("  \"endpoint\": " + jsonString(endpoint == null ? "" : endpoint) + ",\n");
-            w.write("  \"models\": [");
-            boolean first = true;
-            for (String id : ids) {
-                if (!first) {
-                    w.write(", ");
+        boolean placed = false;
+        try {
+            try (BufferedWriter w = new BufferedWriter(
+                    Files.newBufferedWriter(tmp, StandardCharsets.UTF_8))) {
+                w.write("{\n");
+                w.write("  \"provider\": " + jsonString(providerId) + ",\n");
+                w.write("  \"fetched_at\": " + jsonString(fetchedAt.toString()) + ",\n");
+                w.write("  \"endpoint\": " + jsonString(credentialFreeEndpoint(endpoint)) + ",\n");
+                w.write("  \"models\": [");
+                boolean first = true;
+                for (String id : ids) {
+                    if (!first) {
+                        w.write(", ");
+                    }
+                    w.write(jsonString(id));
+                    first = false;
                 }
-                w.write(jsonString(id));
-                first = false;
+                w.write("]\n}\n");
             }
-            w.write("]\n}\n");
+            moveIntoPlace(tmp, target);
+            placed = true;
+        } finally {
+            if (!placed) {
+                try {
+                    Files.deleteIfExists(tmp);
+                } catch (IOException ignored) {
+                    // Best effort: the next write sweeps whatever is left.
+                }
+            }
         }
-        Files.move(tmp, target,
-                StandardCopyOption.REPLACE_EXISTING,
-                StandardCopyOption.ATOMIC_MOVE);
+    }
+
+    /** Number of model ids skipped by the most recent {@link #write}. */
+    public int lastRejectedModelCount() {
+        return lastRejectedModelCount;
+    }
+
+    /**
+     * Rename the finished temp file over the cache slot.
+     *
+     * <p>Windows refuses an atomic replace while another process holds the
+     * target open — a virus scanner, a sync client, or a second Fiji. The
+     * temp file is already complete at this point, so a plain replace is still
+     * safe; retry briefly before giving up.
+     */
+    private static void moveIntoPlace(Path tmp, Path target) throws IOException {
+        try {
+            Files.move(tmp, target,
+                    StandardCopyOption.REPLACE_EXISTING,
+                    StandardCopyOption.ATOMIC_MOVE);
+            return;
+        } catch (FileSystemException atomicUnavailable) {
+            // fall through to the non-atomic retry below
+        }
+        IOException last = null;
+        for (int attempt = 0; attempt < 5; attempt++) {
+            try {
+                Files.move(tmp, target, StandardCopyOption.REPLACE_EXISTING);
+                return;
+            } catch (IOException retryable) {
+                last = retryable;
+                try {
+                    Thread.sleep(50L * (attempt + 1));
+                } catch (InterruptedException interrupted) {
+                    Thread.currentThread().interrupt();
+                    break;
+                }
+            }
+        }
+        throw last == null ? new IOException("Could not replace " + target) : last;
+    }
+
+    /** Delete temp files abandoned by an earlier crash or failed rename. */
+    private void sweepStaleTempFiles() {
+        long cutoff = System.currentTimeMillis() - STALE_TEMP_MILLIS;
+        try (DirectoryStream<Path> entries = Files.newDirectoryStream(rootDir, "*.tmp")) {
+            for (Path entry : entries) {
+                try {
+                    if (Files.getLastModifiedTime(entry).toMillis() < cutoff) {
+                        Files.deleteIfExists(entry);
+                    }
+                } catch (IOException ignored) {
+                    // Another process may own it; leave it for the next sweep.
+                }
+            }
+        } catch (IOException ignored) {
+            // No directory yet, or it is unreadable — nothing to sweep.
+        }
     }
 
     static Snapshot parse(String providerId, String body) {
@@ -148,15 +310,37 @@ public final class ModelsCache {
         // "fetched_at" as an ISO instant and "models" as either ["id"] or
         // [{"id": "..."}] for forward compat with richer payloads.
         Instant fetchedAt;
-        try {
-            fetchedAt = Instant.parse(extractStringField(body, "fetched_at"));
-        } catch (DateTimeParseException ex) {
-            return null;
-        } catch (RuntimeException ex) {
-            return null;
+        fetchedAt = Instant.parse(extractStringField(body, "fetched_at"));
+        List<String> ids = new ArrayList<String>();
+        for (String id : extractIds(body)) {
+            try {
+                ids.add(LaunchPolicy.requireModelId(id));
+            } catch (IllegalArgumentException ignored) {
+                // Treat attacker-controlled or corrupt cache entries as absent.
+            }
         }
-        List<String> ids = extractIds(body);
         return new Snapshot(providerId, fetchedAt, ids);
+    }
+
+    static String credentialFreeEndpoint(String endpoint) {
+        if (endpoint == null || endpoint.trim().isEmpty()) {
+            return "";
+        }
+        String candidate = endpoint.trim();
+        try {
+            URI uri = new URI(candidate);
+            if (uri.isAbsolute() && uri.getHost() != null) {
+                return new URI(uri.getScheme(), null, uri.getHost(), uri.getPort(),
+                        uri.getPath(), null, null).toString();
+            }
+        } catch (URISyntaxException ignored) {
+            return "";
+        }
+        String lower = candidate.toLowerCase(java.util.Locale.ROOT);
+        if (lower.matches(".*(?:key|api_?key|token|secret|password)=.*")) {
+            return "";
+        }
+        return candidate;
     }
 
     private static String extractStringField(String body, String key) {
@@ -173,10 +357,10 @@ public final class ModelsCache {
 
     private static List<String> extractIds(String body) {
         int idx = body.indexOf("\"models\"");
-        if (idx < 0) return Collections.emptyList();
+        if (idx < 0) throw new IllegalStateException("missing field models");
         int open = body.indexOf('[', idx);
         int close = body.indexOf(']', open);
-        if (open < 0 || close < 0) return Collections.emptyList();
+        if (open < 0 || close < 0) throw new IllegalStateException("malformed field models");
         String inner = body.substring(open + 1, close).trim();
         if (inner.isEmpty()) return Collections.emptyList();
         List<String> out = new ArrayList<String>();
@@ -185,11 +369,67 @@ public final class ModelsCache {
             int q1 = inner.indexOf('"', i);
             if (q1 < 0) break;
             int q2 = inner.indexOf('"', q1 + 1);
-            if (q2 < 0) break;
+            if (q2 < 0) throw new IllegalStateException("malformed model identifier");
+            if (out.size() >= MAX_MODELS) {
+                throw new ModelCountLimitException();
+            }
             out.add(inner.substring(q1 + 1, q2));
             i = q2 + 1;
         }
         return out;
+    }
+
+    private static byte[] readBounded(InputStream in, Path path) throws IOException {
+        ByteArrayOutputStream out = new ByteArrayOutputStream(Math.min(8192, MAX_CACHE_BYTES));
+        byte[] buffer = new byte[8192];
+        int total = 0;
+        int read;
+        while ((read = in.read(buffer)) >= 0) {
+            if (read == 0) {
+                continue;
+            }
+            if (read > MAX_CACHE_BYTES - total) {
+                throw new CacheReadException("too_large", path,
+                        "Model cache exceeds safety cap of " + MAX_CACHE_BYTES + " bytes.");
+            }
+            out.write(buffer, 0, read);
+            total += read;
+        }
+        return out.toByteArray();
+    }
+
+    private static String message(Exception e) {
+        String value = e.getMessage();
+        return value == null || value.trim().isEmpty()
+                ? e.getClass().getSimpleName()
+                : value;
+    }
+
+    private static BasicFileAttributes readAttributes(Path path) throws IOException {
+        return Files.readAttributes(path, BasicFileAttributes.class);
+    }
+
+    public static final class CacheReadException extends IllegalStateException {
+        private final String code;
+        private final Path path;
+
+        CacheReadException(String code, Path path, String message) {
+            super(message);
+            this.code = code;
+            this.path = path;
+        }
+
+        CacheReadException(String code, Path path, String message, Throwable cause) {
+            super(message, cause);
+            this.code = code;
+            this.path = path;
+        }
+
+        public String code() { return code; }
+        public Path path() { return path; }
+    }
+
+    private static final class ModelCountLimitException extends IllegalStateException {
     }
 
     private static String jsonString(String s) {

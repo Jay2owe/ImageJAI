@@ -1,0 +1,15 @@
+# Exact, reviewed role constants, documentation examples and synthetic scanner fixtures.
+# No provider credentials or personal paths are authorised by these exceptions.
+# src/main/java/imagejai/engine/automation/UiNode.java
+^public\ static\ final\ String\ ROLE_PASSWORD\ =\ "password";$
+# agent/gemma4_31b/lint.py
+^"e\.g\.\ \\"C:/[U]sers/example/data\.tif\\"\ not\ "$
+^"\\"C:\\\\\\\\[U]sers\\\\\\\\example\\\\\\\\data\.tif\\"\."$
+# agent/test_public_release_hygiene.py
+^planted\ =\ "open\(r'"\ \+\ "C:\\\\[U]sers\\\\"\ \+\ "Owner\\\\notes\.txt'\)"$
+^planted\ =\ "D:/"\ \+\ "Some\ Institute\ "\ \+\ "[D]ropbox/Some\ Lab/data\.tif"$
+^"C:/[U]sers/example/data\.tif",$
+^"C:\\\\[U]sers\\\\me\\\\image\.czi",$
+^"C:/[U]sers/\.\.\./AI_Exports",$
+# scripts/clean_for_public_release.ps1
+^\#\ Removes\ [D]ropbox/[O]neDrive\ conflicted\-copy\ artefacts,\ JVM\ crash\ dumps,$

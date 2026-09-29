@@ -139,4 +139,41 @@ public class UndoStackTest {
         assertEquals("b", s.peek(0).callId);
         assertTrue(s.evictedBytes() >= reclaimed);
     }
+
+    @Test
+    public void failedAtomicRestoreRetainsFramesAndByteAccounting() {
+        UndoStack stack = new UndoStack();
+        stack.push(frame("a", 20));
+        stack.push(frame("b", 30));
+        long bytes = stack.bytes();
+        try {
+            stack.restoreAndPopN(2, target -> {
+                throw new IllegalArgumentException("validation failed");
+            });
+            org.junit.Assert.fail("Expected restore failure");
+        } catch (Exception expected) {
+            assertTrue(expected.getMessage().contains("validation failed"));
+        }
+        assertEquals(2, stack.size());
+        assertEquals(bytes, stack.bytes());
+        assertEquals("b", stack.peek(0).callId);
+        assertEquals("a", stack.peek(1).callId);
+    }
+
+    @Test
+    public void successfulAtomicCallIdRestoreConsumesOnlyAfterCallback() throws Exception {
+        UndoStack stack = new UndoStack();
+        stack.push(frame("a", 10));
+        stack.push(frame("b", 10));
+        stack.push(frame("c", 10));
+        final int[] sizeDuringRestore = new int[1];
+        List<UndoFrame> restored = stack.restoreAndDropTo("b", target -> {
+            sizeDuringRestore[0] = stack.size();
+            assertEquals("b", target.callId);
+        });
+        assertEquals(3, sizeDuringRestore[0]);
+        assertEquals(2, restored.size());
+        assertEquals(1, stack.size());
+        assertEquals("a", stack.peek(0).callId);
+    }
 }

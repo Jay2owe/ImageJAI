@@ -7,9 +7,10 @@ abstract: >-
   Supports natural-language control, multi-step pipeline generation,
   vision reasoning over open images, multi-specialist agents
   (segmentation, measurement, visualisation, statistics, hypothesis-driven
-  analysis), parameter exploration, teaching mode, and a TCP command
-  server for external agent integration. Compatible with Google Gemini,
-  OpenAI-compatible endpoints, and local Ollama backends.
+  analysis), parameter exploration, teaching mode, and a standalone console
+  with model and reasoning-effort selection, automatic Fiji startup,
+  reusable session macros, and direct TCP tools. Supports cloud model
+  providers, supported agent subscriptions, and local Ollama backends.
 authors:
   - given-names: Jamie
     family-names: Malcolm
@@ -19,7 +20,8 @@ authors:
 repository-code: "https://github.com/Jay2owe/ImageJAI"
 url: "https://github.com/Jay2owe/ImageJAI"
 license: BSD-3-Clause
-version: "0.2.0"
+version: "0.5.0"
+date-released: 2026-09-29
 keywords:
   - fiji
   - imagej

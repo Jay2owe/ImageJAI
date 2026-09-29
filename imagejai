@@ -1,0 +1,6 @@
+#!/usr/bin/env sh
+# ImageJAI Console launcher — symlink or copy onto PATH; works from any cwd.
+CONSOLE_HOME=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+export IMAGEJAI_AGENT_WORKSPACE="$CONSOLE_HOME/agent"
+export PYTHONPATH="$CONSOLE_HOME${PYTHONPATH:+:$PYTHONPATH}"
+exec python -m agent.console "$@"

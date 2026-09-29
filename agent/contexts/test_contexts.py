@@ -17,6 +17,9 @@ from __future__ import annotations
 
 import os
 import re
+import importlib.util
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Iterable
 
@@ -30,6 +33,8 @@ AGENT_DIR = CTX_DIR.parent
 REGISTRY_PATH = AGENT_DIR / "providers" / "models.yaml"
 SNAPSHOT_DIR = CTX_DIR / "_snapshots"
 CLAUDE_MD_PATH = AGENT_DIR / "CLAUDE.md"
+UPDATE_SNAPSHOTS_ENV = "IMAGEJAI_UPDATE_CONTEXT_SNAPSHOTS"
+PROJECT_ROOT = AGENT_DIR.parent
 
 
 # --------------------------------------------------------------------------- #
@@ -70,6 +75,37 @@ def _meaningful_lines(text: str) -> list[str]:
     return out
 
 
+def _load_context_hook_module():
+    path = PROJECT_ROOT / "context_hook.py"
+    spec = importlib.util.spec_from_file_location("imagejai_context_hook_test", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _assert_snapshot(model_id: str, composed: str, snap_path: Path) -> None:
+    """Assert a tracked snapshot, updating only after an explicit opt-in."""
+    if not snap_path.exists():
+        if os.environ.get(UPDATE_SNAPSHOTS_ENV) == "1":
+            snap_path.parent.mkdir(parents=True, exist_ok=True)
+            snap_path.write_text(composed, encoding="utf-8")
+            pytest.skip(f"wrote requested snapshot for {model_id}; review and rerun")
+        pytest.fail(
+            f"tracked context snapshot is missing for {model_id}: {snap_path}. "
+            f"To create it intentionally, set {UPDATE_SNAPSHOTS_ENV}=1, run this "
+            "test, then review and commit the generated file."
+        )
+    expected = snap_path.read_text(encoding="utf-8")
+    if composed != expected and os.environ.get(UPDATE_SNAPSHOTS_ENV) == "1":
+        snap_path.write_text(composed, encoding="utf-8")
+        pytest.skip(f"updated requested snapshot for {model_id}; review and rerun")
+    assert composed == expected, (
+        f"composition for {model_id} drifted from snapshot at {snap_path}; "
+        f"set {UPDATE_SNAPSHOTS_ENV}=1 only when intentionally regenerating it."
+    )
+
+
 # --------------------------------------------------------------------------- #
 # loader correctness
 # --------------------------------------------------------------------------- #
@@ -95,6 +131,7 @@ def test_invalid_harness_raises_value_error(monkeypatch):
                 "family": "claude",
                 "vision_capable": True,
                 "tool_call_reliability": "high",
+                "context_size": "large",
             }
         ]
     }
@@ -120,6 +157,7 @@ def test_missing_overlay_file_raises_filenotfound(monkeypatch, tmp_path):
                 "family": "claude",
                 "vision_capable": True,
                 "tool_call_reliability": "high",
+                "context_size": "large",
             }
         ]
     }
@@ -151,6 +189,7 @@ def test_missing_family_overlay_is_not_silently_dropped(monkeypatch, tmp_path):
                 "family": "claude",
                 "vision_capable": True,
                 "tool_call_reliability": "high",
+                "context_size": "large",
             }
         ]
     }
@@ -171,6 +210,31 @@ def test_every_model_composes(entry):
     assert composed.strip(), f"empty composition for {_model_id(entry)}"
     # base.md content always present
     assert "ImageJAI Agent" in composed
+
+
+def test_every_model_declares_exactly_one_known_family_and_harness():
+    validated = loader.load_registry()
+    assert len(validated) == len(_registry_entries())
+    for entry in validated.values():
+        assert entry["family"] in loader._VALID_FAMILIES
+        assert entry["harness"] in loader._VALID_HARNESSES
+
+
+def test_misspelled_family_is_not_hidden_by_generic_overlay(monkeypatch):
+    fake = {
+        "models": [{
+            "provider": "test",
+            "model_id": "typo",
+            "harness": "tool_loop",
+            "family": "llamma",
+            "vision_capable": False,
+            "tool_call_reliability": "medium",
+            "context_size": "small",
+        }]
+    }
+    monkeypatch.setattr(loader.yaml, "safe_load", lambda _text: fake)
+    with pytest.raises(ValueError, match="family must be one of"):
+        loader.load_context("test/typo")
 
 
 # --------------------------------------------------------------------------- #
@@ -203,19 +267,20 @@ SNAPSHOT_CANDIDATES = sorted(_canonical_per_family().items())
 def test_snapshot_canonical_per_family(family, model_id):
     """Compositions are snapshotted; unintended drift fails the test.
 
-    Update by deleting agent/contexts/_snapshots/<slug>.md and re-running.
+    Missing snapshots fail. Intentional creation requires
+    ``IMAGEJAI_UPDATE_CONTEXT_SNAPSHOTS=1`` and review of the generated file.
     """
     composed = loader.load_context(model_id)
-    SNAPSHOT_DIR.mkdir(exist_ok=True)
     snap_path = SNAPSHOT_DIR / f"{_slug(model_id)}.md"
-    if not snap_path.exists():
-        snap_path.write_text(composed, encoding="utf-8")
-        pytest.skip(f"wrote new snapshot for {model_id}; rerun to assert")
-    expected = snap_path.read_text(encoding="utf-8")
-    assert composed == expected, (
-        f"composition for {model_id} drifted from snapshot at {snap_path}; "
-        "delete the snapshot file and rerun to update if change is intended."
-    )
+    _assert_snapshot(model_id, composed, snap_path)
+
+
+def test_missing_snapshot_requires_explicit_update(monkeypatch, tmp_path):
+    monkeypatch.delenv(UPDATE_SNAPSHOTS_ENV, raising=False)
+    missing = tmp_path / "missing.md"
+    with pytest.raises(pytest.fail.Exception, match="tracked context snapshot is missing"):
+        _assert_snapshot("test/missing", "COMPOSED", missing)
+    assert not missing.exists()
 
 
 # --------------------------------------------------------------------------- #
@@ -261,6 +326,10 @@ _CLAUDE_MUST_CONTAIN: tuple[str, ...] = (
     "python ij.py ui list",
     "python ij.py ui click",
     "python ij.py ui dropdown",
+    # Long-running EDT mutation handoff
+    "operation_in_progress",
+    "wait_for_operation",
+    "Never submit the original mutation",
     # Plugin probing
     "probe_plugin.py",
     # Pixel-side analysis
@@ -431,3 +500,65 @@ def test_high_reliability_omits_reliability_overlay():
     composed = loader.load_context("anthropic/claude-opus-4-7")
     assert "Weak tool calling" not in composed
     assert "Good tool calling" not in composed
+
+
+# --------------------------------------------------------------------------- #
+# context sidecar freshness, ownership, and deterministic generation
+# --------------------------------------------------------------------------- #
+
+
+def test_reconnect_does_not_revive_an_expired_heartbeat(monkeypatch):
+    hook = _load_context_hook_module()
+    monkeypatch.setattr(hook.time, "time", lambda: 200.0)
+    reconnected = {
+        "updated_ts": 200_000,       # a recent "subscribed" rewrite
+        "last_heartbeat_ts": 100_000,  # but no recent server heartbeat
+    }
+    assert not hook._snapshot_is_fresh(reconnected, max_age_seconds=90)
+    reconnected["last_heartbeat_ts"] = 200_000
+    assert hook._snapshot_is_fresh(reconnected, max_age_seconds=90)
+
+
+def test_concurrent_subscriber_lease_has_one_owner(monkeypatch, tmp_path):
+    hook = _load_context_hook_module()
+    monkeypatch.setattr(hook, "CACHE_DIR", str(tmp_path))
+    monkeypatch.setattr(hook, "TCP_HOST", "127.0.0.1")
+    monkeypatch.setattr(hook, "TCP_PORT", 47746)
+    monkeypatch.setattr(
+        hook, "_process_identity",
+        lambda pid: "current-process" if pid == os.getpid() else None,
+    )
+    gate = threading.Barrier(2)
+
+    def claim(owner):
+        gate.wait(timeout=2)
+        return owner, hook._acquire_subscriber_lease(
+            owner, os.getpid(), ttl_seconds=30, now=100.0)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(claim, ("owner-a", "owner-b")))
+    winners = [owner for owner, acquired in results if acquired]
+    assert len(winners) == 1
+    lease = hook._read_subscriber_lease()
+    assert lease["owner"] == winners[0]
+    assert lease["pid"] == os.getpid()
+    assert lease["process_identity"] == "current-process"
+    hook._release_subscriber_lease(winners[0], os.getpid())
+
+
+def test_sync_context_is_byte_stable_and_does_not_rewrite(monkeypatch, tmp_path):
+    from agent import sync_context
+
+    monkeypatch.setattr(sync_context, "SCRIPT_DIR", str(tmp_path))
+    monkeypatch.setattr(
+        sync_context, "AGENT_FILES", {"AGENTS.md": "openai/gpt-5-codex"})
+    monkeypatch.setattr(sync_context.loader, "load_context", lambda _model: "BODY\n")
+    sync_context.sync()
+    target = tmp_path / "AGENTS.md"
+    first = target.read_bytes()
+    fixed_ns = 1_700_000_000_000_000_000
+    os.utime(target, ns=(fixed_ns, fixed_ns))
+    sync_context.sync()
+    assert target.read_bytes() == first
+    assert target.stat().st_mtime_ns == fixed_ns
+    assert list(tmp_path.glob("*.tmp")) == []

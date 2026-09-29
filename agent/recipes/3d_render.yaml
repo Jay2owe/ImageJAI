@@ -1,3 +1,4 @@
+schema_version: 1
 name: 3D Rendering
 id: 3d_render
 description: >
@@ -48,10 +49,18 @@ parameters:
     default: true
     description: "If true, segment and mask to isolate one object before rendering. Strongly recommended."
 
+  - name: apply_lut
+    label: "Apply Cyan Hot LUT"
+    type: boolean
+    default: true
+    description: "Apply a display LUT to the finished render without normalizing pixels."
+
 steps:
   - id: 1
     description: "Isolate the object of interest (CRITICAL for clean renders)"
-    macro: |
+    type: manual
+    when: {parameter: isolate_object, equals: true}
+    instructions: |
       // 1. Duplicate the stack for segmentation
       original = getTitle();
       run("Duplicate...", "title=seg duplicate");
@@ -100,7 +109,9 @@ steps:
 
   - id: 3a
     description: "Render with 3Dscript (PREFERRED)"
-    macro: |
+    type: manual
+    when: {parameter: renderer, equals: 3dscript}
+    instructions: |
       // Scale up XY because 3Dscript output size = input image size
       run("Scale...", "x=10 y=10 z=1.0 interpolation=Bicubic process create title=render_input");
       // Write animation script to file
@@ -120,7 +131,9 @@ steps:
 
   - id: 3b
     description: "Render with 3D Viewer (INTERACTIVE)"
-    macro: |
+    type: manual
+    when: {parameter: renderer, equals: 3d_viewer}
+    instructions: |
       // Use TCP command: python ij.py 3d add IMAGE_TITLE volume ${threshold}
       // Then: python ij.py 3d fit
       // Then: python ij.py 3d capture render_result
@@ -131,6 +144,7 @@ steps:
 
   - id: 3c
     description: "Render with 3D Project (FALLBACK)"
+    when: {parameter: renderer, equals: 3d_project}
     macro: |
       run("Scale...", "x=10 y=10 z=1.0 interpolation=Bicubic process create title=render_input");
       run("3D Project...", "projection=[Brightest Point] axis=Y-Axis slice=0.28 initial=0 total=${rotation_degrees} rotation=10 lower=1 upper=255 opacity=0 surface=100 interior=50");
@@ -141,6 +155,7 @@ steps:
 
   - id: 4
     description: "Apply LUT for presentation (optional)"
+    when: {parameter: apply_lut, equals: true}
     macro: |
       run("Cyan Hot");
     decision_point: false

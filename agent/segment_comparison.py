@@ -10,12 +10,17 @@ Approaches:
   E: Weka pixel classifier
 """
 
-import json, socket, struct, sys, time, base64
+import sys, time, base64
 import numpy as np
 from pathlib import Path
 from scipy.ndimage import distance_transform_edt, label, binary_opening, generate_binary_structure
 from skimage.feature import peak_local_max
 from skimage.segmentation import watershed
+
+try:
+    from .ij import imagej_command as _imagej_command
+except ImportError:
+    from ij import imagej_command as _imagej_command
 
 AGENT_DIR = Path(__file__).parent
 TMP_DIR = AGENT_DIR / ".tmp"
@@ -27,18 +32,7 @@ W, H, NZ = 1024, 1024, 13
 
 
 def tcp(cmd, timeout=120):
-    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    s.settimeout(timeout)
-    s.connect(("localhost", 7746))
-    d = json.dumps(cmd).encode()
-    s.sendall(struct.pack(">I", len(d)) + d)
-    b = b""
-    while len(b) < 4: b += s.recv(4 - len(b))
-    n = struct.unpack(">I", b)[0]
-    r = b""
-    while len(r) < n: r += s.recv(min(65536, n - len(r)))
-    s.close()
-    return json.loads(r)
+    return _imagej_command(cmd, timeout=timeout)
 
 
 def macro(code, timeout=120):
@@ -63,6 +57,7 @@ def get_pixels(title, z=None):
         r = tcp({"command": "get_pixels", "width": W, "height": H})
     else:
         # Get all slices
+        macro(f'selectImage("{title}");')
         r = tcp({"command": "get_pixels", "width": W, "height": H, "allSlices": True})
 
     if r.get("ok"):
@@ -86,8 +81,8 @@ def save_labels_and_import(labels_3d, title):
     import tifffile
     tif_path = str(TMP_DIR / f"{title}.tif")
     tifffile.imwrite(tif_path, labels_3d.astype(np.uint16), imagej=True)
-    tif_fwd = tif_path.replace("\\", "/")
-    macro(f'open("{tif_fwd}"); rename("{title}");')
+    tcp({"command": "open_image", "path": tif_path})
+    macro(f'rename("{title}");')
     print(f"  Opened {title} in ImageJ")
 
 
@@ -676,12 +671,8 @@ IJ.log("D_raw: " + totalSpots + " spots, " + nTracks + " tracks, " + (int)maxVal
     # Wait and load
     time.sleep(2)
 
-    # Save label image from ImageJ, then load in Python for filtering
-    tif_path = str(TMP_DIR / "labels_D_raw_export.tif")
-    tif_fwd = tif_path.replace("\\", "/")
-    macro(f'selectImage("labels_D_raw"); saveAs("Tiff", "{tif_fwd}"); rename("labels_D_raw");')
-
-    labels = tifffile.imread(tif_path)
+    # Read the label plane through the governed pixel command; no macro host I/O.
+    labels = get_pixels("labels_D_raw")
     print(f"  Label image shape: {labels.shape}, max label: {labels.max()}")
 
     # Calculate per-label volumes

@@ -56,8 +56,11 @@ public class TerminalView extends JPanel {
                 ApprovalPolicy.loadForAgent(session.info()),
                 new PromptWatcher.RawWriter() {
                     @Override
-                    public void writeRaw(String text) {
-                        session.writeRaw(text);
+                    public void writeRaw(String text) throws Exception {
+                        EmbeddedAgentSession.WriteResult result = terminalHost.writeRaw(text);
+                        if (!result.isSuccess()) {
+                            throw new java.io.IOException(result.message());
+                        }
                     }
                 },
                 new PromptWatcher.Listener() {

@@ -4,6 +4,7 @@ import ij.ImagePlus;
 import ij.ImageStack;
 import ij.process.ByteProcessor;
 import org.junit.Test;
+import imagejai.config.Settings;
 import imagejai.engine.CommandEngine;
 import imagejai.engine.FrictionLog;
 
@@ -143,12 +144,14 @@ public class ParameterPromptingTest {
     }
 
     private static LocalAssistant assistantWithRecordingIntents(RecordingIntent... intents) {
+        Settings settings = new Settings();
+        settings.safeModeEnabled = false;
         IntentLibrary library = IntentLibrary.load();
         for (RecordingIntent intent : intents) {
             library.register(intent);
         }
-        return new LocalAssistant(library, new IntentMatcher(library),
-                new RecordingFijiBridge(), new FrictionLog());
+        return new LocalAssistant(library, new IntentMatcher(library, settings),
+                new RecordingFijiBridge(), new FrictionLog(), settings);
     }
 
     private static void assertRequiredSlot(IntentLibrary library, String intentId, String slotName) {

@@ -4,6 +4,7 @@ import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import ij.process.LUT;
+import imagejai.engine.security.AgentContextSanitizer;
 import org.junit.Test;
 
 import java.awt.image.IndexColorModel;
@@ -11,6 +12,7 @@ import java.io.PrintStream;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNotEquals;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNotSame;
 import static org.junit.Assert.assertSame;
@@ -153,6 +155,65 @@ public class TCPCommandServerGemmaToolsTest {
         assertEquals("", result.get("stdout").getAsString());
         assertEquals("", result.get("stderr").getAsString());
         assertFalse(result.get("installed").getAsBoolean());
+    }
+
+    @Test
+    public void anEmptyConsoleIsDistinguishableFromOneSayingEmpty() {
+        // PM-P. An empty console and a console whose whole contents are the
+        // placeholder carry identical *content* — that is the defect, and no
+        // amount of reading the content can undo it. What separates them is
+        // the tag, which this side generates, and the flag beside it.
+        ConsoleCapture.resetForTests();
+        try {
+            TCPCommandServer server = newServer();
+            JsonObject nothing = server.handleGetConsole(
+                    new JsonObject(), TCPCommandServer.DEFAULT_CAPS)
+                    .getAsJsonObject("result");
+
+            ConsoleCapture.appendStdoutForTests(AgentContextSanitizer.EMPTY);
+            JsonObject saysEmpty = server.handleGetConsole(
+                    new JsonObject(), TCPCommandServer.DEFAULT_CAPS)
+                    .getAsJsonObject("result");
+
+            String nothingText = nothing.get("combined").getAsString();
+            String saysEmptyText = saysEmpty.get("combined").getAsString();
+            assertTrue("both envelopes show the placeholder as their content",
+                    nothingText.endsWith(AgentContextSanitizer.EMPTY + "]")
+                    && saysEmptyText.endsWith(AgentContextSanitizer.EMPTY + "]"));
+            assertNotEquals("...but the tag keeps them apart",
+                    nothingText, saysEmptyText);
+
+            assertTrue(nothing.get("combinedEmpty").getAsBoolean());
+            assertFalse("content that reads like the placeholder is content",
+                    saysEmpty.get("combinedEmpty").getAsBoolean());
+        } finally {
+            ConsoleCapture.uninstall();
+        }
+    }
+
+    @Test
+    public void theConsoleSourceTagCarriesEmptinessIntoTheDedupHash() {
+        // The flag sits beside result; the readonly dedup hash is computed over
+        // result alone. So the tag has to carry it too, or a caller polling
+        // with if_none_match would be told "unchanged" across the transition.
+        ConsoleCapture.resetForTests();
+        try {
+            TCPCommandServer server = newServer();
+            String empty = server.handleGetConsole(
+                    new JsonObject(), TCPCommandServer.DEFAULT_CAPS)
+                    .getAsJsonObject("result").get("combined").getAsString();
+            assertTrue("empty console is tagged as such: " + empty,
+                    empty.startsWith("[CONSOLE:empty: "));
+
+            ConsoleCapture.appendStdoutForTests("a real line\n");
+            String real = server.handleGetConsole(
+                    new JsonObject(), TCPCommandServer.DEFAULT_CAPS)
+                    .getAsJsonObject("result").get("combined").getAsString();
+            assertTrue("content keeps the plain tag: " + real,
+                    real.startsWith("[CONSOLE: "));
+        } finally {
+            ConsoleCapture.uninstall();
+        }
     }
 
     // -----------------------------------------------------------------------

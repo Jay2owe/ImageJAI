@@ -8,7 +8,6 @@ import imagejai.engine.security.PathTokenMap;
 import imagejai.engine.security.RedactionReport;
 import imagejai.engine.security.SelectionBroker;
 import org.junit.Test;
-import org.junit.jupiter.api.Tag;
 
 import java.nio.file.Path;
 import java.nio.file.Paths;
@@ -25,7 +24,6 @@ import static org.junit.Assert.assertTrue;
  * Stage 09 browse brief integration: broker -> TCP poll/retrieve ->
  * reverse-resolution, without exposing local labels.
  */
-@Tag("integration")
 public class BrowseBriefIntegrationTest {
     @Test
     public void selectedSeriesBriefCanBeRetrievedAndOpenedByToken() {

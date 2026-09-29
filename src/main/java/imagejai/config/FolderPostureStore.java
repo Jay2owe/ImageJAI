@@ -62,7 +62,9 @@ public class FolderPostureStore {
 
         private void normalise() {
             if (posture == null) {
-                posture = PrivacyPosture.defaultPosture();
+                // An existing but malformed folder choice must not silently
+                // relax to the first-use Standard default.
+                posture = PrivacyPosture.PSEUDONYMISED;
             }
             setBy = emptyToDefault(setBy, "user");
             setAt = emptyToDefault(setAt, Instant.now().toString());

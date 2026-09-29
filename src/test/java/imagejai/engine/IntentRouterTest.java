@@ -10,6 +10,7 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.attribute.FileTime;
 import java.util.Optional;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -146,12 +147,14 @@ public class IntentRouterTest {
     public void hotReloadOnExternalEdit() throws IOException, InterruptedException {
         IntentRouter r = new IntentRouter(store);
         r.teach("foo", "print(\"foo\");", null);
-        // Wait a bit so mtime can change visibly on coarse filesystems.
-        Thread.sleep(1100);
+        long loadedMtime = Files.getLastModifiedTime(store).toMillis();
         String newJson = "{\"version\":1,\"mappings\":["
                 + "{\"pattern\":\"bar\",\"macro\":\"print(\\\"bar\\\");\"}"
                 + "]}";
         Files.write(store, newJson.getBytes(StandardCharsets.UTF_8));
+        // Advance the timestamp explicitly instead of sleeping for the host
+        // filesystem's timestamp granularity.
+        Files.setLastModifiedTime(store, FileTime.fromMillis(loadedMtime + 2000L));
         assertFalse(r.resolve("foo").isPresent());
         Optional<IntentRouter.Resolved> res = r.resolve("bar");
         assertTrue(res.isPresent());

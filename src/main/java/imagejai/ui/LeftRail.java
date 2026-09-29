@@ -4,6 +4,7 @@ import com.google.gson.JsonObject;
 import ij.IJ;
 import ij.Prefs;
 import imagejai.config.Settings;
+import imagejai.config.ConsoleSessionStore;
 import imagejai.engine.EmbeddedAgentSession;
 import imagejai.engine.RecipePaths;
 import imagejai.terminal.AgentRegistry;
@@ -17,13 +18,17 @@ import javax.swing.JMenuItem;
 import javax.swing.JPanel;
 import javax.swing.JPopupMenu;
 import javax.swing.JOptionPane;
+import javax.swing.JScrollPane;
+import javax.swing.JTextArea;
 import javax.swing.JSeparator;
 import javax.swing.SwingUtilities;
 import javax.swing.SwingWorker;
 import javax.swing.Timer;
 import java.awt.Color;
 import java.awt.Component;
+import java.awt.Container;
 import java.awt.Cursor;
+import java.awt.Desktop;
 import java.awt.Dimension;
 import java.awt.Font;
 import java.awt.Insets;
@@ -94,12 +99,14 @@ public class LeftRail extends JPanel {
     private final SessionRelauncher sessionRelauncher;
     private final Runnable focusReturn;
     private final JPanel body;
+    private final JScrollPane bodyScroll;
     private final JButton collapseButton;
     private final JLabel titleLabel;
     private final JLabel statusLabel;
     private final Timer statusTimer;
     private final JButton commandsButton;
     private final JButton newAgentChatButton;
+    private final JButton consoleChatsButton;
     private final JButton newWipButton;
     private final SessionHistoryPanel sessionHistoryPanel;
     private final JButton myMacrosButton;
@@ -137,6 +144,13 @@ public class LeftRail extends JPanel {
         body = new JPanel();
         body.setOpaque(false);
         body.setLayout(new BoxLayout(body, BoxLayout.Y_AXIS));
+        bodyScroll = UiScrollSupport.wrap(body, "Terminal action rail",
+                JScrollPane.VERTICAL_SCROLLBAR_AS_NEEDED,
+                JScrollPane.HORIZONTAL_SCROLLBAR_AS_NEEDED);
+        bodyScroll.setOpaque(false);
+        bodyScroll.getViewport().setOpaque(false);
+        bodyScroll.setAlignmentX(Component.LEFT_ALIGNMENT);
+        bodyScroll.setMaximumSize(new Dimension(Integer.MAX_VALUE, Integer.MAX_VALUE));
 
         statusLabel = new JLabel(" ");
         statusLabel.setForeground(TEXT_MUTED);
@@ -172,6 +186,13 @@ public class LeftRail extends JPanel {
             @Override
             public void actionPerformed(ActionEvent e) {
                 newAgentChat();
+            }
+        });
+        consoleChatsButton = railButton("Console chats", "Resume chats saved by the imagejai terminal");
+        consoleChatsButton.addActionListener(new ActionListener() {
+            @Override
+            public void actionPerformed(ActionEvent e) {
+                showConsoleChatsPopup(consoleChatsButton);
             }
         });
 
@@ -248,8 +269,7 @@ public class LeftRail extends JPanel {
 
         add(createHeader());
         add(Box.createVerticalStrut(8));
-        add(body);
-        add(Box.createVerticalGlue());
+        add(bodyScroll);
         add(statusLabel);
 
         buildSessionSection();
@@ -322,6 +342,8 @@ public class LeftRail extends JPanel {
         body.add(commandsButton);
         body.add(Box.createVerticalStrut(6));
         body.add(newAgentChatButton);
+        body.add(Box.createVerticalStrut(6));
+        body.add(consoleChatsButton);
         body.add(Box.createVerticalStrut(12));
     }
 
@@ -418,6 +440,58 @@ public class LeftRail extends JPanel {
         popup.show(owner, 0, owner.getHeight());
     }
 
+    private void showConsoleChatsPopup(Component owner) {
+        final ConsoleSessionStore store = new ConsoleSessionStore();
+        final List<ConsoleSessionStore.Summary> sessions = store.list();
+        JPopupMenu popup = new JPopupMenu();
+        if (sessions.isEmpty()) {
+            JMenuItem empty = new JMenuItem("No console chats yet");
+            empty.setEnabled(false);
+            popup.add(empty);
+        } else {
+            for (final ConsoleSessionStore.Summary summary : sessions) {
+                String provider = summary.provider == null || summary.provider.isEmpty()
+                        ? "" : "  [" + summary.provider + "]";
+                JMenuItem item = new JMenuItem(summary.title + provider);
+                item.setToolTipText("Resume ImageJAI Console session " + summary.id);
+                item.addActionListener(new ActionListener() {
+                    @Override public void actionPerformed(ActionEvent e) {
+                        openConsoleChat(store, summary);
+                    }
+                });
+                popup.add(item);
+            }
+        }
+        popup.show(owner, 0, owner.getHeight());
+    }
+
+    private void openConsoleChat(ConsoleSessionStore store,
+                                 ConsoleSessionStore.Summary summary) {
+        if (System.getProperty("os.name", "").toLowerCase().contains("win")) {
+            try {
+                new ProcessBuilder(
+                        "cmd.exe", "/c", "start", "", "imagejai",
+                        "--session", summary.id).start();
+                showStatus("Opened console chat");
+                return;
+            } catch (IOException e) {
+                IJ.log("[ImageJAI-Term] Could not launch imagejai: " + e.getMessage());
+            }
+        }
+        try {
+            JTextArea transcript = new JTextArea(store.transcript(summary), 24, 72);
+            transcript.setEditable(false);
+            transcript.setLineWrap(true);
+            transcript.setWrapStyleWord(true);
+            JOptionPane.showMessageDialog(
+                    SwingUtilities.getWindowAncestor(this),
+                    new JScrollPane(transcript), summary.title,
+                    JOptionPane.PLAIN_MESSAGE);
+        } catch (IOException e) {
+            showStatus(readableMessage(e));
+        }
+    }
+
     private void addPopupSection(JPopupMenu popup, String label,
                                  List<AgentRegistry.CommandEntry> commands) {
         JMenuItem header = new JMenuItem(label);
@@ -432,8 +506,9 @@ public class LeftRail extends JPanel {
                 @Override
                 public void actionPerformed(ActionEvent e) {
                     if (session != null && session.isAlive()) {
-                        session.writeInput(entry.command);
-                        IJ.log("[ImageJAI-Term] Injected agent command: " + entry.command);
+                        if (sendInput(session, entry.command)) {
+                            IJ.log("[ImageJAI-Term] Injected agent command: " + entry.command);
+                        }
                         focusTerminal();
                     }
                 }
@@ -451,7 +526,7 @@ public class LeftRail extends JPanel {
         }
 
         final Pattern clearPattern = AgentRegistry.clearPattern(current.info());
-        current.writeInput("/clear");
+        if (!sendInput(current, "/clear")) return;
         showStatus("Sent /clear");
         focusTerminal();
 
@@ -513,8 +588,10 @@ public class LeftRail extends JPanel {
 
             String path = wip.toAbsolutePath().normalize().toString();
             if (session != null && session.isAlive()) {
-                session.writeInput("Start new WIP: read `" + path + "` and help me scope it.");
-                showStatus("WIP prompt sent");
+                if (sendInput(session, "Start new WIP: read `" + path
+                        + "` and help me scope it.")) {
+                    showStatus("WIP prompt sent");
+                }
             } else {
                 showStatus("WIP note created");
             }
@@ -608,7 +685,8 @@ public class LeftRail extends JPanel {
     private void addMacroItems(JPopupMenu popup, List<MacroLibrary.MacroItem> items,
                                final JButton runButton, boolean includeSource) {
         for (final MacroLibrary.MacroItem macro : items) {
-            JMenuItem item = new JMenuItem(macro.menuText(includeSource));
+            JMenuItem item = new MacroMenuItem(macro.menuText(includeSource),
+                    buildMacroContextMenu(macro), this);
             item.setToolTipText(macro.tooltip());
             item.addActionListener(new ActionListener() {
                 @Override
@@ -617,6 +695,65 @@ public class LeftRail extends JPanel {
                 }
             });
             popup.add(item);
+        }
+    }
+
+    private JPopupMenu buildMacroContextMenu(final MacroLibrary.MacroItem macro) {
+        JPopupMenu popup = new JPopupMenu();
+        popup.getAccessibleContext().setAccessibleName("Macro actions");
+
+        JMenuItem edit = new JMenuItem("Open in Script Editor");
+        edit.addActionListener(new ActionListener() {
+            @Override
+            public void actionPerformed(ActionEvent e) {
+                openMacroInScriptEditor(macro);
+            }
+        });
+        popup.add(edit);
+
+        JMenuItem directory = new JMenuItem(macro.path == null
+                ? "Open macros folder"
+                : "Open containing folder");
+        directory.addActionListener(new ActionListener() {
+            @Override
+            public void actionPerformed(ActionEvent e) {
+                openMacroDirectory(macro);
+            }
+        });
+        popup.add(directory);
+        return popup;
+    }
+
+    private void openMacroInScriptEditor(MacroLibrary.MacroItem macro) {
+        try {
+            ScriptEditorBridge.open(macro);
+            showStatus("Opened " + macro.name + " in Script Editor");
+        } catch (IOException e) {
+            String msg = readableMessage(e);
+            showStatus(msg);
+            IJ.log("[ImageJAI-Term] Open macro in Script Editor failed: " + msg);
+        }
+    }
+
+    private void openMacroDirectory(MacroLibrary.MacroItem macro) {
+        Path directory = macro.path == null || macro.path.getParent() == null
+                ? MacroLibrary.savedMacroDirectory()
+                : macro.path.toAbsolutePath().normalize().getParent();
+        try {
+            Files.createDirectories(directory);
+            if (!Desktop.isDesktopSupported()) {
+                throw new IOException("Opening folders is not supported on this desktop");
+            }
+            Desktop desktop = Desktop.getDesktop();
+            if (!desktop.isSupported(Desktop.Action.OPEN)) {
+                throw new IOException("Opening folders is not supported on this desktop");
+            }
+            desktop.open(directory.toFile());
+            showStatus("Opened " + directory.getFileName());
+        } catch (IOException e) {
+            String msg = readableMessage(e);
+            showStatus(msg);
+            IJ.log("[ImageJAI-Term] Open macro folder failed: " + msg);
         }
     }
 
@@ -768,7 +905,8 @@ public class LeftRail extends JPanel {
                 for (String line : chunks) {
                     showStatus(line);
                     if (current != null && current.isAlive()) {
-                        current.writeRaw(line + "\r");
+                        EmbeddedAgentSession.WriteResult write = current.writeRaw(line + "\r");
+                        if (!write.isSuccess()) showStatus(write.message());
                     }
                 }
             }
@@ -810,9 +948,10 @@ public class LeftRail extends JPanel {
                     + "numeric parameters should be reusable. Keep every other literal "
                     + "number marked image_specific: true. Show me the draft YAML before "
                     + "writing it, then tell me the saved filename.";
-            current.writeInput(prompt);
-            showStatus("Recipe prompt sent");
-            IJ.log("[ImageJAI-Term] Sent recipe-save prompt for " + target);
+            if (sendInput(current, prompt)) {
+                showStatus("Recipe prompt sent");
+                IJ.log("[ImageJAI-Term] Sent recipe-save prompt for " + target);
+            }
         } catch (IOException e) {
             String msg = readableMessage(e);
             showStatus(msg);
@@ -861,7 +1000,10 @@ public class LeftRail extends JPanel {
                 try {
                     String summary = get();
                     if (current != null && current.isAlive()) {
-                        current.writeInput("Audit my results:\n" + summary);
+                        if (!sendInput(current, "Audit my results:\n" + summary)) {
+                            focusTerminal();
+                            return;
+                        }
                     }
                     showStatus("Audit sent");
                     IJ.log("[ImageJAI-Term] Audit summary sent to PTY");
@@ -873,6 +1015,18 @@ public class LeftRail extends JPanel {
                 focusTerminal();
             }
         }.execute();
+    }
+
+    private boolean sendInput(EmbeddedAgentSession target, String text) {
+        EmbeddedAgentSession.WriteResult result = target == null
+                ? EmbeddedAgentSession.WriteResult.failure("No terminal session is attached.")
+                : target.writeInputResult(text);
+        if (!result.isSuccess()) {
+            showStatus(result.message());
+            IJ.log("[ImageJAI-Term] Prompt retained after failed PTY write");
+            return false;
+        }
+        return true;
     }
 
     private JLabel sectionTitle(String text) {
@@ -955,7 +1109,7 @@ public class LeftRail extends JPanel {
     }
 
     private void applyCollapsedState(boolean repaintNow) {
-        body.setVisible(!collapsed);
+        bodyScroll.setVisible(!collapsed);
         titleLabel.setVisible(!collapsed);
         statusLabel.setVisible(!collapsed);
         collapseButton.setText(collapsed ? "\u203A" : "\u2039");
@@ -1012,8 +1166,8 @@ public class LeftRail extends JPanel {
 
     private static void applyFontRecursively(Component component, Font font) {
         component.setFont(font);
-        if (component instanceof JPanel) {
-            Component[] children = ((JPanel) component).getComponents();
+        if (component instanceof Container) {
+            Component[] children = ((Container) component).getComponents();
             for (Component child : children) {
                 applyFontRecursively(child, font);
             }

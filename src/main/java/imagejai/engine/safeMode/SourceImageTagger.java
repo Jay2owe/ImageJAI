@@ -65,6 +65,21 @@ public final class SourceImageTagger {
     }
 
     /**
+     * Shared production preflight for macro, script, pipeline, and async
+     * mutation surfaces. Returns {@code null} when tagging is disabled or the
+     * source explicitly opts out; otherwise the returned tagger is already
+     * prepared for one matching {@link #postExec(ImagePlus)} call.
+     */
+    public static SourceImageTagger beginIfEnabled(boolean enabled,
+                                                   String code,
+                                                   ImagePlus activeImp) {
+        if (!enabled || macroOptsOut(code)) return null;
+        SourceImageTagger tagger = new SourceImageTagger();
+        tagger.preExec(activeImp);
+        return tagger;
+    }
+
+    /**
      * Snapshot the row count and active-image title before the macro
      * runs. Production callers pass the live ImageJ {@link ResultsTable}
      * via {@link #preExec(ImagePlus)}; the explicit-table overload is

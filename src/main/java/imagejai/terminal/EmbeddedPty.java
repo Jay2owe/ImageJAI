@@ -34,7 +34,9 @@ import java.lang.reflect.Field;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -53,19 +55,21 @@ public final class EmbeddedPty {
     private final ImageJAITtyConnector connector;
     private final JediTermWidget widget;
     private final ImageJAITermSettingsProvider settingsProvider;
+    private final OutboundPromptScrubber scrubber;
 
     public EmbeddedPty(AgentLaunchSpec spec) throws IOException {
         configurePtyNativeFolder();
 
         PtyProcessBuilder builder = new PtyProcessBuilder(spec.agentCommand.toArray(new String[0]))
                 .setDirectory(spec.workingDir.getAbsolutePath())
-                .setEnvironment(spec.env)
+                .setEnvironment(childEnvironment(spec.env))
                 .setRedirectErrorStream(true)
                 .setInitialColumns(INITIAL_COLUMNS)
                 .setInitialRows(INITIAL_ROWS);
 
         process = builder.start();
-        connector = new ImageJAITtyConnector(process, OutboundPromptScrubber.getInstance());
+        scrubber = OutboundPromptScrubber.createSessionScrubber();
+        connector = new ImageJAITtyConnector(process, scrubber);
         settingsProvider = new ImageJAITermSettingsProvider();
         widget = new JediTermWidget(INITIAL_COLUMNS, INITIAL_ROWS, settingsProvider);
         widget.setTtyConnector(connector);
@@ -74,6 +78,29 @@ public final class EmbeddedPty {
         widget.start();
 
         IJ.log("[ImageJAI-Term] Started embedded PTY: " + String.join(" ", spec.agentCommand));
+    }
+
+    /**
+     * pty4j treats {@code setEnvironment} as a complete replacement, unlike
+     * {@link ProcessBuilder#environment()} which starts with the host
+     * environment. Merge at the spawn boundary so Windows keeps PATH,
+     * SystemRoot and ComSpec while {@link AgentLaunchSpec#env} remains the
+     * small, safe-to-inspect set of ImageJAI additions.
+     */
+    static Map<String, String> childEnvironment(Map<String, String> additions) {
+        return mergeEnvironment(System.getenv(), additions);
+    }
+
+    static Map<String, String> mergeEnvironment(Map<String, String> inherited,
+                                                Map<String, String> additions) {
+        Map<String, String> merged = new LinkedHashMap<String, String>();
+        if (inherited != null) {
+            merged.putAll(inherited);
+        }
+        if (additions != null) {
+            merged.putAll(additions);
+        }
+        return merged;
     }
 
     public JComponent component() {
@@ -148,7 +175,7 @@ public final class EmbeddedPty {
                 }
                 if (e.isShiftDown() && e.getKeyCode() == KeyEvent.VK_ENTER) {
                     try {
-                        OutboundPromptScrubber.getInstance().sendNextEnterRaw();
+                        scrubber.sendNextEnterRaw();
                         connector.write(new byte[] { '\r' });
                     } catch (IOException ex) {
                         IJ.log("[ImageJAI-Term] Ctrl+Shift+Enter write failed: "

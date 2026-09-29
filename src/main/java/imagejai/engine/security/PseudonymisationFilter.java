@@ -7,9 +7,12 @@ import com.google.gson.JsonObject;
 import com.google.gson.JsonPrimitive;
 import imagejai.config.PrivacyPosture;
 
+import java.nio.file.InvalidPathException;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -18,6 +21,7 @@ import java.util.regex.Pattern;
  * On-premises modes it tokenises identifiers before JSON leaves the JVM.
  */
 public class PseudonymisationFilter {
+    public static final int MAX_FREE_TEXT_CHARS = 1_048_576;
     private static final PseudonymisationFilter INSTANCE = new PseudonymisationFilter(
             PathTokenMap.getInstance(),
             new OmeXmlScrubber(),
@@ -29,9 +33,9 @@ public class PseudonymisationFilter {
     private static final Pattern PATH_SUBSTRING = Pattern.compile(
             "(?i)([A-Za-z]:[\\\\/][^\\r\\n\"'<>|]+?\\.(?:lif|tif|tiff|czi|nd2|lsm|oib|oif|vsi|svs|png|jpe?g|csv|tsv|md|pdf|json|xml|txt)"
                     + "|/[A-Za-z0-9._~+()\\- /]+?\\.(?:lif|tif|tiff|czi|nd2|lsm|oib|oif|vsi|svs|png|jpe?g|csv|tsv|md|pdf|json|xml|txt)"
-                    + "|\\b(?!image-[0-9a-f]{4}\\b)[A-Za-z0-9._+()\\- ]+\\.(?:lif|tif|tiff|czi|nd2|lsm|oib|oif|vsi|svs|png|jpe?g|csv|tsv|md|pdf|json|xml|txt))");
+                    + "|\\b(?!image-[0-9a-f]{4,32}\\b)[A-Za-z0-9._+()\\- ]+\\.(?:lif|tif|tiff|czi|nd2|lsm|oib|oif|vsi|svs|png|jpe?g|csv|tsv|md|pdf|json|xml|txt))");
     private static final Pattern PATH_TOKEN = Pattern.compile(
-            "(?i)image-[0-9a-f]{4,12}(?:\\.[A-Za-z0-9.]+)?(?::\\d+)?");
+            "(?i)image-[0-9a-f]{4,32}(?:\\.[A-Za-z0-9.]+)?(?::\\d+)?");
     private static final String[] PATH_EXTENSIONS = {
             ".lif", ".tif", ".tiff", ".czi", ".nd2", ".lsm", ".oib", ".oif",
             ".vsi", ".svs", ".png", ".jpg", ".jpeg", ".csv", ".tsv", ".md",
@@ -41,6 +45,8 @@ public class PseudonymisationFilter {
     private final PathTokenMap pathTokenMap;
     private final OmeXmlScrubber omeXmlScrubber;
     private final CaptureHandler captureHandler;
+    private final AtomicLong matcherBuilds = new AtomicLong(0L);
+    private volatile MatcherSnapshot matcherSnapshot = MatcherSnapshot.empty();
 
     public PseudonymisationFilter(PathTokenMap pathTokenMap,
                                   OmeXmlScrubber omeXmlScrubber,
@@ -85,7 +91,7 @@ public class PseudonymisationFilter {
             response.add("_governance", built.governanceBlock());
             return built;
         } catch (Exception e) {
-            return failClosed(response, command, effective, report);
+            return failClosed(response, command, effective, report, e);
         }
     }
 
@@ -198,9 +204,32 @@ public class PseudonymisationFilter {
         }
     }
 
+    /**
+     * Replace the whole reply with a redaction failure.
+     *
+     * <p>Failing closed is right — a half-redacted reply must never leave the
+     * JVM — but silently swallowing the cause is not: the caller sees only
+     * {@code redaction_failed} and has no way to tell a genuine leak risk from
+     * a bug in this filter. The cause is therefore reported on stderr, where
+     * {@code get_console} and any bug report will pick it up. The message text
+     * is deliberately class-and-message only: the offending <em>value</em> is
+     * by definition something that must not be printed.</p>
+     */
     private RedactionReport failClosed(JsonObject response, String command,
                                        PrivacyPosture posture,
-                                       RedactionReport.Builder report) {
+                                       RedactionReport.Builder report,
+                                       Exception cause) {
+        if (cause != null) {
+            System.err.println("[ImageJAI-Privacy] redaction failed for '" + command
+                    + "' under " + posture + "; the reply was replaced with "
+                    + "redaction_failed. Cause: " + cause.getClass().getName()
+                    + ": " + cause.getMessage());
+            StackTraceElement[] frames = cause.getStackTrace();
+            int shown = Math.min(frames.length, 8);
+            for (int i = 0; i < shown; i++) {
+                System.err.println("\tat " + frames[i]);
+            }
+        }
         if (response != null) {
             clear(response);
             response.addProperty("ok", false);
@@ -442,7 +471,31 @@ public class PseudonymisationFilter {
             String trimmed = match.trim();
             String token = replacements.get(trimmed);
             if (token == null) {
-                token = pathTokenMap.tokenForPathString(trimmed);
+                try {
+                    token = pathTokenMap.tokenForPathString(trimmed);
+                } catch (InvalidPathException notAPath) {
+                    // PATH_SUBSTRING matches things that *look* like paths;
+                    // `tokenForPathString` calls `Paths.get`, which throws on
+                    // anything the platform cannot parse. Unguarded, that
+                    // escaped as a stack trace into ImageJ's console: a full
+                    // scenario suite ended with eight
+                    // `PathTokenMap.tokenForPathString(PathTokenMap.java:74)`
+                    // frames, and every scenario asserting `console_clean` or
+                    // `no_uncaught_exceptions` failed on them — including
+                    // `startup` and `volcoloc-launch`, which had nothing to do
+                    // with whatever produced the text.
+                    //
+                    // Left unpseudonymised deliberately. A string Windows
+                    // refuses to parse contains one of `< > " | ? *` or a
+                    // control character, none of which can appear in a real
+                    // path on this platform, so there is nothing here to leak.
+                    // It is *not* rerouted through `tokenForSensitiveText`:
+                    // that mints a different token shape, and inbound requests
+                    // are reversed by `deTokeniseRequest`, so a second format
+                    // would round-trip back as something the caller never sent.
+                    matcher.appendReplacement(out, Matcher.quoteReplacement(match));
+                    continue;
+                }
                 replacements.put(trimmed, token);
             }
             matcher.appendReplacement(out, Matcher.quoteReplacement(token));
@@ -499,21 +552,12 @@ public class PseudonymisationFilter {
         if (value == null || value.isEmpty()) {
             return value;
         }
-        List<Map.Entry<String, String>> entries =
-                pathTokenMap.snapshotSensitiveStringsLongestFirst();
-        if (entries.isEmpty()) {
-            return value;
+        if (value.length() > MAX_FREE_TEXT_CHARS) {
+            throw new IllegalArgumentException("Free-text field exceeds "
+                    + MAX_FREE_TEXT_CHARS + " characters");
         }
-        boolean possibleMatch = false;
-        for (Map.Entry<String, String> entry : entries) {
-            String original = entry.getKey();
-            if (original != null && !original.isEmpty()
-                    && value.indexOf(original) >= 0) {
-                possibleMatch = true;
-                break;
-            }
-        }
-        if (!possibleMatch) {
+        MatcherSnapshot snapshot = matcherForCurrentVersion();
+        if (snapshot.root.children.isEmpty()) {
             return value;
         }
 
@@ -528,20 +572,10 @@ public class PseudonymisationFilter {
                 hasToken = tokenMatcher.find();
                 continue;
             }
-            Map.Entry<String, String> match = null;
-            for (Map.Entry<String, String> entry : entries) {
-                String original = entry.getKey();
-                if (original == null || original.isEmpty()) {
-                    continue;
-                }
-                if (startsWithAt(value, original, i)) {
-                    match = entry;
-                    break;
-                }
-            }
+            TrieMatch match = snapshot.root.longestMatch(value, i);
             if (match != null) {
-                out.append(match.getValue());
-                i += match.getKey().length();
+                out.append(match.replacement);
+                i += match.length;
             } else {
                 out.append(value.charAt(i));
                 i++;
@@ -550,12 +584,89 @@ public class PseudonymisationFilter {
         return out.toString();
     }
 
-    private static boolean startsWithAt(String value, String needle, int index) {
-        int n = needle.length();
-        if (index < 0 || n == 0 || index + n > value.length()) {
-            return false;
+    long matcherBuildCountForTest() {
+        return matcherBuilds.get();
+    }
+
+    private MatcherSnapshot matcherForCurrentVersion() {
+        long version = pathTokenMap.sensitiveVersion();
+        MatcherSnapshot cached = matcherSnapshot;
+        if (cached.version == version) return cached;
+        synchronized (this) {
+            cached = matcherSnapshot;
+            version = pathTokenMap.sensitiveVersion();
+            if (cached.version == version) return cached;
+
+            PathTokenMap.SensitiveSnapshot source = pathTokenMap.sensitiveSnapshot();
+            TrieNode root = new TrieNode();
+            for (Map.Entry<String, String> entry : source.entries) {
+                String original = entry.getKey();
+                if (original != null && !original.isEmpty()) {
+                    root.insert(original, entry.getValue());
+                }
+            }
+            cached = new MatcherSnapshot(source.version, root);
+            matcherSnapshot = cached;
+            matcherBuilds.incrementAndGet();
+            return cached;
         }
-        return value.regionMatches(index, needle, 0, n);
+    }
+
+    private static final class MatcherSnapshot {
+        final long version;
+        final TrieNode root;
+
+        MatcherSnapshot(long version, TrieNode root) {
+            this.version = version;
+            this.root = root;
+        }
+
+        static MatcherSnapshot empty() {
+            return new MatcherSnapshot(-1L, new TrieNode());
+        }
+    }
+
+    private static final class TrieMatch {
+        final int length;
+        final String replacement;
+
+        TrieMatch(int length, String replacement) {
+            this.length = length;
+            this.replacement = replacement;
+        }
+    }
+
+    private static final class TrieNode {
+        final Map<Character, TrieNode> children =
+                new HashMap<Character, TrieNode>();
+        String replacement;
+
+        void insert(String original, String token) {
+            TrieNode node = this;
+            for (int i = 0; i < original.length(); i++) {
+                Character key = Character.valueOf(original.charAt(i));
+                TrieNode next = node.children.get(key);
+                if (next == null) {
+                    next = new TrieNode();
+                    node.children.put(key, next);
+                }
+                node = next;
+            }
+            node.replacement = token;
+        }
+
+        TrieMatch longestMatch(String text, int start) {
+            TrieNode node = this;
+            TrieMatch best = null;
+            for (int i = start; i < text.length(); i++) {
+                node = node.children.get(Character.valueOf(text.charAt(i)));
+                if (node == null) break;
+                if (node.replacement != null) {
+                    best = new TrieMatch(i - start + 1, node.replacement);
+                }
+            }
+            return best;
+        }
     }
 
     private static boolean looksLikeOmeField(String key, String value) {
@@ -568,11 +679,31 @@ public class PseudonymisationFilter {
         return value != null && value.contains("<") && value.matches("(?is).*<(?:\\w+:)?(?:OME|Pixels|Experimenter|StageLabel|AcquisitionDate|.*Annotation)\\b.*");
     }
 
+    /**
+     * Keys whose value is a position inside a structure this JVM generated, not
+     * a location in a filesystem.
+     *
+     * <p>{@code index_path} matches the {@code *_path} rule below and is full of
+     * slashes ({@code menu_bar/3/10/1}), so every node in a UI tree used to mint
+     * its own path token. A tree of ImageJ's main window carries a couple of
+     * thousand nodes, which exhausted {@code PathTokenMap}'s token capacity, and
+     * the resulting {@code IllegalStateException} made the filter fail closed
+     * and replace the entire {@code get_ui_tree} reply with
+     * {@code redaction_failed}. The value can never contain user data: it is
+     * built from component indices.</p>
+     */
+    private static final java.util.Set<String> STRUCTURAL_KEYS =
+            new java.util.HashSet<String>(java.util.Arrays.asList(
+                    "index_path", "indexpath"));
+
     private static boolean isPathTypedKey(String key) {
         if (key == null) {
             return false;
         }
         String k = key.toLowerCase();
+        if (STRUCTURAL_KEYS.contains(k)) {
+            return false;
+        }
         return k.equals("path") || k.endsWith("_path") || k.contains("filepath")
                 || k.contains("filename") || k.equals("file") || k.equals("directory")
                 || k.equals("folder") || k.equals("sourcefile") || k.equals("source_file")

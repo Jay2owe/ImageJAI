@@ -1,11 +1,86 @@
 # Harness — CLI shell
 
-You operate Fiji by typing shell commands in a terminal. Use the
-`ij.py` helper for ALL ImageJ operations:
+You operate Fiji by typing shell commands in a terminal. For multi-step
+work, use `imagej-use-auto`: it reads one Python program from stdin and
+preloads semantic helpers bound to one authenticated ImageJ session.
+
+Sample command labels vary between Fiji versions (for example `Blobs` versus
+`Blobs (25K)`). Use the installed command list from `scan_plugins.py`; the
+examples below assume that list contains `Blobs`. Never invent a size suffix.
+
+PowerShell:
+
+```powershell
+@'
+print(get_state())
+print(run_macro('run("Blobs");'))
+print(screenshot_to_path('.tmp/after_blobs.png'))
+event = wait_for_event(
+    ['macro.completed'],
+    predicate={'event': 'macro.completed'},
+    timeout=30,
+)
+print(event)
+'@ | imagej-use-auto
+```
+
+Bash/zsh:
+
+```bash
+imagej-use-auto <<'PY'
+print(get_state())
+print(run_macro('run("Blobs");'))
+print(screenshot_to_path('.tmp/after_blobs.png'))
+PY
+```
+
+Run `imagej-use-auto --doctor` to distinguish Fiji reachability,
+authentication, protocol, workspace, and screenshot failures. The launcher
+sets the explicit workspace used for safe screenshot paths and optional
+`imagej_helpers.py`; workspace helpers cannot replace core session helpers.
+
+Dialog control is semantic only. Inspect with `get_dialogs()`, then use
+`interact_dialog('list_components', dialog='...')` before actions such as
+`interact_dialog('click_button', target='OK', dialog='...')`. Never use screen
+coordinates. The runner does not start, stop, or close Fiji.
+
+`open_image`, `interact_dialog`, and `close_dialogs` can outlive their first
+request deadline. A response with error code `operation_in_progress` is a
+handoff, not a failure. Extract `response['operation']['operation_id']` and
+call `wait_for_operation('<same command>', operation_id, timeout=120,
+poll_interval=0.1)` on the same session. Never submit the original mutation
+again: operation IDs are owner- and command-scoped, and the poll helper sends
+only the same command plus that ID.
+
+For one-shot shell operations, use `ij.py`:
+
+On Windows, send macro source through a pipe or a UTF-8 `.ijm` file.
+PowerShell can remove embedded double quotes from native command arguments,
+so `python ij.py macro 'run("Blobs");'` can arrive as `run(Blobs);` and be
+blocked as a dynamic command. Do not disable safe mode or request elevation
+for a quoting error. Preserve the original quoted source:
+
+```powershell
+@'
+run("Blobs");
+'@ | python ij.py macro --stdin
+python ij.py macro --file .tmp/analysis.ijm
+```
+
+In Bash, use a quoted heredoc when sending macro source through stdin:
+
+```bash
+python ij.py macro --stdin <<'IJM'
+run("Blobs");
+IJM
+```
+
+The same `--stdin` and `--file` options work with `async` and `run_patient`.
+`python ij.py macro --help` shows usage without running a macro.
 
 ```bash
 python ij.py ping                                    # test connection
-python ij.py macro 'run("Blobs (25K)");'             # run macro code
+python ij.py macro 'run("Blobs");'                    # use the installed label
 python ij.py state                                    # full ImageJ state
 python ij.py info                                     # active image details
 python ij.py results                                  # measurements as CSV

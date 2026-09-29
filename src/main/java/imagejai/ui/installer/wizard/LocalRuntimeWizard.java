@@ -1,6 +1,7 @@
 package imagejai.ui.installer.wizard;
 
 import imagejai.install.ProcessRunner;
+import imagejai.ui.UiScrollSupport;
 import imagejai.ui.installer.ProviderCredentials;
 
 import javax.swing.BorderFactory;
@@ -12,6 +13,7 @@ import javax.swing.JOptionPane;
 import javax.swing.JPanel;
 import javax.swing.JTextField;
 import javax.swing.SwingUtilities;
+import javax.swing.SwingWorker;
 import javax.swing.border.EmptyBorder;
 import java.awt.BorderLayout;
 import java.awt.Color;
@@ -34,15 +36,14 @@ import java.util.Map;
 
 /**
  * Install shape #3 — local runtime ± cloud account. Used by Ollama Local
- * (just needs the daemon to be reachable) and Ollama Cloud (browser sign-in
- * via {@code ollama signin} surfaces a token the user pastes back). Detects
- * the {@code ollama} binary on PATH and surfaces a download link if missing.
+ * (just needs the daemon to be reachable) and Ollama Cloud (authentication is
+ * managed by {@code ollama signin}). Detects the {@code ollama} binary on PATH
+ * and surfaces a download link if missing.
  *
  * <p>Local-flow saves the daemon URL after a {@code GET /api/tags} probe with
- * a 2-second timeout (Phase E risk: "Ollama daemon URL trust"). Cloud-flow
- * saves only the cloud token — {@code OLLAMA_CLOUD_API_BASE} for the
- * proxy entry falls back to its {@code imagejai_default_api_base}
- * ({@code https://ollama.com}) so users don't need to type the cloud URL.
+ * a 2-second timeout (Phase E risk: "Ollama daemon URL trust"). Cloud-flow is
+ * informational: ImageJAI neither receives nor stores the Ollama sign-in
+ * token because there is no authenticated candidate-token verification API.
  */
 public class LocalRuntimeWizard implements InstallerWizard {
 
@@ -50,6 +51,8 @@ public class LocalRuntimeWizard implements InstallerWizard {
     public static final String DEFAULT_LOCAL_DAEMON_URL = "http://localhost:11434";
     /** Sanity-check timeout per Phase E risks. */
     public static final int DAEMON_PROBE_TIMEOUT_MS = 2000;
+    /** Compatibility validation budget for programmatic credential callers. */
+    public static final int VERIFY_TIMEOUT_MS = 4000;
 
     /** Per-provider local-runtime facts so this one wizard serves every
      *  keyless local daemon (Ollama, LM Studio, Jan, llama.cpp, vLLM). */
@@ -117,11 +120,17 @@ public class LocalRuntimeWizard implements InstallerWizard {
         return "ollama".equals(providerKey) || "ollama-cloud".equals(providerKey);
     }
 
+    static String cloudSignInInstructions() {
+        return "Run <code>ollama signin</code> in a terminal. Sign-in is managed "
+                + "by Ollama; ImageJAI does not receive, verify, or store the cloud token.";
+    }
+
     private final String providerKey;
     private final boolean cloudFlow;
     private final ProviderCredentials credentials;
     private final OllamaProbe probe;
     private final DaemonProbe daemonProbe;
+    private final CredentialVerifier verifier;
 
     /** For tests: lets us inject a stub probe for the {@code ollama} binary. */
     public interface OllamaProbe {
@@ -150,25 +159,50 @@ public class LocalRuntimeWizard implements InstallerWizard {
                               ProviderCredentials credentials) {
         this(providerKey, credentials,
                 () -> ProcessRunner.findOnPath("ollama") != null,
-                defaultDaemonProbe(healthPathFor(providerKey)));
+                defaultDaemonProbe(healthPathFor(providerKey)),
+                CredentialVerifier.noop());
+    }
+
+    /**
+     * Constructor retaining the credential verifier for compatibility and
+     * programmatic validation. The Ollama Cloud UI itself never collects a
+     * token unless a future authenticated candidate-token API is available.
+     */
+    public LocalRuntimeWizard(String providerKey,
+                              ProviderCredentials credentials,
+                              CredentialVerifier verifier) {
+        this(providerKey, credentials,
+                () -> ProcessRunner.findOnPath("ollama") != null,
+                defaultDaemonProbe(healthPathFor(providerKey)), verifier);
     }
 
     public LocalRuntimeWizard(String providerKey,
                               ProviderCredentials credentials,
                               OllamaProbe probe) {
-        this(providerKey, credentials, probe, defaultDaemonProbe(healthPathFor(providerKey)));
+        this(providerKey, credentials, probe,
+                defaultDaemonProbe(healthPathFor(providerKey)),
+                CredentialVerifier.noop());
     }
 
     public LocalRuntimeWizard(String providerKey,
                               ProviderCredentials credentials,
                               OllamaProbe probe,
                               DaemonProbe daemonProbe) {
+        this(providerKey, credentials, probe, daemonProbe, CredentialVerifier.noop());
+    }
+
+    public LocalRuntimeWizard(String providerKey,
+                              ProviderCredentials credentials,
+                              OllamaProbe probe,
+                              DaemonProbe daemonProbe,
+                              CredentialVerifier verifier) {
         this.providerKey = providerKey;
         this.cloudFlow = "ollama-cloud".equals(providerKey);
         this.credentials = credentials;
         this.probe = probe;
         this.daemonProbe = daemonProbe == null
                 ? defaultDaemonProbe(healthPathFor(providerKey)) : daemonProbe;
+        this.verifier = verifier == null ? CredentialVerifier.noop() : verifier;
     }
 
     @Override
@@ -203,7 +237,7 @@ public class LocalRuntimeWizard implements InstallerWizard {
             header.append("Start the local server, then pick a loaded model.");
         }
         header.append(cloudFlow
-                ? "<br>Sign in with <code>ollama signin</code> to enable cloud models, then paste the resulting token."
+                ? "<br>" + cloudSignInInstructions()
                 : "<br>No API key needed. Server URL defaults to <code>" + meta.defaultUrl + "</code>.");
         header.append("</html>");
         content.add(new JLabel(header.toString()), BorderLayout.NORTH);
@@ -214,8 +248,8 @@ public class LocalRuntimeWizard implements InstallerWizard {
         c.anchor = GridBagConstraints.WEST;
         c.fill = GridBagConstraints.HORIZONTAL;
 
-        // Local flow: daemon URL field. Cloud flow: token only — cloud's
-        // api_base falls back to imagejai_default_api_base in litellm config.
+        // Local flow: daemon URL field. Ollama owns Cloud authentication, so
+        // the cloud flow deliberately has no token-entry or persistence UI.
         final JTextField urlField = new JTextField(meta.defaultUrl, 22);
         if (!cloudFlow) {
             c.gridx = 0; c.gridy = 0;
@@ -224,20 +258,14 @@ public class LocalRuntimeWizard implements InstallerWizard {
             body.add(urlField, c);
         }
 
-        final JTextField tokenField = new JTextField(22);
-        if (cloudFlow) {
-            c.gridx = 0; c.gridy = 0; c.weightx = 0.0;
-            body.add(new JLabel("Cloud token:"), c);
-            c.gridx = 1; c.weightx = 1.0;
-            body.add(tokenField, c);
-        }
-
-        final JLabel statusLine = new JLabel(" ");
+        final JLabel statusLine = new JLabel(cloudFlow
+                ? "No Ollama Cloud credential will be saved by ImageJAI." : " ");
         statusLine.setFont(statusLine.getFont().deriveFont(11f));
         c.gridx = 0; c.gridy = 1; c.gridwidth = 2; c.weightx = 1.0;
         body.add(statusLine, c);
 
-        content.add(body, BorderLayout.CENTER);
+        content.add(UiScrollSupport.wrap(body, "Local runtime setup"),
+                BorderLayout.CENTER);
 
         JPanel buttons = new JPanel(new FlowLayout(FlowLayout.RIGHT, 6, 4));
         JButton install = new JButton(
@@ -246,42 +274,70 @@ public class LocalRuntimeWizard implements InstallerWizard {
         install.addActionListener(e -> openUrl(meta.installUrl));
         JButton cancel = new JButton("Cancel");
         final boolean[] saved = new boolean[] { false };
-        cancel.addActionListener(e -> dialog.dispose());
-        JButton save = new JButton("Save");
+        final SwingWorker<?, ?>[] active = new SwingWorker[1];
+        cancel.addActionListener(e -> {
+            if (active[0] != null) active[0].cancel(true);
+            dialog.dispose();
+        });
+        JButton save = new JButton(cloudFlow ? "Done" : "Save");
         save.addActionListener(e -> {
-            Map<String, String> entries = new LinkedHashMap<String, String>();
+            final Map<String, String> entries = new LinkedHashMap<String, String>();
+            final String runtimeUrl;
             if (cloudFlow) {
-                String token = tokenField.getText().trim();
-                if (token.isEmpty()) {
-                    setError(statusLine, "Run 'ollama signin' in a terminal to obtain a "
-                            + "cloud token, then paste it here.");
-                    return;
-                }
-                entries.put("OLLAMA_API_KEY", token);
-            } else {
-                String url = urlField.getText().trim();
-                if (url.isEmpty()) {
-                    setError(statusLine, "Daemon URL cannot be empty.");
-                    return;
-                }
-                url = normaliseRuntimeUrl(url);
-                DaemonResult result = daemonProbe.probe(url, DAEMON_PROBE_TIMEOUT_MS);
-                if (!result.ok) {
-                    setError(statusLine, "Could not reach " + url + meta.healthPath + ": "
-                            + result.message);
-                    return;
-                }
-                setOk(statusLine, "Server reachable (HTTP " + result.httpCode + ")");
-                String urlEnv = ProviderCredentials.ENV_VAR_FOR_PROVIDER.get(providerKey);
-                entries.put(urlEnv != null ? urlEnv : "OLLAMA_API_BASE", url);
-            }
-            try {
-                credentials.saveEntries(providerKey, entries);
+                // ollama signin persists its own authenticated state. Closing
+                // this informational flow must not imply that a pasted value
+                // was verified or write an OLLAMA_API_KEY file.
                 saved[0] = true;
                 dialog.dispose();
-            } catch (IOException ex) {
-                setError(statusLine, "Could not save: " + ex.getMessage());
+                return;
             }
+
+            String url = urlField.getText().trim();
+            if (url.isEmpty()) {
+                setError(statusLine, "Daemon URL cannot be empty.");
+                return;
+            }
+            url = normaliseRuntimeUrl(url);
+            runtimeUrl = url;
+            String urlEnv = ProviderCredentials.ENV_VAR_FOR_PROVIDER.get(providerKey);
+            entries.put(urlEnv != null ? urlEnv : "OLLAMA_API_BASE", url);
+            save.setEnabled(false);
+            statusLine.setText("Checking serverâ€¦");
+            active[0] = new SwingWorker<DaemonResult, Void>() {
+                @Override protected DaemonResult doInBackground() {
+                    DaemonResult result = daemonProbe.probe(
+                            runtimeUrl, DAEMON_PROBE_TIMEOUT_MS);
+                    if (!result.ok || isCancelled()) return result;
+                    try {
+                        credentials.saveEntries(providerKey, entries);
+                        return result;
+                    } catch (IOException failure) {
+                        return new DaemonResult(false, 0, "credential save failed ("
+                                + failure.getClass().getSimpleName() + ")");
+                    }
+                }
+
+                @Override protected void done() {
+                    if (isCancelled()) return;
+                    active[0] = null;
+                    try {
+                        DaemonResult result = get();
+                        if (result.ok) {
+                            saved[0] = true;
+                            dialog.dispose();
+                        } else {
+                            save.setEnabled(true);
+                            setError(statusLine, "Could not reach " + runtimeUrl
+                                    + meta.healthPath + ": " + result.message);
+                        }
+                    } catch (Exception failure) {
+                        save.setEnabled(true);
+                        setError(statusLine, "Setup failed ("
+                                + failure.getClass().getSimpleName() + ")");
+                    }
+                }
+            };
+            active[0].execute();
         });
         buttons.add(install);
         buttons.add(Box.createHorizontalStrut(12));
@@ -294,6 +350,7 @@ public class LocalRuntimeWizard implements InstallerWizard {
         dialog.pack();
         Dimension preferred = dialog.getPreferredSize();
         dialog.setSize(Math.max(preferred.width, 460), preferred.height);
+        UiScrollSupport.fitToScreen(dialog);
         dialog.setLocationRelativeTo(parent);
         dialog.setVisible(true);
         return saved[0];
@@ -304,9 +361,21 @@ public class LocalRuntimeWizard implements InstallerWizard {
         label.setText(message);
     }
 
-    private static void setOk(JLabel label, String message) {
-        label.setForeground(new Color(0x20, 0x70, 0x30));
-        label.setText(message);
+    /** Package-visible seam used to prove that rejection never reaches disk.
+     * The UI no longer collects cloud tokens, but keeping the transaction seam
+     * protects callers compiled against the earlier wizard implementation. */
+    CredentialVerifier.ValidationWorker cloudValidationWorker(
+            String candidate, CredentialVerifier.Completion completion) {
+        return new CredentialVerifier.ValidationWorker(
+                providerKey, candidate, VERIFY_TIMEOUT_MS, verifier,
+                (key, accepted) -> {
+                    if (credentials == null) {
+                        throw new IOException("credential store unavailable");
+                    }
+                    Map<String, String> entries = new LinkedHashMap<String, String>();
+                    entries.put("OLLAMA_API_KEY", accepted);
+                    credentials.saveEntries(key, entries);
+                }, completion);
     }
 
     private static DaemonProbe defaultDaemonProbe(String healthPath) {

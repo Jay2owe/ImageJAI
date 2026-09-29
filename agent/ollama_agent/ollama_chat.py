@@ -31,6 +31,25 @@ from pathlib import Path
 import ollama
 
 try:
+    from .tcp_frames import recv_bounded
+    from .agentconsole_tcp import load_agentconsole_token, send_agentconsole
+    from .legacy_tool_policy import (
+        allowed_tools_for_model,
+        dispatch_tool_for_model,
+        host_tools_allowed,
+        policy_for_model,
+    )
+except ImportError:
+    from tcp_frames import recv_bounded
+    from agentconsole_tcp import load_agentconsole_token, send_agentconsole
+    from legacy_tool_policy import (  # type: ignore
+        allowed_tools_for_model,
+        dispatch_tool_for_model,
+        host_tools_allowed,
+        policy_for_model,
+    )
+
+try:
     from prompt_toolkit import prompt as _pt_prompt
     from prompt_toolkit.completion import WordCompleter
     from prompt_toolkit.formatted_text import ANSI
@@ -140,63 +159,28 @@ def _tcp(port: int, cmd: str, timeout: float = 5) -> str:
     try:
         with socket.create_connection(("127.0.0.1", port), timeout=timeout) as s:
             s.sendall(f"{cmd}\n".encode())
-            chunks = []
-            while True:
-                try:
-                    data = s.recv(8192)
-                    if not data:
-                        break
-                    chunks.append(data.decode(errors="replace"))
-                except socket.timeout:
-                    break
-            reply = "".join(chunks).strip()
+            try:
+                raw = recv_bounded(s)
+            except socket.timeout:
+                raw = b""
+            reply = raw.decode(errors="replace").strip()
             if reply:
                 return reply
             return f"ACCEPTED_NO_REPLY (port {port}) — service accepted '{cmd[:60]}' but returned no data."
+    except ValueError as e:
+        return f"ERROR: service on port {port} returned an invalid reply ({e})"
     except (ConnectionRefusedError, OSError) as e:
         return f"ERROR: service on port {port} not reachable ({e})"
 
 
 def _load_ac_token() -> str:
     """Load AgentConsole TCP auth token."""
-    paths = [
-        Path(os.environ.get("APPDATA", "")) / "agent-console" / "config" / "tcp_auth_token.txt",
-        Path.home() / ".config" / "agent-console" / "tcp_auth_token.txt",
-    ]
-    for p in paths:
-        try:
-            return p.read_text().strip()
-        except (OSError, FileNotFoundError):
-            continue
-    return ""
+    return load_agentconsole_token()
 
 
 def _ac_tcp(cmd: str, timeout: float = 15) -> str:
     """Send authenticated command to AgentConsole (port 7745)."""
-    token = _load_ac_token()
-    try:
-        with socket.create_connection(("127.0.0.1", 7745), timeout=timeout) as s:
-            if token:
-                s.sendall(f"{token}\n".encode())
-            s.sendall(f"{cmd}\n".encode())
-            chunks = []
-            while True:
-                try:
-                    data = s.recv(65536)
-                    if not data:
-                        break
-                    chunks.append(data)
-                    if b"\n" in b"".join(chunks):
-                        break
-                except socket.timeout:
-                    break
-            raw = b"".join(chunks).decode("utf-8", errors="replace").strip()
-            try:
-                return json.loads(raw).get("result", raw)
-            except (json.JSONDecodeError, ValueError):
-                return raw
-    except (ConnectionRefusedError, OSError) as e:
-        return f"ERROR: AgentConsole not reachable ({e})"
+    return send_agentconsole(cmd, timeout=timeout, token_loader=_load_ac_token)
 
 # ── Tool definitions ─────────────────────────────────────────────────────
 # Each function's signature + docstring becomes the tool schema automatically.
@@ -1306,12 +1290,13 @@ def _run_tool_loop(model: str, text: str) -> tuple[bool, str, Exception | None]:
     the loop aborted before producing a meaningful answer.
     """
     messages = [{"role": "user", "content": text}]
+    schema_tools = allowed_tools_for_model(model, ALL_TOOLS + [learn_new_tool])
     try:
         for _ in range(MAX_ROUNDS):
             resp = ollama.chat(
                 model=model,
                 messages=messages,
-                tools=ALL_TOOLS,
+                tools=schema_tools,
                 stream=False,
                 keep_alive="5m",
                 options={"temperature": 0.2, "num_predict": 256},
@@ -1328,10 +1313,7 @@ def _run_tool_loop(model: str, text: str) -> tuple[bool, str, Exception | None]:
             for tc in msg.tool_calls:
                 name = tc.function.name
                 args = tc.function.arguments
-                if name not in TOOL_MAP:
-                    messages.append({"role": "tool", "content": f"ERROR: unknown tool '{name}'"})
-                    continue
-                result = TOOL_MAP[name](**args)
+                result = dispatch_tool_for_model(model, name, args, TOOL_MAP)
                 messages.append({"role": "tool", "content": str(result)})
 
         return True, "Done.", None
@@ -1464,8 +1446,7 @@ def create_model():
         ollama.create(model=MODEL_NAME, from_=BASE_MODEL,
                       system=_SYSTEM_PROMPT, parameters=_MODEL_PARAMS)
         print(f"Model '{MODEL_NAME}' created successfully.")
-        global _available_cache
-        _available_cache = None
+        _available_cache.clear()
         return True
     except Exception as e:
         print(f"ERROR creating model: {e}")
@@ -1930,9 +1911,11 @@ def chat_turn(model: str, messages: list, tools: list | None,
     the future provider-router integration.
     """
     kwargs = {"model": model, "messages": messages, "stream": False, "keep_alive": "5m"}
-    if tools:
+    schema_tools = allowed_tools_for_model(model, tools or [])
+    if schema_tools:
         # Combine Python function tools with manual JSON defs for learned tools
-        kwargs["tools"] = tools + (extra_tool_defs or [])
+        learned_schemas = (extra_tool_defs or []) if host_tools_allowed(model) else []
+        kwargs["tools"] = schema_tools + learned_schemas
 
     spinner = _Spinner("thinking (Ctrl+C to abort)")
     turn_start = time.time()
@@ -1973,7 +1956,7 @@ def chat_turn(model: str, messages: list, tools: list | None,
             if not msg.tool_calls:
                 content = (msg.content or "").strip()
                 # If model gave up, nudge it to use tools (once per turn)
-                if not _copout_nudged and not _is_meaningful_response(content) and tools:
+                if not _copout_nudged and not _is_meaningful_response(content) and schema_tools:
                     _copout_nudged = True
                     messages.append({
                         "role": "user",
@@ -2004,7 +1987,7 @@ def chat_turn(model: str, messages: list, tools: list | None,
                 if name in TOOL_MAP:
                     print(f"  \033[33m⚡ {name}({json.dumps(args)})\033[0m")
                     try:
-                        result = TOOL_MAP[name](**args)
+                        result = dispatch_tool_for_model(model, name, args, TOOL_MAP)
                     except KeyboardInterrupt:
                         raise _TurnAborted()
                     print(f"  \033[90m→ {result[:200]}\033[0m")
@@ -2067,17 +2050,21 @@ def main():
     _install_shutdown_hooks()
 
     if launcher != "wrapper":
+        if not policy_for_model(model).is_local:
+            raise SystemExit(
+                "cloud models cannot launch host-capable Claude/Codex surfaces"
+            )
         raise SystemExit(_launch_via_ollama_surface(launcher, model))
 
-    # Load learned tools from registry
-    learned_registry = _load_all_learned()
+    # Learned commands are host execution and are not loaded without the
+    # explicit trusted-local capability.
+    learned_registry = _load_all_learned() if host_tools_allowed(model) else {}
 
     if args.tools:
         print("Built-in tools:")
-        for f in ALL_TOOLS:
+        for f in allowed_tools_for_model(model, ALL_TOOLS + [learn_new_tool]):
             doc = (f.__doc__ or "").strip().split("\n")[0]
             print(f"  {f.__name__:20s} — {doc}")
-        print(f"  {'learn_new_tool':20s} — Learn a new tool for future use")
         if learned_registry:
             print(f"\nLearned tools ({len(learned_registry)}):")
             for name, entry in learned_registry.items():
@@ -2085,9 +2072,11 @@ def main():
         return
 
     # Build combined tool list: built-ins + learn_new_tool + learned tools
-    builtin_tools = ALL_TOOLS + [learn_new_tool]
+    builtin_tools = allowed_tools_for_model(model, ALL_TOOLS + [learn_new_tool])
     # Learned tools need manual JSON defs (they're not real Python functions with signatures)
-    learned_defs = _build_learned_tool_defs(learned_registry)
+    learned_defs = (
+        _build_learned_tool_defs(learned_registry) if host_tools_allowed(model) else []
+    )
 
     tools = None if args.no_tools else builtin_tools
     messages = [{"role": "system", "content": _CHAT_SYSTEM_PROMPT}]
@@ -2207,11 +2196,10 @@ def main():
                 print("  (conversation cleared)")
                 continue
             if user_input.lower() == "/tools":
-                for f in ALL_TOOLS:
+                for f in builtin_tools:
                     doc = (f.__doc__ or "").strip().split("\n")[0]
                     print(f"  {f.__name__:20s} — {doc}")
-                print(f"  {'learn_new_tool':20s} — Learn a new tool for future use")
-                cur_learned = _load_learned_tools()
+                cur_learned = _load_learned_tools() if host_tools_allowed(model) else {}
                 if cur_learned:
                     print(f"\n  \033[33mLearned ({len(cur_learned)}):\033[0m")
                     for name, entry in cur_learned.items():

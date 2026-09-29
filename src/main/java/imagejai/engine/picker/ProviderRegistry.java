@@ -15,6 +15,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.Callable;
+import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * Phase G: groups merged {@link ModelEntry}s by provider, after running the
@@ -35,6 +36,10 @@ import java.util.concurrent.Callable;
  * docs/multi_provider/07_implementation_plan.md §4).
  */
 public final class ProviderRegistry {
+    private static volatile String lastLoadError = "";
+
+    /** Safe, user-displayable reason the bundled registry could not load. */
+    public static String lastLoadError() { return lastLoadError; }
 
     /** Canonical hyphenated provider keys — must match agent/providers/router.py. */
     public static final List<String> CANONICAL_PROVIDERS = Collections.unmodifiableList(
@@ -138,10 +143,23 @@ public final class ProviderRegistry {
     public static ProviderRegistry loadBundled() {
         try (InputStream in = ProviderRegistry.class.getResourceAsStream(BUNDLED_RESOURCE)) {
             if (in == null) {
+                lastLoadError = "Bundled model registry is missing.";
+                System.err.println("[ImageJAI] " + lastLoadError);
                 return empty();
             }
-            return fromMerged(ModelsYamlLoader.loadFromStream(in), LocalDate.now());
+            ProviderRegistry registry =
+                    fromMerged(ModelsYamlLoader.loadFromStream(in), LocalDate.now());
+            lastLoadError = "";
+            return registry;
         } catch (IOException ex) {
+            lastLoadError = "Bundled model registry failed to load ("
+                    + ex.getClass().getSimpleName() + ").";
+            System.err.println("[ImageJAI] " + lastLoadError);
+            return empty();
+        } catch (RuntimeException ex) {
+            lastLoadError = "Bundled model registry is corrupt ("
+                    + ex.getClass().getSimpleName() + ").";
+            System.err.println("[ImageJAI] " + lastLoadError);
             return empty();
         }
     }
@@ -334,13 +352,24 @@ public final class ProviderRegistry {
         private final String providerId;
         private final Callable<ProviderEntry> fetcher;
         private final Applier applier;
+        private final RefreshGeneration generation;
+        private final long generationToken;
 
         public RefreshWorker(String providerId,
                              Callable<ProviderEntry> fetcher,
                              Applier applier) {
+            this(providerId, fetcher, applier, null);
+        }
+
+        public RefreshWorker(String providerId,
+                             Callable<ProviderEntry> fetcher,
+                             Applier applier,
+                             RefreshGeneration generation) {
             this.providerId = providerId;
             this.fetcher = fetcher;
             this.applier = applier;
+            this.generation = generation;
+            this.generationToken = generation == null ? 0L : generation.next();
         }
 
         public String providerId() {
@@ -354,14 +383,35 @@ public final class ProviderRegistry {
 
         @Override
         protected void done() {
-            if (applier == null) {
+            if (applier == null || isCancelled() || !isCurrent()) {
                 return;
             }
             try {
-                applier.apply(providerId, get(), null);
+                ProviderEntry result = get();
+                if (isCurrent()) applier.apply(providerId, result, null);
             } catch (Exception ex) {
-                applier.apply(providerId, null, ex);
+                if (isCurrent() && !isCancelled()) {
+                    applier.apply(providerId, null, ex);
+                }
             }
         }
+
+        public long generation() { return generationToken; }
+
+        private boolean isCurrent() {
+            return generation == null || generation.isCurrent(generationToken);
+        }
+    }
+
+    /** Per-owner monotonically increasing gate for cancellable refresh work. */
+    public static final class RefreshGeneration {
+        private final AtomicLong current = new AtomicLong();
+
+        public long next() { return current.incrementAndGet(); }
+        public void cancel() { current.incrementAndGet(); }
+        public boolean isCurrent(long token) {
+            return token > 0L && current.get() == token;
+        }
+        public long current() { return current.get(); }
     }
 }

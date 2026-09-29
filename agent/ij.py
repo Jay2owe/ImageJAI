@@ -6,19 +6,20 @@ Usage:
     python ij.py ping
     python ij.py state
     python ij.py info
+    python ij.py open path/to/image.tif [series]
     python ij.py results
     python ij.py capture [name]
-    python ij.py macro "run('Blobs (25K)');"
+    python ij.py macro --stdin         # read macro text from a pipe, preserving quotes
+    python ij.py macro --file path/to/macro.ijm
     python ij.py script 'println("hello")'
     python ij.py script --lang jython 'print("hello")'
     python ij.py script --file path/to/script.groovy
     # The `run` subcommand takes a single string argument containing a
     # |||-delimited chain. You MUST quote the whole chain so your shell doesn't
     # word-split on spaces or mangle the embedded quotes:
-    #   bash/zsh:  python ij.py run 'open("x.tif") ||| run("Measure") ||| capture done'
-    #   cmd.exe:   python ij.py run "open(""x.tif"") ||| run(""Measure"") ||| capture done"
-    #   powershell: python ij.py run 'open("x.tif") ||| run("Measure") ||| capture done'
-    python ij.py run 'open("x.tif") ||| run("Measure") ||| capture done'
+    # Open host files through the governed command, then run macro-only chains:
+    #   python ij.py open x.tif
+    python ij.py run 'run("Measure") ||| capture done'
     python ij.py explore Otsu Triangle Li
     python ij.py log
     python ij.py histogram
@@ -64,7 +65,7 @@ Usage:
 Importable helper examples:
     from ij import get_state, execute_macro, run_script, get_console
     state = get_state()
-    result = execute_macro("run('Blobs (25K)');")
+    result = execute_macro('run("Blobs");')  # use the installed sample label
     script_result = run_script('println("hello")')
     console = get_console(tail=5000)
 
@@ -79,6 +80,13 @@ import json
 import sys
 import os
 import base64
+import copy
+import math
+import re
+import struct
+import threading
+import time
+import uuid
 
 HOST = os.environ.get("IMAGEJAI_TCP_HOST", "localhost")
 try:
@@ -88,10 +96,47 @@ except ValueError:
 TIMEOUT = 60
 SESSION_ID = os.environ.get("IMAGEJAI_SESSION_ID", "").strip()
 MODEL_ENDPOINT = os.environ.get("IMAGEJAI_MODEL_ENDPOINT", "").strip()
+# The largest legal payload today is a base64-wrapped 16 MiB PNG (or a
+# 4-million-float pixel plane), which is under 22 MiB.  Keep enough headroom
+# for the JSON envelope while preventing an untrusted loopback peer from
+# growing either receive buffer without bound.
+MAX_REPLY_FRAME_BYTES = 32 * 1024 * 1024
+MAX_EVENT_FRAME_BYTES = 32 * 1024 * 1024
 
-# REGRESSION GUARD: Past extensions added CLI/raw TCP commands without importable helpers, tests, or docs.
-# The fix: every stable agent-facing command must have a helper in __all__, CLI routing through it, and API tests.
+
+def _load_command_manifest():
+    """Load the same command contract that is packaged in the plugin jar."""
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                        "command_manifest.json")
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            manifest = json.load(handle)
+    except (OSError, ValueError) as exc:
+        raise RuntimeError("cannot load ImageJAI command manifest %s: %s"
+                           % (path, exc))
+    commands = manifest.get("commands") if isinstance(manifest, dict) else None
+    if (not isinstance(commands, list)
+            or manifest.get("schema_version") != 1
+            or manifest.get("product_version") != "0.5.0"
+            or manifest.get("protocol") != "ImageJAI TCP JSONL"):
+        raise RuntimeError("invalid ImageJAI command manifest: %s" % path)
+    names = [entry.get("name") for entry in commands
+             if isinstance(entry, dict)]
+    if (len(names) != len(commands) or len(set(names)) != len(names)
+            or names != sorted(names)):
+        raise RuntimeError("ImageJAI command manifest names must be sorted and unique")
+    return manifest
+
+
+COMMAND_MANIFEST = _load_command_manifest()
+COMMANDS_BY_NAME = {
+    entry["name"]: entry for entry in COMMAND_MANIFEST["commands"]
+}
+
+# Convenience coverage is declared in command_manifest.json. Commands marked
+# raw remain supported through imagej_command() and are documented that way.
 __all__ = [
+    "ImageJSession",
     "imagej_command",
     "hello",
     "normalize_error",
@@ -105,6 +150,7 @@ __all__ = [
     "get_roi_state",
     "get_display_state",
     "get_console",
+    "open_image",
     "execute_macro",
     "run_script",
     "run_groovy",
@@ -121,6 +167,7 @@ __all__ = [
     "get_dialogs",
     "close_dialogs",
     "probe_command",
+    "pseudonymise_paths",
     "interact_dialog",
     "run_chain",
     "intent",
@@ -140,6 +187,7 @@ __all__ = [
     "job_cancel",
     "job_list",
     "wait_for_job",
+    "wait_for_operation",
     "gui_toast",
     "gui_inline",
     "gui_focus",
@@ -147,7 +195,31 @@ __all__ = [
     "gui_highlight_roi",
     "gui_confirm",
     "imagej_events",
+    # Test automation bridge — gated, opt-in, never negotiated by default.
+    "use_test_automation",
+    "get_ui_tree",
+    "get_ui_component",
+    "perform_ui_action",
+    "wait_for_ui_state",
+    "wait_for_ui_idle",
+    "capture_ui",
+    "start_ui_trace",
+    "stop_ui_trace",
+    "get_ui_metrics",
 ]
+
+_DECLARED_CONVENIENCE_HELPERS = frozenset(
+    helper
+    for descriptor in COMMAND_MANIFEST["commands"]
+    if descriptor.get("python", {}).get("coverage") == "convenience"
+    for helper in descriptor.get("python", {}).get("helpers", [])
+)
+_MISSING_EXPORTED_HELPERS = _DECLARED_CONVENIENCE_HELPERS.difference(__all__)
+if _MISSING_EXPORTED_HELPERS:
+    raise RuntimeError(
+        "command manifest convenience helpers missing from ij.__all__: %s"
+        % sorted(_MISSING_EXPORTED_HELPERS)
+    )
 
 # Step 01 (docs/tcp_upgrade): capabilities Claude's ij.py declares on first
 # contact. Claude Code hooks already inject per-turn session state, so pulse
@@ -161,7 +233,10 @@ _HELLO_CAPS = {
     "verbose": True,
     "pulse": False,
     "state_delta": True,
-    "accept_events": ["macro.*", "image.*", "dialog.*"],
+    # Event subscriptions are authorized against this immutable handshake
+    # capability. The public helper intentionally supports every governed
+    # event topic; payload privacy is still enforced server-side per frame.
+    "accept_events": ["*"],
 }
 # Cache of the last hello response so `ij.py capabilities` can show the
 # server's enabled features without re-hitting the socket. Best-effort: a
@@ -169,16 +244,21 @@ _HELLO_CAPS = {
 _HELLO_RESULT = None
 _HELLO_SENT = False
 
-# Phase 1: commands eligible for hash-based dedup. Server echoes a "hash"
-# field; we persist (hash, payload) per command and attach if_none_match on
-# the next call. Unchanged responses come back as {"ok": true, "unchanged": true, "hash": ...}.
-READONLY_COMMANDS = frozenset([
-    "ping", "get_state", "get_image_info", "get_log", "get_results_table",
-    "get_histogram", "get_open_windows", "get_metadata", "get_dialogs",
-    "get_state_context", "get_progress", "get_friction_log",
-    "get_friction_patterns", "intent_list",
-    "job_status", "job_list",
+_SESSION_FAILURE_CODES = frozenset([
+    "session_expired",
+    "session_revoked",
+    "session_unknown",
+    "session_required",
+    "session_token_mismatch",
 ])
+
+# Commands eligible for hash-based deduplication are declared once in the
+# manifest. The server echoes a hash; the client persists (hash, payload) and
+# attaches if_none_match on the next call.
+READONLY_COMMANDS = frozenset(
+    name for name, descriptor in COMMANDS_BY_NAME.items()
+    if descriptor.get("dedup_hash") is True
+)
 
 # Disk-backed cache so one-shot `python ij.py <cmd>` invocations benefit from
 # dedup across invocations, not just within a single process. Kept in a
@@ -187,125 +267,374 @@ READONLY_COMMANDS = frozenset([
 # the in-memory layer is authoritative during a single run.
 _CACHE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".tmp")
 _CACHE_FILE = os.path.join(_CACHE_DIR, "ij_client_cache.json")
+_CACHE_SCHEMA_VERSION = 3
+_CACHE_MAX_ENTRIES = 256
+_CACHE_MAX_RETAINED_BYTES = 6 * 1024 * 1024
+_CACHE_MAX_FILE_BYTES = 8 * 1024 * 1024
+_CACHE_TTL_SECONDS = 24 * 60 * 60
+_CACHE_FUTURE_SKEW_SECONDS = 5 * 60
+_CACHE_FRAMING_FIELDS = frozenset((
+    "if_none_match",
+    "session_id",
+    "token",
+    "client_session_id",
+    "model_endpoint",
+))
+
+
+def _readonly_cache_key(host, port, cmd):
+    """Return a stable endpoint-and-request key, or None if it is unsafe.
+
+    Cache identity includes the server endpoint and every semantic request
+    argument. Protocol/session framing is deliberately omitted. JSON's sorted
+    object keys make otherwise equivalent request dicts share one entry while
+    list order and JSON value types retain their wire meaning.
+    """
+    if not isinstance(cmd, dict):
+        return None
+    command = cmd.get("command")
+    if command not in READONLY_COMMANDS:
+        return None
+    try:
+        endpoint_port = int(port)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    endpoint_host = str(host).strip().casefold()
+    if not endpoint_host or endpoint_port < 1 or endpoint_port > 65535:
+        return None
+    semantic_args = {
+        key: value for key, value in cmd.items()
+        if key != "command" and key not in _CACHE_FRAMING_FIELDS
+    }
+    identity = {
+        "server": {"host": endpoint_host, "port": endpoint_port},
+        "command": command,
+        "args": semantic_args,
+    }
+    try:
+        return json.dumps(identity, sort_keys=True, separators=(",", ":"),
+                          ensure_ascii=True, allow_nan=False)
+    except (TypeError, ValueError, OverflowError):
+        # An argument that cannot be represented as strict JSON cannot be
+        # matched safely across calls. The request path remains uncached.
+        return None
+
+
+def _valid_cache_key(key):
+    try:
+        identity = json.loads(key)
+    except (TypeError, ValueError):
+        return False
+    if not isinstance(identity, dict) or set(identity) != {
+            "server", "command", "args"}:
+        return False
+    server = identity.get("server")
+    structurally_valid = (
+        isinstance(server, dict)
+        and set(server) == {"host", "port"}
+        and isinstance(server.get("host"), str)
+        and bool(server.get("host"))
+        and isinstance(server.get("port"), int)
+        and not isinstance(server.get("port"), bool)
+        and 1 <= server.get("port") <= 65535
+        and identity.get("command") in READONLY_COMMANDS
+        and isinstance(identity.get("args"), dict)
+    )
+    if not structurally_valid:
+        return False
+    try:
+        canonical = json.dumps(identity, sort_keys=True, separators=(",", ":"),
+                               ensure_ascii=True, allow_nan=False)
+    except (TypeError, ValueError, OverflowError):
+        return False
+    return key == canonical
+
+
+def _cache_now():
+    """Wall-clock time is required because cache ages cross processes."""
+    return time.time()
+
+
+def _valid_cache_timestamp(value, now):
+    return (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and math.isfinite(value)
+        and value >= 0
+        and value <= now + _CACHE_FUTURE_SKEW_SECONDS
+    )
+
+
+def _valid_cache_entry(entry, now):
+    if not isinstance(entry, dict) or set(entry) != {
+            "hash", "result", "stored_at", "accessed_at"}:
+        return False
+    stored_at = entry.get("stored_at")
+    accessed_at = entry.get("accessed_at")
+    return (
+        isinstance(entry.get("hash"), str)
+        and bool(entry.get("hash"))
+        and _valid_cache_timestamp(stored_at, now)
+        and _valid_cache_timestamp(accessed_at, now)
+        and accessed_at >= stored_at
+    )
+
+
+def _cache_entry_bytes(key, entry):
+    try:
+        encoded = json.dumps(
+            [key, entry], sort_keys=True, separators=(",", ":"),
+            ensure_ascii=True, allow_nan=False).encode("utf-8")
+    except (TypeError, ValueError, OverflowError, UnicodeError):
+        return None
+    return len(encoded)
+
+
+def _cache_retained_bytes(cache):
+    total = 0
+    for key, entry in cache.items():
+        size = _cache_entry_bytes(key, entry)
+        if size is None:
+            return _CACHE_MAX_RETAINED_BYTES + 1
+        total += size
+    return total
+
+
+def _cache_expired(entry, now):
+    return now - entry["stored_at"] >= _CACHE_TTL_SECONDS
+
+
+def _cache_victim_order(cache):
+    """Least-recently-used first, with stable tie-breaking."""
+    return sorted(
+        cache,
+        key=lambda key: (
+            cache[key]["accessed_at"], cache[key]["stored_at"], key),
+    )
+
+
+def _prune_cache(cache, now=None):
+    """Apply TTL, count, and retained-byte bounds in-place."""
+    if now is None:
+        now = _cache_now()
+    changed = False
+    for key in list(cache):
+        entry = cache[key]
+        if (not _valid_cache_key(key)
+                or not _valid_cache_entry(entry, now)
+                or _cache_expired(entry, now)
+                or _cache_entry_bytes(key, entry) is None):
+            del cache[key]
+            changed = True
+
+    total = _cache_retained_bytes(cache)
+    victims = iter(_cache_victim_order(cache))
+    while (len(cache) > _CACHE_MAX_ENTRIES
+           or total > _CACHE_MAX_RETAINED_BYTES):
+        try:
+            victim = next(victims)
+        except StopIteration:
+            break
+        size = _cache_entry_bytes(victim, cache[victim]) or 0
+        del cache[victim]
+        total = max(0, total - size)
+        changed = True
+    return changed
+
+
+def _cache_payload_bytes(cache):
+    payload = {"version": _CACHE_SCHEMA_VERSION, "entries": cache}
+    return json.dumps(
+        payload, sort_keys=True, separators=(",", ":"),
+        ensure_ascii=True, allow_nan=False).encode("utf-8")
+
+
+def _cache_json_object(pairs):
+    obj = {}
+    for key, value in pairs:
+        if key in obj:
+            raise ValueError("duplicate cache JSON key")
+        obj[key] = value
+    return obj
 
 
 def _load_cache_from_disk():
     try:
-        with open(_CACHE_FILE, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        if not isinstance(data, dict):
+        # Bound the byte stream before and during parsing. The stat is an early
+        # rejection; the limited binary read closes the grow-after-stat race.
+        if os.path.getsize(_CACHE_FILE) > _CACHE_MAX_FILE_BYTES:
             return {}
+        with open(_CACHE_FILE, "rb") as f:
+            raw = f.read(_CACHE_MAX_FILE_BYTES + 1)
+        if len(raw) > _CACHE_MAX_FILE_BYTES:
+            return {}
+        data = json.loads(
+            raw.decode("utf-8"), object_pairs_hook=_cache_json_object)
+        # Older schemas lack safe endpoint/argument or age metadata. They
+        # cannot be migrated without replay risk, so invalidate them.
+        if (not isinstance(data, dict)
+                or set(data) != {"version", "entries"}
+                or data.get("version") != _CACHE_SCHEMA_VERSION
+                or not isinstance(data.get("entries"), dict)):
+            return {}
+        now = _cache_now()
         out = {}
-        for k, v in data.items():
-            if isinstance(v, list) and len(v) == 2:
-                out[k] = (v[0], v[1])
+        for k, v in data["entries"].items():
+            if (not _valid_cache_key(k)
+                    or not _valid_cache_entry(v, now)
+                    or _cache_entry_bytes(k, v) is None):
+                return {}
+            out[k] = v
+        if _prune_cache(out, now=now):
+            # Expired or over-limit entries should not remain on disk merely
+            # because this process never performs another cacheable request.
+            _save_cache_to_disk(out)
         return out
-    except (IOError, OSError, ValueError):
+    except (IOError, OSError, ValueError, UnicodeError, TypeError,
+            RecursionError):
         return {}
 
 
 def _save_cache_to_disk(cache):
     try:
+        _prune_cache(cache)
+        encoded = _cache_payload_bytes(cache)
+        # The retained-byte ceiling leaves headroom for schema framing, but
+        # enforce the actual file limit too if constants are tightened.
+        while len(encoded) > _CACHE_MAX_FILE_BYTES and cache:
+            del cache[_cache_victim_order(cache)[0]]
+            encoded = _cache_payload_bytes(cache)
+        if len(encoded) > _CACHE_MAX_FILE_BYTES:
+            return False
         os.makedirs(_CACHE_DIR, exist_ok=True)
         tmp = _CACHE_FILE + ".tmp"
-        serial = {k: [v[0], v[1]] for k, v in cache.items()}
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(serial, f)
+        with open(tmp, "wb") as f:
+            f.write(encoded)
         os.replace(tmp, _CACHE_FILE)
-    except (IOError, OSError):
-        pass
+        return True
+    except (IOError, OSError, TypeError, ValueError, UnicodeError,
+            RecursionError):
+        return False
 
 
-# In-memory cache: cmd_name -> (hash, result). Seeded from disk so a fresh
-# subprocess can reuse a previous call's hash on its very first request.
+# In-memory cache: canonical endpoint/request key -> bounded metadata record.
+# Seeded
+# from disk so a fresh subprocess can reuse a previous call on its first
+# request without crossing servers or semantic argument sets.
+_CACHE_LOCK = threading.RLock()
 _READONLY_CACHE = _load_cache_from_disk()
 _READONLY_CACHE_DIRTY = False
 
 
+def _cache_lookup(key):
+    global _READONLY_CACHE_DIRTY
+    now = _cache_now()
+    with _CACHE_LOCK:
+        entry = _READONLY_CACHE.get(key)
+        if entry is None:
+            return None
+        if (not _valid_cache_entry(entry, now)
+                or _cache_expired(entry, now)):
+            del _READONLY_CACHE[key]
+            _READONLY_CACHE_DIRTY = True
+            return None
+        touched_at = max(now, entry["stored_at"])
+        if touched_at != entry["accessed_at"]:
+            entry["accessed_at"] = touched_at
+            _READONLY_CACHE_DIRTY = True
+        # A longer timestamp can increase serialized size at the boundary.
+        # Reapply every bound before exposing the entry.
+        if _prune_cache(_READONLY_CACHE, now=now):
+            _READONLY_CACHE_DIRTY = True
+        entry = _READONLY_CACHE.get(key)
+        if entry is None:
+            return None
+        try:
+            result = copy.deepcopy(entry["result"])
+        except (TypeError, ValueError, RecursionError):
+            del _READONLY_CACHE[key]
+            _READONLY_CACHE_DIRTY = True
+            return None
+        return entry["hash"], result
+
+
+def _cache_store(key, response_hash, result):
+    global _READONLY_CACHE_DIRTY
+    now = _cache_now()
+    try:
+        retained_result = copy.deepcopy(result)
+    except (TypeError, ValueError, RecursionError):
+        return False
+    entry = {
+        "hash": response_hash,
+        "result": retained_result,
+        "stored_at": now,
+        "accessed_at": now,
+    }
+    size = _cache_entry_bytes(key, entry)
+    with _CACHE_LOCK:
+        if size is None or size > _CACHE_MAX_RETAINED_BYTES:
+            if key in _READONLY_CACHE:
+                del _READONLY_CACHE[key]
+                _READONLY_CACHE_DIRTY = True
+            return False
+        _READONLY_CACHE[key] = entry
+        _prune_cache(_READONLY_CACHE, now=now)
+        _READONLY_CACHE_DIRTY = True
+        return key in _READONLY_CACHE
+
+
 def imagej_command(cmd, host=HOST, port=PORT, timeout=TIMEOUT):
-    """Send a JSON command to ImageJAI TCP server and return parsed response.
-    On timeout, automatically checks for open dialogs before returning.
+    """Send a command through the durable session for ``host`` and ``port``.
+
+    The first call negotiates authentication and capabilities. Each later
+    request carries that session on its own fresh TCP connection, matching the
+    server's one-request-per-socket protocol. Timeouts still trigger the
+    existing best-effort dialog check.
 
     For readonly commands, auto-attaches the last-seen hash as if_none_match.
     When the server replies unchanged, returns the cached result with
     {"cached": true} so callers can't tell the difference."""
     # Phase 1: hash dedup — only for well-formed readonly requests that don't
     # already carry an explicit if_none_match (respect caller override).
-    cmd_name = None
-    if isinstance(cmd, dict):
-        cmd_name = cmd.get("command")
-    if cmd_name in READONLY_COMMANDS and "if_none_match" not in cmd:
-        cached = _READONLY_CACHE.get(cmd_name)
+    cache_key = _readonly_cache_key(host, port, cmd)
+    if cache_key is not None and "if_none_match" not in cmd:
+        cached = _cache_lookup(cache_key)
         if cached is not None:
             cmd = dict(cmd)  # don't mutate caller's dict
             cmd["if_none_match"] = cached[0]
 
-    if isinstance(cmd, dict):
-        if (SESSION_ID and cmd.get("session_id") != SESSION_ID) or (
-                MODEL_ENDPOINT and cmd.get("model_endpoint") != MODEL_ENDPOINT):
-            cmd = dict(cmd)
-            if SESSION_ID:
-                cmd.setdefault("session_id", SESSION_ID)
-            if MODEL_ENDPOINT:
-                cmd.setdefault("model_endpoint", MODEL_ENDPOINT)
-
-    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    s.settimeout(timeout)
-    try:
-        s.connect((host, port))
-        payload = json.dumps(cmd) + "\n"
-        s.sendall(payload.encode("utf-8"))
-        # Read response
-        data = b""
-        while True:
-            try:
-                chunk = s.recv(65536)
-                if not chunk:
-                    break
-                data += chunk
-                # Check if we have a complete JSON response (ends with newline)
-                if data.endswith(b"\n"):
-                    break
-            except socket.timeout:
-                # TCP timeout — command may have opened a blocking dialog.
-                # Check for dialogs immediately.
-                s.close()
-                dialogs = _check_dialogs_fallback(host, port)
-                return {
-                    "ok": False,
-                    "error": "TCP timeout after {}s — command may be blocked by a dialog".format(timeout),
-                    "dialogs": dialogs,
-                }
-        resp = json.loads(data.decode("utf-8"))
-    finally:
-        try:
-            s.close()
-        except Exception:
-            pass
+    resp = _session_for(host, port).request(cmd, timeout=timeout)
 
     # Phase 1: resolve unchanged responses from cache; refresh cache on hash.
-    global _READONLY_CACHE_DIRTY
-    if cmd_name in READONLY_COMMANDS and isinstance(resp, dict) and resp.get("ok"):
+    if cache_key is not None and isinstance(resp, dict) and resp.get("ok"):
         if resp.get("unchanged"):
-            cached = _READONLY_CACHE.get(cmd_name)
-            if cached is not None:
+            cached = _cache_lookup(cache_key)
+            if cached is not None and cmd.get("if_none_match") == cached[0]:
                 return {
                     "ok": True,
                     "result": cached[1],
                     "hash": cached[0],
                     "cached": True,
                 }
-            # Cache miss on unchanged shouldn't happen in normal flow, but be
-            # defensive: drop the if_none_match and re-request.
+            # Never resolve an explicit/stale hash with unrelated local data.
+            # Re-request once without conditional framing and bypass the
+            # server's separate per-session response-dedup cache. Removing
+            # only if_none_match is insufficient: that cache can otherwise
+            # return another short-form unchanged response. A broken peer
+            # that ignores force and again says unchanged is surfaced as-is
+            # instead of recursing forever.
             retry_cmd = dict(cmd)
             retry_cmd.pop("if_none_match", None)
-            return imagej_command(retry_cmd, host=host, port=port, timeout=timeout)
+            retry_cmd["force"] = True
+            resp = _session_for(host, port).request(retry_cmd, timeout=timeout)
+            if not (isinstance(resp, dict) and resp.get("ok")):
+                return resp
+            if resp.get("unchanged"):
+                return resp
         h = resp.get("hash")
-        if h:
-            prev = _READONLY_CACHE.get(cmd_name)
-            if prev is None or prev[0] != h:
-                _READONLY_CACHE[cmd_name] = (h, resp.get("result"))
-                _READONLY_CACHE_DIRTY = True
+        if isinstance(h, str) and h:
+            _cache_store(cache_key, h, resp.get("result"))
 
     return resp
 
@@ -313,9 +642,10 @@ def imagej_command(cmd, host=HOST, port=PORT, timeout=TIMEOUT):
 def _flush_cache():
     """Persist in-memory cache mutations to disk. Safe to call multiple times."""
     global _READONLY_CACHE_DIRTY
-    if _READONLY_CACHE_DIRTY:
-        _save_cache_to_disk(_READONLY_CACHE)
-        _READONLY_CACHE_DIRTY = False
+    with _CACHE_LOCK:
+        if (_READONLY_CACHE_DIRTY
+                and _save_cache_to_disk(_READONLY_CACHE)):
+            _READONLY_CACHE_DIRTY = False
 
 
 # Flush on interpreter exit so long-running imports persist too.
@@ -325,11 +655,10 @@ _atexit.register(_flush_cache)
 
 def _read_server_token():
     """Read the per-install shared token written by the Java server at
-    ~/.imagejai/server-token. Returns None if the file isn't present —
-    that's fine while token enforcement is opt-in (the server still
-    accepts unauthenticated hello). When IMAGEJAI_TCP_REQUIRE_TOKEN=1 is
-    set on the server side, this function MUST return a valid token or
-    every command will be rejected."""
+    ~/.imagejai/server-token. Token enforcement is enabled by default, so a
+    missing or invalid token leaves only public ping available. An explicit
+    server-side compatibility opt-out permits a restricted read-only session,
+    but never mutation or host-code execution."""
     try:
         p = os.path.join(os.path.expanduser("~"), ".imagejai", "server-token")
         with open(p, "r", encoding="utf-8") as f:
@@ -339,44 +668,799 @@ def _read_server_token():
         return None
 
 
-def hello(host=HOST, port=PORT, timeout=10):
-    """Send the step 01 handshake. Records caps on the server side and
-    returns {server_version, session_id, enabled[], server_time_ms}.
-    On any failure returns the error response — callers can fall through
-    to the legacy no-handshake path without changing behaviour."""
-    global _HELLO_RESULT, _HELLO_SENT
-    req = {"command": "hello", "agent": "claude-code",
-           "capabilities": _HELLO_CAPS}
-    if SESSION_ID:
-        req["session_id"] = SESSION_ID
-    if MODEL_ENDPOINT:
-        req["model_endpoint"] = MODEL_ENDPOINT
-    tok = _read_server_token()
-    if tok:
-        req["token"] = tok
-    try:
-        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        s.settimeout(timeout)
+def _exact_int(value, name, minimum=None):
+    """Return a true integer, rejecting bools, floats and numeric strings."""
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise TypeError("{} must be an exact integer".format(name))
+    if minimum is not None and value < minimum:
+        raise ValueError("{} must be at least {}".format(name, minimum))
+    return value
+
+
+def _add_image_binding(
+    request,
+    *,
+    image_id=None,
+    image_revision=None,
+    display_revision=None,
+    channel=None,
+    slice=None,
+    frame=None,
+    scope=None,
+):
+    """Add a validated optional active-image snapshot/plane binding."""
+    if (image_id is None) != (image_revision is None):
+        raise ValueError("image_id and image_revision must be provided together")
+    if image_id is not None:
+        if not isinstance(image_id, str) or not image_id.strip():
+            raise TypeError("image_id must be a non-empty string")
+        request["image_id"] = image_id.strip()
+        request["image_revision"] = _exact_int(
+            image_revision, "image_revision", minimum=1
+        )
+    if display_revision is not None:
+        if image_id is None:
+            raise ValueError(
+                "display_revision requires image_id and image_revision"
+            )
+        request["display_revision"] = _exact_int(
+            display_revision, "display_revision", minimum=1
+        )
+    for key, value in (("channel", channel), ("slice", slice), ("frame", frame)):
+        if value is not None:
+            request[key] = _exact_int(value, key, minimum=1)
+    if scope is not None:
+        if scope not in ("full_plane", "active_roi"):
+            raise ValueError("scope must be 'full_plane' or 'active_roi'")
+        request["scope"] = scope
+    return request
+
+
+_OPERATION_COMMANDS = frozenset({
+    "open_image", "open_image_by_token", "interact_dialog",
+    "close_dialogs", "close_windows",
+})
+_OPERATION_ID_RE = re.compile(r"edt_[A-Za-z0-9_-]{16,64}\Z")
+
+
+def _validate_operation_wait(command, operation_id, timeout, poll_interval):
+    if not isinstance(command, str) or command not in _OPERATION_COMMANDS:
+        raise ValueError(
+            "command must be one of {}".format(", ".join(sorted(_OPERATION_COMMANDS)))
+        )
+    if not isinstance(operation_id, str) or not _OPERATION_ID_RE.fullmatch(operation_id):
+        raise ValueError("operation_id is not a valid opaque EDT operation id")
+    for value, name in ((timeout, "timeout"), (poll_interval, "poll_interval")):
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise TypeError("{} must be a finite number".format(name))
+        if not math.isfinite(float(value)) or float(value) <= 0:
+            raise ValueError("{} must be finite and greater than zero".format(name))
+    if float(poll_interval) < 0.01:
+        raise ValueError("poll_interval must be at least 0.01 seconds")
+    return command, operation_id, float(timeout), float(poll_interval)
+
+
+def _operation_status(response):
+    """Extract and validate a status object from a lifecycle poll reply."""
+    if not isinstance(response, dict):
+        return None
+    operation = response.get("operation")
+    if isinstance(operation, dict):
+        return operation
+    result = response.get("result")
+    if isinstance(result, dict) and "operation_id" in result:
+        return result
+    return None
+
+
+def _operation_wait_timeout(command, operation_id, last_status, timeout):
+    operation = dict(last_status) if isinstance(last_status, dict) else {
+        "operation_id": operation_id,
+        "state": "unknown",
+        "terminal": False,
+    }
+    return {
+        "ok": False,
+        "error": {
+            "code": "operation_wait_timeout",
+            "message": (
+                "Timed out after {:.3g}s waiting for {}; the operation may still complete."
+            ).format(timeout, command),
+            "category": "operation",
+            "retry_safe": True,
+        },
+        "operation": operation,
+    }
+
+
+def _wait_for_operation(request_fn, command, operation_id, timeout, poll_interval):
+    command, operation_id, timeout, poll_interval = _validate_operation_wait(
+        command, operation_id, timeout, poll_interval
+    )
+    started = time.monotonic()
+    deadline = started + timeout
+    last_status = None
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return _operation_wait_timeout(
+                command, operation_id, last_status, timeout
+            )
+        response = request_fn(
+            {"command": command, "operation_id": operation_id},
+            timeout=max(0.001, min(TIMEOUT, remaining)),
+        )
+        status = _operation_status(response)
+        if status is None:
+            # Owner/command failures and other terminal protocol errors have
+            # no status and must be surfaced unchanged, never retried as the
+            # original mutation.
+            if isinstance(response, dict) and response.get("ok") is False:
+                return response
+            return {
+                "ok": False,
+                "error": {
+                    "code": "operation_protocol_error",
+                    "message": "Operation poll did not return a lifecycle status.",
+                    "category": "protocol",
+                    "retry_safe": False,
+                },
+            }
+        if status.get("operation_id") != operation_id:
+            return {
+                "ok": False,
+                "error": {
+                    "code": "operation_protocol_error",
+                    "message": "Operation poll returned a different operation_id.",
+                    "category": "protocol",
+                    "retry_safe": False,
+                },
+                "operation": status,
+            }
+        terminal = status.get("terminal")
+        if not isinstance(terminal, bool):
+            return {
+                "ok": False,
+                "error": {
+                    "code": "operation_protocol_error",
+                    "message": "Operation poll returned an invalid terminal flag.",
+                    "category": "protocol",
+                    "retry_safe": False,
+                },
+                "operation": status,
+            }
+        last_status = status
+        if terminal:
+            return response
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return _operation_wait_timeout(
+                command, operation_id, last_status, timeout
+            )
+        time.sleep(min(poll_interval, remaining))
+
+
+class ImageJSession:
+    """Authenticated capability session over ImageJAI's one-shot sockets.
+
+    The Java server closes each command socket after one reply, so persistence
+    belongs in this object rather than in a TCP connection. A session ID and
+    installation token are negotiated once, then copied into every request
+    envelope. Server-side authentication failures are returned to the caller;
+    commands are never replayed after such a failure.
+    """
+
+    def __init__(self, host=HOST, port=PORT, timeout=TIMEOUT,
+                 agent="claude-code", capabilities=None, token_loader=None,
+                 client_session_id=SESSION_ID, model_endpoint=MODEL_ENDPOINT):
+        self.host = host
+        self.port = int(port)
+        self.timeout = timeout
+        self.agent = agent
+        self.capabilities = copy.deepcopy(
+            _HELLO_CAPS if capabilities is None else capabilities)
+        self._token_loader = token_loader or _read_server_token
+        self.client_session_id = (client_session_id or "").strip()
+        self.model_endpoint = (model_endpoint or "").strip()
+        self._session_id = None
+        self._token = None
+        self._expires_at = None
+        self._hello_response = None
+        self._lock = threading.RLock()
+
+    @property
+    def session_id(self):
+        with self._lock:
+            return self._session_id
+
+    @property
+    def expires_at(self):
+        with self._lock:
+            return self._expires_at
+
+    @property
+    def hello_result(self):
+        with self._lock:
+            if not isinstance(self._hello_response, dict):
+                return None
+            return copy.deepcopy(self._hello_response.get("result"))
+
+    def invalidate(self):
+        """Forget local session state without revoking unrelated sessions."""
+        with self._lock:
+            self._session_id = None
+            self._token = None
+            self._expires_at = None
+            self._hello_response = None
+
+    def hello(self, timeout=10, force=False):
+        """Negotiate once and return the server's complete hello response."""
+        with self._lock:
+            if self._session_id and not force and not self._expired_locked():
+                return copy.deepcopy(self._hello_response)
+
+            token = self._token_loader()
+            caps = copy.deepcopy(self.capabilities)
+            if self.client_session_id:
+                # Preserve the launcher/audit correlation ID without allowing
+                # it to masquerade as the server-issued protocol session.
+                caps.setdefault("agent_id", self.client_session_id)
+            req = {
+                "command": "hello",
+                "agent": self.agent,
+                "capabilities": caps,
+            }
+            if self.client_session_id:
+                req["client_session_id"] = self.client_session_id
+            if self.model_endpoint:
+                req["model_endpoint"] = self.model_endpoint
+            if token:
+                req["token"] = token
+
+            try:
+                resp = self._exchange(req, timeout)
+            except (socket.error, OSError) as exc:
+                return {
+                    "ok": False,
+                    "error": {
+                        "code": "transport_unreachable",
+                        "message": "hello failed: {}".format(exc),
+                        "category": "transport",
+                        "retry_safe": True,
+                    },
+                }
+            except ValueError as exc:
+                return {
+                    "ok": False,
+                    "error": {
+                        "code": "invalid_hello",
+                        "message": "Server hello was not valid JSON: {}".format(exc),
+                        "category": "protocol",
+                        "retry_safe": False,
+                    },
+                }
+
+            result = resp.get("result") if isinstance(resp, dict) else None
+            session_id = result.get("session_id") if isinstance(result, dict) else None
+            if not (resp.get("ok") if isinstance(resp, dict) else False):
+                return resp
+            if not isinstance(session_id, str) or not session_id.strip():
+                return {
+                    "ok": False,
+                    "error": {
+                        "code": "invalid_hello",
+                        "message": "Server hello did not return a session_id",
+                        "category": "protocol",
+                        "retry_safe": False,
+                    },
+                }
+
+            self._session_id = session_id.strip()
+            self._token = token
+            expires = result.get("expires_at")
+            self._expires_at = expires if isinstance(expires, (int, float)) else None
+            self._hello_response = copy.deepcopy(resp)
+            return resp
+
+    def request(self, cmd, timeout=None, _check_dialogs=True):
+        """Send one request, negotiating first and never replaying auth errors."""
+        if not isinstance(cmd, dict):
+            raise TypeError("ImageJAI command must be a dict")
+        if cmd.get("command") == "hello":
+            return self.hello(timeout=timeout or 10, force=True)
+
+        with self._lock:
+            if self._expired_locked():
+                self._clear_locked()
+            if not self._session_id:
+                hello_resp = self.hello(timeout=min(timeout or self.timeout, 10))
+                if not hello_resp.get("ok"):
+                    return hello_resp
+            session_id = self._session_id
+            token = self._token
+
+        request = dict(cmd)
+        # ``token`` is the installation credential on the authenticated wire
+        # envelope.  Older callers used the same field name for the governed
+        # image handle accepted by open_image_by_token.  Preserve that public
+        # compatibility without letting the command argument overwrite (or be
+        # overwritten by) the authentication credential.
+        legacy_image_token = (
+            request.get("command") == "open_image_by_token"
+            or (
+                request.get("command") == "open_image"
+                and "path" not in request
+            )
+        )
+        if legacy_image_token and "token" in request:
+            request.setdefault("image_token", request["token"])
+            request.pop("token", None)
+        request["session_id"] = session_id
+        if token:
+            request["token"] = token
+        else:
+            request.pop("token", None)
+        if self.client_session_id:
+            request.setdefault("client_session_id", self.client_session_id)
+        if self.model_endpoint:
+            request.setdefault("model_endpoint", self.model_endpoint)
+
+        effective_timeout = self.timeout if timeout is None else timeout
         try:
-            s.connect((host, port))
-            s.sendall((json.dumps(req) + "\n").encode("utf-8"))
-            data = b""
+            resp = self._exchange(request, effective_timeout)
+        except socket.timeout:
+            dialogs = []
+            if _check_dialogs:
+                dialogs = self._dialog_fallback()
+            return {
+                "ok": False,
+                "error": "TCP timeout after {}s — command may be blocked by a dialog".format(
+                    effective_timeout),
+                "dialogs": dialogs,
+            }
+
+        code = _response_error_code(resp)
+        if code in _SESSION_FAILURE_CODES:
+            # The failed command was rejected before dispatch, but do not
+            # replay it automatically. A later request will negotiate anew.
+            with self._lock:
+                if self._session_id == session_id:
+                    self._clear_locked()
+        return resp
+
+    def events(self, topics=None, reconnect=True, reconnect_delay=2.0,
+               read_timeout=None, deadline=None):
+        """Yield authenticated event frames for this durable session.
+
+        A stream uses a long-lived socket, but its authorization still comes
+        from the same session ID and installation token as one-shot requests.
+        Authentication/protocol errors are yielded once and never replayed.
+        """
+        import time as _time
+        if not topics:
+            topics = ["*"]
+        elif isinstance(topics, str):
+            topics = [topics]
+        else:
+            topics = list(topics)
+
+        while True:
+            with self._lock:
+                if self._expired_locked():
+                    self._clear_locked()
+                if not self._session_id:
+                    hello_timeout = min(self.timeout, 10)
+                    if deadline is not None:
+                        remaining = deadline - _time.monotonic()
+                        if remaining <= 0:
+                            return
+                        hello_timeout = min(hello_timeout, remaining)
+                    hello_resp = self.hello(timeout=max(0.01, hello_timeout))
+                    if not hello_resp.get("ok"):
+                        yield hello_resp
+                        return
+                session_id = self._session_id
+                token = self._token
+
+            request = {
+                "command": "subscribe",
+                "topics": topics,
+                "session_id": session_id,
+            }
+            if token:
+                request["token"] = token
+            if self.client_session_id:
+                request["client_session_id"] = self.client_session_id
+            if self.model_endpoint:
+                request["model_endpoint"] = self.model_endpoint
+
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            effective_read_timeout = read_timeout
+            deadline_limited_timeout = False
+            if deadline is not None:
+                remaining = deadline - _time.monotonic()
+                if remaining <= 0:
+                    return
+                deadline_limited_timeout = (
+                    read_timeout is None or remaining <= read_timeout)
+                effective_read_timeout = (
+                    remaining if read_timeout is None
+                    else min(read_timeout, remaining))
+            sock.settimeout(effective_read_timeout)
+            saw_protocol_error = False
+            transport_error = None
+            try:
+                sock.connect((self.host, self.port))
+                sock.sendall((json.dumps(request) + "\n").encode("utf-8"))
+                buf = bytearray()
+                frame_start = 0
+                while True:
+                    remaining = MAX_EVENT_FRAME_BYTES - (len(buf) - frame_start)
+                    chunk = sock.recv(min(8192, remaining + 1))
+                    if not chunk:
+                        if (deadline is not None
+                                and _time.monotonic() >= deadline):
+                            return
+                        transport_error = ConnectionError(
+                            "ImageJAI event stream closed unexpectedly")
+                        break
+                    buf.extend(chunk)
+                    while True:
+                        newline = buf.find(b"\n", frame_start)
+                        if newline < 0:
+                            if len(buf) - frame_start > MAX_EVENT_FRAME_BYTES:
+                                raise ValueError(
+                                    "ImageJAI event frame exceeds {} bytes".format(
+                                        MAX_EVENT_FRAME_BYTES))
+                            break
+                        if newline - frame_start > MAX_EVENT_FRAME_BYTES:
+                            raise ValueError(
+                                "ImageJAI event frame exceeds {} bytes".format(
+                                    MAX_EVENT_FRAME_BYTES))
+                        line = bytes(buf[frame_start:newline])
+                        frame_start = newline + 1
+                        # Compact only after consuming a meaningful prefix.
+                        # Tracking an offset avoids copying the entire pending
+                        # buffer once per event when many frames arrive at once.
+                        if frame_start == len(buf):
+                            buf.clear()
+                            frame_start = 0
+                        elif frame_start >= 65536:
+                            del buf[:frame_start]
+                            frame_start = 0
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            frame = json.loads(line.decode("utf-8"))
+                        except (UnicodeDecodeError, ValueError):
+                            continue
+                        yield frame
+                        if deadline is not None:
+                            remaining = deadline - _time.monotonic()
+                            if remaining <= 0:
+                                return
+                            deadline_limited_timeout = (
+                                read_timeout is None
+                                or remaining <= read_timeout)
+                            sock.settimeout(
+                                remaining if read_timeout is None
+                                else min(read_timeout, remaining))
+                        if isinstance(frame, dict) and frame.get("ok") is False:
+                            saw_protocol_error = True
+                            code = _response_error_code(frame)
+                            if code in _SESSION_FAILURE_CODES:
+                                with self._lock:
+                                    if self._session_id == session_id:
+                                        self._clear_locked()
+                            return
+            except socket.timeout as exc:
+                # A timeout imposed by the caller's absolute deadline is
+                # normal stream exhaustion. A shorter independent read
+                # timeout is a transport failure (or a reconnect trigger).
+                if (deadline is not None
+                        and (deadline_limited_timeout
+                             or _time.monotonic() >= deadline)):
+                    return
+                transport_error = ConnectionError(
+                    "ImageJAI event stream timed out unexpectedly: {}".format(
+                        exc))
+            except OSError as exc:
+                if (deadline is not None
+                        and _time.monotonic() >= deadline):
+                    return
+                transport_error = ConnectionError(
+                    "ImageJAI event stream transport failed: {}".format(exc))
+            finally:
+                try:
+                    # An abortive close makes the server's next queued write
+                    # fail immediately. gui_confirm follows a deadline close
+                    # with a correlated cancellation event specifically to
+                    # wake that writer and release its subscriber slot.
+                    linger_format = "HH" if os.name == "nt" else "ii"
+                    sock.setsockopt(
+                        socket.SOL_SOCKET,
+                        socket.SO_LINGER,
+                        struct.pack(linger_format, 1, 0),
+                    )
+                except Exception:
+                    pass
+                try:
+                    sock.close()
+                except Exception:
+                    pass
+            if saw_protocol_error or not reconnect:
+                if transport_error is not None:
+                    raise transport_error
+                return
+            if deadline is not None:
+                remaining = deadline - _time.monotonic()
+                if remaining <= 0:
+                    return
+                reconnect_delay = min(reconnect_delay, remaining)
+            try:
+                _time.sleep(reconnect_delay)
+            except KeyboardInterrupt:
+                return
+
+    # Bound helpers keep imagej-use-auto on this exact authenticated session.
+    # They intentionally mirror the stable module-level API without going
+    # through the process-global session cache.
+    def ping(self):
+        return self.request({"command": "ping"})
+
+    def get_state(self):
+        return self.request({"command": "get_state"})
+
+    def get_image_info(
+        self, *, image_id=None, image_revision=None, display_revision=None,
+        channel=None, slice=None, frame=None,
+    ):
+        return self.request(_add_image_binding(
+            {"command": "get_image_info"},
+            image_id=image_id, image_revision=image_revision,
+            display_revision=display_revision, channel=channel,
+            slice=slice, frame=frame,
+        ))
+
+    def get_results_table(self):
+        return self.request({"command": "get_results_table"})
+
+    def run_macro(self, code):
+        return self.request({"command": "execute_macro", "code": code})
+
+    def run_script(self, code, language="groovy", timeout=180):
+        return self.request({
+            "command": "run_script",
+            "language": language,
+            "code": code,
+        }, timeout=timeout)
+
+    def get_histogram(
+        self, *, image_id=None, image_revision=None, display_revision=None,
+        channel=None, slice=None, frame=None, scope=None,
+    ):
+        return self.request(_add_image_binding(
+            {"command": "get_histogram"},
+            image_id=image_id, image_revision=image_revision,
+            display_revision=display_revision, channel=channel,
+            slice=slice, frame=frame, scope=scope,
+        ))
+
+    def get_pixels(
+        self, x=None, y=None, width=None, height=None, slice_num=None,
+        all_slices=False, *, image_id=None, image_revision=None,
+        display_revision=None, channel=None, slice=None, frame=None,
+    ):
+        if slice_num is not None and slice is not None:
+            raise ValueError("slice_num and slice cannot both be provided")
+        request = {"command": "get_pixels"}
+        for key, value, minimum in (
+            ("x", x, 0), ("y", y, 0), ("width", width, 1),
+            ("height", height, 1),
+        ):
+            if value is not None:
+                request[key] = _exact_int(value, key, minimum=minimum)
+        if not isinstance(all_slices, bool):
+            raise TypeError("all_slices must be bool")
+        selected_slice = slice if slice is not None else slice_num
+        if all_slices:
+            request["allSlices"] = True
+        return self.request(_add_image_binding(
+            request, image_id=image_id, image_revision=image_revision,
+            display_revision=display_revision, channel=channel,
+            slice=selected_slice, frame=frame,
+        ))
+
+    def get_display_state(
+        self, *, image_id=None, image_revision=None, display_revision=None,
+        channel=None, slice=None, frame=None,
+    ):
+        return self.request(_add_image_binding(
+            {"command": "get_display_state"},
+            image_id=image_id, image_revision=image_revision,
+            display_revision=display_revision, channel=channel,
+            slice=slice, frame=frame,
+        ))
+
+    def capture_image(
+        self, max_size=1024, *, image_id=None, image_revision=None,
+        display_revision=None, channel=None, slice=None, frame=None,
+    ):
+        request = {
+            "command": "capture_image",
+            "maxSize": _exact_int(max_size, "max_size", minimum=1),
+        }
+        return self.request(_add_image_binding(
+            request, image_id=image_id, image_revision=image_revision,
+            display_revision=display_revision, channel=channel,
+            slice=slice, frame=frame,
+        ))
+
+    def get_dialogs(self):
+        return self.request({"command": "get_dialogs"})
+
+    def interact_dialog(self, action, **kwargs):
+        command = dict(kwargs)
+        command["command"] = "interact_dialog"
+        command["action"] = action
+        return self.request(command)
+
+    def wait_for_operation(
+        self, command, operation_id, timeout=120, poll_interval=0.1,
+    ):
+        """Poll one handed-off EDT mutation on this authenticated session.
+
+        The original mutation must not be submitted again.  Its opaque
+        ``operation_id`` is scoped by the server to this session owner and
+        the exact original command.
+        """
+        return _wait_for_operation(
+            lambda request, timeout: self.request(
+                request, timeout=timeout, _check_dialogs=False),
+            command,
+            operation_id,
+            timeout,
+            poll_interval,
+        )
+
+    def wait_for_event(self, topics=None, predicate=None, timeout=60):
+        """Wait for one governed event on this session.
+
+        ``predicate`` may be a callable or a nested mapping whose values must
+        be present in the event. Subscription acknowledgements and heartbeat
+        frames are transport metadata and are never returned as events.
+        """
+        import time as _time
+
+        if timeout is None or timeout <= 0:
+            return None
+        deadline = _time.monotonic() + timeout
+        stream = self.events(
+            topics=topics, reconnect=False, read_timeout=timeout,
+            deadline=deadline)
+        try:
+            for frame in stream:
+                if _is_event_transport_frame(frame):
+                    continue
+                if predicate is None:
+                    return frame
+                if callable(predicate):
+                    if predicate(frame):
+                        return frame
+                elif isinstance(predicate, dict):
+                    if _mapping_contains(frame, predicate):
+                        return frame
+                else:
+                    raise TypeError("event predicate must be callable, dict, or None")
+                remaining = deadline - _time.monotonic()
+                if remaining <= 0:
+                    return None
+        finally:
+            close = getattr(stream, "close", None)
+            if close is not None:
+                close()
+        return None
+
+    def _dialog_fallback(self):
+        try:
+            resp = self.request(
+                {"command": "get_dialogs"}, timeout=5, _check_dialogs=False)
+            if resp.get("ok") and resp.get("result", {}).get("dialogs"):
+                return resp["result"]["dialogs"]
+        except Exception:
+            pass
+        return []
+
+    def _exchange(self, request, timeout):
+        data = bytearray()
+        with socket.create_connection((self.host, self.port), timeout=timeout) as sock:
+            sock.settimeout(timeout)
+            sock.sendall((json.dumps(request) + "\n").encode("utf-8"))
             while True:
-                chunk = s.recv(65536)
+                remaining = MAX_REPLY_FRAME_BYTES - len(data)
+                chunk = sock.recv(min(65536, remaining + 1))
                 if not chunk:
                     break
-                data += chunk
-                if data.endswith(b"\n"):
+                data.extend(chunk)
+                newline = data.find(b"\n")
+                if newline >= 0:
+                    if newline > MAX_REPLY_FRAME_BYTES:
+                        raise ValueError(
+                            "ImageJAI reply frame exceeds {} bytes".format(
+                                MAX_REPLY_FRAME_BYTES))
+                    del data[newline:]
                     break
-            resp = json.loads(data.decode("utf-8"))
-        finally:
-            try:
-                s.close()
-            except Exception:
-                pass
-    except (socket.error, OSError, ValueError) as e:
-        return {"ok": False, "error": "hello failed: {}".format(e)}
-    _HELLO_SENT = True
+                if len(data) > MAX_REPLY_FRAME_BYTES:
+                    raise ValueError(
+                        "ImageJAI reply frame exceeds {} bytes".format(
+                            MAX_REPLY_FRAME_BYTES))
+        if not data.strip():
+            raise ConnectionError("empty reply from ImageJAI")
+        return json.loads(bytes(data).decode("utf-8"))
+
+    def _expired_locked(self):
+        if self._expires_at is None:
+            return False
+        import time
+        return time.time() * 1000 >= self._expires_at
+
+    def _clear_locked(self):
+        self._session_id = None
+        self._token = None
+        self._expires_at = None
+        self._hello_response = None
+
+
+def _response_error_code(resp):
+    if not isinstance(resp, dict):
+        return None
+    error = resp.get("error")
+    return error.get("code") if isinstance(error, dict) else None
+
+
+def _is_event_transport_frame(frame):
+    if not isinstance(frame, dict):
+        return False
+    frame_type = frame.get("type") or frame.get("event")
+    return frame_type in ("subscribed", "heartbeat")
+
+
+def _mapping_contains(value, expected):
+    """Return whether ``value`` recursively contains the expected mapping."""
+    if not isinstance(value, dict):
+        return False
+    for key, expected_value in expected.items():
+        if key not in value:
+            return False
+        actual = value[key]
+        if isinstance(expected_value, dict):
+            if not _mapping_contains(actual, expected_value):
+                return False
+        elif actual != expected_value:
+            return False
+    return True
+
+
+_SESSIONS = {}
+_SESSIONS_LOCK = threading.Lock()
+
+
+def _session_for(host, port):
+    key = (host, int(port))
+    with _SESSIONS_LOCK:
+        session = _SESSIONS.get(key)
+        if session is None:
+            session = ImageJSession(host=host, port=port)
+            _SESSIONS[key] = session
+        return session
+
+
+def hello(host=HOST, port=PORT, timeout=10, force=False):
+    """Negotiate and cache a durable authenticated protocol session."""
+    global _HELLO_RESULT, _HELLO_SENT
+    resp = _session_for(host, port).hello(timeout=timeout, force=force)
+    _HELLO_SENT = bool(isinstance(resp, dict) and resp.get("ok"))
     if isinstance(resp, dict) and resp.get("ok"):
         _HELLO_RESULT = resp.get("result")
     return resp
@@ -456,30 +1540,8 @@ def extract_error(resp):
 
 
 def _check_dialogs_fallback(host=HOST, port=PORT):
-    """Emergency dialog check after a timeout. Uses a short timeout."""
-    try:
-        s2 = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        s2.settimeout(5)
-        s2.connect((host, port))
-        s2.sendall((json.dumps({"command": "get_dialogs"}) + "\n").encode("utf-8"))
-        data = b""
-        while True:
-            try:
-                chunk = s2.recv(65536)
-                if not chunk:
-                    break
-                data += chunk
-                if data.endswith(b"\n"):
-                    break
-            except socket.timeout:
-                break
-        s2.close()
-        resp = json.loads(data.decode("utf-8"))
-        if resp.get("ok") and resp.get("result", {}).get("dialogs"):
-            return resp["result"]["dialogs"]
-    except Exception:
-        pass
-    return []
+    """Emergency authenticated dialog check after a command timeout."""
+    return _session_for(host, port)._dialog_fallback()
 
 
 def ping():
@@ -490,8 +1552,16 @@ def get_state():
     return imagej_command({"command": "get_state"})
 
 
-def get_image_info():
-    return imagej_command({"command": "get_image_info"})
+def get_image_info(
+    *, image_id=None, image_revision=None, display_revision=None,
+    channel=None, slice=None, frame=None,
+):
+    return imagej_command(_add_image_binding(
+        {"command": "get_image_info"},
+        image_id=image_id, image_revision=image_revision,
+        display_revision=display_revision, channel=channel,
+        slice=slice, frame=frame,
+    ))
 
 
 def get_results_table():
@@ -510,12 +1580,27 @@ def get_roi_state():
     return imagej_command({"command": "get_roi_state"})
 
 
-def get_display_state():
-    return imagej_command({"command": "get_display_state"})
+def get_display_state(
+    *, image_id=None, image_revision=None, display_revision=None,
+    channel=None, slice=None, frame=None,
+):
+    return imagej_command(_add_image_binding(
+        {"command": "get_display_state"},
+        image_id=image_id, image_revision=image_revision,
+        display_revision=display_revision, channel=channel,
+        slice=slice, frame=frame,
+    ))
 
 
 def get_console(tail=2000):
     return imagej_command({"command": "get_console", "tail": tail})
+
+
+def open_image(path, series=None, timeout=120):
+    request = {"command": "open_image", "path": os.fspath(path)}
+    if series is not None:
+        request["series"] = int(series)
+    return imagej_command(request, timeout=timeout)
 
 
 def execute_macro(code):
@@ -538,8 +1623,19 @@ def run_jython(code, timeout=180):
     return run_script(code, language="jython", timeout=timeout)
 
 
-def capture_image(max_size=1024):
-    return imagej_command({"command": "capture_image", "maxSize": max_size})
+def capture_image(
+    max_size=1024, *, image_id=None, image_revision=None,
+    display_revision=None, channel=None, slice=None, frame=None,
+):
+    request = {
+        "command": "capture_image",
+        "maxSize": _exact_int(max_size, "max_size", minimum=1),
+    }
+    return imagej_command(_add_image_binding(
+        request, image_id=image_id, image_revision=image_revision,
+        display_revision=display_revision, channel=channel,
+        slice=slice, frame=frame,
+    ))
 
 
 def run_pipeline(steps):
@@ -554,8 +1650,16 @@ def get_log():
     return imagej_command({"command": "get_log"})
 
 
-def get_histogram():
-    return imagej_command({"command": "get_histogram"})
+def get_histogram(
+    *, image_id=None, image_revision=None, display_revision=None,
+    channel=None, slice=None, frame=None, scope=None,
+):
+    return imagej_command(_add_image_binding(
+        {"command": "get_histogram"},
+        image_id=image_id, image_revision=image_revision,
+        display_revision=display_revision, channel=channel,
+        slice=slice, frame=frame, scope=scope,
+    ))
 
 
 def get_open_windows():
@@ -566,15 +1670,30 @@ def get_metadata():
     return imagej_command({"command": "get_metadata"})
 
 
-def get_pixels(x=None, y=None, width=None, height=None, slice_num=None, all_slices=False):
+def get_pixels(
+    x=None, y=None, width=None, height=None, slice_num=None, all_slices=False,
+    *, image_id=None, image_revision=None, display_revision=None,
+    channel=None, slice=None, frame=None,
+):
+    if slice_num is not None and slice is not None:
+        raise ValueError("slice_num and slice cannot both be provided")
     cmd = {"command": "get_pixels"}
-    if x is not None: cmd["x"] = x
-    if y is not None: cmd["y"] = y
-    if width is not None: cmd["width"] = width
-    if height is not None: cmd["height"] = height
-    if slice_num is not None: cmd["slice"] = slice_num
-    if all_slices: cmd["allSlices"] = True
-    return imagej_command(cmd)
+    for key, value, minimum in (
+        ("x", x, 0), ("y", y, 0), ("width", width, 1),
+        ("height", height, 1),
+    ):
+        if value is not None:
+            cmd[key] = _exact_int(value, key, minimum=minimum)
+    if not isinstance(all_slices, bool):
+        raise TypeError("all_slices must be bool")
+    if all_slices:
+        cmd["allSlices"] = True
+    selected_slice = slice if slice is not None else slice_num
+    return imagej_command(_add_image_binding(
+        cmd, image_id=image_id, image_revision=image_revision,
+        display_revision=display_revision, channel=channel,
+        slice=selected_slice, frame=frame,
+    ))
 
 
 def viewer3d(action="status", **kwargs):
@@ -595,11 +1714,50 @@ def probe_command(plugin):
     return imagej_command({"command": "probe_command", "plugin": plugin})
 
 
+def pseudonymise_paths(paths):
+    """Ask Fiji to mint a session pseudonym token for each absolute path.
+
+    The plugin owns the pseudonym map, so only the plugin can mint a token it
+    can later reverse: the salt is process-local to the JVM. A token minted
+    client-side looks the same but resolves to nothing, so a macro built from
+    it fails. Call this instead whenever a real path would otherwise be put
+    in front of a model.
+
+    Under the Standard posture there is nothing to hide and each entry echoes
+    the real path; ``result['pseudonymised']`` says which happened.
+
+    Accepts one path or an iterable of paths. Returns the normal response
+    envelope whose ``result.mappings`` list matches the request order.
+    """
+    if isinstance(paths, (str, os.PathLike)):
+        paths = [paths]
+    return imagej_command({
+        "command": "pseudonymise_paths",
+        "paths": [os.fspath(path) for path in paths],
+    })
+
+
 def interact_dialog(action, **kwargs):
     cmd = dict(kwargs)
     cmd["command"] = "interact_dialog"
     cmd["action"] = action
     return imagej_command(cmd)
+
+
+def wait_for_operation(
+    command, operation_id, timeout=120, poll_interval=0.1,
+    *, host=HOST, port=PORT,
+):
+    """Poll a handed-off EDT mutation without replaying its side effects."""
+    session = _session_for(host, port)
+    return _wait_for_operation(
+        lambda request, timeout: session.request(
+            request, timeout=timeout, _check_dialogs=False),
+        command,
+        operation_id,
+        timeout,
+        poll_interval,
+    )
 
 
 def run_chain(chain, halt_on_error=True):
@@ -682,10 +1840,153 @@ def reactive_stats():
 
 
 # ---------------------------------------------------------------------------
+# Test automation bridge (docs/automation-bridge/PROTOCOL.md)
+#
+# These reach the gated in-JVM UI surface. They are inert unless BOTH gates
+# turned: Fiji was started with -Dimagejai.testAutomation.enabled=true, and
+# this process opted in with use_test_automation() before its first command.
+# Normal agent sessions never negotiate the capability, so a stray call on a
+# production Fiji is refused with test_automation_disabled rather than
+# silently touching the user's interface.
+# ---------------------------------------------------------------------------
+
+def use_test_automation(enabled=True):
+    """Opt this process into the gated test-automation capability.
+
+    Must be called before the first command, because the capability is fixed
+    at handshake time. Drops any cached session so the next call re-negotiates.
+    Returns the capability set that will be sent.
+    """
+    _HELLO_CAPS["test_automation"] = bool(enabled)
+    with _SESSIONS_LOCK:
+        _SESSIONS.clear()
+    return copy.deepcopy(_HELLO_CAPS)
+
+
+def get_ui_tree(window_id=None, include_hidden=False, max_nodes=None,
+                max_depth=None, timeout_ms=None):
+    """Snapshot owned windows/components with stable ids and a generation."""
+    request = {"command": "get_ui_tree", "include_hidden": bool(include_hidden)}
+    if window_id is not None:
+        request["window_id"] = window_id
+    if max_nodes is not None:
+        request["max_nodes"] = int(max_nodes)
+    if max_depth is not None:
+        request["max_depth"] = int(max_depth)
+    if timeout_ms is not None:
+        request["timeout_ms"] = int(timeout_ms)
+    return imagej_command(request)
+
+
+def get_ui_component(node_id, generation=None, include_children=False,
+                     timeout_ms=None):
+    request = {
+        "command": "get_ui_component",
+        "node_id": node_id,
+        "include_children": bool(include_children),
+    }
+    if generation is not None:
+        request["generation"] = int(generation)
+    if timeout_ms is not None:
+        request["timeout_ms"] = int(timeout_ms)
+    return imagej_command(request)
+
+
+def perform_ui_action(node_id, generation, action, value=None, index=None,
+                      trace_id=None, timeout_ms=None):
+    """Run one semantic action on an exact node.
+
+    A timed-out mutation returns ``operation_in_progress``: poll it with
+    ``wait_for_operation('perform_ui_action', operation_id)``. Never resubmit.
+    """
+    request = {
+        "command": "perform_ui_action",
+        "node_id": node_id,
+        "generation": int(generation),
+        "action": action,
+    }
+    if value is not None:
+        request["value"] = value
+    if index is not None:
+        request["index"] = int(index)
+    if trace_id is not None:
+        request["trace_id"] = trace_id
+    if timeout_ms is not None:
+        request["timeout_ms"] = int(timeout_ms)
+    return imagej_command(request)
+
+
+def wait_for_ui_state(predicate, node_id=None, window_id=None, timeout_ms=5000,
+                      poll_interval_ms=None):
+    request = {
+        "command": "wait_for_ui_state",
+        "predicate": predicate,
+        "timeout_ms": int(timeout_ms),
+    }
+    if node_id is not None:
+        request["node_id"] = node_id
+    if window_id is not None:
+        request["window_id"] = window_id
+    if poll_interval_ms is not None:
+        request["poll_interval_ms"] = int(poll_interval_ms)
+    # The server waits up to timeout_ms before replying, so the socket read
+    # budget has to exceed it.
+    return imagej_command(request, timeout=(int(timeout_ms) / 1000.0) + 15)
+
+
+def wait_for_ui_idle(timeout_ms=5000, quiet_ms=None, require_paint_quiet=False,
+                     trace_id=None):
+    request = {
+        "command": "wait_for_ui_idle",
+        "timeout_ms": int(timeout_ms),
+        "require_paint_quiet": bool(require_paint_quiet),
+    }
+    if quiet_ms is not None:
+        request["quiet_ms"] = int(quiet_ms)
+    if trace_id is not None:
+        request["trace_id"] = trace_id
+    return imagej_command(request, timeout=(int(timeout_ms) / 1000.0) + 15)
+
+
+def capture_ui(node_id, generation, max_dimension=None, include_bytes=True,
+               timeout_ms=None):
+    request = {
+        "command": "capture_ui",
+        "node_id": node_id,
+        "generation": int(generation),
+        "include_bytes": bool(include_bytes),
+    }
+    if max_dimension is not None:
+        request["max_dimension"] = int(max_dimension)
+    if timeout_ms is not None:
+        request["timeout_ms"] = int(timeout_ms)
+    return imagej_command(request)
+
+
+def start_ui_trace(action_id):
+    return imagej_command({"command": "start_ui_trace", "action_id": action_id})
+
+
+def stop_ui_trace(trace_id, phase=None):
+    request = {"command": "stop_ui_trace", "trace_id": trace_id}
+    if phase is not None:
+        request["phase"] = phase
+    return imagej_command(request)
+
+
+def get_ui_metrics(trace_id=None):
+    request = {"command": "get_ui_metrics"}
+    if trace_id is not None:
+        request["trace_id"] = trace_id
+    return imagej_command(request)
+
+
+# ---------------------------------------------------------------------------
 # Phase 3: async job helpers
 # ---------------------------------------------------------------------------
 
-_JOB_TERMINAL_STATES = frozenset(("completed", "failed", "cancelled"))
+_JOB_TERMINAL_STATES = frozenset(
+    ("completed", "failed", "cancelled", "timed_out"))
 
 
 def submit_async(code):
@@ -694,8 +1995,12 @@ def submit_async(code):
     return imagej_command({"command": "execute_macro_async", "code": code})
 
 
-def job_status(job_id):
-    return imagej_command({"command": "job_status", "job_id": job_id})
+def job_status(job_id, host=HOST, port=PORT):
+    return imagej_command(
+        {"command": "job_status", "job_id": job_id},
+        host=host,
+        port=port,
+    )
 
 
 def job_cancel(job_id):
@@ -721,7 +2026,9 @@ def _terminal_status(resp):
 
 def wait_for_job(job_id, timeout=None, host=HOST, port=PORT,
                  poll_interval=0.5, reconnect=True):
-    """Block until a job reaches a terminal state (completed/failed/cancelled).
+    """Block until a job reaches a terminal state.
+
+    Terminal states are completed, failed, cancelled, and timed_out.
 
     Prefers the Phase 2 subscription channel: subscribes to ``job.*`` and
     filters on job_id. If the subscription socket fails or drops, falls back
@@ -731,86 +2038,67 @@ def wait_for_job(job_id, timeout=None, host=HOST, port=PORT,
     ``{"ok": false, "error": "timeout", "job_id": ...}`` if ``timeout`` elapses.
     """
     import time as _time
-    deadline = (_time.time() + timeout) if timeout is not None else None
+    deadline = (_time.monotonic() + timeout) if timeout is not None else None
 
     # Fast path: if the job is already terminal, skip the subscription dance.
-    initial = job_status(job_id)
+    initial = job_status(job_id, host=host, port=port)
     term = _terminal_status(initial)
     if term is not None:
         return term
-    if not initial.get("ok"):
+    if not isinstance(initial, dict) or not initial.get("ok"):
         return initial  # unknown job — surface error immediately
 
-    # Try the subscription channel first.
-    s = None
+    # Try the shared authenticated subscription client first.
     try:
-        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        s.settimeout(None)
-        s.connect((host, port))
-        req = json.dumps({"command": "subscribe", "topics": ["job.*"]}) + "\n"
-        s.sendall(req.encode("utf-8"))
-
-        # Re-check status after subscribing to avoid a TOCTOU miss where the
-        # job completed between our initial poll and the subscribe ack.
-        recheck = job_status(job_id)
-        term = _terminal_status(recheck)
-        if term is not None:
-            return term
-
-        buf = b""
-        while True:
-            if deadline is not None:
-                remaining = deadline - _time.time()
-                if remaining <= 0:
-                    return {"ok": False, "error": "timeout", "job_id": job_id}
-                s.settimeout(remaining)
-            try:
-                chunk = s.recv(8192)
-            except socket.timeout:
+        read_timeout = (None if deadline is None
+                        else max(0.01, deadline - _time.monotonic()))
+        subscribed = False
+        for frame in _session_for(host, port).events(
+                topics=["job.*"], reconnect=False,
+                read_timeout=read_timeout):
+            if deadline is not None and _time.monotonic() >= deadline:
                 return {"ok": False, "error": "timeout", "job_id": job_id}
-            if not chunk:
-                break  # socket dropped — fall back to polling
-            buf += chunk
-            while b"\n" in buf:
-                line, buf = buf.split(b"\n", 1)
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    frame = json.loads(line.decode("utf-8"))
-                except Exception:
-                    continue
-                ev = frame.get("event") or ""
-                if not ev.startswith("job."):
-                    continue
-                data = frame.get("data") or {}
-                if data.get("job_id") != job_id:
-                    continue
-                if ev in ("job.completed", "job.failed"):
-                    return job_status(job_id)
+            if not isinstance(frame, dict):
+                continue
+            if frame.get("ok") is False:
+                break
+            event = frame.get("event") or ""
+            if event == "subscribed" and not subscribed:
+                subscribed = True
+                # Registration happens before the ack. This closes the poll /
+                # subscribe race while any concurrent completion stays queued.
+                recheck = job_status(job_id, host=host, port=port)
+                term = _terminal_status(recheck)
+                if term is not None:
+                    return term
+                continue
+            data = frame.get("data") or {}
+            if data.get("job_id") == job_id \
+                    and event in ("job.completed", "job.failed"):
+                return job_status(job_id, host=host, port=port)
     except (socket.error, OSError, ConnectionError):
         if not reconnect:
             return {"ok": False, "error": "connection failed"}
-    finally:
-        if s is not None:
-            try:
-                s.close()
-            except Exception:
-                pass
 
     # Polling fallback — also reached if the subscription socket dropped.
     while True:
-        if deadline is not None and _time.time() >= deadline:
+        now = _time.monotonic()
+        if deadline is not None and now >= deadline:
             return {"ok": False, "error": "timeout", "job_id": job_id}
         try:
-            cur = job_status(job_id)
+            cur = job_status(job_id, host=host, port=port)
         except Exception:
             cur = {"ok": False, "error": "poll failed"}
         term = _terminal_status(cur)
         if term is not None:
             return term
         try:
-            _time.sleep(poll_interval)
+            sleep_for = poll_interval
+            if deadline is not None:
+                sleep_for = min(sleep_for,
+                                max(0.0, deadline - _time.monotonic()))
+            if sleep_for > 0:
+                _time.sleep(sleep_for)
         except KeyboardInterrupt:
             return {"ok": False, "error": "interrupted", "job_id": job_id}
 
@@ -869,68 +2157,119 @@ def gui_highlight_roi(image_title, x, y, width, height):
 def gui_confirm(prompt, options, timeout=300):
     """Ask the user via the plugin's chat panel; block until they click.
 
-    Tries the Phase 2 subscribe channel first (push-based, low latency). If
-    the subscribe stream isn't available — e.g. the subscriber cap is hit, or
-    the server is older than Phase 2 — falls back to friction-log polling at
-    1 Hz for up to 60 s.
+    The event subscription is acknowledged before the confirmation is sent,
+    so even an immediate button callback cannot be lost. The subscription
+    socket shares this call's deadline and is closed on every exit path.
 
     Returns the dict {"id", "choice"}; on timeout returns
     {"id", "choice": None, "timed_out": True}.
     """
     if isinstance(options, str):
         options = [o.strip() for o in options.split(",") if o.strip()]
+    try:
+        timeout = float(timeout)
+    except (TypeError, ValueError):
+        raise ValueError("timeout must be a finite non-negative number")
+    if not math.isfinite(timeout) or timeout < 0:
+        raise ValueError("timeout must be a finite non-negative number")
+
+    import time as _time
+    confirm_id = "confirm-" + uuid.uuid4().hex
+    deadline = _time.monotonic() + timeout
     req = {
         "command": "gui_action",
         "type": "confirm",
+        "id": confirm_id,
         "prompt": prompt,
         "options": list(options),
     }
-    resp = imagej_command(req)
-    if not (isinstance(resp, dict) and resp.get("ok")):
-        return {"id": None, "choice": None, "error": resp}
-    confirm_id = resp.get("id")
+    stream = None
+    session = None
+    subscribed = False
+    dispatched = False
 
-    # Preferred path: subscribe to the resolved event.
-    try:
-        import threading
-        result_holder = {"choice": None, "got": False}
-        stop_flag = {"stop": False}
-
-        def listen():
+    def cancel_pending(session):
+        """Close the stream, then wake the server subscriber for prompt cleanup."""
+        if not dispatched:
+            return
+        if stream is not None:
             try:
-                for event in imagej_events(
-                        ["gui_action.confirm.resolved"], reconnect=False):
-                    if stop_flag["stop"]:
-                        return
-                    if not isinstance(event, dict):
-                        continue
-                    data = event.get("data") or {}
-                    if data.get("id") == confirm_id:
-                        result_holder["choice"] = data.get("choice")
-                        result_holder["got"] = True
-                        return
+                stream.close()
             except Exception:
                 pass
+        try:
+            session.request({
+                "command": "gui_action",
+                "type": "confirm_cancel",
+                "id": confirm_id,
+            }, timeout=0.25, _check_dialogs=False)
+        except Exception:
+            pass
 
-        t = threading.Thread(target=listen, daemon=True)
-        t.start()
-        t.join(timeout=timeout)
-        stop_flag["stop"] = True
-        if result_holder["got"]:
-            return {"id": confirm_id, "choice": result_holder["choice"]}
-    except Exception:
-        # subscribe path is best-effort — fall through to polling
-        pass
-
-    # 60s polling fallback (spec): no subscribe support? Just sleep-poll the
-    # friction log as a heartbeat ping. If the user clicks during this window
-    # we won't see the response without subscribe — surface a timed_out so the
-    # caller can decide whether to retry.
-    import time as _time
-    deadline = _time.time() + 60
-    while _time.time() < deadline:
-        _time.sleep(1)
-    return {"id": confirm_id, "choice": None, "timed_out": True}
+    try:
+        session = _session_for(HOST, PORT)
+        stream = session.events(
+            topics=["gui_action.confirm.resolved"],
+            reconnect=False,
+            read_timeout=max(0.01, timeout),
+            deadline=deadline,
+        )
+        for event in stream:
+            if _time.monotonic() >= deadline:
+                cancel_pending(session)
+                return {"id": confirm_id, "choice": None, "timed_out": True}
+            if not isinstance(event, dict):
+                continue
+            if event.get("ok") is False:
+                return {"id": confirm_id, "choice": None, "error": event}
+            event_name = event.get("event") or ""
+            if event_name == "subscribed" and not subscribed:
+                subscribed = True
+                remaining = deadline - _time.monotonic()
+                if remaining <= 0:
+                    return {"id": confirm_id, "choice": None,
+                            "timed_out": True}
+                resp = imagej_command(req, timeout=max(0.01, remaining))
+                if not (isinstance(resp, dict) and resp.get("ok")):
+                    return {"id": confirm_id, "choice": None, "error": resp}
+                if resp.get("id") != confirm_id:
+                    return {
+                        "id": confirm_id,
+                        "choice": None,
+                        "error": "confirmation id mismatch",
+                    }
+                dispatched = True
+                continue
+            if not subscribed:
+                continue
+            data = event.get("data") or {}
+            if (event_name == "gui_action.confirm.resolved"
+                    and data.get("id") == confirm_id):
+                return {"id": confirm_id, "choice": data.get("choice")}
+        if _time.monotonic() >= deadline:
+            cancel_pending(session)
+            return {"id": confirm_id, "choice": None, "timed_out": True}
+        if not subscribed:
+            return {
+                "id": confirm_id,
+                "choice": None,
+                "error": "confirmation subscription unavailable",
+            }
+        cancel_pending(session)
+        return {"id": confirm_id, "choice": None, "timed_out": True}
+    except (socket.timeout, socket.error, OSError, ConnectionError) as exc:
+        if _time.monotonic() >= deadline:
+            cancel_pending(session)
+            return {"id": confirm_id, "choice": None, "timed_out": True}
+        cancel_pending(session)
+        return {"id": confirm_id, "choice": None,
+                "error": "confirmation subscription failed: {}".format(exc)}
+    finally:
+        if stream is not None:
+            try:
+                stream.close()
+            except Exception:
+                pass
 
 
 # ---------------------------------------------------------------------------
@@ -938,108 +2277,66 @@ def gui_confirm(prompt, options, timeout=300):
 # ---------------------------------------------------------------------------
 
 def imagej_events(topics=None, host=HOST, port=PORT, reconnect=True, reconnect_delay=2.0):
-    """Generator that yields event dicts from the Fiji TCP event bus.
-
-    Usage:
-        for event in imagej_events(["dialog.*", "macro.completed"]):
-            print(event["event"], event["data"])
-
-    Topics default to ``["*"]``. The helper maintains a long-lived socket
-    and yields one decoded JSON object per frame. If ``reconnect`` is True
-    (default), a dropped connection triggers a retry after ``reconnect_delay``
-    seconds. Set ``reconnect=False`` to exit the generator on first drop.
-    """
-    import time as _time
-    if not topics:
-        topics = ["*"]
-    elif isinstance(topics, str):
-        topics = [topics]
-
-    while True:
-        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        # Disable read timeout — heartbeats keep the socket alive.
-        s.settimeout(None)
-        try:
-            s.connect((host, port))
-            req = json.dumps({"command": "subscribe", "topics": list(topics)}) + "\n"
-            s.sendall(req.encode("utf-8"))
-            buf = b""
-            while True:
-                chunk = s.recv(8192)
-                if not chunk:
-                    break
-                buf += chunk
-                while b"\n" in buf:
-                    line, buf = buf.split(b"\n", 1)
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        yield json.loads(line.decode("utf-8"))
-                    except Exception:
-                        # Malformed line — skip but keep streaming.
-                        continue
-        except (socket.error, OSError, ConnectionError):
-            pass
-        finally:
-            try:
-                s.close()
-            except Exception:
-                pass
-        if not reconnect:
-            return
-        try:
-            _time.sleep(reconnect_delay)
-        except KeyboardInterrupt:
-            return
+    """Generator that yields authenticated, governed Fiji event frames."""
+    for frame in _session_for(host, port).events(
+            topics=topics, reconnect=reconnect,
+            reconnect_delay=reconnect_delay):
+        yield frame
 
 
-def imagej_events(topics=None, host=HOST, port=PORT, reconnect=True, reconnect_delay=2.0):
-    """Generator that yields event dicts from the Fiji TCP event bus."""
-    import time as _time
-    if not topics:
-        topics = ["*"]
-    elif isinstance(topics, str):
-        topics = [topics]
+def _macro_cli_code(args):
+    """Keep source text out of shell arguments when quoting is unreliable."""
+    usage = "macro <code> | --stdin | --file path/to/macro.ijm"
+    if not args:
+        raise ValueError("Usage: python ij.py " + usage)
+    if args[0] == "--stdin":
+        if len(args) != 1:
+            raise ValueError("--stdin cannot be combined with macro arguments")
+        code = sys.stdin.read()
+    elif args[0] == "--file":
+        if len(args) != 2:
+            raise ValueError("--file requires exactly one macro file path")
+        with open(args[1], "r", encoding="utf-8-sig") as source:
+            code = source.read()
+    elif args[0].startswith("--"):
+        raise ValueError("Unknown macro option; usage: " + usage)
+    else:
+        code = " ".join(args)
+    if not code.strip():
+        raise ValueError("Macro source is empty")
+    return code
 
-    while True:
-        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        s.settimeout(None)
-        try:
-            s.connect((host, port))
-            req = json.dumps({"command": "subscribe", "topics": list(topics)}) + "\n"
-            s.sendall(req.encode("utf-8"))
-            buf = b""
-            while True:
-                chunk = s.recv(8192)
-                if not chunk:
-                    break
-                buf += chunk
-                while b"\n" in buf:
-                    line, buf = buf.split(b"\n", 1)
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        frame = json.loads(line.decode("utf-8"))
-                    except Exception:
-                        continue
-                    yield frame
-                    if isinstance(frame, dict) and frame.get("ok") is False:
-                        return
-        except (socket.error, OSError, ConnectionError):
-            pass
-        finally:
-            try:
-                s.close()
-            except Exception:
-                pass
-        if not reconnect:
-            return
-        try:
-            _time.sleep(reconnect_delay)
-        except KeyboardInterrupt:
-            return
+
+def _macro_cli_failed(reply):
+    """The protocol can deliver a successful reply containing a failed macro."""
+    if not isinstance(reply, dict):
+        return False
+    result = reply.get("result")
+    return reply.get("ok") is False or (
+        isinstance(result, dict) and result.get("success") is False
+    )
+
+
+def _macro_cli_reply(code, reply):
+    """Explain quote loss without rewriting source or weakening server checks."""
+    result = reply.get("result") if isinstance(reply, dict) else None
+    error = str(reply.get("error", "")) if isinstance(reply, dict) else ""
+    if isinstance(result, dict):
+        error += str(result.get("error", ""))
+    if (_macro_cli_failed(reply)
+            and re.search(r"\brun\s*\(\s*[A-Za-z_]", code)
+            and any(rule in error
+                    for rule in ("host_code_execution", "macro_filesystem_access"))):
+        reply = dict(reply)
+        reply["client_hint"] = (
+            "A run(...) command name is not a quoted string. If you intended a "
+            "literal menu command, the shell may have removed its quotes. "
+            "Send the original macro with `python ij.py macro --stdin` or "
+            "`python ij.py macro --file path/to/macro.ijm`; keep the double "
+            "quotes around the installed command name. Do not elevate or "
+            "disable safe mode to fix quoting."
+        )
+    return reply
 
 
 def main():
@@ -1048,6 +2345,13 @@ def main():
         sys.exit(1)
 
     cmd = sys.argv[1].lower()
+
+    if cmd in ("help", "--help", "-h"):
+        print(__doc__)
+        return
+    if cmd in ("macro", "async", "run_patient") and sys.argv[2:] in (["--help"], ["-h"]):
+        print("Usage: python ij.py " + cmd + " <code> | --stdin | --file path/to/macro.ijm")
+        return
 
     try:
         if cmd == "ping":
@@ -1058,6 +2362,13 @@ def main():
 
         elif cmd == "info":
             print(json.dumps(get_image_info(), indent=2))
+
+        elif cmd == "open":
+            if len(sys.argv) < 3:
+                print("Usage: python ij.py open path/to/image [series]")
+                sys.exit(1)
+            series = int(sys.argv[3]) if len(sys.argv) > 3 else None
+            print(json.dumps(open_image(sys.argv[2], series=series), indent=2))
 
         elif cmd == "results":
             resp = get_results_table()
@@ -1089,11 +2400,8 @@ def main():
                 print(json.dumps(resp, indent=2))
 
         elif cmd == "macro":
-            if len(sys.argv) < 3:
-                print("Usage: python ij.py macro \"run('Blobs (25K)');\"")
-                sys.exit(1)
-            code = " ".join(sys.argv[2:])
-            resp = execute_macro(code)
+            code = _macro_cli_code(sys.argv[2:])
+            resp = _macro_cli_reply(code, execute_macro(code))
             print(json.dumps(resp, indent=2))
             # Auto-warn about dialogs — check EVERYWHERE they might be
             dlgs = []
@@ -1111,6 +2419,8 @@ def main():
                     ))
                     if d.get("buttons"):
                         print("    Buttons: {}".format(", ".join(d["buttons"])))
+            if _macro_cli_failed(resp):
+                sys.exit(1)
 
         elif cmd == "explore":
             methods = sys.argv[2:] if len(sys.argv) > 2 else ["Otsu", "Triangle", "Li", "Huang", "MaxEntropy"]
@@ -1569,11 +2879,8 @@ def main():
         elif cmd == "async":
             # Phase 3: submit a macro for async execution. Prints only the job_id
             # on success so callers can `JOB=$(python ij.py async '...')`.
-            if len(sys.argv) < 3:
-                print("Usage: python ij.py async '<macro code>'")
-                sys.exit(1)
-            code = " ".join(sys.argv[2:])
-            resp = submit_async(code)
+            code = _macro_cli_code(sys.argv[2:])
+            resp = _macro_cli_reply(code, submit_async(code))
             if resp.get("ok") and resp.get("result", {}).get("job_id"):
                 print(resp["result"]["job_id"])
             else:
@@ -1651,8 +2958,8 @@ def main():
                         pass
                 else:
                     rest.append(a)
-            code = " ".join(rest)
-            sub = submit_async(code)
+            code = _macro_cli_code(rest)
+            sub = _macro_cli_reply(code, submit_async(code))
             if not (sub.get("ok") and sub.get("result", {}).get("job_id")):
                 print(json.dumps(sub, indent=2))
                 sys.exit(1)

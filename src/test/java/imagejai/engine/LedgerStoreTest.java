@@ -20,6 +20,7 @@ import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNotEquals;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
+import static org.junit.Assert.fail;
 
 /**
  * Unit tests for {@link LedgerStore}. Every test points the store at a fresh
@@ -271,6 +272,76 @@ public class LedgerStoreTest {
         store.confirm(null, "X", "frag", "run(\"A\")",
                 "fix", null, "agent", true);
         assertFalse(store.isMemoryOnly());
+    }
+
+    @Test
+    public void corruptStoreIsQuarantinedAndCannotBeOverwritten() throws Exception {
+        String corrupt = "{not valid json";
+        Files.write(ledgerFile, corrupt.getBytes(StandardCharsets.UTF_8));
+
+        LedgerStore store = new LedgerStore(ledgerFile);
+
+        assertTrue(store.isWriteBlocked());
+        assertNotNull(store.loadError());
+        assertNotNull(store.quarantinedPath());
+        assertFalse(Files.exists(ledgerFile));
+        assertEquals(corrupt, new String(Files.readAllBytes(store.quarantinedPath()),
+                StandardCharsets.UTF_8));
+        try {
+            store.lookup("X", "frag", "run(\"A\")", 5);
+            fail("corrupt store lookup must return an explicit error");
+        } catch (LedgerStore.PersistenceException expected) {
+            assertEquals("CORRUPT_STORE_BLOCKED", expected.code);
+        }
+        try {
+            store.confirm(null, "X", "frag", "run(\"A\")",
+                    "fix", null, "agent", true);
+            fail("corrupt store must block writes");
+        } catch (LedgerStore.PersistenceException expected) {
+            assertEquals("CORRUPT_STORE_BLOCKED", expected.code);
+        }
+        assertFalse(Files.exists(ledgerFile));
+    }
+
+    @Test
+    public void returnedEntriesAndLookupSnapshotsCannotMutateStoredState() {
+        LedgerStore store = new LedgerStore(ledgerFile);
+        LedgerStore.Entry first = store.confirm(null, "X", "frag", "run(\"A\")",
+                "fix", null, "agent-a", true);
+        store.confirm(first.fingerprint, "X", "frag", "run(\"A\")",
+                "fix", null, "agent-b", true);
+
+        assertEquals(1, first.timesSeen);
+        try {
+            first.confirmedBy.add("poison");
+            fail("confirmedBy must be immutable");
+        } catch (UnsupportedOperationException expected) {
+            // expected
+        }
+        List<LedgerStore.Entry> matches = store.lookup("X", "frag", "run(\"A\")", 5);
+        assertEquals(2, matches.get(0).timesSeen);
+        try {
+            matches.get(0).confirmedBy.clear();
+            fail("lookup entry must be immutable");
+        } catch (UnsupportedOperationException expected) {
+            // expected
+        }
+    }
+
+    @Test
+    public void oversizedEntryFailsBeforeCreatingStore() {
+        LedgerStore store = new LedgerStore(ledgerFile);
+        char[] chars = new char[LedgerStore.MAX_FIELD_BYTES + 1];
+        java.util.Arrays.fill(chars, 'x');
+        try {
+            store.confirm(null, "X", new String(chars), "run(\"A\")",
+                    "fix", null, "agent", true);
+            fail("oversized entry must fail");
+        } catch (LedgerStore.PersistenceException expected) {
+            assertEquals("ENTRY_LIMIT_EXCEEDED", expected.code);
+        }
+        assertFalse(Files.exists(ledgerFile));
+        assertEquals(0, store.size());
     }
 
     // ------------------------------------------------------------------

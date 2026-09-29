@@ -1,56 +1,176 @@
-#!/bin/bash
-# Build and deploy ImageJAI to Fiji
-set -e
+#!/usr/bin/env bash
+# Build ImageJAI and, unless --no-deploy is supplied, install it in local Fiji.
+set -euo pipefail
 
-PROJECT_DIR="$(cd "$(dirname "$0")" && pwd)"
-FIJI_DIR="$(cd "$PROJECT_DIR/../.." && pwd)/Fiji.app"
-echo "Building ImageJAI..."
-cd "$PROJECT_DIR"
-mvn clean package -Dmaven.test.skip=true -q 2>/dev/null
+PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+DEFAULT_FIJI_DIR="$(cd "$PROJECT_DIR/../.." && pwd)/Fiji.app"
+FIJI_DIR="${IMAGEJAI_FIJI_DIR:-$DEFAULT_FIJI_DIR}"
+SKIP_TESTS=false
+DEPLOY=true
 
-# Find the main plugin JAR (exclude sources/tests classifiers)
-JAR_FILE=$(find target -maxdepth 1 -type f -name 'imagej-ai-*.jar' \
-    ! -name '*-sources.jar' ! -name '*-tests.jar' | head -1)
+usage() {
+    cat <<'EOF'
+Usage: ./build.sh [--skip-tests] [--no-deploy] [--fiji-dir PATH]
 
-if [ -n "$JAR_FILE" ]; then
-    JAR_NAME=$(basename "$JAR_FILE")
-    echo "Build successful: $JAR_FILE"
+  --skip-tests     Compile tests but do not run them. Tests run by default.
+  --no-deploy      Build and verify the JAR without changing a Fiji install.
+  --fiji-dir PATH  Override the default Fiji.app directory.
+EOF
+}
 
-    if [ -d "$FIJI_DIR/plugins" ]; then
-        # Remove old version
-        rm -f "$FIJI_DIR/plugins"/imagej-ai-*.jar
-        cp "$JAR_FILE" "$FIJI_DIR/plugins/"
-        echo "Deployed to Fiji: $FIJI_DIR/plugins/$JAR_NAME"
+sha256_file() {
+    local file="$1"
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$file" | awk '{print tolower($1)}'
+    elif command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 "$file" | awk '{print tolower($1)}'
+    elif command -v openssl >/dev/null 2>&1; then
+        openssl dgst -sha256 "$file" | awk '{print tolower($NF)}'
     else
-        echo "Warning: Fiji plugins directory not found at $FIJI_DIR/plugins"
-        echo "Copy $JAR_FILE to your Fiji plugins/ directory manually."
+        echo "No SHA-256 implementation found (sha256sum, shasum, or openssl)." >&2
+        return 1
+    fi
+}
+
+assert_fiji_stopped() {
+    local root="$1"
+    local python_command
+    if command -v python >/dev/null 2>&1; then
+        python_command=python
+    elif command -v python3 >/dev/null 2>&1; then
+        python_command=python3
+    else
+        echo "Python is required to verify Fiji is stopped; no files were installed." >&2
+        return 1
+    fi
+    "$python_command" "$PROJECT_DIR/scripts/check_fiji_stopped.py" --fiji-dir "$root"
+}
+
+# Copy and hash the complete JAR before replacing anything. The temporary file
+# is created in plugins/ so the final rename stays on one filesystem. If copy or
+# verification fails, the installed JAR is untouched.
+install_verified_artifact() {
+    local source="$1"
+    local plugins_dir="$2"
+    local artifact_name="$3"
+    local expected_hash="$4"
+    local staged
+    local staged_hash
+
+    assert_fiji_stopped "$(dirname "$plugins_dir")" || return 1
+    staged="$(mktemp "$plugins_dir/.${artifact_name}.install.XXXXXX")"
+    if ! cp "$source" "$staged"; then
+        rm -f "$staged"
+        return 1
+    fi
+    if ! staged_hash="$(sha256_file "$staged")"; then
+        rm -f "$staged"
+        return 1
+    fi
+    if [[ "$staged_hash" != "$expected_hash" ]]; then
+        echo "Staged JAR hash mismatch; existing Fiji plugin was preserved." >&2
+        rm -f "$staged"
+        return 1
     fi
 
-    # Rebuild the graphify knowledge graph so it reflects the freshly deployed
-    # source. Code-only AST pass (no LLM, no tokens); doc/image nodes from any
-    # prior full run are preserved. Detached in the background so it doesn't
-    # slow the deploy. Same mechanism the post-commit hook uses.
-    GF_PY=""
-    if command -v python >/dev/null 2>&1 && python -c "import graphify" >/dev/null 2>&1; then
-        GF_PY=python
-    elif command -v python3 >/dev/null 2>&1 && python3 -c "import graphify" >/dev/null 2>&1; then
-        GF_PY=python3
+    if ! assert_fiji_stopped "$(dirname "$plugins_dir")"; then
+        rm -f "$staged"
+        return 1
     fi
-    if [ -n "$GF_PY" ]; then
-        mkdir -p .git/graphify-hook-logs
-        GF_LOG=".git/graphify-hook-logs/deploy-$(date +%Y%m%d-%H%M%S).log"
-        echo "Rebuilding graphify knowledge graph (detached): $GF_LOG"
-        PYTHONIOENCODING=utf-8 PYTHONUTF8=1 nohup "$GF_PY" -c "
-from graphify.watch import _rebuild_code
-from pathlib import Path
-import sys
-sys.exit(0 if _rebuild_code(Path('.')) else 1)
-" > "$GF_LOG" 2>&1 < /dev/null &
-        disown 2>/dev/null || true
+    if ! mv -f "$staged" "$plugins_dir/$artifact_name"; then
+        rm -f "$staged"
+        return 1
+    fi
+
+    # A verified main artifact is now installed. Only then remove stale
+    # ImageJAI JARs; unrelated Fiji plugins are never matched.
+    find "$plugins_dir" -maxdepth 1 -type f -name 'imagej-ai-*.jar' \
+        ! -name "$artifact_name" -delete
+}
+
+main() {
+    while (($#)); do
+        case "$1" in
+            --skip-tests)
+                SKIP_TESTS=true
+                ;;
+            --no-deploy)
+                DEPLOY=false
+                ;;
+            --fiji-dir)
+                shift
+                if (($# == 0)); then
+                    echo "--fiji-dir requires a path." >&2
+                    return 2
+                fi
+                FIJI_DIR="$1"
+                ;;
+            -h|--help)
+                usage
+                return 0
+                ;;
+            *)
+                echo "Unknown option: $1" >&2
+                usage >&2
+                return 2
+                ;;
+        esac
+        shift
+    done
+
+    cd "$PROJECT_DIR"
+    local -a maven_args=(clean package -Denforcer.skip=true)
+    if [[ "$SKIP_TESTS" == true ]]; then
+        maven_args+=(-DskipTests)
+    fi
+
+    echo "Building ImageJAI (tests $([[ "$SKIP_TESTS" == true ]] && echo skipped || echo enabled))..."
+    mvn "${maven_args[@]}"
+
+    local version
+    local jar_file
+    local jar_name
+    local source_hash
+    version="$(mvn help:evaluate -Dexpression=project.version -q -DforceStdout)"
+    if [[ -z "$version" || "$version" == *$'\n'* ]]; then
+        echo "Could not resolve one Maven project version." >&2
+        return 1
+    fi
+
+    jar_name="imagej-ai-${version}.jar"
+    jar_file="target/$jar_name"
+    if [[ ! -f "$jar_file" ]]; then
+        echo "Fresh main artifact not found at the exact expected path: $jar_file" >&2
+        return 1
+    fi
+    source_hash="$(sha256_file "$jar_file")"
+    echo "Build verified: $jar_file"
+    echo "SHA-256: $source_hash"
+
+    if [[ "$DEPLOY" == true ]]; then
+        local plugins_dir="$FIJI_DIR/plugins"
+        if [[ ! -d "$plugins_dir" ]]; then
+            echo "Fiji plugins directory not found at $plugins_dir" >&2
+            echo "Build is valid; no files were installed." >&2
+            return 1
+        fi
+        install_verified_artifact "$jar_file" "$plugins_dir" "$jar_name" "$source_hash"
+        echo "Installed verified JAR: $plugins_dir/$jar_name"
     else
-        echo "graphify not found on PATH - skipping knowledge-graph rebuild."
+        echo "Deployment disabled (--no-deploy)."
     fi
-else
-    echo "Build failed!"
-    exit 1
+
+    # Schedule exactly one detached graph update after the successful build and
+    # optional verified install. The hook runner owns locking and debouncing.
+    if command -v python >/dev/null 2>&1; then
+        python scripts/graphify_hook.py --event build-deploy --all
+    elif command -v python3 >/dev/null 2>&1; then
+        python3 scripts/graphify_hook.py --event build-deploy --all
+    else
+        echo "Python not found - graphify update was not scheduled."
+    fi
+}
+
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+    main "$@"
 fi

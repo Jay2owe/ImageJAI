@@ -30,6 +30,7 @@ public final class VisualOverrideNotice extends JPanel implements EventBus.Liste
     private final JLabel detail;
     private String pendingSessionId = "default";
     private String pendingReason = "";
+    private String pendingRequestId = "";
 
     public VisualOverrideNotice() {
         this(EventBus.getInstance(), VisualOverrideRegistry.getInstance());
@@ -90,6 +91,7 @@ public final class VisualOverrideNotice extends JPanel implements EventBus.Liste
     void showRequest(String sessionId, String reason, String requestId) {
         pendingSessionId = clean(sessionId).isEmpty() ? "default" : clean(sessionId);
         pendingReason = clean(reason);
+        pendingRequestId = clean(requestId);
         String suffix = clean(requestId).isEmpty() ? "" : " (" + escape(requestId) + ")";
         detail.setText("<html><b>Full-resolution visual request" + suffix
                 + ":</b> " + escape(pendingReason.isEmpty()
@@ -112,7 +114,7 @@ public final class VisualOverrideNotice extends JPanel implements EventBus.Liste
     }
 
     private void allow() {
-        registry.grant(pendingSessionId, pendingReason);
+        registry.grant(pendingSessionId, pendingRequestId, pendingReason);
         hideNotice();
     }
 
@@ -125,6 +127,7 @@ public final class VisualOverrideNotice extends JPanel implements EventBus.Liste
         setVisible(false);
         pendingSessionId = "default";
         pendingReason = "";
+        pendingRequestId = "";
     }
 
     private static JsonObject object(JsonElement element) {

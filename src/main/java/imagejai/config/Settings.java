@@ -9,7 +9,10 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.*;
 
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
+import java.util.Map;
 import java.util.UUID;
 
 /**
@@ -21,7 +24,7 @@ public class Settings {
     private static final Gson GSON = new GsonBuilder()
             .setPrettyPrinting()
             // Never serialize ModelConfig.apiKey — secrets live in
-            // <imagej-ai>/secrets/<provider>.env, never in config.json
+            // protected provider credential store, never in config.json
             // (verifier #3). Deserialization stays intact so a legacy key in an
             // old config.json can be migrated to the secrets store on load.
             .addSerializationExclusionStrategy(new com.google.gson.ExclusionStrategy() {
@@ -37,6 +40,10 @@ public class Settings {
                 }
             })
             .create();
+    private static volatile String lastPersistenceError = "";
+
+    /** Last settings load/save corruption or I/O category, safe for UI display. */
+    public static String lastPersistenceError() { return lastPersistenceError; }
 
     /** Env-var name under which a legacy "custom" provider key is stored in custom.env. */
     public static final String CUSTOM_API_KEY_ENV = "CUSTOM_API_KEY";
@@ -98,7 +105,12 @@ public class Settings {
             "4278337fd0ff3c68bfb6291042cad8ab363e1d9fbc43dcb499fe91c871902474";
     public boolean miniLmInstalled = false;
     public String miniLmModelSha256 = DEFAULT_MINILM_MODEL_SHA256;
-    public boolean claudeUseGsdFlag = true;
+    /**
+     * One-launch consent for Claude's permission-skipping flag. AgentLauncher
+     * consumes and clears this value when it constructs an approved Claude
+     * command; it is deliberately false for new and migrated configurations.
+     */
+    public transient boolean claudeUseGsdFlag = false;
     public String gsdSkillsPath = "";
 
     public String claudeInstallCommand = "npm i -g @anthropic-ai/claude-code";
@@ -109,6 +121,14 @@ public class Settings {
     public String gsdInstallCommand = "";
     public String gsdInstallDocsUrl =
             "https://www.claudepluginhub.com/commands/glittercowboy-get-shit-done/commands/gsd/help";
+
+    /**
+     * Extra arguments appended when an installed CLI agent is launched.
+     * Keys are the CLI command's first token (for example {@code claude}).
+     * Keeping these separate from install commands lets users tune launch
+     * behaviour without replacing the executable ImageJAI detects.
+     */
+    public Map<String, String> cliAgentArguments = defaultCliAgentArguments();
 
     /**
      * Stage 03 (embedded-agent-widget): when true, AgentLauncher launches the
@@ -145,7 +165,7 @@ public class Settings {
      * independent of safeModeEnabled: Safe Mode guards destructive ImageJ
      * actions, while Privacy Posture governs outbound data handling.
      */
-    private PrivacyPosture privacyPosture = PrivacyPosture.PSEUDONYMISED;
+    private PrivacyPosture privacyPosture = PrivacyPosture.defaultPosture();
 
     // === Multi-provider (Phase D) =====================================
     // Per docs/multi_provider/05_ui_design.md Â§9.4. Coexist with the v1
@@ -188,9 +208,103 @@ public class Settings {
     // Transient
     private transient Path configPath;
     private transient imagejai.ui.installer.ProviderCredentials providerCredentials;
+    /** Detached dialog copies must never write the live config file. */
+    private transient boolean persistenceEnabled = true;
 
     public Settings() {
         configPath = getConfigDir().resolve("config.json");
+    }
+
+    private static Map<String, String> defaultCliAgentArguments() {
+        Map<String, String> defaults = new LinkedHashMap<String, String>();
+        defaults.put("claude", "--dangerously-skip-permissions");
+        defaults.put("codex", "--yolo");
+        defaults.put("gemini", "--yolo");
+        return defaults;
+    }
+
+    public synchronized String getCliAgentArguments(String command) {
+        if (cliAgentArguments == null) {
+            cliAgentArguments = defaultCliAgentArguments();
+        }
+        String value = cliAgentArguments.get(cliCommandKey(command));
+        return value == null ? "" : value.trim();
+    }
+
+    public synchronized void setCliAgentArguments(String command, String arguments) {
+        if (cliAgentArguments == null) {
+            cliAgentArguments = defaultCliAgentArguments();
+        }
+        cliAgentArguments.put(cliCommandKey(command),
+                arguments == null ? "" : arguments.trim());
+    }
+
+    private static String cliCommandKey(String command) {
+        String value = command == null ? "" : command.trim();
+        if (value.isEmpty()) return "";
+        return value.split("\\s+")[0].toLowerCase(Locale.ROOT);
+    }
+
+    /**
+     * Deep, non-persisting working copy for transactional editors.
+     * API keys are restored explicitly because production JSON intentionally
+     * excludes them.
+     */
+    public synchronized Settings detachedCopy() {
+        Settings copy = GSON.fromJson(GSON.toJson(this), Settings.class);
+        if (copy == null) copy = new Settings();
+        copy.configPath = configPath;
+        copy.providerCredentials = providerCredentials;
+        copy.persistenceEnabled = false;
+        copy.claudeUseGsdFlag = claudeUseGsdFlag;
+        copy.provider = provider;
+        copy.apiKey = apiKey;
+        copy.model = model;
+        copy.ollamaUrl = ollamaUrl;
+        copy.openaiUrl = openaiUrl;
+        if (configs != null && copy.configs != null) {
+            for (int i = 0; i < configs.size() && i < copy.configs.size(); i++) {
+                ModelConfig original = configs.get(i);
+                ModelConfig target = copy.configs.get(i);
+                if (original != null && target != null) {
+                    target.apiKey = original.apiKey == null ? "" : original.apiKey;
+                }
+            }
+        }
+        return copy;
+    }
+
+    /** Atomically replace live in-memory state with a detached snapshot. */
+    public synchronized void applyFrom(Settings source) {
+        if (source == null || source == this) return;
+        Settings copy = source.detachedCopy();
+        try {
+            for (java.lang.reflect.Field field : Settings.class.getDeclaredFields()) {
+                int modifiers = field.getModifiers();
+                if (java.lang.reflect.Modifier.isStatic(modifiers)
+                        || "configPath".equals(field.getName())
+                        || "providerCredentials".equals(field.getName())
+                        || "persistenceEnabled".equals(field.getName())) {
+                    continue;
+                }
+                field.setAccessible(true);
+                field.set(this, field.get(copy));
+            }
+        } catch (IllegalAccessException e) {
+            throw new IllegalStateException("Could not apply settings snapshot", e);
+        }
+    }
+
+    /** Values whose change requires rebuilding the live legacy chat backend. */
+    public synchronized String backendFingerprint() {
+        ModelConfig active = getActiveConfig();
+        if (active == null) return "<none>";
+        return String.valueOf(active.id) + '\u0000'
+                + String.valueOf(active.provider) + '\u0000'
+                + String.valueOf(active.model) + '\u0000'
+                + String.valueOf(active.url) + '\u0000'
+                + resolveApiKey(active) + '\u0000'
+                + getPrivacyPosture().name();
     }
 
     /**
@@ -205,11 +319,18 @@ public class Settings {
                 if (loaded != null) {
                     loaded.configPath = s.configPath;
                     loaded.migrateIfNeeded();
+                    lastPersistenceError = "";
                     return loaded;
                 }
+                lastPersistenceError = "Settings load failed (empty or corrupt JSON)";
+                System.err.println("[ImageJAI] " + lastPersistenceError);
             } catch (Exception e) {
+                lastPersistenceError = "Settings load failed ("
+                        + e.getClass().getSimpleName() + ")";
                 System.err.println("[ImageJAI] Failed to load settings: " + e.getMessage());
             }
+        } else {
+            lastPersistenceError = "";
         }
         
         // No settings or load failed: create default Gemini config
@@ -315,7 +436,7 @@ public class Settings {
         // from the legacy selectedAgentName so users who configured an agent
         // before the new picker shipped don't lose their pick on first launch.
         if (privacyPosture == null) {
-            privacyPosture = PrivacyPosture.PSEUDONYMISED;
+            privacyPosture = PrivacyPosture.defaultPosture();
         }
         if (!embeddedTerminalDefaultFlipApplied) {
             agentEmbeddedTerminal = true;
@@ -402,14 +523,14 @@ public class Settings {
 
     public PrivacyPosture getPrivacyPosture() {
         if (privacyPosture == null) {
-            privacyPosture = PrivacyPosture.PSEUDONYMISED;
+            privacyPosture = PrivacyPosture.defaultPosture();
         }
         return privacyPosture;
     }
 
     public void setPrivacyPosture(PrivacyPosture posture) {
         privacyPosture = posture == null
-                ? PrivacyPosture.PSEUDONYMISED
+                ? PrivacyPosture.defaultPosture()
                 : posture;
     }
 
@@ -461,6 +582,9 @@ public class Settings {
      * truncate-and-rewrite path.
      */
     public synchronized void save() {
+        if (!persistenceEnabled) {
+            return;
+        }
         try {
             Files.createDirectories(configPath.getParent());
             Path tmp = configPath.resolveSibling(configPath.getFileName() + ".tmp");
@@ -474,15 +598,18 @@ public class Settings {
             } catch (java.nio.file.AtomicMoveNotSupportedException ignore) {
                 Files.move(tmp, configPath, StandardCopyOption.REPLACE_EXISTING);
             }
+            lastPersistenceError = "";
         } catch (Exception e) {
+            lastPersistenceError = "Settings save failed ("
+                    + e.getClass().getSimpleName() + ")";
             System.err.println("[ImageJAI] Failed to save settings: " + e.getMessage());
         }
     }
 
     /**
      * The effective API key for a config: the in-memory {@link ModelConfig#apiKey}
-     * if present, otherwise the value relocated to the {@code <provider>.env}
-     * secrets store. Lets the legacy direct backends keep working after apiKey
+     * if present, otherwise the value relocated to the provider credential
+     * store. Lets the legacy direct backends keep working after apiKey
      * stopped being serialized to config.json (verifier #3 / #3-2).
      */
     public String resolveApiKey(ModelConfig config) {
@@ -551,7 +678,7 @@ public class Settings {
     }
 
     /**
-     * Lazily-instantiated handle for the per-provider .env credential store.
+     * Lazily-instantiated handle for the per-provider credential store.
      * Tests inject a custom store via {@link #setProviderCredentials}.
      */
     public imagejai.ui.installer.ProviderCredentials providerCredentials() {

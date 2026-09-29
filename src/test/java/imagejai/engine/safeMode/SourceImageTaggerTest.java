@@ -213,6 +213,17 @@ public class SourceImageTaggerTest {
         assertFalse(SourceImageTagger.macroOptsOut(""));
     }
 
+    @Test
+    public void sharedPreflightHonoursEnablementAndOptOut() {
+        ImagePlus image = headlessImagePlus("imageA");
+        assertTrue(SourceImageTagger.beginIfEnabled(false, "run(\"Measure\");", image)
+                == null);
+        assertTrue(SourceImageTagger.beginIfEnabled(true,
+                "// @safe_mode allow: legacy_results_format", image) == null);
+        assertTrue(SourceImageTagger.beginIfEnabled(true,
+                "run(\"Measure\");", image) != null);
+    }
+
     // -----------------------------------------------------------------------
     // helpers
     // -----------------------------------------------------------------------

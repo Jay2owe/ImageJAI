@@ -26,6 +26,26 @@ import ollama
 from PIL import Image
 
 try:
+    from agent.providers.base import (
+        HOST_CODE_CAPABILITY,
+        HostCodeApprovalRequest,
+        ProviderToolPolicy,
+        apply_tool_argument_defaults,
+    )
+    from agent.providers.router import provider_tool_policy, validate_process_identifier
+except ImportError:  # pragma: no cover - bundled workspace import layout
+    from providers.base import (  # type: ignore
+        HOST_CODE_CAPABILITY,
+        HostCodeApprovalRequest,
+        ProviderToolPolicy,
+        apply_tool_argument_defaults,
+    )
+    from providers.router import (  # type: ignore
+        provider_tool_policy,
+        validate_process_identifier,
+    )
+
+try:
     from prompt_toolkit import prompt as _pt_prompt
     from prompt_toolkit.application.current import get_app_or_none
     from prompt_toolkit.completion import WordCompleter
@@ -58,7 +78,33 @@ from . import tools_recipes
 from . import tools_shell  # noqa: F401
 from . import triage_image  # noqa: F401
 from .console_text import normalize_inline_latex_symbols
-from .registry import REGISTRY, _rebuild_tool_map
+from .presentation import (
+    _THINKING_STATUS,
+    _INSPECTING_STATUS,
+    _WRITING_STATUS,
+    _RUNNING_FIJI_STATUS,
+    _STATUS_ANIMATION_FRAME_S,
+    _STATUS_TEXT_FRAME_S,
+    _STATUS_PULSE_REST_FRAMES,
+    _INSPECT_TOOLS,
+    _SCRIPT_TOOLS,
+    _RUN_IN_FIJI_TOOLS,
+    _TOOL_ICONS,
+    _TOOL_ICON_PALETTES,
+    _TOOL_ICON_RGB,
+    _rgb_text,
+    _colorize_chars,
+    _status_frame_index,
+    _status_animation_index,
+    _status_text_pulse_slot,
+    _status_animation_frame,
+    _status_label_wave,
+    _format_status_line,
+    _tool_icon,
+    _tool_icon_display,
+    _format_tool_args_for_display,
+)
+from .registry import is_host_code_tool, tools_for_policy
 
 # No model name is hardcoded here. This wrapper drives *any* Ollama model
 # (and, via a ProviderClient, any provider model); the model is always supplied
@@ -67,6 +113,28 @@ from .registry import REGISTRY, _rebuild_tool_map
 _FALLBACK_OLLAMA_MODEL_ENVS = ("IMAGEJAI_MODEL", "OLLAMA_MODEL")
 DEFAULT_PROVIDER = "ollama-cloud"
 NUM_CTX = 131072
+MAX_MODEL_ROUNDS_PER_TURN = 24
+MAX_TOOL_CALLS_PER_TURN = 64
+MAX_HISTORY_MESSAGES = 160
+MAX_HISTORY_CHARS = 1_000_000
+MAX_USER_PROMPT_CHARS = 64_000
+MAX_TOOL_RESULT_CHARS = 64_000
+MAX_PIXEL_RESULT_CHARS = 32_000
+MAX_RETAINED_MESSAGE_TEXT_CHARS = 4_096
+
+_EVENT_TOPICS = (
+    "image.activated",
+    "image.opened",
+    "image.updated",
+    "image.closed",
+    "macro.completed",
+    "dialog.appeared",
+    "dialog.closed",
+)
+_EVENT_SUBSCRIBER_STARTED = False
+_EVENT_SUBSCRIBER_LOCK = threading.Lock()
+_EVENT_RECONNECT_INITIAL_S = 0.25
+_EVENT_RECONNECT_MAX_S = 5.0
 
 
 def _resolve_default_model() -> str:
@@ -129,101 +197,11 @@ _PROMPT_STYLE = (
     if Style is not None
     else None
 )
-_THINKING_STATUS = "Thinking"
-_INSPECTING_STATUS = "Inspecting image"
-_WRITING_STATUS = "Writing macro/script"
-_RUNNING_FIJI_STATUS = "Running in Fiji"
 _STATUS_REFRESH_S = 0.16
-_STATUS_ANIMATION_FRAME_S = 0.5
-_STATUS_TEXT_FRAME_S = 0.16
-_STATUS_PULSE_REST_FRAMES = 4
 _THINKING_DELAY_S = 1.0
 _INSPECTING_DELAY_S = 2.0
 _WRITING_DELAY_S = 1.0
 _RUNNING_FIJI_DELAY_S = 4.0
-_INSPECT_TOOLS = frozenset(
-    {
-        "capture_image",
-        "click_dialog_button",
-        "close_dialogs",
-        "count_bright_regions",
-        "describe_image",
-        "get_histogram",
-        "get_image_info",
-        "get_log",
-        "get_metadata",
-        "get_open_windows",
-        "get_pixels_array",
-        "get_results",
-        "get_state",
-        "histogram_summary",
-        "line_profile",
-        "list_dialog_components",
-        "probe_plugin",
-        "quick_object_count",
-        "region_stats",
-        "set_dialog_checkbox",
-        "set_dialog_dropdown",
-        "set_dialog_text",
-        "triage_image",
-    }
-)
-_SCRIPT_TOOLS = frozenset({"run_macro", "run_macro_async", "run_script"})
-_RUN_IN_FIJI_TOOLS = frozenset({"threshold_shootout"})
-_TOOL_ICONS = {
-    "describe_image": "🔎",
-    "triage_image": "🔎",
-    "get_image_info": "🔎",
-    "get_state": "🔎",
-    "get_metadata": "🔎",
-    "get_open_windows": "🔎",
-    "get_log": "🔎",
-    "capture_image": "📸",
-    "get_pixels_array": "🔬",
-    "region_stats": "🔬",
-    "line_profile": "🔬",
-    "get_histogram": "▁▃█▃▁",
-    "histogram_summary": "▁▃█▃▁",
-    "get_results": "💡",
-    "quick_object_count": "∑",
-    "count_bright_regions": "∑",
-    "threshold_shootout": "🪄",
-    "close_dialogs": "✖️",
-    "list_dialog_components": "🧾",
-    "click_dialog_button": "🖱️",
-    "set_dialog_text": "📝",
-    "set_dialog_checkbox": "✔️",
-    "set_dialog_dropdown": "▾",
-    "probe_plugin": "🧩",
-    "run_macro": "🪄",
-    "run_script": "🪄",
-    "run_macro_async": "🪄",
-    "job_status": "⏱️",
-    "cancel_job": "🛑",
-    "offer_recipe_save": "💾",
-    "save_recipe": "💾",
-    "run_shell": "💻",
-}
-_TOOL_ICON_PALETTES = {
-    "get_histogram": (
-        (92, 214, 255),
-        (102, 236, 173),
-        (255, 205, 82),
-        (255, 142, 92),
-        (206, 126, 255),
-    ),
-    "histogram_summary": (
-        (92, 214, 255),
-        (102, 236, 173),
-        (255, 205, 82),
-        (255, 142, 92),
-        (206, 126, 255),
-    ),
-}
-_TOOL_ICON_RGB = {
-    "quick_object_count": (88, 224, 255),
-    "count_bright_regions": (88, 224, 255),
-}
 _THRESHOLD_TRIGGER_RE = re.compile(
     r"\b(threshold(?:ing)?|segment(?:ation|ing)?|mask(?:ing)?|binary|binar(?:ise|ize|isation|ization))\b",
     re.IGNORECASE,
@@ -394,7 +372,7 @@ def _estimate_tokens(messages: list) -> int:
     total_chars = 0
     for message in messages:
         if isinstance(message, dict):
-            total_chars += len(message.get("content", "") or "")
+            total_chars += _serialised_size(message)
         else:
             total_chars += len(getattr(message, "content", "") or "")
             tool_calls = getattr(message, "tool_calls", None)
@@ -404,6 +382,201 @@ def _estimate_tokens(messages: list) -> int:
                     for tc in tool_calls
                 ]))
     return total_chars // 4 + 100
+
+
+def _serialised_size(value: Any) -> int:
+    try:
+        return len(json.dumps(value, ensure_ascii=False, default=str))
+    except (TypeError, ValueError, OverflowError):
+        return len(str(value))
+
+
+def _is_plain_user_message(message: Any) -> bool:
+    return (
+        isinstance(message, dict)
+        and message.get("role") == "user"
+        and "function_response" not in message
+        and isinstance(message.get("content"), str)
+    )
+
+
+def _bound_history(messages: list) -> None:
+    """Drop complete oldest turns before provider context can grow unbounded."""
+
+    def over_limit() -> bool:
+        return (
+            len(messages) > MAX_HISTORY_MESSAGES
+            or sum(_serialised_size(message) for message in messages) > MAX_HISTORY_CHARS
+        )
+
+    while over_limit():
+        user_indices = [
+            index for index, message in enumerate(messages) if _is_plain_user_message(message)
+        ]
+        if len(user_indices) < 2:
+            break
+        # Delete the oldest complete turn, including transient system notes
+        # immediately before it, but retain the initial system prompt.
+        first = 1 if messages and isinstance(messages[0], dict) and messages[0].get("role") == "system" else 0
+        del messages[first:user_indices[1]]
+
+    while over_limit() and _drop_oldest_completed_exchange(messages):
+        pass
+
+    # Post-tool guidance is useful for the immediately following round but is
+    # safe to discard before corrupting provider call/result pairing.
+    index = 1
+    while over_limit() and index < len(messages):
+        message = messages[index]
+        if isinstance(message, dict) and message.get("role") == "system":
+            del messages[index]
+            continue
+        index += 1
+
+    if over_limit():
+        # A single unusually tool-heavy turn has no complete older turn to
+        # drop. Preserve provider call/result structure but compact old text.
+        for message in messages:
+            _compact_message_text(message)
+            if not over_limit():
+                break
+
+    if over_limit():
+        # Last-resort validity-preserving reset: never send an oversized or
+        # structurally dangling provider history. Keep the bounded base prompt
+        # and most recent plain user request so the model can safely re-plan.
+        base = messages[0] if messages and isinstance(messages[0], dict) \
+            and messages[0].get("role") == "system" else None
+        latest_user = next(
+            (message for message in reversed(messages) if _is_plain_user_message(message)),
+            None,
+        )
+        retained = []
+        if base is not None:
+            retained.append(base)
+        if MAX_HISTORY_MESSAGES - len(retained) > 1:
+            retained.append(
+                {
+                    "role": "system",
+                    "content": "Earlier tool exchanges were dropped to enforce context limits; re-inspect state before mutating.",
+                }
+            )
+        if latest_user is not None and len(retained) < MAX_HISTORY_MESSAGES:
+            retained.append(latest_user)
+        messages[:] = retained[:MAX_HISTORY_MESSAGES]
+        for message in messages:
+            _compact_message_text(message)
+        if over_limit():
+            messages.clear()
+
+
+def _drop_oldest_completed_exchange(messages: list) -> bool:
+    """Drop one whole assistant/tool exchange, never a dangling half."""
+
+    assistants = [
+        index
+        for index, message in enumerate(messages)
+        if (
+            (isinstance(message, dict) and message.get("role") == "assistant")
+            or getattr(message, "role", None) == "assistant"
+        )
+    ]
+    if len(assistants) < 2:
+        return False
+    start = assistants[0]
+    end = assistants[1]
+    del messages[start:end]
+    return True
+
+
+def _compact_message_text(value: Any) -> None:
+    if isinstance(value, list):
+        for item in value:
+            _compact_message_text(item)
+        return
+    if not isinstance(value, dict):
+        return
+    safe_text_keys = {"content", "result", "text", "output"}
+    for key, item in list(value.items()):
+        if key in safe_text_keys and isinstance(item, str):
+            if len(item) > MAX_RETAINED_MESSAGE_TEXT_CHARS:
+                value[key] = item[:MAX_RETAINED_MESSAGE_TEXT_CHARS] + "\n… [history compacted]"
+        elif isinstance(item, (dict, list)):
+            _compact_message_text(item)
+
+
+def _bounded_tool_result(tool_name: str, result_text: str) -> str:
+    limit = MAX_PIXEL_RESULT_CHARS if tool_name == "get_pixels_array" else MAX_TOOL_RESULT_CHARS
+    if len(result_text) <= limit:
+        return result_text
+    suffix = "\n… [bounded: {} characters omitted]".format(len(result_text) - limit)
+    if tool_name == "get_pixels_array":
+        suffix += "\nRequest a smaller region; raw pixel history is capped."
+    return result_text[:limit] + suffix
+
+
+def _start_governed_event_subscriber(topics: Any = None) -> None:
+    """Bridge the authenticated stage-04 event stream into the rich loop."""
+
+    global _EVENT_SUBSCRIBER_STARTED
+    with _EVENT_SUBSCRIBER_LOCK:
+        if _EVENT_SUBSCRIBER_STARTED:
+            return
+        _EVENT_SUBSCRIBER_STARTED = True
+
+    selected = list(topics or _EVENT_TOPICS)
+
+    threading.Thread(
+        target=_consume_governed_events,
+        args=(selected,),
+        name="imagejai-governed-event-subscriber",
+        daemon=True,
+    ).start()
+
+
+def _new_governed_event_session() -> Any:
+    # Events and one-shot tool calls must share the same negotiated session.
+    # A separate event session would carry a different session_id and could
+    # silently diverge in authentication/capabilities from the tool channel.
+    from .registry import imagej_session
+
+    return imagej_session()
+
+
+def _consume_governed_events(
+    topics: list[str],
+    *,
+    session_factory: Any = None,
+    stop_event: threading.Event | None = None,
+    sleep_fn: Any = time.sleep,
+) -> None:
+    """Keep the authenticated event bridge alive across startup/protocol failures."""
+
+    factory = session_factory or _new_governed_event_session
+    stop = stop_event or threading.Event()
+    delay = _EVENT_RECONNECT_INITIAL_S
+    while not stop.is_set():
+        try:
+            session = factory()
+            for frame in session.events(topics, reconnect=True):
+                if stop.is_set():
+                    return
+                if isinstance(frame, dict) and frame.get("ok") is False:
+                    break
+                if isinstance(frame, dict):
+                    events._handle_frame(frame)
+                    delay = _EVENT_RECONNECT_INITIAL_S
+        except Exception:
+            pass
+        if stop.is_set():
+            return
+        sleep_fn(delay)
+        delay = min(_EVENT_RECONNECT_MAX_S, delay * 2.0)
+
+
+# ``gemma4_31b.__main__`` calls this module attribute before entering run().
+# Redirect that legacy wrapper entry point to the governed session transport.
+events.start_subscriber = _start_governed_event_subscriber
 
 
 def _format_ctx_bar(used: int, limit: int, width: int = 24) -> str:
@@ -472,141 +645,6 @@ def _get_prompt_status() -> tuple[str, float]:
         )
 
 
-def _rgb_text(text: str, rgb: tuple[int, int, int]) -> str:
-    """Wrap text in a true-color ANSI foreground sequence."""
-    red, green, blue = rgb
-    return "\033[38;2;{};{};{}m{}".format(red, green, blue, text)
-
-
-def _colorize_chars(text: str, colors: tuple[tuple[int, int, int], ...]) -> str:
-    """Apply a per-character palette to one animation frame."""
-    if not text:
-        return ""
-    colored: list[str] = []
-    for color_index, char in enumerate(text):
-        rgb = colors[color_index % len(colors)]
-        if char == " ":
-            colored.append(char)
-            continue
-        colored.append(_rgb_text(char, rgb))
-    return "".join(colored)
-
-
-def _status_frame_index(elapsed_s: float, frame_s: float) -> int:
-    """Return the frame index for the current elapsed time."""
-    return max(0, int(elapsed_s / frame_s))
-
-
-def _status_animation_index(elapsed_s: float) -> int:
-    """Return the steady animation frame index."""
-    return _status_frame_index(elapsed_s, _STATUS_ANIMATION_FRAME_S)
-
-
-def _status_text_pulse_slot(elapsed_s: float, active_slots: int) -> int | None:
-    """Return the active text-pulse slot, or None during the resting gap."""
-    cycle = max(1, active_slots) + _STATUS_PULSE_REST_FRAMES
-    frame = _status_frame_index(elapsed_s, _STATUS_TEXT_FRAME_S) % cycle
-    if frame >= active_slots:
-        return None
-    return frame
-
-
-def _status_animation_frame(label: str, elapsed_s: float) -> str:
-    """Return a one-frame ImageJ-themed activity animation."""
-    frames: tuple[str, ...]
-    animation_index = _status_animation_index(elapsed_s)
-    if label == _THINKING_STATUS:
-        frames = (
-            "•···•",
-            "·•·•·",
-            "··●··",
-            "·•·•·",
-        )
-        palette = (
-            (255, 82, 82),
-            (255, 166, 92),
-            (255, 232, 92),
-            (168, 236, 96),
-            (88, 255, 132),
-        )
-    elif label == _INSPECTING_STATUS:
-        frames = ("●○○", "○●○", "○○●", "○●○")
-        palette = (
-            (92, 163, 255),
-            (92, 227, 159),
-            (215, 112, 255),
-        )
-    elif label == _WRITING_STATUS:
-        frames = ("[>__]", "[_>_]", "[__>]", "[_>_]")
-        palette = (
-            (92, 163, 255),
-            (255, 179, 71),
-            (255, 92, 141),
-            (92, 227, 159),
-            (92, 163, 255),
-        )
-    elif label == _RUNNING_FIJI_STATUS:
-        frames = ("[▮  ]", "[ ▮ ]", "[  ▮]", "[ ▮ ]")
-        palette = (
-            (92, 163, 255),
-            (255, 92, 141),
-            (255, 179, 71),
-            (92, 227, 159),
-            (92, 163, 255),
-        )
-    else:
-        return ""
-    return _colorize_chars(frames[animation_index % len(frames)], palette)
-
-
-def _status_label_wave(label: str, elapsed_s: float) -> str:
-    """Render the activity label with a moving highlight wave."""
-    chars = list(str(label or ""))
-    wave_positions = [index for index, char in enumerate(chars) if not char.isspace()]
-    if not wave_positions:
-        return "\033[90m{}\033[0m".format(label)
-
-    pulse_slot = _status_text_pulse_slot(elapsed_s, len(wave_positions))
-    highlighted: list[str] = []
-
-    if pulse_slot is None:
-        for char in chars:
-            if char.isspace():
-                highlighted.append("\033[90m ")
-            else:
-                highlighted.append(_rgb_text(char, (128, 138, 156)))
-        return "".join(highlighted)
-
-    center_index = wave_positions[pulse_slot]
-
-    for index, char in enumerate(chars):
-        if char.isspace():
-            highlighted.append("\033[90m ")
-            continue
-        distance = abs(index - center_index)
-        if distance == 0:
-            rgb = (255, 255, 255)
-        elif distance == 1:
-            rgb = (214, 225, 255)
-        elif distance == 2:
-            rgb = (176, 190, 230)
-        else:
-            rgb = (128, 138, 156)
-        highlighted.append(_rgb_text(char, rgb))
-
-    return "".join(highlighted)
-
-
-def _format_status_line(label: str, elapsed_s: float) -> str:
-    """Render one complete status line with colored animation."""
-    animation = _status_animation_frame(label, elapsed_s)
-    label_text = _status_label_wave(label, elapsed_s)
-    elapsed_display = max(0, int(elapsed_s))
-    if animation:
-        return "  {} {} \033[90m({}s)\033[0m".format(animation, label_text, elapsed_display)
-    return "  {} \033[90m({}s)\033[0m".format(label_text, elapsed_display)
-
-
 def _prompt_status_text() -> str:
     """Render the live working status line shown above the prompt."""
     label, started_at = _get_prompt_status()
@@ -648,14 +686,23 @@ def _run_interruptible(fn, *args, abort_event: threading.Event | None = None, **
         except BaseException as exc:
             result["exc"] = exc
 
-    thread = threading.Thread(target=_run, daemon=True)
+    thread = threading.Thread(target=_run, daemon=False)
     thread.start()
+    aborted = False
     try:
         while thread.is_alive():
             thread.join(timeout=0.1)
             if abort_event is not None and abort_event.is_set():
-                raise _TurnAborted()
+                aborted = True
     except KeyboardInterrupt:
+        aborted = True
+        if abort_event is not None:
+            abort_event.set()
+    finally:
+        # Never orphan an in-flight model/socket/tool worker. Provider and TCP
+        # timeouts bound this wait; ownership remains with the interrupted turn.
+        thread.join()
+    if aborted:
         raise _TurnAborted()
     if result["exc"]:
         raise result["exc"]
@@ -816,7 +863,7 @@ def _update_async_job_state(tool_name: str, result, async_job_active: bool) -> b
         state = str(payload.get("state") or "").strip().lower() if isinstance(payload, dict) else ""
         if state in {"queued", "running", "started"}:
             return True
-        if state in {"completed", "failed", "cancelled"}:
+        if state in {"completed", "failed", "cancelled", "timed_out"}:
             return False
         return async_job_active
     if tool_name == "cancel_job":
@@ -826,24 +873,6 @@ def _update_async_job_state(tool_name: str, result, async_job_active: bool) -> b
         if isinstance(payload, dict) and payload.get("cancelled") is True:
             return False
     return async_job_active
-
-
-def _tool_icon(tool_name: str) -> str:
-    """Return the display icon for one tool call."""
-    return _TOOL_ICONS.get(str(tool_name or "").strip(), "⚡")
-
-
-def _tool_icon_display(tool_name: str) -> str:
-    """Return one tool icon, with standalone coloring when needed."""
-    tool_key = str(tool_name or "").strip()
-    icon = _TOOL_ICONS.get(tool_key, "⚡")
-    palette = _TOOL_ICON_PALETTES.get(tool_key)
-    if palette:
-        return _colorize_chars(icon, palette) + "\033[0m"
-    rgb = _TOOL_ICON_RGB.get(tool_key)
-    if rgb:
-        return _rgb_text(icon, rgb) + "\033[0m"
-    return icon
 
 
 def _chat_interruptible(abort_event: threading.Event | None = None, **kwargs):
@@ -990,6 +1019,98 @@ def _normalise_provider(provider: str | None, model: str) -> str:
     return value or _infer_provider_for_model(model)
 
 
+def _resolve_tool_policy(
+    provider: str,
+    provider_client: Any | None,
+    provider_opts: dict | None,
+) -> ProviderToolPolicy:
+    """Resolve policy from router-owned metadata, failing closed on mismatch."""
+
+    attached = getattr(provider_client, "tool_policy", None)
+    if isinstance(attached, ProviderToolPolicy) and attached.provider == provider:
+        return attached
+    capabilities = (provider_opts or {}).get("capabilities")
+    return provider_tool_policy(provider, capabilities)
+
+
+def _host_code_approval_request(
+    provider: str,
+    model: str,
+    tool_name: str,
+    args: dict,
+) -> HostCodeApprovalRequest:
+    """Build an exact, immutable preview for one host-code invocation."""
+
+    if tool_name == "run_shell":
+        preview = tools_shell.preview_shell_call(args.get("argv"), args.get("cwd", ""))
+        working_directory = str(json.loads(preview)["cwd"])
+    elif tool_name == "run_script":
+        code = args.get("code")
+        language = args.get("language")
+        if not isinstance(code, str) or not isinstance(language, str):
+            raise ValueError("run_script requires string code and language arguments")
+        preview = json.dumps(
+            {"language": language, "code": code, "runtime": "Fiji JVM"},
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        working_directory = "Fiji JVM"
+    else:
+        preview = _canonical_json(args)
+        working_directory = "unspecified"
+    return HostCodeApprovalRequest(
+        provider=provider,
+        model=model,
+        tool=tool_name,
+        preview=preview,
+        working_directory=working_directory,
+    )
+
+
+def _host_code_abort_note(
+    tool_name: str,
+    args: dict,
+    *,
+    provider: str,
+    model: str,
+    policy: ProviderToolPolicy,
+    approval_callback: Any | None,
+) -> str | None:
+    """Authorize one host-code call; cloud approval is never remembered."""
+
+    if not is_host_code_tool(tool_name):
+        return None
+    if not policy.has_capability(HOST_CODE_CAPABILITY):
+        return "host-code capability is not enabled for this provider session"
+    if policy.is_local:
+        return None
+    if not callable(approval_callback):
+        return "cloud host-code elevation requires an explicit one-call approval callback"
+    try:
+        request = _host_code_approval_request(provider, model, tool_name, args)
+    except (TypeError, ValueError) as exc:
+        return "invalid host-code invocation: {}".format(exc)
+
+    _console_emit(
+        "\nHOST-CODE APPROVAL REQUIRED (one call only)\n"
+        "provider={}; model={}; tool={}; working_directory={}\n{}".format(
+            request.provider,
+            request.model,
+            request.tool,
+            request.working_directory,
+            request.preview,
+        ),
+        reserve_status_line=True,
+    )
+    try:
+        approved = approval_callback(request)
+    except Exception as exc:
+        return "host-code approval failed closed: {}: {}".format(type(exc).__name__, exc)
+    if approved is not True:
+        return "host-code call was denied by the one-call approval callback"
+    return None
+
+
 def _context_limit_for(provider: str, model: str) -> int:
     try:
         from agent.contexts import loader as _ctx_loader
@@ -1049,62 +1170,6 @@ def _format_tool_result(value) -> str:
             return _format_error_result(top_error, top_dialogs)
     try:
         return json.dumps(value)
-    except (TypeError, ValueError):
-        return str(value)
-
-
-def _format_tool_args_for_display(value, indent: int = 0) -> str:
-    """Pretty-print tool arguments, expanding multiline strings for readability."""
-    pad = " " * indent
-    child_pad = " " * (indent + 2)
-
-    if isinstance(value, dict):
-        if not value:
-            return "{}"
-        lines = ["{"]
-        items = list(value.items())
-        for index, (key, item) in enumerate(items):
-            rendered = _format_tool_args_for_display(item, indent + 2)
-            rendered_lines = rendered.splitlines() or [""]
-            entry = '{}: {}'.format(
-                json.dumps(str(key), ensure_ascii=False),
-                rendered_lines[0],
-            )
-            lines.append(child_pad + entry)
-            for extra_line in rendered_lines[1:]:
-                lines.append(extra_line)
-            if index < len(items) - 1:
-                lines[-1] += ","
-        lines.append(pad + "}")
-        return "\n".join(lines)
-
-    if isinstance(value, list):
-        if not value:
-            return "[]"
-        lines = ["["]
-        for index, item in enumerate(value):
-            rendered = _format_tool_args_for_display(item, indent + 2)
-            rendered_lines = rendered.splitlines() or [""]
-            lines.append(child_pad + rendered_lines[0])
-            for extra_line in rendered_lines[1:]:
-                lines.append(extra_line)
-            if index < len(value) - 1:
-                lines[-1] += ","
-        lines.append(pad + "]")
-        return "\n".join(lines)
-
-    if isinstance(value, str):
-        text = value.replace("\r\n", "\n").replace("\r", "\n")
-        if "\n" not in text:
-            return json.dumps(text, ensure_ascii=False)
-        lines = ["|"]
-        block_pad = " " * (indent + 2)
-        for raw_line in text.split("\n"):
-            lines.append(block_pad + raw_line)
-        return "\n".join(lines)
-
-    try:
-        return json.dumps(value, ensure_ascii=False)
     except (TypeError, ValueError):
         return str(value)
 
@@ -1497,20 +1562,31 @@ def _one_turn(
     ticker = _ActivityTicker()
     turn_start = time.time()
     round_n = 0
+    tool_call_count = 0
     last_tool_signature = None
     identical_tool_repeats = 0
     async_job_active = False
     think_capability_state = think_capability_state or {"supported": True, "logged": False}
     # Scratchpad shared across post-tool injectors within this turn.
-    # Injectors can read/write any key; example: _stale_error_loop_injector
-    # uses turn_state["last_tool_error"] to compare consecutive errors.
+    # Injectors can read or write keys when they need turn-local context.
     turn_state: dict = {}
+    tool_policy = _resolve_tool_policy(provider, provider_client, provider_opts)
+    approval_callback = (provider_opts or {}).get("host_code_approval")
 
     ticker.start(_THINKING_STATUS)
     try:
         while True:
             if budget_guard is not None and budget_guard.exceeded():
                 return _budget_pause_message(budget_guard), False
+            if round_n >= MAX_MODEL_ROUNDS_PER_TURN:
+                _mark_turn_failure(turn_config)
+                return (
+                    "(stopped at the per-turn model-round limit of {})".format(
+                        MAX_MODEL_ROUNDS_PER_TURN
+                    ),
+                    True,
+                )
+            _bound_history(messages)
             round_n += 1
             model_initial, model_transitions = _status_plan_for_model_round(
                 round_n,
@@ -1595,6 +1671,15 @@ def _one_turn(
                 ), _turn_had_failure(turn_config)
 
             for call in tool_calls:
+                if tool_call_count >= MAX_TOOL_CALLS_PER_TURN:
+                    _mark_turn_failure(turn_config)
+                    return (
+                        "(stopped at the per-turn tool-call limit of {})".format(
+                            MAX_TOOL_CALLS_PER_TURN
+                        ),
+                        True,
+                    )
+                tool_call_count += 1
                 name = _tool_call_name(call)
                 args = _tool_call_args(call)
                 call_error = _tool_call_error(call)
@@ -1610,6 +1695,7 @@ def _one_turn(
                     _append_tool_result(messages, call, name, result_text, provider_client)
                     _flip_turn_config_to_recover(turn_config)
                     continue
+                args = apply_tool_argument_defaults(name, args)
                 _console_emit(
                     "  {} \033[33m{}({})\033[0m".format(
                         _tool_icon_display(name),
@@ -1618,7 +1704,14 @@ def _one_turn(
                     ),
                     reserve_status_line=True,
                 )
-                pre_dispatch_note = _pre_dispatch_abort_note(name, args)
+                pre_dispatch_note = _host_code_abort_note(
+                    name,
+                    args,
+                    provider=provider,
+                    model=model,
+                    policy=tool_policy,
+                    approval_callback=approval_callback,
+                ) or _pre_dispatch_abort_note(name, args)
                 if pre_dispatch_note is not None:
                     _console_emit(
                         "  \033[31m⛔ pre-dispatch abort: {}\033[0m".format(
@@ -1654,23 +1747,28 @@ def _one_turn(
                 async_job_active = _update_async_job_state(name, result, async_job_active)
                 if async_job_active and not previous_async_state:
                     ticker.set_phase(_RUNNING_FIJI_STATUS)
-                result_text = _format_tool_result(result)
+                result_text = _bounded_tool_result(name, _format_tool_result(result))
                 if result_text.startswith("ERROR:"):
                     _flip_turn_config_to_recover(turn_config)
+                result_preview_len = 140
+                result_preview = result_text[:result_preview_len] + (
+                    "…" if len(result_text) > result_preview_len else ""
+                )
                 display_text = result_text
                 if len(display_text) > 20480:
                     hidden = len(display_text) - 20480
                     display_text = display_text[:20480] + "\n… [truncated, {} chars hidden]".format(hidden)
                 _console_emit("  \033[90m→ {}\033[0m".format(display_text), reserve_status_line=True)
                 _append_tool_result(messages, call, name, result_text, provider_client)
+                _bound_history(messages)
                 for post_note in _post_tool_system_notes(name, args, result_text, turn_state):
                     messages.append({"role": "system", "content": post_note})
-                    preview_len = 140
-                    preview = post_note[:preview_len] + (
-                        "…" if len(post_note) > preview_len else ""
+                    post_note_preview_len = 140
+                    post_note_preview = post_note[:post_note_preview_len] + (
+                        "…" if len(post_note) > post_note_preview_len else ""
                     )
                     _console_emit(
-                        "  \033[95m↯ post-tool note: {}\033[0m".format(preview),
+                        "  \033[95m↯ post-tool note: {}\033[0m".format(post_note_preview),
                         reserve_status_line=True,
                     )
                 signature = (name, _canonical_json(args), result_text)
@@ -1686,7 +1784,7 @@ def _one_turn(
                             "tool": name,
                             "args": _canonical_json(args),
                             "repeat_count": identical_tool_repeats,
-                            "result_preview": preview,
+                            "result_preview": result_preview,
                         }
                     )
                     elapsed = time.time() - turn_start
@@ -1867,7 +1965,7 @@ def _hallucinated_filter_cmds_note(user_text: str) -> str | None:
 
 
 def _sample_image_note(user_text: str) -> str | None:
-    """Provide exact literal names for built-in sample images."""
+    """Resolve sample names from the installed Fiji, not a hard-coded version."""
     if not isinstance(user_text, str):
         return None
     if not _SAMPLE_IMAGE_NAME_RE.search(user_text):
@@ -1875,11 +1973,10 @@ def _sample_image_note(user_text: str) -> str | None:
     if not _SAMPLE_IMAGE_VERB_RE.search(user_text):
         return None
     return (
-        "Sample images load by EXACT literal name. Correct: \"Blobs (25K)\", "
-        "\"Cell Colony (31K)\", \"Clown (14K)\", \"Embryos (42K)\", "
-        "\"Fluorescent Cells (400K)\", \"HeLa Cells (1.3M)\", \"Leaf (36K)\", "
-        "\"M51 Galaxy (177K)\", \"MRI Stack (528K)\", \"T1 Head (2.4M)\", "
-        "\"Boats\", \"Bridge (174K)\". Size guesses like \"Blobs (2K)\" fail."
+        "Sample image command labels vary between Fiji versions: for example "
+        "\"Blobs\" versus \"Blobs (25K)\". Read the installed command list "
+        "with ij.Menus.getCommands() via run_script, then use the exact returned "
+        "label. Do not assume a size suffix or retry guessed command names."
     )
 
 
@@ -1939,42 +2036,6 @@ def _selectimage_anchor_note(user_text: str) -> str | None:
 # ---------------------------------------------------------------------------
 
 
-def _normalise_tool_error(result_text: str) -> str | None:
-    """Normalise a tool error string for same-error comparison."""
-    if not isinstance(result_text, str) or not result_text.startswith("ERROR:"):
-        return None
-    first_line = result_text.splitlines()[0] if result_text else ""
-    stripped = re.sub(r"\bline\s+\d+\b", "line <N>", first_line, flags=re.IGNORECASE)
-    stripped = re.sub(r"\s+", " ", stripped).strip().lower()
-    return stripped or None
-
-
-def _stale_error_loop_injector(
-    tool_name: str,
-    args: dict,
-    result_text: str,
-    turn_state: dict,
-) -> str | None:
-    """Fire when two macro/script calls in a row returned the same error."""
-    if tool_name not in {"run_macro", "run_script", "run_macro_async", "job_status"}:
-        return None
-    current = _normalise_tool_error(result_text)
-    if current is None:
-        turn_state["last_tool_error"] = None
-        return None
-    previous = turn_state.get("last_tool_error")
-    turn_state["last_tool_error"] = current
-    if previous is None or previous != current:
-        return None
-    return (
-        "Two tool calls in a row returned the same error. STOP submitting "
-        "variants. Next calls: close_dialogs({}), then get_open_windows({}), "
-        "then get_log({}). If the error's line number doesn't match your last "
-        "macro, a previous dialog is still blocking the queue — the error is "
-        "stale."
-    )
-
-
 def _hallucination_reflector_injector(
     tool_name: str,
     args: dict,
@@ -2030,7 +2091,6 @@ def _nresults_zero_injector(
 
 
 _POST_TOOL_INJECTORS: tuple = (
-    _stale_error_loop_injector,
     _hallucination_reflector_injector,
     _no_image_reflex_injector,
     # _nresults_zero_injector,  # disabled — see docs/ollama/future-injectors.md
@@ -2195,10 +2255,19 @@ def run(
         model = _resolve_default_model()
 
     provider_key = _normalise_provider(provider, model)
+    validate_process_identifier(model, "model")
+    _start_governed_event_subscriber(_EVENT_TOPICS)
+    tool_policy = _resolve_tool_policy(provider_key, provider_client, provider_opts)
+    approval_callback = (provider_opts or {}).get("host_code_approval")
+    cloud_elevation = (
+        not tool_policy.is_local
+        and tool_policy.has_capability(HOST_CODE_CAPABILITY)
+        and callable(approval_callback)
+    )
     ctx_limit = _context_limit_for(provider_key, model)
     assistant_label = _assistant_label(provider_key)
-    tools = list(REGISTRY)
-    tool_map = _rebuild_tool_map()
+    tools = tools_for_policy(tool_policy, cloud_elevation=cloud_elevation)
+    tool_map = {fn.__name__: fn for fn in tools}
     slash_completer = _build_slash_completer()
     ctx_state = {"used": 0, "limit": ctx_limit}
     mode_state = {"lock": initial_mode_lock if initial_mode_lock in SAMPLING_PROFILES else None}
@@ -2319,7 +2388,7 @@ def run(
                         budget_guard,
                         ctx_limit,
                     ),
-                    daemon=True,
+                    daemon=False,
                 )
                 active_turn = {
                     "thread": thread,
@@ -2333,6 +2402,7 @@ def run(
                 thread.start()
 
             if active_turn is not None and not active_turn["thread"].is_alive():
+                active_turn["thread"].join()
                 result = active_turn["result_queue"].get_nowait()
                 if result["status"] == "ok":
                     _console_emit("\033[34m{}>\033[0m {}\n".format(assistant_label, result["reply"]), reserve_status_line=True)
@@ -2474,6 +2544,15 @@ def run(
             if queued_prompt is None:
                 continue
 
+            if len(queued_prompt) > MAX_USER_PROMPT_CHARS:
+                _console_emit(
+                    "(prompt rejected: {} characters exceeds the {} character limit)".format(
+                        len(queued_prompt), MAX_USER_PROMPT_CHARS
+                    ),
+                    reserve_status_line=True,
+                )
+                continue
+
             if active_turn is None and not pending_prompts:
                 pending_prompts.appendleft(queued_prompt)
             else:
@@ -2487,6 +2566,9 @@ def run(
             pass
     finally:
         input_stop.set()
+        if active_turn is not None:
+            active_turn["abort_event"].set()
+            active_turn["thread"].join()
 
     _console_emit("bye")
     return 0

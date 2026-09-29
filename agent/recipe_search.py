@@ -292,6 +292,8 @@ def _simple_yaml_parse(text):
 # ---------------------------------------------------------------------------
 
 RECIPE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "recipes")
+SCHEMA_PATH = os.path.join(RECIPE_DIR, "schema.json")
+SCHEMA_VERSION = 1
 USER_RECIPE_DIR_ENV = "IMAGEJAI_USER_RECIPES_DIR"
 RECIPE_DIRS_ENV = "IMAGEJAI_RECIPE_DIRS"
 
@@ -336,7 +338,10 @@ def recipe_directories(recipe_dir=None):
 def load_recipe(path):
     """Load a single recipe YAML file and return as dict."""
     try:
-        return _load_yaml(path)
+        recipe = _load_yaml(path)
+        if not isinstance(recipe, dict):
+            return {"_error": "Recipe document must be a YAML mapping", "_path": path}
+        return recipe
     except Exception as e:
         return {"_error": str(e), "_path": path}
 
@@ -355,11 +360,10 @@ def load_all_recipes(recipe_dir=None):
             if fname.endswith((".yaml", ".yml")) and not fname.startswith("."):
                 path = os.path.join(d, fname)
                 recipe = load_recipe(path)
-                if recipe:
-                    recipe["_source_file"] = fname
-                    recipe["_source_dir"] = d
-                    recipe["_source_path"] = path
-                    recipes.append(recipe)
+                recipe["_source_file"] = fname
+                recipe["_source_dir"] = d
+                recipe["_source_path"] = path
+                recipes.append(recipe)
     return recipes
 
 
@@ -367,8 +371,148 @@ def load_all_recipes(recipe_dir=None):
 # Validation
 # ---------------------------------------------------------------------------
 
-REQUIRED_FIELDS = ["name", "id", "description", "domain", "steps"]
-RECOMMENDED_FIELDS = ["preconditions", "parameters", "outputs", "known_issues", "tags", "difficulty"]
+REQUIRED_FIELDS = [
+    "schema_version", "name", "id", "description", "domain", "difficulty",
+    "preconditions", "parameters", "steps",
+]
+
+ROOT_FIELDS = frozenset([
+    "schema_version", "name", "id", "description", "domain", "difficulty",
+    "preconditions", "parameters", "steps", "postconditions", "validation",
+    "outputs", "known_issues", "tags", "created", "related_recipes",
+    # Documented, informational extensions used by specialist bundled recipes.
+    "decision_points", "quality_settings", "decisions", "display_ranges",
+    "animations", "naming", "batch_script", "groovy_reference", "tips",
+    "agent_instructions",
+])
+PRECONDITION_FIELDS = frozenset([
+    "image_type", "min_channels", "needs_stack", "needs_time",
+    "needs_calibration", "notes",
+])
+PARAMETER_FIELDS = frozenset([
+    "name", "label", "type", "default", "range", "options", "description",
+    "image_specific", "value", "note",
+])
+STEP_FIELDS = frozenset([
+    "id", "name", "description", "type", "macro", "code", "script",
+    "groovy", "file", "language", "instructions", "when", "decision_point",
+    "decision_logic", "capture_after", "validate", "validation", "notes",
+    "timeout_seconds", "expected_output", "source",
+])
+PARAMETER_TYPES = frozenset(["numeric", "string", "text", "choice", "boolean"])
+STEP_TYPES = frozenset(["macro", "script", "manual"])
+SCRIPT_LANGUAGES = frozenset(["groovy", "jython", "javascript"])
+CONTRACT_TYPES = frozenset(["acknowledgement", "image_open", "results_nonempty"])
+_SCHEMA_CACHE = None
+
+
+def _canonical_schema_issues(recipe):
+    """Apply schema.json when jsonschema is available.
+
+    The hand-written semantic checks below remain the dependency-free fallback
+    and add execution-specific rules (such as rejecting comment-only macros).
+    """
+    try:
+        from jsonschema import Draft202012Validator
+    except ImportError:
+        return []
+    global _SCHEMA_CACHE
+    try:
+        if _SCHEMA_CACHE is None:
+            with open(SCHEMA_PATH, "r", encoding="utf-8") as handle:
+                _SCHEMA_CACHE = json.load(handle)
+        document = {key: value for key, value in recipe.items() if not str(key).startswith("_")}
+        errors = sorted(Draft202012Validator(_SCHEMA_CACHE).iter_errors(document),
+                        key=lambda error: list(error.absolute_path))
+    except (IOError, OSError, ValueError) as exc:
+        return ["Canonical schema could not be loaded: %s" % exc]
+    issues = []
+    for error in errors:
+        path = ".".join(str(part) for part in error.absolute_path) or "recipe"
+        issues.append("Schema %s: %s" % (path, error.message))
+    return issues
+
+
+def _unknown_fields(mapping, allowed, prefix):
+    return ["%s has unknown field: %s" % (prefix, key)
+            for key in mapping if key not in allowed and not str(key).startswith("_")]
+
+
+def _is_nonempty_text(value):
+    return isinstance(value, str) and bool(value.strip())
+
+
+def _comment_only(code):
+    if not _is_nonempty_text(code):
+        return True
+    meaningful = []
+    in_block = False
+    for raw in code.splitlines():
+        line = raw.strip()
+        if in_block:
+            if "*/" in line:
+                line = line.split("*/", 1)[1].strip()
+                in_block = False
+            else:
+                continue
+        if line.startswith("/*"):
+            if "*/" in line[2:]:
+                line = line.split("*/", 1)[1].strip()
+            else:
+                in_block = True
+                continue
+        line = line.split("//", 1)[0].strip()
+        if line:
+            meaningful.append(line)
+    return not meaningful
+
+
+def step_type(step):
+    """Resolve a validated step to one exhaustive dispatcher name."""
+    explicit = str(step.get("type") or "").strip().lower()
+    if explicit:
+        return explicit
+    if _is_nonempty_text(step.get("groovy")) or _is_nonempty_text(step.get("script")):
+        return "script"
+    if _is_nonempty_text(step.get("macro")) or _is_nonempty_text(step.get("code")):
+        return "macro"
+    return None
+
+
+def _validate_contract(contract, where):
+    issues = []
+    if isinstance(contract, str):
+        if not contract.strip():
+            issues.append("%s acknowledgement is empty" % where)
+        return issues
+    if not isinstance(contract, dict):
+        return ["%s must be a string or mapping" % where]
+    if "type" not in contract and _is_nonempty_text(contract.get("check")):
+        allowed = frozenset(["check", "method"])
+        issues.extend(_unknown_fields(contract, allowed, where))
+        if "method" in contract and not _is_nonempty_text(contract.get("method")):
+            issues.append("%s method must be non-empty text" % where)
+        return issues
+    allowed = frozenset(["type", "prompt"])
+    issues.extend(_unknown_fields(contract, allowed, where))
+    kind = contract.get("type")
+    if kind not in CONTRACT_TYPES:
+        issues.append("%s has unsupported contract type: %s" % (where, kind))
+    if kind == "acknowledgement" and not _is_nonempty_text(contract.get("prompt")):
+        issues.append("%s acknowledgement requires prompt" % where)
+    return issues
+
+
+def _validate_contracts(value, where):
+    if value is None or value == "":
+        return []
+    contracts = value if isinstance(value, list) else [value]
+    if not contracts:
+        return ["%s must not be empty" % where]
+    issues = []
+    for index, contract in enumerate(contracts, 1):
+        issues.extend(_validate_contract(contract, "%s[%d]" % (where, index)))
+    return issues
 
 
 def validate_recipe(recipe):
@@ -379,53 +523,159 @@ def validate_recipe(recipe):
     """
     issues = []
 
+    if not isinstance(recipe, dict):
+        return ["Recipe document must be a mapping"]
     if recipe.get("_error"):
         issues.append("Parse error: %s" % recipe["_error"])
         return issues
 
+    issues.extend(_canonical_schema_issues(recipe))
+    issues.extend(_unknown_fields(recipe, ROOT_FIELDS, "recipe"))
+
     for field in REQUIRED_FIELDS:
-        if not recipe.get(field):
+        if field not in recipe or recipe.get(field) is None or recipe.get(field) == "":
             issues.append("Missing required field: %s" % field)
 
-    for field in RECOMMENDED_FIELDS:
-        if not recipe.get(field):
-            issues.append("Missing recommended field: %s" % field)
+    if recipe.get("schema_version") != SCHEMA_VERSION:
+        issues.append("schema_version must be %d" % SCHEMA_VERSION)
+    rid = recipe.get("id")
+    if not _is_nonempty_text(rid) or not re.match(r"^[a-z0-9][a-z0-9_]*$", rid or ""):
+        issues.append("id must be lower snake_case")
+    if recipe.get("difficulty") not in ("beginner", "intermediate", "advanced"):
+        issues.append("difficulty must be beginner, intermediate, or advanced")
 
     # Validate steps structure
     steps = recipe.get("steps", [])
-    if isinstance(steps, list):
+    if isinstance(steps, list) and steps:
+        seen_ids = set()
         for i, step in enumerate(steps):
+            where = "Step %d" % (i + 1)
             if not isinstance(step, dict):
-                issues.append("Step %d is not a mapping" % (i + 1))
+                issues.append("%s is not a mapping" % where)
                 continue
-            if not step.get("description") and not step.get("macro"):
-                issues.append("Step %d has no description or macro" % (i + 1))
+            issues.extend(_unknown_fields(step, STEP_FIELDS, where))
+            if not _is_nonempty_text(step.get("description")):
+                issues.append("%s requires description" % where)
+            step_id = step.get("id", i + 1)
+            if step_id in seen_ids:
+                issues.append("%s duplicates step id %s" % (where, step_id))
+            seen_ids.add(step_id)
+            kind = step_type(step)
+            if kind not in STEP_TYPES:
+                issues.append("%s has unsupported or missing type" % where)
+                continue
+            payloads = [key for key in ("macro", "code", "script", "groovy", "file", "instructions")
+                        if _is_nonempty_text(step.get(key))]
+            executable = [key for key in payloads if key != "instructions"]
+            if kind == "manual":
+                if executable:
+                    issues.append("%s manual step cannot contain executable payloads" % where)
+                if not _is_nonempty_text(step.get("instructions") or step.get("notes")):
+                    issues.append("%s manual step requires instructions or notes" % where)
+            elif kind == "macro":
+                macro_payloads = [key for key in ("macro", "code") if key in executable]
+                if len(macro_payloads) != 1 or len(executable) != 1:
+                    issues.append("%s macro step requires exactly one macro/code payload" % where)
+                elif _comment_only(step.get(macro_payloads[0])):
+                    issues.append("%s macro payload contains comments only; use type: manual" % where)
+            elif kind == "script":
+                script_payloads = [key for key in ("script", "groovy", "code", "file") if key in executable]
+                if len(script_payloads) != 1 or len(executable) != 1:
+                    issues.append("%s script step requires exactly one script/groovy/code/file payload" % where)
+                elif script_payloads[0] != "file" and _comment_only(step.get(script_payloads[0])):
+                    issues.append("%s script payload contains comments only" % where)
+                language = str(step.get("language") or ("groovy" if "groovy" in script_payloads else "")).lower()
+                if language not in SCRIPT_LANGUAGES:
+                    issues.append("%s script language is unsupported: %s" % (where, language or "missing"))
+            when = step.get("when")
+            if when is not None:
+                if not isinstance(when, dict):
+                    issues.append("%s when must be a mapping" % where)
+                else:
+                    issues.extend(_unknown_fields(when, frozenset(["parameter", "equals", "not_equals", "in"]), where + ".when"))
+                    if not _is_nonempty_text(when.get("parameter")):
+                        issues.append("%s when requires parameter" % where)
+                    operators = [key for key in ("equals", "not_equals", "in") if key in when]
+                    if len(operators) != 1:
+                        issues.append("%s when requires exactly one operator" % where)
+                    if "in" in when and not isinstance(when.get("in"), list):
+                        issues.append("%s when.in must be a list" % where)
+            if "decision_point" in step and not isinstance(step.get("decision_point"), bool):
+                issues.append("%s decision_point must be boolean" % where)
+            if step.get("decision_point") and not _is_nonempty_text(step.get("decision_logic")):
+                issues.append("%s decision_point requires decision_logic" % where)
+            if "capture_after" in step and not isinstance(step.get("capture_after"), bool):
+                issues.append("%s capture_after must be boolean" % where)
+            timeout = step.get("timeout_seconds")
+            if timeout is not None and (not isinstance(timeout, (int, float)) or isinstance(timeout, bool) or timeout <= 0):
+                issues.append("%s timeout_seconds must be positive" % where)
+            if "validate" in step:
+                issues.extend(_validate_contracts(step.get("validate"), where + ".validate"))
+            if "validation" in step:
+                issues.extend(_validate_contracts(step.get("validation"), where + ".validation"))
     else:
-        issues.append("'steps' should be a list")
+        issues.append("steps must be a non-empty list")
 
     # Validate parameters structure
     params = recipe.get("parameters", [])
+    parameter_names = set()
     if isinstance(params, list):
         for i, p in enumerate(params):
-            if isinstance(p, dict):
-                if not p.get("name"):
-                    issues.append("Parameter %d has no name" % (i + 1))
-                if not p.get("type"):
-                    issues.append("Parameter '%s' has no type" % p.get("name", i + 1))
+            where = "Parameter %d" % (i + 1)
+            if not isinstance(p, dict):
+                issues.append("%s is not a mapping" % where)
+                continue
+            issues.extend(_unknown_fields(p, PARAMETER_FIELDS, where))
+            name = p.get("name")
+            if not _is_nonempty_text(name):
+                issues.append("%s has no name" % where)
+            elif name in parameter_names:
+                issues.append("%s duplicates name %s" % (where, name))
+            else:
+                parameter_names.add(name)
+            ptype = p.get("type")
+            if ptype not in PARAMETER_TYPES:
+                issues.append("Parameter '%s' has unsupported type: %s" % (name or i + 1, ptype))
+            if "default" not in p:
+                issues.append("Parameter '%s' has no default" % (name or i + 1))
+            if ptype == "choice":
+                options = p.get("options")
+                if not isinstance(options, list) or not options:
+                    issues.append("Parameter '%s' choice requires options" % (name or i + 1))
+                elif p.get("default") not in options:
+                    issues.append("Parameter '%s' default is not in options" % (name or i + 1))
+            if "range" in p:
+                bounds = p.get("range")
+                if not isinstance(bounds, list) or len(bounds) != 2 or not all(isinstance(x, (int, float)) for x in bounds):
+                    issues.append("Parameter '%s' range must contain two numbers" % (name or i + 1))
+    else:
+        issues.append("parameters must be a list")
 
     # Validate preconditions
     pre = recipe.get("preconditions", {})
     if isinstance(pre, dict):
+        issues.extend(_unknown_fields(pre, PRECONDITION_FIELDS, "preconditions"))
         img_type = pre.get("image_type")
         if img_type and not isinstance(img_type, list):
             issues.append("preconditions.image_type should be a list")
+        min_channels = pre.get("min_channels")
+        if min_channels is not None and (not isinstance(min_channels, int) or isinstance(min_channels, bool) or min_channels < 0):
+            issues.append("preconditions.min_channels must be a non-negative integer")
+        for key in ("needs_stack", "needs_time", "needs_calibration"):
+            if key in pre and not isinstance(pre.get(key), bool):
+                issues.append("preconditions.%s must be boolean" % key)
+    else:
+        issues.append("preconditions must be a mapping")
 
     # Validate tags
     tags = recipe.get("tags", [])
     if tags and not isinstance(tags, list):
         issues.append("'tags' should be a list")
 
-    return issues
+    issues.extend(_validate_contracts(recipe.get("postconditions"), "postconditions"))
+    issues.extend(_validate_contracts(recipe.get("validation"), "validation"))
+
+    return list(dict.fromkeys(issues))
 
 
 def validate_all(recipe_dir=None):
@@ -440,6 +690,17 @@ def validate_all(recipe_dir=None):
             "valid": len(issues) == 0,
             "issues": issues,
         })
+    ids = {}
+    for result in results:
+        rid = result["id"]
+        if rid == "unknown":
+            continue
+        if rid in ids:
+            issue = "Duplicate recipe id also used by %s" % ids[rid]
+            result["issues"].append(issue)
+            result["valid"] = False
+        else:
+            ids[rid] = result["file"]
     return results
 
 
@@ -505,6 +766,10 @@ def search(query, domain=None, tag=None, image_type=None, recipe_dir=None):
 
     results = []
     for recipe in recipes:
+        # Invalid documents remain visible to --validate but are never ranked
+        # or recommended as runnable workflows.
+        if validate_recipe(recipe):
+            continue
         # Apply filters
         if domain:
             if recipe.get("domain", "").lower() != domain.lower():
@@ -580,25 +845,29 @@ def recommend(image_info=None, task=None, recipe_dir=None):
             if not isinstance(pre, dict):
                 continue
 
+            bonus = 0
+
             # Bonus for matching image type
             allowed = pre.get("image_type", [])
             if isinstance(allowed, list) and image_type:
                 if image_type in allowed:
-                    results[i] = (recipe, score + 3)
+                    bonus += 3
 
             # Bonus for matching channel count
             min_ch = pre.get("min_channels")
             ch = image_info.get("channels", 1)
             if min_ch and ch and ch >= min_ch:
-                results[i] = (recipe, score + 1)
+                bonus += 1
 
             # Bonus/penalty for stack requirement
             needs_stack = pre.get("needs_stack")
             has_stack = image_info.get("slices", 1) > 1
             if needs_stack and has_stack:
-                results[i] = (recipe, score + 2)
+                bonus += 2
             elif needs_stack and not has_stack:
-                results[i] = (recipe, score - 5)
+                bonus -= 5
+
+            results[i] = (recipe, score + bonus)
 
         results.sort(key=lambda x: -x[1])
 
@@ -747,7 +1016,7 @@ def format_recipe_list(recipes):
 # CLI entry point
 # ---------------------------------------------------------------------------
 
-def main():
+def main(argv=None):
     import argparse
 
     parser = argparse.ArgumentParser(description="Search and recommend ImageJ analysis recipes.")
@@ -760,28 +1029,27 @@ def main():
     parser.add_argument("--validate", action="store_true", help="Validate all recipe YAML files")
     parser.add_argument("--json", action="store_true", help="Output as JSON")
     parser.add_argument("--recipe-dir", help="Override recipe directory path")
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     recipe_dir = args.recipe_dir
 
     if args.validate:
         results = validate_all(recipe_dir)
+        all_valid = bool(results) and all(r["valid"] for r in results)
         if args.json:
             print(json.dumps(results, indent=2))
         else:
-            all_valid = True
             for r in results:
                 status = "OK" if r["valid"] else "ISSUES"
                 print("  [%s] %s (%s)" % (status, r["file"], r["id"]))
                 if r["issues"]:
-                    all_valid = False
                     for issue in r["issues"]:
                         print("        - %s" % issue)
             if all_valid:
                 print("\n  All %d recipes are valid." % len(results))
             else:
-                print("\n  Some recipes have issues.")
-        return
+                print("\n  Recipe validation failed.")
+        return 0 if all_valid else 1
 
     if args.show:
         recipes = load_all_recipes(recipe_dir)
@@ -799,13 +1067,13 @@ def main():
             print("Recipe '%s' not found. Available IDs:" % args.show)
             for r in recipes:
                 print("  - %s" % r.get("id", r.get("_source_file", "?")))
-        return
+        return 0 if found else 1
 
     if args.list:
         recipes = load_all_recipes(recipe_dir)
         if not recipes:
             print("No recipes found in %s" % ", ".join(recipe_directories(recipe_dir)))
-            return
+            return 1
         if args.json:
             summary = [{"id": r.get("id"), "name": r.get("name"), "domain": r.get("domain"),
                          "difficulty": r.get("difficulty"), "tags": r.get("tags", [])}
@@ -813,20 +1081,20 @@ def main():
             print(json.dumps(summary, indent=2))
         else:
             print(format_recipe_list(recipes))
-        return
+        return 0
 
     # Search
     query = " ".join(args.query) if args.query else ""
     if not query and not args.domain and not args.tag and not args.image_type:
         parser.print_help()
-        return
+        return 2
 
     results = search(query, domain=args.domain, tag=args.tag,
                      image_type=args.image_type, recipe_dir=recipe_dir)
 
     if not results:
         print("No recipes found matching '%s'." % query)
-        return
+        return 1
 
     if args.json:
         output = [{"id": r.get("id"), "name": r.get("name"), "score": s,
@@ -840,7 +1108,8 @@ def main():
             top = results[0][0]
             print("  Top match:")
             print(format_recipe(top))
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

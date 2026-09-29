@@ -1,3 +1,4 @@
+schema_version: 1
 name: Remove Drift Correction Borders
 id: remove_drift_borders
 description: >
@@ -60,10 +61,9 @@ steps:
       the original (not the already-cropped image).
 
 agent_instructions: >
-  Run via: python ij.py script --file scripts/remove_drift_borders.groovy
-
-  To change parameters, edit the top of the Groovy script (detectChannel,
-  scanStep, safetyMargin).
+  Run via: python run_recipe.py remove_drift_borders. The canonical runner
+  validates and substitutes detect_channel, scan_step, and safety_margin
+  before sending the bundled Groovy file to Fiji.
 
   After running, capture a few frames (first, middle, last) and visually
   confirm no black borders remain.

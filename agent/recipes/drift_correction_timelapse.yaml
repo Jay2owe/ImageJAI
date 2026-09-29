@@ -1,3 +1,4 @@
+schema_version: 1
 name: Time-Lapse Drift Correction (Channel-Based Registration)
 id: drift_correction_timelapse
 description: >
@@ -70,7 +71,8 @@ parameters:
 steps:
   - id: 1
     description: "Check the input image and identify channels"
-    decision_point: >
+    decision_point: true
+    decision_logic: >
       Inspect each channel to determine which has stable landmarks and which has
       moving objects. For RGB: split channels temporarily and compare. The stable
       channel should show tissue texture, scratches, or fixed structures that do
@@ -117,7 +119,8 @@ steps:
 
   - id: 4
     description: "Verify registration quality"
-    decision_point: >
+    decision_point: true
+    decision_logic: >
       Scroll through the registered time series. The background tissue should be
       stable while the fluorescent cells show natural movement. Check edges for
       black padding from the shifts — this is normal and can be cropped. Compare

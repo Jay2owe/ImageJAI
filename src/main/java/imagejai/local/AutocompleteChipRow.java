@@ -47,6 +47,10 @@ public class AutocompleteChipRow extends JPanel {
         removeAll();
         for (final RankedPhrase candidate : candidates) {
             JButton chip = new JButton(candidate.phrase());
+            chip.getAccessibleContext().setAccessibleName(
+                    "Suggested message: " + candidate.phrase());
+            chip.getAccessibleContext().setAccessibleDescription(
+                    "Insert this Local Assistant suggestion into the chat editor.");
             chip.setFocusPainted(false);
             chip.setBorderPainted(false);
             chip.setBackground(CHIP_BG);

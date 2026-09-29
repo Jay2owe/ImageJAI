@@ -9,7 +9,7 @@
         "px size",
         "calibration",
         "what is the pixel size",
-        "what's the pixel size",
+        "what s the pixel size",
         "spatial resolution",
         "how big are the pixels",
         "show pixel size",
@@ -125,7 +125,7 @@
       "description": "Report the active image bit depth",
       "phrases": [
         "bit depth",
-        "what's the bit depth",
+        "what s the bit depth",
         "is this 8 bit or 16 bit",
         "image bit depth",
         "bit depth command",
@@ -763,6 +763,13 @@
       ]
     },
     {
+      "id": "image.next_open_image",
+      "description": "Switch to the next open image",
+      "phrases": [
+        "the next image"
+      ]
+    },
+    {
       "id": "image.previous_slice",
       "description": "Move the active image to the previous slice",
       "phrases": [
@@ -1177,7 +1184,7 @@
       "phrases": [
         "make substack",
         "extract slices 4 to 12",
-        "make substack slices 5-20",
+        "make substack slices 5 20",
         "extract frames 1 to 5",
         "can i get frames 50 100 as a new image",
         "can i get just slice 1",
@@ -1293,7 +1300,7 @@
       "phrases": [
         "scale image by 2",
         "resize to half",
-        "scale by 0.5",
+        "scale by 0 5",
         "resize by factor 2"
       ]
     },
@@ -1368,7 +1375,7 @@
         "convert to 8 bit",
         "make 8 bit",
         "8 bit image",
-        "convert image to 8-bit"
+        "convert image to 8 bit"
       ]
     },
     {
@@ -1378,7 +1385,7 @@
         "convert to 16 bit",
         "make 16 bit",
         "16 bit image",
-        "convert image to 16-bit"
+        "convert image to 16 bit"
       ]
     },
     {
@@ -1388,7 +1395,7 @@
         "convert to 32 bit",
         "make 32 bit",
         "32 bit image",
-        "convert image to 32-bit"
+        "convert image to 32 bit"
       ]
     },
     {

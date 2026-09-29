@@ -160,18 +160,18 @@ public final class AuditRow {
             throw new IllegalArgumentException("Expected 12 audit columns, got " + cells.size());
         }
         return new AuditRow(
-                parseInstant(cells.get(0)),
-                cells.get(1),
-                cells.get(2),
-                parsePosture(cells.get(3)),
-                cells.get(4),
-                cells.get(5),
-                parseInt(cells.get(6)),
-                parseInt(cells.get(7)),
-                cells.get(8),
-                Boolean.parseBoolean(cells.get(9)),
-                splitFields(cells.get(10)),
-                cells.get(11));
+                parseInstant(unprotectFormula(cells.get(0))),
+                unprotectFormula(cells.get(1)),
+                unprotectFormula(cells.get(2)),
+                parsePosture(unprotectFormula(cells.get(3))),
+                unprotectFormula(cells.get(4)),
+                unprotectFormula(cells.get(5)),
+                parseInt(unprotectFormula(cells.get(6))),
+                parseInt(unprotectFormula(cells.get(7))),
+                unprotectFormula(cells.get(8)),
+                parseBoolean(unprotectFormula(cells.get(9))),
+                splitFields(unprotectFormula(cells.get(10))),
+                unprotectFormula(cells.get(11)));
     }
 
     public static String capRedactedPayload(String value) {
@@ -203,6 +203,8 @@ public final class AuditRow {
         List<String> cells = new ArrayList<String>();
         StringBuilder cell = new StringBuilder();
         boolean quoted = false;
+        boolean quoteClosed = false;
+        boolean atCellStart = true;
         String input = line == null ? "" : line;
         for (int i = 0; i < input.length(); i++) {
             char c = input.charAt(i);
@@ -213,19 +215,35 @@ public final class AuditRow {
                         i++;
                     } else {
                         quoted = false;
+                        quoteClosed = true;
                     }
                 } else {
                     cell.append(c);
                 }
-            } else if (c == '"') {
+            } else if (quoteClosed) {
+                if (c == ',') {
+                    cells.add(cell.toString());
+                    cell.setLength(0);
+                    quoteClosed = false;
+                    atCellStart = true;
+                } else if (c != '\r' && c != '\n') {
+                    throw new IllegalArgumentException("unexpected character after closing quote");
+                }
+            } else if (c == '"' && atCellStart) {
                 quoted = true;
+                atCellStart = false;
+            } else if (c == '"') {
+                throw new IllegalArgumentException("quote inside unquoted field");
             } else if (c == ',') {
                 cells.add(cell.toString());
                 cell.setLength(0);
+                atCellStart = true;
             } else if (c != '\r' && c != '\n') {
                 cell.append(c);
+                atCellStart = false;
             }
         }
+        if (quoted) throw new IllegalArgumentException("unterminated quoted field");
         cells.add(cell.toString());
         return cells;
     }
@@ -234,7 +252,7 @@ public final class AuditRow {
         try {
             return Instant.parse(value);
         } catch (Exception e) {
-            return Instant.EPOCH;
+            throw new IllegalArgumentException("invalid timestamp", e);
         }
     }
 
@@ -247,15 +265,23 @@ public final class AuditRow {
                 }
             }
         }
-        return PrivacyPosture.defaultPosture();
+        throw new IllegalArgumentException("invalid privacy posture: " + value);
     }
 
     private static int parseInt(String value) {
         try {
-            return Integer.parseInt(value == null ? "" : value.trim());
+            int parsed = Integer.parseInt(value == null ? "" : value.trim());
+            if (parsed < 0) throw new NumberFormatException("negative");
+            return parsed;
         } catch (Exception e) {
-            return 0;
+            throw new IllegalArgumentException("invalid non-negative integer: " + value, e);
         }
+    }
+
+    private static boolean parseBoolean(String value) {
+        if ("true".equalsIgnoreCase(value)) return true;
+        if ("false".equalsIgnoreCase(value)) return false;
+        throw new IllegalArgumentException("invalid boolean: " + value);
     }
 
     private static List<String> splitFields(String value) {
@@ -289,12 +315,26 @@ public final class AuditRow {
 
     private static String csv(String value) {
         String v = safe(value);
+        if (!v.isEmpty() && (v.charAt(0) == '=' || v.charAt(0) == '+'
+                || v.charAt(0) == '-' || v.charAt(0) == '@')) {
+            v = "'" + v;
+        }
         boolean quote = v.contains(",") || v.contains("\"")
                 || v.contains("\n") || v.contains("\r");
         if (!quote) {
             return v;
         }
         return "\"" + v.replace("\"", "\"\"") + "\"";
+    }
+
+    private static String unprotectFormula(String value) {
+        if (value != null && value.length() > 1 && value.charAt(0) == '\'') {
+            char next = value.charAt(1);
+            if (next == '=' || next == '+' || next == '-' || next == '@') {
+                return value.substring(1);
+            }
+        }
+        return value;
     }
 
     private static List<String> immutableCleanList(List<String> values) {

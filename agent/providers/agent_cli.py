@@ -31,8 +31,10 @@ import json
 import os
 import sys
 from typing import Any, Callable
+from urllib.parse import urlparse
 
-from agent.providers.router import PROVIDER_KEYS, get_client
+from agent.providers.base import HOST_CODE_CAPABILITY, ProviderToolPolicy
+from agent.providers.router import PROVIDER_KEYS, get_client, provider_tool_policy
 
 try:  # pragma: no cover - exercised when the contexts package is importable
     from agent.contexts.loader import load_context
@@ -132,7 +134,6 @@ def probe_plugin(plugin: str) -> str:
 
 FIJI_TOOLS: list[Callable[..., Any]] = [
     run_macro,
-    run_script,
     get_state,
     get_image_info,
     get_results,
@@ -146,7 +147,15 @@ FIJI_TOOLS: list[Callable[..., Any]] = [
     probe_plugin,
 ]
 
-TOOL_MAP: dict[str, Callable[..., Any]] = {fn.__name__: fn for fn in FIJI_TOOLS}
+# Host-code primitives are deliberately absent from the legacy provider
+# surface unless the router has classified the provider as local *and* the
+# caller explicitly enabled the host_code capability.  This fallback path is
+# still reachable when the rich wrapper cannot be imported, so schema omission
+# is backed by a dispatch check rather than treated as a sufficient boundary.
+_LOCAL_HOST_CODE_TOOLS: tuple[Callable[..., Any], ...] = (run_script,)
+TOOL_MAP: dict[str, Callable[..., Any]] = {
+    fn.__name__: fn for fn in FIJI_TOOLS
+}
 
 _MAX_TOOL_ROUNDS = 16
 
@@ -158,7 +167,11 @@ _MAX_TOOL_ROUNDS = 16
 _OLLAMA_PROVIDERS = frozenset({"ollama", "ollama-cloud"})
 
 
-def _run_ollama_wrapper(provider: str, model: str) -> int:
+def _run_ollama_wrapper(
+    provider: str,
+    model: str,
+    opts: dict[str, Any] | None = None,
+) -> int:
     """Delegate an Ollama model to the gemma4_31b wrapper loop.
 
     Returns the wrapper's exit code. Raises ImportError if the wrapper package
@@ -172,6 +185,9 @@ def _run_ollama_wrapper(provider: str, model: str) -> int:
         argv += ["--provider", provider.strip()]
     if model and model.strip():
         argv += ["--model", model.strip()]
+    capabilities = set((opts or {}).get("capabilities") or ())
+    if HOST_CODE_CAPABILITY in capabilities:
+        argv.append("--allow-local-host-code")
     return gemma_main(argv)
 
 
@@ -231,6 +247,73 @@ def _native_opts() -> dict[str, Any]:
     return opts
 
 
+_LOCAL_HOST_CODE_ENV = "IMAGEJAI_ALLOW_LOCAL_HOST_CODE"
+_TRUE_ENV_VALUES = frozenset({"1", "true", "yes", "on"})
+_FALSE_ENV_VALUES = frozenset({"", "0", "false", "no", "off"})
+
+
+def _strict_env_bool(name: str) -> bool:
+    """Parse one security-sensitive boolean without typo-to-false behavior."""
+
+    raw = os.environ.get(name)
+    if raw is None:
+        return False
+    value = raw.strip().lower()
+    if value in _TRUE_ENV_VALUES:
+        return True
+    if value in _FALSE_ENV_VALUES:
+        return False
+    raise ValueError(
+        "{} must be one of 1/true/yes/on or 0/false/no/off".format(name)
+    )
+
+
+def _local_host_code_opts(
+    provider: str,
+    *,
+    explicit_grant: bool = False,
+) -> dict[str, Any]:
+    """Return a host-code capability only for an explicitly trusted local provider.
+
+    The CLI flag and environment variable are launcher/user inputs, never model
+    inputs.  Even an explicit request fails closed for cloud providers.
+    """
+
+    env_grant = _strict_env_bool(_LOCAL_HOST_CODE_ENV)
+    requested = bool(explicit_grant) or env_grant
+    if not requested:
+        return {}
+    policy = provider_tool_policy(provider)
+    if not policy.is_local:
+        raise ValueError(
+            "local host-code permission cannot be granted to cloud provider {!r}".format(
+                provider
+            )
+        )
+    if provider == "ollama":
+        endpoint = os.environ.get("OLLAMA_HOST", "").strip()
+        if endpoint:
+            try:
+                hostname = urlparse(endpoint).hostname
+            except ValueError:
+                hostname = None
+            if hostname not in {"localhost", "127.0.0.1", "::1"}:
+                raise ValueError(
+                    "local host-code permission requires a loopback OLLAMA_HOST"
+                )
+    return {"capabilities": [HOST_CODE_CAPABILITY]}
+
+
+def _provider_opts(provider: str, *, explicit_host_code: bool = False) -> dict[str, Any]:
+    """Compose native-provider options with the trusted-local permission."""
+
+    opts = _native_opts()
+    opts.update(
+        _local_host_code_opts(provider, explicit_grant=explicit_host_code)
+    )
+    return opts
+
+
 def _env_true(name: str) -> bool:
     return os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
 
@@ -286,10 +369,28 @@ def _short(args: Any, limit: int = 200) -> str:
     return text if len(text) <= limit else text[: limit - 1] + "…"
 
 
-def _dispatch(call: Any) -> str:
+def _tools_for_client(client: Any) -> list[Callable[..., Any]]:
+    """Return the fail-closed legacy tool surface for one routed client."""
+
+    policy = getattr(client, "tool_policy", None)
+    if not isinstance(policy, ProviderToolPolicy):
+        policy = ProviderToolPolicy()
+    tools = list(FIJI_TOOLS)
+    if policy.is_local and policy.has_capability(HOST_CODE_CAPABILITY):
+        tools.extend(_LOCAL_HOST_CODE_TOOLS)
+    return tools
+
+
+def _dispatch(
+    call: Any,
+    allowed_tools: dict[str, Callable[..., Any]] | None = None,
+) -> str:
     """Run one tool call, returning a string result (never raising)."""
 
-    fn = TOOL_MAP.get(call.name)
+    # The default is the least-privileged surface.  Callers must pass a map
+    # derived from a trusted local policy to dispatch host code.
+    permitted = TOOL_MAP if allowed_tools is None else allowed_tools
+    fn = permitted.get(call.name)
     if fn is None:
         return f"ERROR: unknown tool '{call.name}'"
     if call.error:
@@ -386,6 +487,8 @@ def run_turn(client: Any, model: str, messages: list[dict[str, Any]],
              guard: "_BudgetGuard | None" = None) -> str:
     """Drive one user turn to completion: model → tools → … → final text."""
 
+    tools = _tools_for_client(client)
+    allowed_tools = {fn.__name__: fn for fn in tools}
     for _ in range(max_rounds):
         if guard is not None and guard.exceeded():
             emit(f"[budget] ceiling ${guard.ceiling_usd:.2f} reached "
@@ -393,7 +496,7 @@ def run_turn(client: Any, model: str, messages: list[dict[str, Any]],
                  f"call — type /resume to raise the ceiling, or /exit to stop.")
             return ""
         try:
-            response = client.chat(messages, FIJI_TOOLS, model)
+            response = client.chat(messages, tools, model)
         except Exception as exc:
             emit(f"[error] model call failed: {type(exc).__name__}: {exc}")
             return ""
@@ -406,7 +509,7 @@ def run_turn(client: Any, model: str, messages: list[dict[str, Any]],
             return text
         for call in calls:
             emit(f"[tool] {call.name}({_short(call.args)})")
-            result = _dispatch(call)
+            result = _dispatch(call, allowed_tools)
             client.append_tool_result(messages, call, result)
     emit("[note] reached the tool-round limit for this turn; ask me to continue.")
     return ""
@@ -466,6 +569,14 @@ def main(argv: list[str] | None = None) -> int:
                         help="canonical provider key, e.g. groq, anthropic, gemini")
     parser.add_argument("--model", default=os.environ.get("IMAGEJAI_MODEL"),
                         help="model id, e.g. llama-3.3-70b-versatile")
+    parser.add_argument(
+        "--allow-local-host-code",
+        action="store_true",
+        help=(
+            "Expose run_shell, run_script, and saved-recipe execution to a "
+            "trusted local provider. Rejected for every cloud provider."
+        ),
+    )
     args = parser.parse_args(argv)
 
     provider = (args.provider or "").strip()
@@ -475,20 +586,30 @@ def main(argv: list[str] | None = None) -> int:
               "IMAGEJAI_MODEL) are required", file=sys.stderr)
         return 2
 
-    if provider.lower() in _OLLAMA_PROVIDERS:
-        try:
-            return _run_ollama_wrapper(provider, model)
-        except ImportError as exc:
-            print(f"warning: gemma4_31b wrapper unavailable ({exc}); falling "
-                  f"back to the provider-client loop for {provider}/{model}",
-                  file=sys.stderr)
-
-    if provider not in PROVIDER_KEYS:
+    provider_key = provider.lower()
+    if provider_key not in PROVIDER_KEYS:
         print(f"error: unknown provider {provider!r}; known: "
               f"{', '.join(PROVIDER_KEYS)}", file=sys.stderr)
         return 2
 
-    return _run_rich_provider_wrapper(provider, model, _native_opts())
+    try:
+        opts = _provider_opts(
+            provider_key,
+            explicit_host_code=args.allow_local_host_code,
+        )
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+
+    if provider_key in _OLLAMA_PROVIDERS:
+        try:
+            return _run_ollama_wrapper(provider_key, model, opts)
+        except ImportError as exc:
+            print(f"warning: gemma4_31b wrapper unavailable ({exc}); falling "
+                  f"back to the provider-client loop for {provider_key}/{model}",
+                  file=sys.stderr)
+
+    return _run_rich_provider_wrapper(provider_key, model, opts)
 
 
 if __name__ == "__main__":

@@ -1,0 +1,279 @@
+name: Upload To Fiji Update Site
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Simulate the updater upload without changing the update site"
+        required: true
+        type: boolean
+        default: true
+      clear_stale_lock:
+        description: "Delete db.xml.gz.lock before upload using the WebDAV credentials"
+        required: true
+        type: boolean
+        default: false
+      confirm_live_upload:
+        description: "Required when dry_run=false: type UPLOAD ImageJ-AI"
+        required: false
+        type: string
+        default: ""
+
+concurrency:
+  group: imagejai-update-site-upload
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  upload:
+    name: Build and upload
+    runs-on: ubuntu-latest
+    environment: fiji-update-site
+
+    env:
+      FIJI_DOWNLOAD_URL: "https://downloads.imagej.net/fiji/latest/fiji-latest-linux64-jdk.zip"
+      IMAGEJ_UPDATE_SITE_NAME: "ImageJ-AI"
+      IMAGEJ_UPDATE_SITE_URL: "https://sites.imagej.net/ImageJ-AI/"
+      IMAGEJ_UPLOAD_USER: ${{ secrets.IMAGEJ_UPLOAD_USER }}
+      IMAGEJ_UPLOAD_PASSWORD: ${{ secrets.IMAGEJ_UPLOAD_PASSWORD }}
+      DEFAULT_UPLOAD_USER: ""
+      ARTIFACT_GLOB: "target/imagej-ai-*.jar"
+      INSTALL_DIR: "plugins"
+      ARTIFACT_NAME: ""
+      REPLACE_GLOB: "plugins/imagej-ai-*.jar"
+      UPLOAD_MODE: "single-file"
+      LIVE_UPLOAD_CONFIRMATION: "UPLOAD ImageJ-AI"
+      LIVE_CONFIRMATION_INPUT: ${{ inputs.confirm_live_upload }}
+      DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run || 'false' }}
+      CLEAR_STALE_LOCK: ${{ github.event_name == 'workflow_dispatch' && inputs.clear_stale_lock || 'false' }}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set default upload user
+        shell: bash
+        run: |
+          if [ -z "$IMAGEJ_UPLOAD_USER" ] && [ -n "$DEFAULT_UPLOAD_USER" ]; then
+            echo "IMAGEJ_UPLOAD_USER=$DEFAULT_UPLOAD_USER" >> "$GITHUB_ENV"
+          fi
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: "temurin"
+          java-version: "25"
+          cache: maven
+
+      - name: Validate secrets
+        shell: bash
+        run: |
+          test -n "$IMAGEJ_UPLOAD_USER" || {
+            echo "Missing upload user. Set IMAGEJ_UPLOAD_USER, or regenerate with --default-upload-user."
+            exit 1
+          }
+          test -n "$IMAGEJ_UPLOAD_PASSWORD" || {
+            echo "Missing repository secret: IMAGEJ_UPLOAD_PASSWORD"
+            exit 1
+          }
+
+      - name: Require live upload confirmation
+        shell: bash
+        run: |
+          if [ "$DRY_RUN" != "true" ] && [ "$LIVE_CONFIRMATION_INPUT" != "$LIVE_UPLOAD_CONFIRMATION" ]; then
+            echo "Live update-site upload blocked. Re-run with confirm_live_upload set to: $LIVE_UPLOAD_CONFIRMATION"
+            exit 1
+          fi
+
+      - name: Build and test
+        shell: bash
+        run: |
+          mvn -B clean test -Denforcer.skip=true
+
+      - name: Build plugin artifact
+        shell: bash
+        run: |
+          mvn -B clean package -DskipTests -Denforcer.skip=true
+
+      - name: Download Fiji
+        shell: bash
+        run: |
+          curl -fsSL "$FIJI_DOWNLOAD_URL" -o fiji-linux64.zip
+          unzip -q fiji-linux64.zip
+          FIJI_DIR="$(find . -maxdepth 5 -type f \( -name "ImageJ*linux64*" -o -name "ImageJ2*linux64*" -o -name "fiji-linux-x64" \) -printf "%h\n" | head -n 1)"
+          if [ -z "$FIJI_DIR" ]; then
+            FIJI_DIR="$(find . -maxdepth 4 -type d -name "*.app" -print -quit)"
+          fi
+          if [ -z "$FIJI_DIR" ]; then
+            echo "Could not locate extracted Fiji/ImageJ directory."
+            unzip -Z1 fiji-linux64.zip | head -n 80
+            exit 1
+          fi
+          if [ "$FIJI_DIR" != "./Fiji.app" ]; then
+            mv "$FIJI_DIR" ./Fiji.app
+          fi
+          FIJI_LAUNCHER="$(find Fiji.app -maxdepth 2 -type f \( -name "ImageJ*linux64*" -o -name "ImageJ2*linux64*" -o -name "fiji-linux-x64" \) -print -quit)"
+          test -n "$FIJI_LAUNCHER" || {
+            echo "Could not locate the Fiji Linux launcher."
+            find Fiji.app -maxdepth 2 -type f | sort | head -n 80
+            exit 1
+          }
+          chmod +x "$FIJI_LAUNCHER"
+          echo "FIJI_LAUNCHER=$FIJI_LAUNCHER" >> "$GITHUB_ENV"
+          find Fiji.app -maxdepth 2 -type f \( -name "ImageJ*linux64*" -o -name "ImageJ2*linux64*" -o -name "fiji-linux-x64" \) -print
+
+      - name: Check or clear remote lock
+        shell: bash
+        run: |
+          lock_url="${IMAGEJ_UPDATE_SITE_URL%/}/db.xml.gz.lock"
+          status="$(curl -L -s -o /dev/null -w "%{http_code}" -I "$lock_url" || true)"
+          if [ "$status" = "404" ]; then
+            echo "No remote lock exists at $lock_url"
+            exit 0
+          fi
+          if [ "$status" != "200" ]; then
+            echo "Unexpected status for $lock_url: HTTP $status"
+            exit 1
+          fi
+          if [ "$CLEAR_STALE_LOCK" != "true" ]; then
+            echo "Remote lock exists at $lock_url. Rerun with clear_stale_lock=true only if you are sure no upload is active."
+            exit 1
+          fi
+          delete_status="$(curl -L -s -o /dev/null -w "%{http_code}" -u "$IMAGEJ_UPLOAD_USER:$IMAGEJ_UPLOAD_PASSWORD" -X DELETE "$lock_url" || true)"
+          if [ "$delete_status" != "200" ] && [ "$delete_status" != "204" ] && [ "$delete_status" != "404" ]; then
+            echo "Could not delete remote lock. HTTP $delete_status"
+            exit 1
+          fi
+          echo "Remote lock cleared or absent."
+
+      - name: Stage artifact into Fiji
+        shell: bash
+        run: |
+          mapfile -t artifacts < <(compgen -G "$ARTIFACT_GLOB" | grep -Ev '(-sources|-tests)\.jar$' || true)
+          if [ "${#artifacts[@]}" -ne 1 ]; then
+            printf 'Expected exactly one uploadable artifact for %s, found %s\n' "$ARTIFACT_GLOB" "${#artifacts[@]}"
+            printf '%s\n' "${artifacts[@]}"
+            exit 1
+          fi
+
+          artifact="${artifacts[0]}"
+          if [ -n "$REPLACE_GLOB" ]; then
+            mapfile -t old_files < <(compgen -G "Fiji.app/$REPLACE_GLOB" || true)
+            for old_file in "${old_files[@]}"; do
+              rm -f "$old_file"
+            done
+          fi
+
+          install_name="$ARTIFACT_NAME"
+          if [ -z "$install_name" ]; then
+            install_name="$(basename "$artifact")"
+          fi
+          mkdir -p "Fiji.app/$INSTALL_DIR"
+          cp "$artifact" "Fiji.app/$INSTALL_DIR/$install_name"
+          echo "RELATIVE_TARGET=$INSTALL_DIR/$install_name" >> "$GITHUB_ENV"
+          find Fiji.app/plugins Fiji.app/jars Fiji.app/scripts -maxdepth 2 -type f 2>/dev/null | sort
+
+      - name: Configure update site metadata
+        shell: bash
+        run: |
+          "$FIJI_LAUNCHER" --update edit-update-site "$IMAGEJ_UPDATE_SITE_NAME" "$IMAGEJ_UPDATE_SITE_URL" "webdav:$IMAGEJ_UPLOAD_USER:$IMAGEJ_UPLOAD_PASSWORD" .
+          "$FIJI_LAUNCHER" --update update
+
+      - name: Upload to Fiji update site
+        shell: bash
+        run: |
+          if [ "$UPLOAD_MODE" = "single-file" ]; then
+            if [ "$DRY_RUN" = "true" ]; then
+              upload_args=(--update upload --simulate --update-site "$IMAGEJ_UPDATE_SITE_NAME" --force-shadow --forget-missing-dependencies "$RELATIVE_TARGET")
+              echo "Running simulated upload for $RELATIVE_TARGET"
+            else
+              upload_args=(--update upload --update-site "$IMAGEJ_UPDATE_SITE_NAME" --force-shadow --forget-missing-dependencies "$RELATIVE_TARGET")
+              echo "Uploading $RELATIVE_TARGET to $IMAGEJ_UPDATE_SITE_NAME"
+            fi
+          else
+            if [ "$DRY_RUN" = "true" ]; then
+              upload_args=(--update upload-complete-site --simulate --force --force-shadow "$IMAGEJ_UPDATE_SITE_NAME")
+              echo "Running simulated complete-site upload"
+            else
+              upload_args=(--update upload-complete-site --force --force-shadow "$IMAGEJ_UPDATE_SITE_NAME")
+              echo "Running complete-site upload to $IMAGEJ_UPDATE_SITE_NAME"
+            fi
+          fi
+          upload_log="$(mktemp)"
+          "$FIJI_LAUNCHER" "${upload_args[@]}" 2>&1 | tee "$upload_log"
+          if grep -q '\[ERROR\]' "$upload_log"; then
+            echo "The ImageJ updater reported an error."
+            exit 1
+          fi
+          if [ "$DRY_RUN" = "true" ]; then
+            if ! grep -Fq "Would upload '$RELATIVE_TARGET'" "$upload_log"; then
+              echo "The updater did not schedule the expected JAR for upload."
+              exit 1
+            fi
+            echo "Dry run complete. No files were uploaded."
+          else
+            echo "Upload complete."
+          fi
+
+      - name: Verify hosted JAR
+        if: ${{ !inputs.dry_run }}
+        shell: bash
+        run: |
+          python - <<'PY'
+          import gzip
+          import hashlib
+          import os
+          import pathlib
+          import time
+          import urllib.error
+          import urllib.request
+          import xml.etree.ElementTree as ET
+
+          site = os.environ["IMAGEJ_UPDATE_SITE_URL"].rstrip("/") + "/"
+          target = os.environ["RELATIVE_TARGET"]
+          expected = hashlib.sha256((pathlib.Path("Fiji.app") / target).read_bytes()).hexdigest()
+          record = None
+          for attempt in range(6):
+              with urllib.request.urlopen(site + "db.xml.gz", timeout=30) as response:
+                  root = ET.fromstring(gzip.decompress(response.read()))
+              records = [p for p in root.findall("plugin") if p.get("filename") == target]
+              if len(records) == 1 and records[0].find("version") is not None:
+                  record = records[0]
+                  break
+              time.sleep(5)
+          if record is None:
+              raise SystemExit("Hosted update-site index does not list the uploaded JAR")
+          others = [p.get("filename", "") for p in root.findall("plugin")
+                    if p.get("filename", "").startswith("plugins/imagej-ai-")
+                    and p.get("filename") != target]
+          if others:
+              raise SystemExit("Unexpected current ImageJAI JARs: " + ", ".join(others))
+          timestamp = record.find("version").get("timestamp")
+          if not timestamp or not timestamp.isdigit():
+              raise SystemExit("Hosted update-site index has no artifact timestamp")
+          with urllib.request.urlopen(site + target + "-" + timestamp, timeout=60) as response:
+              actual = hashlib.sha256(response.read()).hexdigest()
+          if actual != expected:
+              raise SystemExit("Hosted artifact SHA-256 differs from tested build")
+          request = urllib.request.Request(site + "db.xml.gz.lock", method="HEAD")
+          try:
+              urllib.request.urlopen(request, timeout=30)
+          except urllib.error.HTTPError as error:
+              if error.code != 404:
+                  raise
+          else:
+              raise SystemExit("Update-site lock remains after upload")
+          print(f"Verified hosted {target}: SHA-256 {actual}")
+          PY
+
+      - name: Upload built artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: imagejai-uploaded-artifact
+          path: |
+            target/imagej-ai-*.jar
+            !target/*-sources.jar
+            !target/*-tests.jar
+          if-no-files-found: error

@@ -31,6 +31,6 @@ public enum PrivacyPosture {
     }
 
     public static PrivacyPosture defaultPosture() {
-        return PSEUDONYMISED;
+        return STANDARD;
     }
 }

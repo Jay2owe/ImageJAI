@@ -196,6 +196,8 @@ public final class BrowseFilesDialog extends JDialog {
 
         installListeners();
         setSize(920, 560);
+        UiScrollSupport.fitToScreen(this);
+        setResizable(true);
         setLocationRelativeTo(owner);
         scanAsync();
     }

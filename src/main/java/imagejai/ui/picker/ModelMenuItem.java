@@ -2,8 +2,12 @@ package imagejai.ui.picker;
 
 import imagejai.engine.picker.ModelEntry;
 import imagejai.engine.picker.SoftDeprecationPolicy;
+import imagejai.ui.ThemeColors;
 
 import javax.swing.JMenuItem;
+import javax.swing.AbstractAction;
+import javax.swing.JComponent;
+import javax.swing.KeyStroke;
 import javax.swing.UIManager;
 import java.awt.Color;
 import java.awt.Dimension;
@@ -15,6 +19,9 @@ import java.awt.RenderingHints;
 import java.awt.event.MouseAdapter;
 import java.awt.event.MouseEvent;
 import java.awt.event.MouseMotionAdapter;
+import java.awt.event.ActionEvent;
+import java.awt.event.InputEvent;
+import java.awt.event.KeyEvent;
 import java.awt.font.TextAttribute;
 import java.time.LocalDate;
 import java.time.format.DateTimeFormatter;
@@ -70,8 +77,11 @@ public class ModelMenuItem extends JMenuItem {
         this.statusIcon = statusIcon == null ? ProviderStatusIcon.READY : statusIcon;
         this.pinToggleListener = pinToggleListener;
         this.statusClickListener = statusClickListener;
+        setFocusable(true);
         setPreferredSize(new Dimension(380, ROW_HEIGHT));
         setOpaque(true);
+        setBackground(ThemeColors.menuBackground());
+        setForeground(ThemeColors.menuTextOn(getBackground(), false));
         // Hover-card replaces the Swing tooltip; for soft-deprecated rows we
         // surface the "no longer available since X" copy via an HTML tooltip
         // so screen readers still get the key date even with HoverCard down.
@@ -79,6 +89,8 @@ public class ModelMenuItem extends JMenuItem {
         // are appended so screen-reader users get the headline before the
         // hover-card opens.
         setToolTipText(composeTooltip(entry, LocalDate.now()));
+        updateAccessibleText();
+        installKeyboardActions();
         addMouseMotionListener(new MouseMotionAdapter() {
             @Override
             public void mouseMoved(MouseEvent e) {
@@ -130,14 +142,49 @@ public class ModelMenuItem extends JMenuItem {
 
     public void setStatusIcon(ProviderStatusIcon statusIcon) {
         this.statusIcon = statusIcon == null ? ProviderStatusIcon.READY : statusIcon;
+        updateAccessibleText();
         repaint();
     }
 
     void togglePin() {
         pinned = !pinned;
+        updateAccessibleText();
         if (pinToggleListener != null) {
             pinToggleListener.onPinToggled(entry, pinned);
         }
+    }
+
+    boolean activateStatusAction() {
+        return statusClickListener != null
+                && statusClickListener.onStatusIconClicked(entry, statusIcon);
+    }
+
+    private void installKeyboardActions() {
+        getInputMap(JComponent.WHEN_FOCUSED).put(
+                KeyStroke.getKeyStroke(KeyEvent.VK_P, InputEvent.CTRL_DOWN_MASK),
+                "toggleModelPin");
+        getActionMap().put("toggleModelPin", new AbstractAction() {
+            @Override public void actionPerformed(ActionEvent e) { togglePin(); }
+        });
+        getInputMap(JComponent.WHEN_FOCUSED).put(
+                KeyStroke.getKeyStroke(KeyEvent.VK_ENTER, InputEvent.ALT_DOWN_MASK),
+                "activateModelStatus");
+        getActionMap().put("activateModelStatus", new AbstractAction() {
+            @Override public void actionPerformed(ActionEvent e) { activateStatusAction(); }
+        });
+    }
+
+    private void updateAccessibleText() {
+        String status = statusIcon == ProviderStatusIcon.READY
+                ? "ready"
+                : statusIcon == ProviderStatusIcon.NEEDS_SETUP
+                ? "needs setup" : "unavailable";
+        getAccessibleContext().setAccessibleName("Model " + entry.displayName()
+                + ", provider " + entry.providerId() + ", " + status
+                + (pinned ? ", pinned" : ", not pinned"));
+        getAccessibleContext().setAccessibleDescription(
+                "Press Enter to launch. Press Control+P to pin or unpin. "
+                        + "Press Alt+Enter for provider status or setup.");
     }
 
     @Override
@@ -174,15 +221,25 @@ public class ModelMenuItem extends JMenuItem {
                     ? strikethrough(baseFont)
                     : baseFont;
             g2.setFont(textFont);
-            g2.setColor(textColorFor(entry, lifecycle, getForeground()));
+            boolean selected = getModel().isArmed();
+            g2.setColor(textColorFor(entry, lifecycle, background, selected));
             FontMetrics fm = g2.getFontMetrics();
             int baseline = (getHeight() + fm.getAscent() - fm.getDescent()) / 2;
             g2.drawString(entry.displayName(), COL_TEXT, baseline);
 
             String hint = providerHint(entry.providerId());
             int hintWidth = fm.stringWidth(hint);
-            g2.setColor(new Color(140, 140, 150));
+            Color hintPreferred = selected
+                    ? ThemeColors.uiColor("MenuItem.selectionForeground", getForeground())
+                    : ThemeColors.uiColor("Label.disabledForeground", getForeground());
+            g2.setColor(ThemeColors.ensureContrast(background, hintPreferred, 4.5));
             g2.drawString(hint, getWidth() - hintWidth - 8, baseline);
+
+            if (isFocusOwner() || getModel().isArmed()) {
+                g2.setColor(ThemeColors.focusColor(background));
+                g2.drawRect(1, 1, Math.max(0, getWidth() - 3),
+                        Math.max(0, getHeight() - 3));
+            }
         } finally {
             g2.dispose();
         }
@@ -195,17 +252,26 @@ public class ModelMenuItem extends JMenuItem {
 
     private static Color textColorFor(ModelEntry entry,
                                       SoftDeprecationPolicy.State lifecycle,
-                                      Color fallback) {
+                                      Color background,
+                                      boolean selected) {
+        if (selected) {
+            return ThemeColors.menuTextOn(background, true);
+        }
+        Color preferred;
         if (lifecycle == SoftDeprecationPolicy.State.PINNED_DEPRECATED) {
-            return new Color(180, 60, 60);
+            preferred = new Color(180, 60, 60);
+        } else if (lifecycle == SoftDeprecationPolicy.State.SOFT_DEPRECATED) {
+            preferred = new Color(170, 130, 30);
+        } else if (!entry.curated()) {
+            preferred = ThemeColors.uiColor("Label.disabledForeground", getFallback(background));
+        } else {
+            preferred = ThemeColors.uiColor("MenuItem.foreground", getFallback(background));
         }
-        if (lifecycle == SoftDeprecationPolicy.State.SOFT_DEPRECATED) {
-            return new Color(170, 130, 30);
-        }
-        if (!entry.curated()) {
-            return new Color(110, 110, 120);
-        }
-        return fallback == null ? Color.BLACK : fallback;
+        return ThemeColors.ensureContrast(background, preferred, 4.5);
+    }
+
+    private static Color getFallback(Color background) {
+        return ThemeColors.textOn(background);
     }
 
     private static Font strikethrough(Font base) {

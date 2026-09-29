@@ -34,5 +34,8 @@ public class AgentLauncherRecipeEnvTest {
                 new String[] { userRecipes, bundledRecipes },
                 spec.env.get(RecipePaths.RECIPE_DIRS_ENV)
                         .split(Pattern.quote(java.io.File.pathSeparator)));
+        assertEquals(
+                agent.toAbsolutePath().normalize().toString(),
+                spec.env.get(AgentLauncher.AGENT_WORKSPACE_ENV));
     }
 }

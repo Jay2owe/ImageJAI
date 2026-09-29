@@ -215,6 +215,39 @@ public class PatternDetectorTest {
     }
 
     @Test
+    public void sessionStatsRetainsDigestsAndBoundedSummariesOnly() {
+        SessionStats stats = new SessionStats();
+        String large = repeat('x', 100_000);
+        for (int i = 0; i < 100; i++) {
+            stats.record("execute_macro" + large, large + i, i,
+                    "ERROR_" + large);
+        }
+
+        assertEquals(SessionStats.MAX_HISTORY, stats.size());
+        assertTrue(stats.retainedBytes() <= SessionStats.MAX_RETAINED_BYTES);
+        for (SessionStats.CmdLog row : stats.history()) {
+            assertEquals(SessionStats.ARGS_DIGEST_BYTES, row.argsDigest.length());
+            assertEquals("legacy field must not retain raw args",
+                    row.argsDigest, row.canonicalArgs);
+            assertTrue(row.argsSummary.length() < large.length());
+        }
+    }
+
+    @Test
+    public void probedCommandSetCapsCountAndRejectsOversizedNames() {
+        SessionStats stats = new SessionStats();
+        for (int i = 0; i < SessionStats.MAX_PROBED_COMMANDS + 50; i++) {
+            stats.noteProbed("plugin-" + i);
+        }
+        stats.noteProbed(repeat('x', SessionStats.MAX_PROBED_COMMAND_BYTES + 1));
+
+        assertEquals(SessionStats.MAX_PROBED_COMMANDS, stats.probedCount());
+        assertFalse(stats.hasProbed(
+                repeat('x', SessionStats.MAX_PROBED_COMMAND_BYTES + 1)));
+        assertTrue(stats.retainedBytes() <= SessionStats.MAX_RETAINED_BYTES);
+    }
+
+    @Test
     public void sessionStatsThrottleHonoursWindow() {
         SessionStats stats = new SessionStats();
         assertTrue(stats.canFire("rule_a", 0L, 1_000L));
@@ -242,5 +275,11 @@ public class PatternDetectorTest {
         assertTrue(PatternDetector.isMutating("execute_macro"));
         assertTrue(PatternDetector.isMutating("run_script"));
         assertTrue(PatternDetector.isMutating("run_pipeline"));
+    }
+
+    private static String repeat(char value, int count) {
+        StringBuilder out = new StringBuilder(count);
+        for (int i = 0; i < count; i++) out.append(value);
+        return out.toString();
     }
 }

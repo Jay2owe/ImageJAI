@@ -36,8 +36,10 @@ except ImportError:
 def _load_png_raw(path):
     """Parse a PNG file using only stdlib. Returns (width, height, pixels).
 
-    pixels is a flat list of grayscale values (averaged across RGB channels).
-    This is a minimal parser — handles 8-bit RGB/RGBA/grayscale PNGs.
+    Pixels are normalized RGBA tuples so colour-only changes are preserved.
+    This is a minimal parser — handles non-interlaced 8-bit
+    RGB/RGBA/grayscale PNGs. Interlaced inputs are rejected instead of being
+    silently decoded with the wrong scanline layout.
     """
     with open(path, "rb") as f:
         data = f.read()
@@ -52,17 +54,29 @@ def _load_png_raw(path):
     idat_chunks = []
 
     while pos < len(data):
+        if len(data) - pos < 12:
+            raise ValueError("Truncated PNG chunk in: %s" % path)
         length = struct.unpack(">I", data[pos:pos + 4])[0]
+        if length > len(data) - pos - 12:
+            raise ValueError("Truncated PNG chunk data in: %s" % path)
         chunk_type = data[pos + 4:pos + 8]
         chunk_data = data[pos + 8:pos + 8 + length]
         pos += 12 + length  # 4 len + 4 type + data + 4 crc
 
         if chunk_type == b"IHDR":
+            if len(chunk_data) != 13:
+                raise ValueError("Invalid IHDR length in: %s" % path)
             width = struct.unpack(">I", chunk_data[0:4])[0]
             height = struct.unpack(">I", chunk_data[4:8])[0]
             bit_depth = chunk_data[8]
             color_type = chunk_data[9]
-            ihdr = (width, height, bit_depth, color_type)
+            compression = chunk_data[10]
+            filter_method = chunk_data[11]
+            interlace = chunk_data[12]
+            ihdr = (
+                width, height, bit_depth, color_type,
+                compression, filter_method, interlace,
+            )
         elif chunk_type == b"IDAT":
             idat_chunks.append(chunk_data)
         elif chunk_type == b"IEND":
@@ -71,12 +85,15 @@ def _load_png_raw(path):
     if ihdr is None:
         raise ValueError("No IHDR chunk found in: %s" % path)
 
-    width, height, bit_depth, color_type = ihdr
+    width, height, bit_depth, color_type, compression, filter_method, interlace = ihdr
+    if width <= 0 or height <= 0:
+        raise ValueError("PNG dimensions must be positive")
     if bit_depth != 8:
         raise ValueError("Only 8-bit PNGs supported (got %d-bit)" % bit_depth)
-
-    # Decompress pixel data
-    raw = zlib.decompress(b"".join(idat_chunks))
+    if compression != 0 or filter_method != 0:
+        raise ValueError("Unsupported PNG compression or filter method")
+    if interlace != 0:
+        raise ValueError("Interlaced (Adam7) PNGs are not supported by the raw fallback")
 
     # Determine bytes per pixel
     if color_type == 0:    # grayscale
@@ -91,6 +108,22 @@ def _load_png_raw(path):
         raise ValueError("Unsupported color type: %d" % color_type)
 
     stride = 1 + width * bpp  # 1 byte filter + pixel data per row
+    expected_raw_length = stride * height
+
+    # Bound decompression to the exact non-interlaced scanline size. This also
+    # makes truncated or trailing scanline data fail closed.
+    decompressor = zlib.decompressobj()
+    raw = decompressor.decompress(b"".join(idat_chunks), expected_raw_length + 1)
+    if (
+        len(raw) != expected_raw_length
+        or decompressor.unconsumed_tail
+        or not decompressor.eof
+        or decompressor.unused_data
+    ):
+        raise ValueError(
+            "Invalid PNG scanline length: expected %d bytes, got %d"
+            % (expected_raw_length, len(raw))
+        )
 
     # Reconstruct pixels (handle filter type 0=None, 1=Sub, 2=Up only)
     pixels = []
@@ -99,6 +132,8 @@ def _load_png_raw(path):
     for y in range(height):
         row_start = y * stride
         filter_type = raw[row_start]
+        if filter_type not in (0, 1, 2, 3, 4):
+            raise ValueError("Unsupported PNG filter type: %d" % filter_type)
         row_data = list(raw[row_start + 1:row_start + stride])
 
         # Apply PNG filters
@@ -129,19 +164,21 @@ def _load_png_raw(path):
                     pred = up_left
                 row_data[i] = (row_data[i] + pred) & 0xFF
 
-        # Convert to grayscale values
+        # Normalize to RGBA without discarding channel differences.
         for x in range(width):
             offset = x * bpp
             if color_type == 0:  # grayscale
-                pixels.append(row_data[offset])
+                value = row_data[offset]
+                pixels.append((value, value, value, 255))
             elif color_type == 2:  # RGB
                 r, g, b = row_data[offset], row_data[offset + 1], row_data[offset + 2]
-                pixels.append((r + g + b) // 3)
+                pixels.append((r, g, b, 255))
             elif color_type == 4:  # grayscale + alpha
-                pixels.append(row_data[offset])
+                value, alpha = row_data[offset], row_data[offset + 1]
+                pixels.append((value, value, value, alpha))
             elif color_type == 6:  # RGBA
                 r, g, b = row_data[offset], row_data[offset + 1], row_data[offset + 2]
-                pixels.append((r + g + b) // 3)
+                pixels.append((r, g, b, row_data[offset + 3]))
 
         prev_row = row_data
 
@@ -149,15 +186,16 @@ def _load_png_raw(path):
 
 
 def _load_image(path):
-    """Load image and return (width, height, grayscale_pixels_list).
+    """Load image and return (width, height, RGBA pixel tuples).
 
     Uses PIL if available, otherwise raw PNG parsing.
     """
     if _HAS_PIL:
-        img = Image.open(path).convert("L")
-        w, h = img.size
-        pixels = list(img.getdata())
-        return w, h, pixels
+        with Image.open(path) as source:
+            img = source.convert("RGBA")
+            w, h = img.size
+            pixels = list(img.getdata())
+            return w, h, pixels
     else:
         return _load_png_raw(path)
 
@@ -203,34 +241,54 @@ def compare_images(path_a, path_b, threshold=10, save_diff=False, diff_path=None
     if n == 0:
         return result
 
-    # Pixel difference
-    diffs = [abs(px1[i] - px2[i]) for i in range(n)]
-    changed = sum(1 for d in diffs if d > threshold)
-    mean_diff = sum(diffs) / n
+    # A pixel is changed when any channel exceeds the threshold. The mean
+    # remains a channel-level absolute difference so equal-luminance colour
+    # substitutions cannot disappear.
+    channel_diffs = [
+        tuple(abs(a - b) for a, b in zip(px1[i], px2[i]))
+        for i in range(n)
+    ]
+    diffs = [max(values) for values in channel_diffs]
+    changed = sum(1 for difference in diffs if difference > threshold)
+    channel_count = sum(len(values) for values in channel_diffs)
+    mean_diff = (
+        sum(sum(values) for values in channel_diffs) / channel_count
+        if channel_count else 0.0
+    )
 
     result["changed_pixels_pct"] = round(100.0 * changed / n, 2)
     result["mean_absolute_diff"] = round(mean_diff, 2)
     result["identical"] = all(d == 0 for d in diffs)
 
-    # Pearson correlation
-    mean1 = sum(px1) / n
-    mean2 = sum(px2) / n
-
-    sum_cross = 0.0
-    sum_sq1 = 0.0
-    sum_sq2 = 0.0
-    for i in range(n):
-        d1 = px1[i] - mean1
-        d2 = px2[i] - mean2
-        sum_cross += d1 * d2
-        sum_sq1 += d1 * d1
-        sum_sq2 += d2 * d2
-
-    denom = math.sqrt(sum_sq1 * sum_sq2)
-    if denom > 0:
-        result["correlation"] = round(sum_cross / denom, 4)
+    # Pearson correlation over every channel, not grayscale averages. Spatially
+    # constant but unequal images are not a perfect match merely because their
+    # channel vectors have the same shape.
+    spatially_constant1 = all(pixel == px1[0] for pixel in px1)
+    spatially_constant2 = all(pixel == px2[0] for pixel in px2)
+    if spatially_constant1 and spatially_constant2:
+        result["correlation"] = 1.0 if result["identical"] else 0.0
     else:
-        result["correlation"] = 1.0 if sum_sq1 == 0 and sum_sq2 == 0 else 0.0
+        flat1 = [channel for pixel in px1 for channel in pixel]
+        flat2 = [channel for pixel in px2 for channel in pixel]
+        sample_count = len(flat1)
+        mean1 = sum(flat1) / sample_count
+        mean2 = sum(flat2) / sample_count
+
+        sum_cross = 0.0
+        sum_sq1 = 0.0
+        sum_sq2 = 0.0
+        for i in range(sample_count):
+            d1 = flat1[i] - mean1
+            d2 = flat2[i] - mean2
+            sum_cross += d1 * d2
+            sum_sq1 += d1 * d1
+            sum_sq2 += d2 * d2
+
+        denom = math.sqrt(sum_sq1 * sum_sq2)
+        if denom > 0:
+            result["correlation"] = round(sum_cross / denom, 4)
+        else:
+            result["correlation"] = 1.0 if result["identical"] else 0.0
 
     # Save visual diff
     if save_diff:

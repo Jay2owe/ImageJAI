@@ -14,9 +14,11 @@ import java.awt.event.ActionListener;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.function.Supplier;
 
 /**
  * Background monitor that watches ImageJ state and proactively warns about issues.
@@ -42,15 +44,17 @@ public class ImageMonitor {
     private static final String WARN_LARGE = "large";
 
     private final StateInspector stateInspector;
-    private final EventBus bus = EventBus.getInstance();
+    private final EventBus bus;
+    private final Supplier<List<ImageGraph.ImageRef>> openImagesSupplier;
+    private final Supplier<ImagePlus> activeImageSupplier;
     private MonitorListener listener;
     private Timer pollTimer;
     private boolean running;
 
-    private int lastImageCount;
-    private String lastImageTitle;
+    private String lastImageIdentity;
     // Track open image titles between polls — diff drives image.opened/image.closed events.
-    private final Set<String> lastOpenImages = new HashSet<String>();
+    private final Map<String, ImageState> lastOpenImages =
+            new LinkedHashMap<String, ImageState>();
     // Track whether memory.pressure is currently latched; re-fire only when it
     // crosses back above the threshold from below.
     private boolean memoryPressureActive = false;
@@ -63,9 +67,18 @@ public class ImageMonitor {
     private final Set<String> checkedImages = new HashSet<String>();
 
     public ImageMonitor(StateInspector stateInspector) {
+        this(stateInspector, EventBus.getInstance(),
+                ImageGraph::captureOpenImages, WindowManager::getCurrentImage);
+    }
+
+    ImageMonitor(StateInspector stateInspector, EventBus bus,
+                 Supplier<List<ImageGraph.ImageRef>> openImagesSupplier,
+                 Supplier<ImagePlus> activeImageSupplier) {
         this.stateInspector = stateInspector;
-        this.lastImageCount = 0;
-        this.lastImageTitle = "";
+        this.bus = bus;
+        this.openImagesSupplier = openImagesSupplier;
+        this.activeImageSupplier = activeImageSupplier;
+        this.lastImageIdentity = "";
         this.running = false;
     }
 
@@ -104,6 +117,10 @@ public class ImageMonitor {
             pollTimer = null;
         }
         listener = null;
+        lastOpenImages.clear();
+        checkedImages.clear();
+        warningTimestamps.clear();
+        lastImageIdentity = "";
     }
 
     /**
@@ -145,27 +162,19 @@ public class ImageMonitor {
      * active title changes — a coarse "something switched" signal.
      */
     private void publishImageDiffEvents() {
-        Set<String> current = new HashSet<String>();
-        Map<String, ImagePlus> byTitle = new HashMap<String, ImagePlus>();
-        int[] ids = WindowManager.getIDList();
-        if (ids != null) {
-            for (int id : ids) {
-                ImagePlus imp = WindowManager.getImage(id);
-                if (imp != null) {
-                    String t = imp.getTitle();
-                    if (t == null) t = "";
-                    current.add(t);
-                    byTitle.put(t, imp);
-                }
-            }
+        Map<String, ImageState> current = new LinkedHashMap<String, ImageState>();
+        for (ImageGraph.ImageRef ref : openImagesSupplier.get()) {
+            current.put(ref.identity, new ImageState(ref.identity, ref.windowId,
+                    ref.title == null ? "" : ref.title, ref.image));
         }
 
         // New titles -> image.opened
-        for (String t : current) {
-            if (!lastOpenImages.contains(t)) {
-                ImagePlus imp = byTitle.get(t);
+        for (ImageState state : current.values()) {
+            if (!lastOpenImages.containsKey(state.identity)) {
+                ImagePlus imp = state.image;
                 JsonObject data = new JsonObject();
-                data.addProperty("title", t);
+                data.addProperty("image_id", state.identity);
+                data.addProperty("title", state.title);
                 if (imp != null) {
                     JsonObject dims = new JsonObject();
                     dims.addProperty("width", imp.getWidth());
@@ -190,20 +199,26 @@ public class ImageMonitor {
         }
 
         // Disappeared titles -> image.closed
-        for (String t : lastOpenImages) {
-            if (!current.contains(t)) {
+        for (ImageState state : lastOpenImages.values()) {
+            if (!current.containsKey(state.identity)) {
                 JsonObject data = new JsonObject();
-                data.addProperty("title", t);
+                String imageId = state.identity;
+                data.addProperty("image_id", imageId);
+                data.addProperty("title", state.title);
                 bus.publish("image.closed", data);
+                checkedImages.remove(state.identity);
+                removeWarningState(imageId);
             }
         }
 
         // Active image switch -> image.updated (coalesced to 200ms by the bus).
-        ImagePlus active = WindowManager.getCurrentImage();
+        ImagePlus active = activeImageSupplier.get();
         String activeTitle = active == null ? "" : active.getTitle();
         if (activeTitle == null) activeTitle = "";
-        if (!activeTitle.equals(lastImageTitle) && !activeTitle.isEmpty()) {
+        String activeIdentity = active == null ? null : ImageGraph.stableIdentity(active);
+        if (activeIdentity != null && !activeIdentity.equals(lastImageIdentity)) {
             JsonObject data = new JsonObject();
+            data.addProperty("image_id", activeIdentity);
             data.addProperty("title", activeTitle);
             data.addProperty("reason", "active_changed");
             if (active != null) addImagePath(data, active);
@@ -211,7 +226,7 @@ public class ImageMonitor {
         }
 
         lastOpenImages.clear();
-        lastOpenImages.addAll(current);
+        lastOpenImages.putAll(current);
     }
 
     private void collectWarnings(List<String> output) {
@@ -221,26 +236,24 @@ public class ImageMonitor {
         // Check active image
         ImagePlus imp = WindowManager.getCurrentImage();
         if (imp == null) {
-            lastImageTitle = "";
-            lastImageCount = countOpenImages();
+            lastImageIdentity = "";
             return;
         }
 
         String currentTitle = imp.getTitle();
-        int currentCount = countOpenImages();
-        boolean isNewImage = !currentTitle.equals(lastImageTitle) || currentCount != lastImageCount;
+        String currentIdentity = ImageGraph.stableIdentity(imp);
 
         // One-time checks for new/changed images
-        if (isNewImage && !checkedImages.contains(currentTitle)) {
-            checkedImages.add(currentTitle);
-            checkSaturation(imp, currentTitle, output);
-            checkCalibration(imp, currentTitle, output);
-            checkRGB(imp, currentTitle, output);
-            checkLargeImage(imp, currentTitle, output);
+        if (!checkedImages.contains(currentIdentity)) {
+            checkedImages.add(currentIdentity);
+            String imageId = currentIdentity;
+            checkSaturation(imp, currentTitle, imageId, output);
+            checkCalibration(imp, currentTitle, imageId, output);
+            checkRGB(imp, currentTitle, imageId, output);
+            checkLargeImage(imp, currentTitle, imageId, output);
         }
 
-        lastImageTitle = currentTitle;
-        lastImageCount = currentCount;
+        lastImageIdentity = currentIdentity;
     }
 
     private void checkMemory(List<String> output) {
@@ -274,7 +287,8 @@ public class ImageMonitor {
         }
     }
 
-    private void checkSaturation(ImagePlus imp, String title, List<String> output) {
+    private void checkSaturation(ImagePlus imp, String title, String imageId,
+                                 List<String> output) {
         int type = imp.getType();
         if (type == ImagePlus.COLOR_RGB || type == ImagePlus.GRAY32) {
             // Skip saturation check for RGB (ambiguous) and 32-bit float
@@ -310,7 +324,7 @@ public class ImageMonitor {
 
         double saturatedPercent = (saturatedCount * 100.0) / totalPixels;
         if (saturatedPercent > SATURATION_THRESHOLD_PERCENT) {
-            String key = title + ":" + WARN_SATURATED;
+            String key = imageId + ":" + WARN_SATURATED;
             if (canWarn(key)) {
                 String msg = "Warning: " + String.format("%.1f", saturatedPercent)
                         + "% of pixels are saturated (at max value). "
@@ -322,7 +336,8 @@ public class ImageMonitor {
         }
     }
 
-    private void checkCalibration(ImagePlus imp, String title, List<String> output) {
+    private void checkCalibration(ImagePlus imp, String title, String imageId,
+                                  List<String> output) {
         Calibration cal = imp.getCalibration();
         if (cal == null) {
             return;
@@ -333,7 +348,7 @@ public class ImageMonitor {
                 || "pixels".equalsIgnoreCase(unit));
 
         if (isDefault && noUnit) {
-            String key = title + ":" + WARN_UNCALIBRATED;
+            String key = imageId + ":" + WARN_UNCALIBRATED;
             if (canWarn(key)) {
                 String msg = "This image has no spatial calibration. Measurements will be in pixels. "
                         + "Set scale via Analyze > Set Scale if you know the pixel size.";
@@ -344,9 +359,10 @@ public class ImageMonitor {
         }
     }
 
-    private void checkRGB(ImagePlus imp, String title, List<String> output) {
+    private void checkRGB(ImagePlus imp, String title, String imageId,
+                          List<String> output) {
         if (imp.getType() == ImagePlus.COLOR_RGB) {
-            String key = title + ":" + WARN_RGB;
+            String key = imageId + ":" + WARN_RGB;
             if (canWarn(key)) {
                 String msg = "This is an RGB image. For quantitative fluorescence analysis, "
                         + "consider splitting channels first.";
@@ -357,11 +373,12 @@ public class ImageMonitor {
         }
     }
 
-    private void checkLargeImage(ImagePlus imp, String title, List<String> output) {
+    private void checkLargeImage(ImagePlus imp, String title, String imageId,
+                                 List<String> output) {
         long totalPixels = (long) imp.getWidth() * imp.getHeight()
                 * imp.getNSlices() * imp.getNChannels();
         if (totalPixels > LARGE_IMAGE_PIXEL_THRESHOLD) {
-            String key = title + ":" + WARN_LARGE;
+            String key = imageId + ":" + WARN_LARGE;
             if (canWarn(key)) {
                 long megapixels = totalPixels / 1000000L;
                 String msg = "This is a very large image (" + megapixels
@@ -401,9 +418,15 @@ public class ImageMonitor {
         }
     }
 
-    private int countOpenImages() {
-        int[] ids = WindowManager.getIDList();
-        return ids != null ? ids.length : 0;
+    private void removeWarningState(String imageId) {
+        String prefix = imageId + ":";
+        for (String key : new ArrayList<String>(warningTimestamps.keySet())) {
+            if (key.startsWith(prefix)) warningTimestamps.remove(key);
+        }
+    }
+
+    void publishImageDiffEventsForTest() {
+        publishImageDiffEvents();
     }
 
     private void addImagePath(JsonObject data, ImagePlus imp) {
@@ -413,6 +436,20 @@ public class ImageMonitor {
             if (fi == null || fi.directory == null || fi.fileName == null) return;
             data.addProperty("path", fi.directory + fi.fileName);
         } catch (Throwable ignore) {
+        }
+    }
+
+    private static final class ImageState {
+        final String identity;
+        final int windowId;
+        final String title;
+        final ImagePlus image;
+
+        ImageState(String identity, int windowId, String title, ImagePlus image) {
+            this.identity = identity;
+            this.windowId = windowId;
+            this.title = title;
+            this.image = image;
         }
     }
 }

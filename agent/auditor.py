@@ -58,7 +58,7 @@ def _parse_csv(csv_string):
                 parsed[key] = None
                 continue
             val = val.strip()
-            if val == "" or val.lower() == "nan":
+            if val == "":
                 parsed[key] = None
                 continue
             try:
@@ -74,7 +74,7 @@ def _col_values(rows, col):
     vals, idxs = [], []
     for i, row in enumerate(rows):
         v = row.get(col)
-        if isinstance(v, (int, float)) and not math.isnan(v):
+        if isinstance(v, (int, float)) and math.isfinite(v):
             vals.append(float(v))
             idxs.append(i)
     return vals, idxs
@@ -100,6 +100,63 @@ def _median(vals):
     if n % 2 == 1:
         return s[n // 2]
     return (s[n // 2 - 1] + s[n // 2]) / 2.0
+
+
+_NONNEGATIVE_COLUMNS = {
+    "Area", "Perim.", "Perimeter", "Major", "Minor", "Feret", "MinFeret",
+    "Width", "Height", "AR", "Aspect Ratio",
+    "Count", "Slice", "Frame", "Channel",
+}
+
+
+def _check_numeric_validity(rows, columns):
+    """Fail closed on non-finite or physically impossible numeric results."""
+    problems = []
+    affected = set()
+    for row_index, row in enumerate(rows):
+        for column in columns:
+            value = row.get(column)
+            if not isinstance(value, (int, float)):
+                continue
+            if not math.isfinite(value):
+                problems.append("row %d %s is non-finite" % (row_index + 1, column))
+                affected.add(row_index)
+            elif column in _NONNEGATIVE_COLUMNS and value < 0:
+                problems.append("row %d %s is negative" % (row_index + 1, column))
+                affected.add(row_index)
+
+        major = row.get("Major")
+        minor = row.get("Minor")
+        if (isinstance(major, (int, float)) and math.isfinite(major)
+                and isinstance(minor, (int, float)) and math.isfinite(minor)
+                and minor > major):
+            problems.append("row %d Minor exceeds Major" % (row_index + 1))
+            affected.add(row_index)
+
+        minimum = row.get("Min")
+        maximum = row.get("Max")
+        mean = row.get("Mean")
+        if all(isinstance(v, (int, float)) and math.isfinite(v)
+               for v in (minimum, maximum, mean)):
+            if minimum > maximum or mean < minimum or mean > maximum:
+                problems.append("row %d has impossible Min/Mean/Max ordering" % (row_index + 1))
+                affected.add(row_index)
+
+    if problems:
+        return {
+            "check": "numeric_validity",
+            "status": "fail",
+            "message": "%d invalid numeric value%s: %s" % (
+                len(problems), "s" if len(problems) != 1 else "", "; ".join(problems[:3])
+            ),
+            "affected_rows": sorted(affected)[:50],
+        }
+    return {
+        "check": "numeric_validity",
+        "status": "pass",
+        "message": "Numeric values are finite and physically consistent.",
+        "affected_rows": [],
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -588,6 +645,32 @@ def audit_results(csv_string, pixel_size=None, unit=None, bit_depth=None, check=
     """
     rows, columns = _parse_csv(csv_string)
 
+    if pixel_size is not None and (
+            not isinstance(pixel_size, (int, float))
+            or not math.isfinite(pixel_size)
+            or pixel_size <= 0):
+        return {
+            "status": "fail",
+            "checks": [{
+                "check": "audit_parameters",
+                "status": "fail",
+                "message": "pixel_size must be a finite value greater than zero.",
+                "affected_rows": [],
+            }],
+            "summary": "1 failure. Invalid audit parameters.",
+        }
+    if bit_depth is not None and bit_depth not in (8, 16, 32):
+        return {
+            "status": "fail",
+            "checks": [{
+                "check": "audit_parameters",
+                "status": "fail",
+                "message": "bit_depth must be one of 8, 16, or 32.",
+                "affected_rows": [],
+            }],
+            "summary": "1 failure. Invalid audit parameters.",
+        }
+
     all_checks = []
 
     # Count validation
@@ -603,6 +686,10 @@ def audit_results(csv_string, pixel_size=None, unit=None, bit_depth=None, check=
 
     # Missing data
     all_checks.append(_check_missing_data(rows, columns))
+
+    # Numeric domain validation must run before calculations silently discard
+    # infinities or interpret impossible geometry as a plausible measurement.
+    all_checks.append(_check_numeric_validity(rows, columns))
 
     # Area plausibility
     area_result = _check_area_plausibility(rows, pixel_size, unit)
@@ -656,7 +743,15 @@ def audit_results(csv_string, pixel_size=None, unit=None, bit_depth=None, check=
     # Filter to specific check if requested
     if check:
         check_lower = check.lower()
-        all_checks = [c for c in all_checks if check_lower in c["check"].lower()]
+        matching = [c for c in all_checks if check_lower in c["check"].lower()]
+        if not matching:
+            matching = [{
+                "check": "unknown_check",
+                "status": "fail",
+                "message": "Unknown audit check: %s" % check,
+                "affected_rows": [],
+            }]
+        all_checks = matching
 
     # Compute overall status
     statuses = [c["status"] for c in all_checks]

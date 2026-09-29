@@ -35,6 +35,8 @@ Thumbs.db
 /CLAUDE.md
 /GEMINI.md
 .claude/
+.codex/
+.planning/
 .codex-m2/
 .codex_pytest_tmp/
 .tmp/
@@ -55,7 +57,11 @@ agent_implementation_plan.txt
 agent/gemma4_31b/.plugin_cache/
 agent/providers/proxy.port
 agent/providers/proxy.port.lock
-test-scripts/
+test-scripts/*
+!test-scripts/live_fiji_smoke.py
+!test-scripts/zero_polling_test.py
+!test-scripts/automation_bridge_smoke.java
+!test-scripts/automation_bridge_smoke.ps1
 
 # Excluded from public release: unpublished lab research + publication-prep
 agent/scripts/

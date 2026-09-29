@@ -4,6 +4,7 @@ import imagejai.engine.picker.ModelEntry;
 import imagejai.engine.picker.ProviderEntry;
 import imagejai.engine.picker.ProviderRegistry;
 import imagejai.install.ProcessRunner;
+import imagejai.ui.UiScrollSupport;
 import imagejai.ui.installer.ProviderCredentials;
 
 import javax.swing.BorderFactory;
@@ -144,6 +145,7 @@ public class LocalModelDownloadWizard implements InstallerWizard {
         dialog.pack();
         Dimension preferred = dialog.getPreferredSize();
         dialog.setSize(Math.max(preferred.width, 540), Math.max(preferred.height, 360));
+        UiScrollSupport.fitToScreen(dialog);
         dialog.setLocationRelativeTo(parent);
         // Persisting an OLLAMA_API_BASE here keeps the proxy in sync after the
         // user has launched the runtime once. Idempotent if already set.

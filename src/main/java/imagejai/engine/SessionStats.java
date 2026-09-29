@@ -1,5 +1,6 @@
 package imagejai.engine;
 
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayDeque;
 import java.util.Collections;
 import java.util.Deque;
@@ -9,105 +10,219 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
-/**
- * Step 12 (docs/tcp_upgrade/12_per_agent_telemetry.md): per-socket rolling
- * log of commands plus tiny bookkeeping for the pattern-detection rule set.
- *
- * <p>Lives alongside {@link ResponseDedupCache} on
- * {@link TCPCommandServer.AgentCaps}. One instance per connection.
- *
- * <p>Thread-safety: each instance is bound to a single connection whose TCP
- * handler is single-threaded per request, but every public method guards its
- * shared state with {@code synchronized} to stay safe against future batch /
- * run paths that reuse the same caps from nested threads.
- */
+/** Bounded per-session telemetry used by {@link PatternDetector}. */
 public final class SessionStats {
 
-    /** Hard cap on the rolling command history. */
     public static final int MAX_HISTORY = 50;
-
-    /** Per-rule silence window after the rule fires once. */
     public static final long DEFAULT_THROTTLE_MS = 5L * 60L * 1000L;
+    public static final int MAX_COMMAND_BYTES = 128;
+    public static final int MAX_ARGS_SUMMARY_BYTES = 512;
+    public static final int MAX_ERROR_CODE_BYTES = 128;
+    public static final int MAX_PROBED_COMMANDS = 128;
+    public static final int MAX_PROBED_COMMAND_BYTES = 256;
+    public static final int MAX_RULE_KINDS = 64;
+    public static final int MAX_RULE_KIND_BYTES = 128;
+    public static final int ARGS_DIGEST_BYTES = 64; // lowercase SHA-256 hex
+    public static final int MAX_RETAINED_BYTES =
+            MAX_HISTORY * (MAX_COMMAND_BYTES + ARGS_DIGEST_BYTES
+                    + MAX_ARGS_SUMMARY_BYTES + MAX_ERROR_CODE_BYTES)
+            + MAX_PROBED_COMMANDS * MAX_PROBED_COMMAND_BYTES
+            + MAX_RULE_KINDS * MAX_RULE_KIND_BYTES;
 
-    /** One row of the history ring buffer. */
+    /** One row of the bounded history ring. */
     public static final class CmdLog {
         public final String cmd;
-        public final String canonicalArgs;
+        /** Fixed SHA-256 identity used for exact equality checks. */
+        public final String argsDigest;
+        /** Bounded diagnostic prefix used only to identify plugin names. */
+        public final String argsSummary;
+        /** Compatibility alias: no longer contains raw caller arguments. */
+        @Deprecated public final String canonicalArgs;
         public final long timestampMs;
-        /** Structured error code (or normalised error string) when the call failed; {@code null} on success. */
         public final String responseErrorCode;
+        private final int retainedBytes;
 
-        public CmdLog(String cmd, String canonicalArgs, long timestampMs, String responseErrorCode) {
-            this.cmd = cmd == null ? "" : cmd;
-            this.canonicalArgs = canonicalArgs == null ? "" : canonicalArgs;
+        public CmdLog(String cmd, String rawArgs, long timestampMs,
+                      String responseErrorCode) {
+            this(cmd, ResponseDedupCache.digestText(rawArgs), rawArgs,
+                    timestampMs, responseErrorCode, true);
+        }
+
+        private CmdLog(String cmd, String argsDigest, String argsSummary,
+                       long timestampMs, String responseErrorCode,
+                       boolean alreadyDigested) {
+            this.cmd = truncateUtf8(cmd, MAX_COMMAND_BYTES);
+            this.argsDigest = normaliseDigest(argsDigest, alreadyDigested);
+            this.argsSummary = truncateUtf8(argsSummary, MAX_ARGS_SUMMARY_BYTES);
+            this.canonicalArgs = this.argsDigest;
             this.timestampMs = timestampMs;
-            this.responseErrorCode = responseErrorCode;
+            this.responseErrorCode = responseErrorCode == null ? null
+                    : truncateUtf8(responseErrorCode, MAX_ERROR_CODE_BYTES);
+            this.retainedBytes = utf8Bytes(this.cmd) + utf8Bytes(this.argsDigest)
+                    + utf8Bytes(this.argsSummary) + utf8Bytes(this.responseErrorCode);
+        }
+
+        static CmdLog fromDigest(String cmd, String argsDigest, String argsSummary,
+                                 long timestampMs, String responseErrorCode) {
+            return new CmdLog(cmd, argsDigest, argsSummary, timestampMs,
+                    responseErrorCode, true);
         }
 
         public boolean isFailure() {
             return responseErrorCode != null && !responseErrorCode.isEmpty();
+        }
+
+        int retainedBytes() {
+            return retainedBytes;
         }
     }
 
     private final Deque<CmdLog> commandHistory = new ArrayDeque<CmdLog>();
     private final Map<String, Long> lastFiredByRule = new HashMap<String, Long>();
     private final Set<String> probedCommands = new HashSet<String>();
+    private int historyBytes;
+    private int probedBytes;
+    private int ruleBytes;
 
-    /** Append one command to the history, evicting the oldest when capped. */
-    public synchronized void record(String cmd, String canonicalArgs, long ts, String responseErrorCode) {
-        commandHistory.addLast(new CmdLog(cmd, canonicalArgs, ts, responseErrorCode));
+    /** Record raw args from tests/legacy callers without retaining them. */
+    public synchronized void record(String cmd, String rawArgs, long ts,
+                                    String responseErrorCode) {
+        add(new CmdLog(cmd, rawArgs, ts, responseErrorCode));
+    }
+
+    /** Record a precomputed identity plus a bounded diagnostic summary. */
+    public synchronized void recordDigest(String cmd, String argsDigest,
+                                          String argsSummary, long ts,
+                                          String responseErrorCode) {
+        add(CmdLog.fromDigest(cmd, argsDigest, argsSummary, ts, responseErrorCode));
+    }
+
+    private void add(CmdLog row) {
+        commandHistory.addLast(row);
+        historyBytes += row.retainedBytes();
         while (commandHistory.size() > MAX_HISTORY) {
-            commandHistory.removeFirst();
+            historyBytes -= commandHistory.removeFirst().retainedBytes();
         }
     }
 
-    /** Snapshot of the history in insertion order (oldest first). */
     public synchronized List<CmdLog> history() {
-        return Collections.unmodifiableList(new java.util.ArrayList<CmdLog>(commandHistory));
+        return Collections.unmodifiableList(
+                new java.util.ArrayList<CmdLog>(commandHistory));
     }
 
-    /** Current history size — primarily for tests. */
     public synchronized int size() {
         return commandHistory.size();
     }
 
-    /**
-     * True when the rule keyed on {@code ruleKind} has not fired inside the
-     * last {@link #DEFAULT_THROTTLE_MS}. Pattern rules gate their own
-     * detection on this — see {@link PatternDetector}.
-     */
     public synchronized boolean canFire(String ruleKind, long now) {
         return canFire(ruleKind, now, DEFAULT_THROTTLE_MS);
     }
 
     public synchronized boolean canFire(String ruleKind, long now, long throttleMs) {
-        Long last = lastFiredByRule.get(ruleKind);
+        String key = boundedRuleKind(ruleKind);
+        Long last = lastFiredByRule.get(key);
         return last == null || (now - last) >= throttleMs;
     }
 
-    /** Mark a rule fired so subsequent checks stay silent for the throttle window. */
     public synchronized void markFired(String ruleKind, long ts) {
-        lastFiredByRule.put(ruleKind, ts);
+        String key = boundedRuleKind(ruleKind);
+        if (key.isEmpty()) return;
+        if (!lastFiredByRule.containsKey(key)) {
+            if (lastFiredByRule.size() >= MAX_RULE_KINDS) return;
+            ruleBytes += utf8Bytes(key);
+        }
+        lastFiredByRule.put(key, ts);
     }
 
     /**
-     * Note that the client has run {@code probe_command} against this plugin
-     * name this session. Consulted by {@code probe_before_run_missed}.
+     * Record a successfully probed plugin name. Oversized names and entries
+     * beyond the declared cap are ignored rather than retained in truncated
+     * form, which could otherwise falsely match a different plugin.
      */
     public synchronized void noteProbed(String pluginName) {
-        if (pluginName != null && !pluginName.isEmpty()) {
-            probedCommands.add(pluginName);
-        }
+        if (pluginName == null || pluginName.isEmpty()
+                || utf8BytesAtMost(pluginName, MAX_PROBED_COMMAND_BYTES)
+                > MAX_PROBED_COMMAND_BYTES) return;
+        if (probedCommands.contains(pluginName)) return;
+        if (probedCommands.size() >= MAX_PROBED_COMMANDS) return;
+        probedCommands.add(pluginName);
+        probedBytes += utf8Bytes(pluginName);
     }
 
     public synchronized boolean hasProbed(String pluginName) {
         return pluginName != null && probedCommands.contains(pluginName);
     }
 
-    /** Wipe all history + rule throttles. Intended for tests. */
+    public synchronized int probedCount() {
+        return probedCommands.size();
+    }
+
+    public synchronized int retainedBytes() {
+        return historyBytes + probedBytes + ruleBytes;
+    }
+
     public synchronized void clear() {
         commandHistory.clear();
         lastFiredByRule.clear();
         probedCommands.clear();
+        historyBytes = 0;
+        probedBytes = 0;
+        ruleBytes = 0;
+    }
+
+    private static String boundedRuleKind(String value) {
+        return truncateUtf8(value, MAX_RULE_KIND_BYTES);
+    }
+
+    private static String normaliseDigest(String value, boolean alreadyDigested) {
+        String candidate = value == null ? "" : value;
+        if (alreadyDigested && candidate.length() == ARGS_DIGEST_BYTES) {
+            boolean hex = true;
+            for (int i = 0; i < candidate.length(); i++) {
+                char c = candidate.charAt(i);
+                if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) {
+                    hex = false;
+                    break;
+                }
+            }
+            if (hex) return candidate;
+        }
+        return ResponseDedupCache.digestText(candidate);
+    }
+
+    static String truncateUtf8(String value, int maxBytes) {
+        if (value == null || maxBytes <= 0) return "";
+        if (utf8BytesAtMost(value, maxBytes) <= maxBytes) return value;
+        int bytes = 0;
+        int end = 0;
+        while (end < value.length()) {
+            int codePoint = value.codePointAt(end);
+            int width = codePoint <= 0x7f ? 1
+                    : codePoint <= 0x7ff ? 2
+                    : codePoint <= 0xffff ? 3 : 4;
+            if (bytes + width > maxBytes) break;
+            bytes += width;
+            end += Character.charCount(codePoint);
+        }
+        return value.substring(0, end);
+    }
+
+    private static int utf8Bytes(String value) {
+        return value == null ? 0
+                : value.getBytes(StandardCharsets.UTF_8).length;
+    }
+
+    /** Returns maxBytes+1 as soon as the limit is exceeded. */
+    private static int utf8BytesAtMost(String value, int maxBytes) {
+        int bytes = 0;
+        for (int offset = 0; offset < value.length();) {
+            int codePoint = value.codePointAt(offset);
+            bytes += codePoint <= 0x7f ? 1
+                    : codePoint <= 0x7ff ? 2
+                    : codePoint <= 0xffff ? 3 : 4;
+            if (bytes > maxBytes) return maxBytes + 1;
+            offset += Character.charCount(codePoint);
+        }
+        return bytes;
     }
 }

@@ -17,4 +17,6 @@ Instead, after every step that changes the image, call:
 
 The numbers replace the visual sanity check. Trust the numbers;
 do not narrate what the image "would look like" — describe what
-the stats say.
+the stats say. Pixel results also name the source channel, Z slice,
+and frame; include that attribution when the image has more than one
+channel, slice, or frame.

@@ -11,20 +11,19 @@ import java.util.Map;
 
 /**
  * Production {@link CredentialVerifier} that fires one {@code /models} probe
- * through {@link ProviderDiscovery} using the freshly-saved API key.
+ * through {@link ProviderDiscovery} using an in-memory candidate API key.
  *
- * <p>Wires the cross-phase carry-over from Phase E: the wizard saves
- * {@code <provider>.env}, then this verifier reads the env file, builds a
- * one-off {@link ProviderDiscovery} instance with that credential, and runs a
- * single {@link ProviderDiscovery#discover(String, Duration)} call. Success when
- * the endpoint returns 2xx with at least one model id; failure carries the
- * verifier-side reason ({@code "no models returned"}, {@code "endpoint
- * returned 401 — key rejected"}, etc.).
+ * <p>The verifier builds a one-off {@link ProviderDiscovery} instance with the
+ * candidate and runs a single {@link ProviderDiscovery#discover(String,
+ * Duration)} call. The wizard persists the candidate only after verification
+ * succeeds. {@link #verify(String, int)} remains available for re-checking an
+ * already-saved credential.
  *
- * <p>Curated-only providers ({@link ProviderDiscovery#CURATED_ONLY} —
- * Ollama Cloud, Perplexity) skip the probe and report success: there is no live
- * endpoint to test against, so the wizard's "Save & test" button cannot do
- * better than trust the curated catalogue (see 02 §6).
+ * <p>Ollama Cloud has no candidate-token endpoint in the discovery client.
+ * Its authentication state is owned by {@code ollama signin}, so a pasted
+ * token is explicitly reported as unverified and can never pass the wizard's
+ * validate-before-persist gate. Other curated-only providers retain their
+ * catalogue-only result for existing non-Ollama setup flows.
  */
 public final class ProviderDiscoveryCredentialVerifier implements CredentialVerifier {
 
@@ -44,18 +43,28 @@ public final class ProviderDiscoveryCredentialVerifier implements CredentialVeri
 
     @Override
     public Result verify(String providerKey, int timeoutMs) {
+        return verifyCandidate(providerKey, readSavedApiKey(providerKey), timeoutMs);
+    }
+
+    @Override
+    public Result verifyCandidate(String providerKey, String candidate, int timeoutMs) {
         if (providerKey == null || providerKey.isEmpty()) {
             return Result.failure("no provider key supplied");
+        }
+        if ("ollama-cloud".equals(providerKey)) {
+            return Result.failure("unverified: Ollama Cloud has no authenticated "
+                    + "candidate-token endpoint; token was not saved. Run 'ollama signin' "
+                    + "and let Ollama manage the sign-in state");
         }
         if (ProviderDiscovery.CURATED_ONLY.contains(providerKey)) {
             return Result.success(
                     "no live /models endpoint — curated entries assumed authoritative");
         }
-        String apiKey = readSavedApiKey(providerKey);
+        String apiKey = candidate == null || candidate.trim().isEmpty()
+                ? null : candidate.trim();
         // Local Ollama doesn't need a key — the daemon is unauthenticated.
         if (apiKey == null && !"ollama".equals(providerKey)) {
-            return Result.failure(
-                    "key not found on disk — was the wizard's save step skipped?");
+            return Result.failure("credential not found or supplied for validation");
         }
         Map<String, String> creds = new LinkedHashMap<String, String>();
         if (apiKey != null) {

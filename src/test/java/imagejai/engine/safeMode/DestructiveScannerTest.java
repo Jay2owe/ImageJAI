@@ -2,6 +2,9 @@ package imagejai.engine.safeMode;
 
 import org.junit.Test;
 
+import java.io.IOException;
+import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
@@ -49,6 +52,238 @@ public class DestructiveScannerTest {
         return new DestructiveScanner.FileExistsCheck() {
             @Override public boolean exists(String path) { return set.contains(path); }
         };
+    }
+
+    // -----------------------------------------------------------------------
+    // Host/JVM code escapes
+    // -----------------------------------------------------------------------
+
+    @Test
+    public void hostCodePrimitivesAreRejectedBeforeFiji() {
+        String[] unsafe = {
+                "exec(\"python\", \"-V\");",
+                "eval(\"script\", \"java.lang.Runtime.getRuntime()\");",
+                "call(\"java.lang.System.exit\", \"0\");",
+                "runMacro(\"/tmp/untrusted.ijm\");",
+                "runMacroFile(\"/tmp/untrusted.ijm\");",
+                "IJ.runMacro(\"print(1);\");",
+                "IJ.runMacroFile(\"/tmp/untrusted.ijm\");",
+                "Ext.install(\"/tmp/extension.jar\");",
+                "run(\"Script...\");",
+                "run(\"Groovy Script\", \"script=[println 1]\");",
+                "run(\"BeanShell Interpreter\");",
+                "run(\"Compile and Run...\");",
+                "doCommand(\"JavaScript Interpreter\");",
+                "run(\"JRuby Interpreter\");",
+                "run(\"Scr\" + \"ipt...\");",
+                "command = \"Script...\"; run(command);"
+        };
+
+        for (String code : unsafe) {
+            List<DestructiveScanner.DestructiveOp> ops =
+                    DestructiveScanner.scan(code, baseCtx());
+            assertEquals("expected one host-code finding for " + code,
+                    1, ops.size());
+            assertEquals(DestructiveScanner.RULE_HOST_CODE, ops.get(0).ruleId);
+            assertEquals(DestructiveScanner.Severity.REJECT, ops.get(0).severity);
+        }
+    }
+
+    @Test
+    public void hostCodeWordsInStringsAndCommentsAreHarmless() {
+        String code = "// exec(\\\"python\\\");\n"
+                + "/* eval(\\\"script\\\", \\\"danger\\\"); "
+                + "Ext.install(\\\"danger\\\"); */\n"
+                + "print(\"call( and IJ.runMacro( are documentation\");\n"
+                + "print(\"run('Script...') is documentation\");\n"
+                + "run(\"Gaussian Blur...\", \"sigma=2\");\n"
+                + "run(\"Descriptor-based registration (2d/3d)\");";
+        assertTrue(DestructiveScanner.scan(code, baseCtx()).isEmpty());
+    }
+
+    @Test
+    public void hostCodeFindingCarriesSourceLine() {
+        String code = "run(\"Gaussian Blur...\", \"sigma=2\");\n"
+                + "call(\"java.lang.System.exit\", \"0\");";
+        List<DestructiveScanner.DestructiveOp> ops =
+                DestructiveScanner.scan(code, baseCtx());
+        assertEquals(1, ops.size());
+        assertEquals(2, ops.get(0).line);
+    }
+
+    @Test
+    public void contextFreeHostRuleStillFailsClosedWithoutImageContext() {
+        List<DestructiveScanner.DestructiveOp> ops = DestructiveScanner.scan(
+                "exec(\"python\", \"-V\");", null);
+        assertEquals(1, ops.size());
+        assertEquals(DestructiveScanner.RULE_HOST_CODE, ops.get(0).ruleId);
+    }
+
+    @Test
+    public void explicitlyElevatedScriptScanDoesNotReapplyMacroHostGate() {
+        assertTrue(DestructiveScanner.scanElevatedScript(
+                "eval(\"arbitrary approved script code\");", baseCtx()).isEmpty());
+    }
+
+    @Test
+    public void elevatedScriptScanRetainsScientificIntegrityRules() {
+        DestructiveScanner.Context ctx = new DestructiveScanner.Context(
+                "/raw/cells.lif", "/raw/AI_Exports",
+                16, true, 0, 0, false, false, noFiles());
+        List<DestructiveScanner.DestructiveOp> ops =
+                DestructiveScanner.scanElevatedScript(
+                        "run(\"Properties...\", \"pixel_width=1\");", ctx);
+        assertEquals(1, ops.size());
+        assertEquals(DestructiveScanner.RULE_CALIBRATION_LOSS, ops.get(0).ruleId);
+    }
+
+    // -----------------------------------------------------------------------
+    // Unconditional macro filesystem policy
+    // -----------------------------------------------------------------------
+
+    @Test
+    public void macroFilesystemReadsAndEnumerationAreRejected() {
+        String[] unsafe = {
+                "text = File.openAsString(\"/private/subjects.csv\");",
+                "raw = File.openAsRawString(\"/private/image.bin\", 64);",
+                "text = File.openUrlAsString(\"https://example.invalid/data\");",
+                "File.openSequence(\"/private/images\", \"virtual\");",
+                "path = File.openDialog(\"Choose private data\");",
+                "open(\"/private/subject.tif\");",
+                "openVirtual(\"/private/subject.tif\");",
+                "names = getFileList(\"/private\");",
+                "home = getDirectory(\"home\");",
+                "size = File.length(\"/private/subject.tif\");",
+                "size = File.getLength(\"/private/subject.tif\");",
+                "present = File.exists(\"/private/subject.tif\");",
+                "cwd = File.getAbsolutePath(\".\");",
+                "defaultDir = File.getDefaultDir();",
+                "lastDir = File.directory;",
+                "lastName = File.name;",
+                "imp = IJ.openImage(\"/private/subject.tif\");",
+                "IJ.open(\"/private/subject.tif\");",
+                "hash = IJ.checksum(\"MD5 file\", \"/private/subject.tif\");"
+        };
+        for (String code : unsafe) {
+            List<DestructiveScanner.FilesystemAccess> access =
+                    DestructiveScanner.classifyMacroFilesystem(
+                            code, "/safe/AI_Exports");
+            assertEquals("expected one filesystem finding for " + code,
+                    1, access.size());
+            assertFalse(access.get(0).allowed);
+            assertEquals(DestructiveScanner.FilesystemKind.READ,
+                    access.get(0).kind);
+        }
+    }
+
+    @Test
+    public void macroDestructiveAndImportPrimitivesAreRejected() {
+        String[] unsafe = {
+                "File.delete(\"/private/subject.tif\");",
+                "File.rename(\"/private/a.tif\", \"/private/b.tif\");",
+                "File.copy(\"/private/a.tif\", \"/safe/AI_Exports/a.tif\");",
+                "File.setDefaultDir(\"/private\");",
+                "run(\"Save\");",
+                "run(\"Revert\");",
+                "run(\"Open...\");",
+                "run(\"Bio-Formats Importer\");"
+        };
+        for (String code : unsafe) {
+            List<DestructiveScanner.DestructiveOp> ops =
+                    DestructiveScanner.scanMacroFilesystem(
+                            code, "/safe/AI_Exports");
+            assertEquals("expected one rejected filesystem access for " + code,
+                    1, ops.size());
+            assertEquals(DestructiveScanner.RULE_MACRO_FILESYSTEM,
+                    ops.get(0).ruleId);
+            assertEquals(DestructiveScanner.Severity.REJECT,
+                    ops.get(0).severity);
+        }
+    }
+
+    @Test
+    public void macroFilesystemWordsInStringsAndCommentsAreHarmless() {
+        String code = "// File.delete(\"/private/a.tif\");\n"
+                + "/* File.openAsString(\"/private/subjects.csv\"); */\n"
+                + "print(\"File.copy(a,b) and open('/private') docs\");\n"
+                + "name = File.getName(\"/private/subject.tif\");\n"
+                + "parent = File.getParent(\"/private/subject.tif\");\n"
+                + "separator = File.separator;\n"
+                + "run(\"Gaussian Blur...\", \"sigma=2\");";
+        assertTrue(DestructiveScanner.classifyMacroFilesystem(
+                code, "/safe/AI_Exports").isEmpty());
+    }
+
+    @Test
+    public void unknownFilePrimitiveAndDynamicWritesFailClosed() {
+        String[] unsafe = {
+                "File.futureFilesystemMethod(\"/private/a.tif\");",
+                "IJ.futureFilesystemMethod(\"/private/a.tif\");",
+                "File.write(\"data\", handle);",
+                "saveAs(\"Tiff\", outputPath);",
+                "File.saveString(\"data\", exportDir + \"/result.csv\");",
+                "File.open(path);",
+                "File.makeDirectory(directory);",
+                "run(\"Tiff...\", \"save=\" + outputPath);"
+        };
+        for (String code : unsafe) {
+            assertEquals("expected fail-closed finding for " + code, 1,
+                    DestructiveScanner.scanMacroFilesystem(
+                            code, "/safe/AI_Exports").size());
+        }
+    }
+
+    @Test
+    public void literalOutputWritesUnderResolvedAiExportsAreAllowed() {
+        Path exports = Paths.get("target", "filesystem-policy", "AI_Exports")
+                .toAbsolutePath().normalize();
+        String root = exports.toString().replace('\\', '/');
+        String code = "File.makeDirectory(\"" + root + "/nested\");\n"
+                + "File.mkdir(\"" + root + "/nested\");\n"
+                + "File.saveString(\"header\", \"" + root + "/result.csv\");\n"
+                + "File.append(\"row\", \"" + root + "/result.csv\");\n"
+                + "f = File.open(\"" + root + "/log.txt\");\n"
+                + "print(f, \"ok\"); File.close(f);\n"
+                + "saveAs(\"Results\", \"" + root + "/result.csv\");\n"
+                + "IJ.saveAs(\"Tiff\", \"" + root + "/image.tif\");\n"
+                + "IJ.saveAsTiff(\"" + root + "/image2.tif\");\n"
+                + "IJ.saveString(\"data\", \"" + root + "/data.txt\");\n"
+                + "run(\"Tiff...\", \"save=[" + root + "/run.tif]\");";
+
+        List<DestructiveScanner.FilesystemAccess> access =
+                DestructiveScanner.classifyMacroFilesystem(code, root);
+        assertEquals(10, access.size());
+        for (DestructiveScanner.FilesystemAccess item : access) {
+            assertTrue(item.message, item.allowed);
+            assertEquals(DestructiveScanner.FilesystemKind.OUTPUT_WRITE, item.kind);
+        }
+        assertTrue(DestructiveScanner.scanMacroFilesystem(code, root).isEmpty());
+    }
+
+    @Test
+    public void literalOutputOutsideOrTraversingAiExportsIsRejected() {
+        Path exports = Paths.get("target", "filesystem-policy", "AI_Exports")
+                .toAbsolutePath().normalize();
+        String root = exports.toString().replace('\\', '/');
+        String outside = exports.resolve("..").resolve("subject.tif")
+                .toString().replace('\\', '/');
+        List<DestructiveScanner.DestructiveOp> ops =
+                DestructiveScanner.scanMacroFilesystem(
+                        "saveAs(\"Tiff\", \"" + outside + "\");", root);
+        assertEquals(1, ops.size());
+        assertEquals(DestructiveScanner.RULE_MACRO_FILESYSTEM,
+                ops.get(0).ruleId);
+    }
+
+    @Test
+    public void filesystemFindingCarriesSourceLine() {
+        List<DestructiveScanner.DestructiveOp> ops =
+                DestructiveScanner.scanMacroFilesystem(
+                        "run(\"Gaussian Blur...\", \"sigma=2\");\n"
+                                + "File.delete(\"/private/a.tif\");",
+                        "/safe/AI_Exports");
+        assertEquals(1, ops.size());
+        assertEquals(2, ops.get(0).line);
     }
 
     // -----------------------------------------------------------------------
@@ -183,6 +418,61 @@ public class DestructiveScannerTest {
         DestructiveScanner.Context ctx = baseCtx();
         String code = "saveAs(\"PNG\", \"/raw/AI_Exports/figure.png\");";
         assertTrue(DestructiveScanner.scan(code, ctx).isEmpty());
+    }
+
+    @Test
+    public void aiExportsLexicalTraversalIsRejected() {
+        DestructiveScanner.Context ctx = baseCtx();
+        String code = "saveAs(\"PNG\", \"/raw/AI_Exports/../cells.lif\");";
+
+        List<DestructiveScanner.DestructiveOp> ops =
+                DestructiveScanner.scan(code, ctx);
+
+        assertEquals(1, ops.size());
+        assertEquals(DestructiveScanner.RULE_AI_EXPORTS_ESCAPE,
+                ops.get(0).ruleId);
+        assertEquals(DestructiveScanner.Severity.REJECT, ops.get(0).severity);
+    }
+
+    @Test
+    public void canonicalSymlinkEscapeCannotClaimAiExportsContainment() {
+        final Path root = Paths.get("safe", "AI_Exports")
+                .toAbsolutePath().normalize();
+        final Path target = root.resolve("link").resolve("figure.png");
+        final Path outside = root.getParent().resolve("outside").resolve("figure.png");
+        DestructiveScanner.CanonicalPathResolver resolver =
+                new DestructiveScanner.CanonicalPathResolver() {
+                    @Override
+                    public Path canonicalise(Path intended) {
+                        return intended.equals(root) ? root : outside;
+                    }
+                };
+
+        assertEquals("ESCAPE", DestructiveScanner.containmentForTest(
+                target.toString(), root.toString(), resolver));
+    }
+
+    @Test
+    public void unreadableAiExportsParentFailsClosedInsteadOfLookingEmpty() {
+        final Path root = Paths.get("safe", "AI_Exports")
+                .toAbsolutePath().normalize();
+        Path target = root.resolve("figure.png");
+        DestructiveScanner.CanonicalPathResolver unreadable =
+                new DestructiveScanner.CanonicalPathResolver() {
+                    @Override
+                    public Path canonicalise(Path intended) throws IOException {
+                        throw new IOException("access denied");
+                    }
+                };
+
+        assertEquals("ESCAPE", DestructiveScanner.containmentForTest(
+                target.toString(), root.toString(), unreadable));
+    }
+
+    @Test
+    public void literalAiExportsSegmentWithoutResolvedRootIsNotTrusted() {
+        assertFalse(DestructiveScanner.isUnderAiExports(
+                "AI_Exports/figure.png", null));
     }
 
     /** PNG saveAs over an existing .lif file → reject. */

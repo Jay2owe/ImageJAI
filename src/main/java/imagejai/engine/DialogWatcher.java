@@ -1,6 +1,10 @@
 package imagejai.engine;
 
 import com.google.gson.JsonObject;
+import imagejai.engine.automation.AutomationBridge;
+import imagejai.engine.automation.UiAutomationService;
+import imagejai.engine.automation.UiIdentityRegistry;
+import imagejai.engine.automation.UiNode;
 
 import javax.swing.Timer;
 import java.awt.Component;
@@ -10,19 +14,20 @@ import java.awt.Window;
 import java.awt.event.ActionEvent;
 import java.awt.event.ActionListener;
 import java.util.ArrayList;
-import java.util.HashMap;
-import java.util.HashSet;
+import java.util.IdentityHashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
+import java.util.UUID;
+import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * Phase 2: polls {@link Window#getWindows()} every 500ms on the EDT and emits
  * {@code dialog.appeared} / {@code dialog.closed} events through {@link EventBus}.
  * <p>
- * Dialog identity is the window title (stable for the lifetime of a dialog).
- * Newly-seen titles produce {@code dialog.appeared}; titles that disappear
- * from the open set produce {@code dialog.closed}.
+ * Dialog identity is an opaque id attached to the concrete Window instance.
+ * Display titles are metadata only: simultaneous or successive dialogs with
+ * the same title retain distinct lifecycles.
  */
 public class DialogWatcher {
 
@@ -32,11 +37,30 @@ public class DialogWatcher {
     private Timer timer;
     private volatile boolean running;
 
-    // title -> classified kind; stable set of open dialogs from the last poll.
-    private final Map<String, String> openDialogs = new HashMap<String, String>();
+    private final Map<String, DialogState> openDialogs =
+            new LinkedHashMap<String, DialogState>();
+    private final IdentityHashMap<Window, String> dialogIds =
+            new IdentityHashMap<Window, String>();
+    private final AtomicLong dialogSequence = new AtomicLong();
+    private final String identityNamespace = UUID.randomUUID().toString().substring(0, 8);
+    /**
+     * Stable window identity shared with the test automation bridge, or
+     * {@code null} on a normal Fiji. When present, dialog events also carry the
+     * {@code window_id} the UI tree reports, so a harness can correlate a
+     * lifecycle event with the node it was targeting without matching on title.
+     */
+    private final UiIdentityRegistry identities;
+    private final Map<String, WindowState> openWindows =
+            new LinkedHashMap<String, WindowState>();
 
     public DialogWatcher(EventBus bus) {
+        this(bus, AutomationBridge.sharedIdentitiesIfEnabled());
+    }
+
+    /** Test seam / explicit wiring for the automation bridge's identity registry. */
+    public DialogWatcher(EventBus bus, UiIdentityRegistry identities) {
         this.bus = bus;
+        this.identities = identities;
     }
 
     /** Start polling. Safe to call once at plugin start — idempotent. */
@@ -63,18 +87,27 @@ public class DialogWatcher {
             timer.stop();
             timer = null;
         }
+        openDialogs.clear();
+        openWindows.clear();
+        dialogIds.clear();
     }
 
     private void poll() {
         if (!running) return;
 
-        Set<String> seenTitles = new HashSet<String>();
-        Map<String, String> currentKinds = new HashMap<String, String>();
+        Map<String, DialogState> current = new LinkedHashMap<String, DialogState>();
+        Map<String, WindowState> currentWindows = new LinkedHashMap<String, WindowState>();
 
         Window[] windows = Window.getWindows();
         if (windows != null) {
             for (Window win : windows) {
                 if (win == null || !win.isShowing()) continue;
+                if (identities != null) {
+                    String windowId = identities.windowId(win);
+                    currentWindows.put(windowId, new WindowState(windowId,
+                            UiNode.roleOf(win), UiAutomationService.ownerOf(win),
+                            win instanceof Dialog && ((Dialog) win).isModal()));
+                }
                 if (!(win instanceof Dialog)) continue;
                 Dialog dlg = (Dialog) win;
                 String title = dlg.getTitle();
@@ -82,37 +115,94 @@ public class DialogWatcher {
                 // Skip our own chat window — never emit events for ourselves.
                 if (title.contains("AI Assistant")) continue;
 
-                seenTitles.add(title);
-                if (!currentKinds.containsKey(title)) {
-                    currentKinds.put(title, classifyDialog(dlg));
+                String dialogId = dialogIds.get(dlg);
+                if (dialogId == null) {
+                    dialogId = "dialog-" + identityNamespace + "-"
+                            + dialogSequence.incrementAndGet();
+                    dialogIds.put(dlg, dialogId);
                 }
+                current.put(dialogId,
+                        new DialogState(dialogId, title, classifyDialog(dlg), dlg));
             }
         }
 
-        // dialog.appeared for new titles
-        for (Map.Entry<String, String> e : currentKinds.entrySet()) {
-            String title = e.getKey();
-            String kind = e.getValue();
-            if (!openDialogs.containsKey(title)) {
-                JsonObject data = buildDialogData(findDialogByTitle(title), kind);
-                data.addProperty("title", title);
-                data.addProperty("kind", kind);
-                data.addProperty("type", kind);
+        for (DialogState state : current.values()) {
+            if (!openDialogs.containsKey(state.id)) {
+                JsonObject data = buildDialogData(state.dialog, state.kind);
+                data.addProperty("dialog_id", state.id);
+                data.addProperty("title", state.title);
+                data.addProperty("kind", state.kind);
+                data.addProperty("type", state.kind);
+                addWindowIdentity(data, state.dialog);
                 bus.publish("dialog.appeared", data);
             }
         }
 
-        // dialog.closed for titles that disappeared
-        for (Map.Entry<String, String> e : openDialogs.entrySet()) {
-            if (!seenTitles.contains(e.getKey())) {
+        for (DialogState state : openDialogs.values()) {
+            if (!current.containsKey(state.id)) {
                 JsonObject data = new JsonObject();
-                data.addProperty("title", e.getKey());
+                data.addProperty("dialog_id", state.id);
+                data.addProperty("title", state.title);
+                data.addProperty("kind", state.kind);
+                addWindowIdentity(data, state.dialog);
                 bus.publish("dialog.closed", data);
+                dialogIds.remove(state.dialog);
             }
         }
 
         openDialogs.clear();
-        openDialogs.putAll(currentKinds);
+        openDialogs.putAll(current);
+        publishWindowLifecycle(currentWindows);
+    }
+
+    /**
+     * Payload-minimal window lifecycle for the test bridge: ids, role, owner,
+     * and modality. No titles, no labels, no contents — a subscriber learns
+     * that a window appeared, not what it says.
+     */
+    private void publishWindowLifecycle(Map<String, WindowState> current) {
+        if (identities == null) return;
+        for (WindowState state : current.values()) {
+            if (!openWindows.containsKey(state.id)) {
+                bus.publish("ui.window.appeared", state.toJson());
+            }
+        }
+        for (WindowState state : openWindows.values()) {
+            if (!current.containsKey(state.id)) {
+                bus.publish("ui.window.closed", state.toJson());
+            }
+        }
+        openWindows.clear();
+        openWindows.putAll(current);
+    }
+
+    private void addWindowIdentity(JsonObject data, Window window) {
+        if (identities == null || window == null) return;
+        data.addProperty("window_id", identities.windowId(window));
+        data.addProperty("ui_generation", identities.generation());
+    }
+
+    private static final class WindowState {
+        final String id;
+        final String role;
+        final String owner;
+        final boolean modal;
+
+        WindowState(String id, String role, String owner, boolean modal) {
+            this.id = id;
+            this.role = role;
+            this.owner = owner;
+            this.modal = modal;
+        }
+
+        JsonObject toJson() {
+            JsonObject data = new JsonObject();
+            data.addProperty("window_id", id);
+            data.addProperty("role", role);
+            data.addProperty("owner", owner);
+            data.addProperty("modal", modal);
+            return data;
+        }
     }
 
     /**
@@ -174,17 +264,18 @@ public class DialogWatcher {
         return data;
     }
 
-    private Dialog findDialogByTitle(String title) {
-        Window[] windows = Window.getWindows();
-        if (windows == null) return null;
-        for (Window win : windows) {
-            if (!(win instanceof Dialog) || !win.isShowing()) continue;
-            Dialog dlg = (Dialog) win;
-            String dlgTitle = dlg.getTitle();
-            if (dlgTitle == null) dlgTitle = "";
-            if (dlgTitle.equals(title)) return dlg;
+    private static final class DialogState {
+        final String id;
+        final String title;
+        final String kind;
+        final Dialog dialog;
+
+        DialogState(String id, String title, String kind, Dialog dialog) {
+            this.id = id;
+            this.title = title;
+            this.kind = kind;
+            this.dialog = dialog;
         }
-        return null;
     }
 
     private void collectText(Container c, StringBuilder out) {

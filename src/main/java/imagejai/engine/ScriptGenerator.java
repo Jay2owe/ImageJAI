@@ -5,8 +5,12 @@ import imagejai.llm.LLMResponse;
 import imagejai.llm.Message;
 
 import java.io.File;
-import java.io.FileWriter;
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.nio.file.StandardOpenOption;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.regex.Matcher;
@@ -143,34 +147,43 @@ public class ScriptGenerator {
      * @return the installed file path, or null on failure
      */
     public String installScript(GeneratedScript script, String fijiDir) {
-        if (script == null || fijiDir == null) {
+        if (script == null || fijiDir == null || script.language == null
+                || script.content == null) {
             return null;
         }
 
-        File installDir = new File(fijiDir, INSTALL_SUBDIR);
-        if (!installDir.exists() && !installDir.mkdirs()) {
-            System.err.println("[ImageJAI] Failed to create script directory: " + installDir);
-            return null;
-        }
-
-        File target = new File(installDir, script.fileName);
-        FileWriter writer = null;
         try {
-            writer = new FileWriter(target);
-            writer.write(script.content);
-            System.err.println("[ImageJAI] Script installed: " + target.getAbsolutePath());
-            return target.getAbsolutePath();
+            Path root = Paths.get(fijiDir).toAbsolutePath().normalize();
+            Path installDir = root.resolve(INSTALL_SUBDIR).normalize();
+            if (!installDir.startsWith(root)) return null;
+            Files.createDirectories(installDir);
+            Path rootReal = root.toRealPath();
+            Path installReal = installDir.toRealPath();
+            if (!installReal.startsWith(rootReal)) return null;
+
+            // GeneratedScript is mutable and callers can replace fileName
+            // after generation. Recompute the basename from the safe name
+            // and enum instead of trusting a traversal/CRLF-bearing value.
+            String safeName = sanitizeName(script.name);
+            String safeFileName = toFileName(safeName, script.language);
+            Path target = installReal.resolve(safeFileName).normalize();
+            if (!target.getParent().equals(installReal)
+                    || Files.isSymbolicLink(target)) return null;
+
+            Files.write(target, script.content.getBytes(StandardCharsets.UTF_8),
+                    StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING,
+                    StandardOpenOption.WRITE);
+            script.name = safeName;
+            script.fileName = safeFileName;
+            script.menuPath = "Plugins>AI_Generated>" + safeName;
+            System.err.println("[ImageJAI] Script installed: " + target);
+            return target.toString();
         } catch (IOException e) {
             System.err.println("[ImageJAI] Failed to install script: " + e.getMessage());
             return null;
-        } finally {
-            if (writer != null) {
-                try {
-                    writer.close();
-                } catch (IOException ignored) {
-                    // ignore
-                }
-            }
+        } catch (RuntimeException e) {
+            System.err.println("[ImageJAI] Invalid script path: " + e.getMessage());
+            return null;
         }
     }
 
@@ -302,11 +315,13 @@ public class ScriptGenerator {
         if (name == null || name.trim().isEmpty()) {
             return "Untitled";
         }
-        String sanitized = name.replaceAll("[^a-zA-Z0-9_\\- ]", "").trim();
+        String sanitized = name.replace('\r', ' ').replace('\n', ' ')
+                .replaceAll("[^a-zA-Z0-9_\\- ]", "").trim();
         sanitized = sanitized.replaceAll("\\s+", "_");
         if (sanitized.isEmpty()) {
             return "Untitled";
         }
+        if (sanitized.length() > 80) sanitized = sanitized.substring(0, 80);
         return sanitized;
     }
 

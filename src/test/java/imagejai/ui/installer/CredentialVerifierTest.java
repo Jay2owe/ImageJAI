@@ -10,6 +10,11 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import javax.swing.SwingUtilities;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
@@ -88,5 +93,67 @@ public class CredentialVerifierTest {
         PureApiKeyWizard pure = new PureApiKeyWizard("groq", "Groq",
                 "https://example", creds, null);
         assertNotNull(pure);
+    }
+
+    @Test
+    public void rejectedCandidateRunsOffEdtAndNeverReplacesStoredKey() throws Exception {
+        Path tmp = Files.createTempDirectory("verifier-rejected");
+        ProviderCredentials creds = new ProviderCredentials(tmp);
+        creds.saveApiKey("groq", "existing-good-key");
+        CountDownLatch completed = new CountDownLatch(1);
+        AtomicBoolean verifierWasOnEdt = new AtomicBoolean(true);
+        AtomicReference<CredentialVerifier.Result> outcome = new AtomicReference<>();
+        final String rejected = "rejected-secret-value";
+        CredentialVerifier verifier = new CredentialVerifier() {
+            @Override public CredentialVerifier.Result verify(String provider, int timeout) {
+                return CredentialVerifier.Result.failure("legacy path unused");
+            }
+            @Override public CredentialVerifier.Result verifyCandidate(
+                    String provider, String candidate, int timeout) {
+                verifierWasOnEdt.set(SwingUtilities.isEventDispatchThread());
+                return CredentialVerifier.Result.failure("provider rejected " + candidate);
+            }
+        };
+        CredentialVerifier.ValidationWorker worker =
+                new CredentialVerifier.ValidationWorker(
+                        "groq", rejected, 4000, verifier,
+                        (provider, candidate) -> creds.saveApiKey(provider, candidate),
+                        result -> { outcome.set(result); completed.countDown(); });
+
+        worker.execute();
+        assertTrue(completed.await(5, TimeUnit.SECONDS));
+
+        assertFalse(verifierWasOnEdt.get());
+        assertFalse(outcome.get().ok);
+        assertFalse(outcome.get().message.contains(rejected));
+        assertEquals("existing-good-key", creds.read("groq").get("GROQ_API_KEY"));
+    }
+
+    @Test
+    public void acceptedCandidatePersistsBeforeEdtCompletion() throws Exception {
+        Path tmp = Files.createTempDirectory("verifier-accepted");
+        ProviderCredentials creds = new ProviderCredentials(tmp);
+        CountDownLatch completed = new CountDownLatch(1);
+        AtomicBoolean callbackOnEdt = new AtomicBoolean(false);
+        CredentialVerifier verifier = new CredentialVerifier() {
+            @Override public CredentialVerifier.Result verify(String provider, int timeout) {
+                return CredentialVerifier.Result.failure("legacy path unused");
+            }
+            @Override public CredentialVerifier.Result verifyCandidate(
+                    String provider, String candidate, int timeout) {
+                return CredentialVerifier.Result.success("accepted");
+            }
+        };
+        new CredentialVerifier.ValidationWorker(
+                "groq", "accepted-key", 4000, verifier,
+                (provider, candidate) -> creds.saveApiKey(provider, candidate),
+                result -> {
+                    callbackOnEdt.set(SwingUtilities.isEventDispatchThread());
+                    completed.countDown();
+                }).execute();
+
+        assertTrue(completed.await(5, TimeUnit.SECONDS));
+        assertTrue(callbackOnEdt.get());
+        assertEquals("accepted-key", creds.read("groq").get("GROQ_API_KEY"));
     }
 }

@@ -5,10 +5,12 @@ import imagejai.engine.AgentLauncher;
 import imagejai.engine.AgentPlannerDetector;
 import imagejai.install.MiniLmDownloader;
 import imagejai.install.ProcessRunner;
+import imagejai.install.ConsoleBootstrap;
 
 import javax.swing.*;
 import javax.swing.border.EmptyBorder;
 import java.awt.*;
+import java.io.IOException;
 import java.net.URI;
 import java.nio.file.Path;
 import java.util.ArrayList;
@@ -26,9 +28,13 @@ public class InstallerPanel extends JPanel {
 
     private final Settings settings;
     private final ProcessRunner processRunner;
+    private final ConsoleBootstrap consoleBootstrap;
     private final Map<String, JTextField> commandFields = new LinkedHashMap<String, JTextField>();
     private final Map<String, JLabel> statusLabels = new LinkedHashMap<String, JLabel>();
-    private JCheckBox claudeUseGsdFlag;
+    private JButton consoleInstallButton;
+    private JButton consoleLaunchButton;
+    private JButton consoleRepairButton;
+    private JButton consoleUninstallButton;
 
     public InstallerPanel(Settings settings) {
         this(settings, new ProcessRunner());
@@ -38,6 +44,7 @@ public class InstallerPanel extends JPanel {
         super(new BorderLayout(8, 8));
         this.settings = settings;
         this.processRunner = processRunner;
+        this.consoleBootstrap = new ConsoleBootstrap();
         buildUI();
         refreshStatuses();
     }
@@ -51,7 +58,10 @@ public class InstallerPanel extends JPanel {
         settings.gsdInstallCommand = field("gsd", settings.gsdInstallCommand);
         settings.gsdInstallDocsUrl = field("gsdDocs", settings.gsdInstallDocsUrl);
         settings.gsdSkillsPath = field("gsdPath", settings.gsdSkillsPath);
-        settings.claudeUseGsdFlag = claudeUseGsdFlag.isSelected();
+        settings.setCliAgentArguments("claude", field("claude.args", ""));
+        settings.setCliAgentArguments("codex", field("codex.args", ""));
+        settings.setCliAgentArguments("aider", field("aider.args", ""));
+        settings.setCliAgentArguments("gemini", field("gemini.args", ""));
     }
 
     private void buildUI() {
@@ -64,6 +74,7 @@ public class InstallerPanel extends JPanel {
 
         addHeader(rows, c);
         int row = 1;
+        row = addConsoleRow(rows, c, row);
         row = addStaticRow(rows, c, row, AgentLauncher.LOCAL_ASSISTANT_NAME, "\u2713 ready", "Built in");
         row = addMiniLmRow(rows, c, row);
         row = addAgentRow(rows, c, row, "Claude Code", "claude", "claude",
@@ -111,6 +122,35 @@ public class InstallerPanel extends JPanel {
         statusLabels.put(name, statusLabel);
         c.gridx = 2;
         rows.add(new JLabel(actionText), c);
+        return row + 1;
+    }
+
+    private int addConsoleRow(JPanel rows, GridBagConstraints c, int row) {
+        c.gridy = row;
+        c.gridx = 0;
+        rows.add(new JLabel("ImageJAI Console"), c);
+        c.gridx = 1;
+        JLabel status = new JLabel("checking...");
+        status.setToolTipText("Standalone imagejai command; Python is downloaded privately if needed");
+        statusLabels.put("imagejai-console", status);
+        rows.add(status, c);
+        c.gridx = 2;
+        JPanel actions = new JPanel(new FlowLayout(FlowLayout.LEFT, 4, 0));
+        consoleInstallButton = new JButton("Install");
+        consoleInstallButton.addActionListener(e -> installConsole(false));
+        consoleLaunchButton = new JButton("Launch");
+        consoleLaunchButton.addActionListener(e -> launchConsole());
+        consoleRepairButton = new JButton("Repair / update");
+        consoleRepairButton.addActionListener(e -> installConsole(true));
+        consoleUninstallButton = new JButton("Uninstall");
+        consoleUninstallButton.addActionListener(e -> uninstallConsole());
+        actions.add(consoleInstallButton);
+        actions.add(consoleLaunchButton);
+        actions.add(consoleRepairButton);
+        actions.add(consoleUninstallButton);
+        rows.add(actions, c);
+        updateConsoleButtons(new ConsoleBootstrap.Inspection(
+                ConsoleBootstrap.State.NOT_INSTALLED, "", "checking"));
         return row + 1;
     }
 
@@ -174,7 +214,7 @@ public class InstallerPanel extends JPanel {
     private JPanel buildEditableSettings() {
         JPanel wrapper = new JPanel(new BorderLayout());
         wrapper.setBorder(BorderFactory.createCompoundBorder(
-                BorderFactory.createTitledBorder("Packager-editable install settings"),
+                BorderFactory.createTitledBorder("CLI installation and launch settings"),
                 new EmptyBorder(4, 8, 6, 8)));
 
         JPanel grid = new JPanel(new GridBagLayout());
@@ -184,11 +224,24 @@ public class InstallerPanel extends JPanel {
         c.fill = GridBagConstraints.HORIZONTAL;
         c.weightx = 0.0;
         int row = 0;
-        row = addField(grid, c, row, "Claude command:", "claude");
-        row = addField(grid, c, row, "Codex command:", "codex");
-        row = addField(grid, c, row, "Aider command:", "aider");
-        row = addField(grid, c, row, "Gemini command:", "gemini");
+        row = addField(grid, c, row, "Claude install command:", "claude");
+        row = addField(grid, c, row, "Codex install command:", "codex");
+        row = addField(grid, c, row, "Aider install command:", "aider");
+        row = addField(grid, c, row, "Gemini install command:", "gemini");
         row = addField(grid, c, row, "Ollama download URL:", "ollamaUrl");
+
+        commandFields.put("claude.args", new JTextField(
+                settings.getCliAgentArguments("claude"), 34));
+        commandFields.put("codex.args", new JTextField(
+                settings.getCliAgentArguments("codex"), 34));
+        commandFields.put("aider.args", new JTextField(
+                settings.getCliAgentArguments("aider"), 34));
+        commandFields.put("gemini.args", new JTextField(
+                settings.getCliAgentArguments("gemini"), 34));
+        row = addField(grid, c, row, "Claude launch arguments:", "claude.args");
+        row = addField(grid, c, row, "Codex launch arguments:", "codex.args");
+        row = addField(grid, c, row, "Aider launch arguments:", "aider.args");
+        row = addField(grid, c, row, "Gemini launch arguments:", "gemini.args");
 
         commandFields.put("gsd", new JTextField(settings.gsdInstallCommand, 34));
         commandFields.put("gsdDocs", new JTextField(settings.gsdInstallDocsUrl, 34));
@@ -200,9 +253,10 @@ public class InstallerPanel extends JPanel {
         c.gridy = row;
         c.gridx = 0;
         c.gridwidth = 2;
-        claudeUseGsdFlag = new JCheckBox("Use Claude GSD speed flag when GSD is installed");
-        claudeUseGsdFlag.setSelected(settings.claudeUseGsdFlag);
-        grid.add(claudeUseGsdFlag, c);
+        JLabel launchWarning = new JLabel(
+                "<html><i>Launch arguments are passed to the CLI as written; "
+                        + "autonomy flags can disable its approval safeguards.</i></html>");
+        grid.add(launchWarning, c);
 
         wrapper.add(grid, BorderLayout.CENTER);
         return wrapper;
@@ -221,6 +275,7 @@ public class InstallerPanel extends JPanel {
     }
 
     private void refreshStatuses() {
+        refreshConsoleStatus();
         setStatus(AgentLauncher.LOCAL_ASSISTANT_NAME, "\u2713 ready");
         setStatus("minilm", settings.miniLmInstalled ? "\u2713 ready" : "not downloaded");
         checkCommandAsync("claude", "claude");
@@ -228,6 +283,155 @@ public class InstallerPanel extends JPanel {
         checkCommandAsync("ollama", "ollama");
         checkCommandAsync("aider", "aider");
         checkCommandAsync("gemini", "gemini");
+    }
+
+    private void refreshConsoleStatus() {
+        new Thread(new Runnable() {
+            @Override public void run() {
+                final ConsoleBootstrap.Inspection inspection = consoleBootstrap.inspect();
+                SwingUtilities.invokeLater(new Runnable() {
+                    @Override public void run() {
+                        String label;
+                        switch (inspection.state) {
+                            case READY:
+                                label = "\u2713 ready";
+                                break;
+                            case UPDATE_AVAILABLE:
+                                label = "update available";
+                                break;
+                            case BROKEN:
+                                label = "needs repair";
+                                break;
+                            default:
+                                label = "not installed";
+                        }
+                        setStatus("imagejai-console", label);
+                        JLabel status = statusLabels.get("imagejai-console");
+                        if (status != null) status.setToolTipText(inspection.message);
+                        updateConsoleButtons(inspection);
+                    }
+                });
+            }
+        }, "ImageJAI console status").start();
+    }
+
+    private void updateConsoleButtons(ConsoleBootstrap.Inspection inspection) {
+        if (consoleInstallButton == null) return;
+        boolean ready = inspection.state == ConsoleBootstrap.State.READY;
+        boolean installed = inspection.state != ConsoleBootstrap.State.NOT_INSTALLED;
+        consoleInstallButton.setVisible(!installed);
+        consoleInstallButton.setEnabled(!installed);
+        consoleLaunchButton.setEnabled(ready);
+        consoleRepairButton.setEnabled(installed);
+        consoleRepairButton.setText(inspection.state == ConsoleBootstrap.State.UPDATE_AVAILABLE
+                ? "Update" : "Repair / update");
+        consoleUninstallButton.setEnabled(installed);
+    }
+
+    private void installConsole(final boolean repair) {
+        ConsoleBootstrap.Plan plan = consoleBootstrap.plan();
+        int choice = JOptionPane.showConfirmDialog(this,
+                plan.describe(), repair ? "Repair or update ImageJAI Console"
+                        : "Install ImageJAI Console",
+                JOptionPane.YES_NO_OPTION, JOptionPane.WARNING_MESSAGE);
+        if (choice != JOptionPane.YES_OPTION) return;
+        runConsoleTask(repair ? "ImageJAI Console repair" : "ImageJAI Console installation",
+                new ConsoleTask() {
+                    @Override public void run(ConsoleBootstrap.LogSink log) throws Exception {
+                        if (repair) consoleBootstrap.repair(log);
+                        else consoleBootstrap.install(log);
+                    }
+                });
+    }
+
+    private void launchConsole() {
+        try {
+            consoleBootstrap.launch();
+        } catch (IOException failure) {
+            JOptionPane.showMessageDialog(this, failure.getMessage(),
+                    "Could not launch ImageJAI Console", JOptionPane.ERROR_MESSAGE);
+            refreshConsoleStatus();
+        }
+    }
+
+    private void uninstallConsole() {
+        int choice = JOptionPane.showConfirmDialog(this,
+                "Remove the standalone imagejai command and its private Python runtime?\n\n"
+                        + "Saved chats and provider credentials will be kept.",
+                "Uninstall ImageJAI Console", JOptionPane.YES_NO_OPTION,
+                JOptionPane.WARNING_MESSAGE);
+        if (choice != JOptionPane.YES_OPTION) return;
+        runConsoleTask("ImageJAI Console uninstall", new ConsoleTask() {
+            @Override public void run(ConsoleBootstrap.LogSink log) throws Exception {
+                consoleBootstrap.uninstall(log);
+            }
+        });
+    }
+
+    private void runConsoleTask(String title, final ConsoleTask task) {
+        final JDialog dialog = new JDialog(SwingUtilities.getWindowAncestor(this),
+                title, Dialog.ModalityType.MODELESS);
+        final JTextArea logArea = new JTextArea(16, 72);
+        logArea.setEditable(false);
+        logArea.setLineWrap(true);
+        logArea.setWrapStyleWord(true);
+        final JButton close = new JButton("Close");
+        close.setEnabled(false);
+        close.addActionListener(e -> dialog.dispose());
+        dialog.add(new JScrollPane(logArea), BorderLayout.CENTER);
+        dialog.add(close, BorderLayout.SOUTH);
+        dialog.pack();
+        dialog.setLocationRelativeTo(this);
+        setConsoleActionsEnabled(false);
+        dialog.setVisible(true);
+
+        Thread worker = new Thread(new Runnable() {
+            @Override public void run() {
+                try {
+                    task.run(new ConsoleBootstrap.LogSink() {
+                        @Override public void line(final String line) {
+                            SwingUtilities.invokeLater(new Runnable() {
+                                @Override public void run() {
+                                    logArea.append(line + "\n");
+                                    logArea.setCaretPosition(logArea.getDocument().getLength());
+                                }
+                            });
+                        }
+                    });
+                    SwingUtilities.invokeLater(new Runnable() {
+                        @Override public void run() {
+                            logArea.append("Completed successfully.\n");
+                        }
+                    });
+                } catch (final Exception failure) {
+                    SwingUtilities.invokeLater(new Runnable() {
+                        @Override public void run() {
+                            logArea.append("Failed: " + failure.getMessage() + "\n");
+                        }
+                    });
+                } finally {
+                    SwingUtilities.invokeLater(new Runnable() {
+                        @Override public void run() {
+                            close.setEnabled(true);
+                            refreshConsoleStatus();
+                        }
+                    });
+                }
+            }
+        }, "ImageJAI console bootstrap");
+        worker.setDaemon(true);
+        worker.start();
+    }
+
+    private void setConsoleActionsEnabled(boolean enabled) {
+        consoleInstallButton.setEnabled(enabled);
+        consoleLaunchButton.setEnabled(enabled);
+        consoleRepairButton.setEnabled(enabled);
+        consoleUninstallButton.setEnabled(enabled);
+    }
+
+    private interface ConsoleTask {
+        void run(ConsoleBootstrap.LogSink log) throws Exception;
     }
 
     private void checkCommandAsync(final String key, final String commandName) {
@@ -320,8 +524,8 @@ public class InstallerPanel extends JPanel {
         boolean installed = AgentPlannerDetector.isInstalled(settings);
         if (installed) {
             JOptionPane.showMessageDialog(this,
-                    "Claude Code will launch with --dangerously-skip-permissions "
-                            + "(faster, unlocks full potential).",
+                    "GSD is installed. Claude launch arguments are configured "
+                            + "separately below.",
                     "GSD detected",
                     JOptionPane.INFORMATION_MESSAGE);
             return;

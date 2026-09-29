@@ -19,6 +19,7 @@ public class AgentLauncherGsdTest {
     @Test
     public void claudeLaunchIncludesDangerousFlagOnlyWhenGsdInstalled() {
         Settings settings = new Settings();
+        settings.setCliAgentArguments("claude", "");
         settings.claudeUseGsdFlag = true;
         AgentLauncher launcher = new AgentLauncher(".", 7746, settings);
         AgentLauncher.AgentInfo claude = new AgentLauncher.AgentInfo(
@@ -26,6 +27,10 @@ public class AgentLauncherGsdTest {
 
         AgentPlannerDetector.setProbeForTests(new FixedProbe(true));
         assertTrue(launcher.buildAgentCommandString(claude)
+                .contains("--dangerously-skip-permissions"));
+
+        // Consent is consumed by exactly one command construction.
+        assertFalse(launcher.buildAgentCommandString(claude)
                 .contains("--dangerously-skip-permissions"));
 
         AgentPlannerDetector.setProbeForTests(new FixedProbe(false));
@@ -36,6 +41,7 @@ public class AgentLauncherGsdTest {
     @Test
     public void claudeLaunchOmitsDangerousFlagWhenUserDisablesSetting() {
         Settings settings = new Settings();
+        settings.setCliAgentArguments("claude", "");
         settings.claudeUseGsdFlag = false;
         AgentLauncher launcher = new AgentLauncher(".", 7746, settings);
         AgentLauncher.AgentInfo claude = new AgentLauncher.AgentInfo(

@@ -17,6 +17,7 @@ import ij.gui.Roi;
 import ij.measure.Calibration;
 import ij.measure.ResultsTable;
 import ij.plugin.frame.RoiManager;
+import ij.process.ColorProcessor;
 import ij.process.ImageProcessor;
 import ij.process.ImageStatistics;
 import ij.process.LUT;
@@ -32,14 +33,19 @@ import imagejai.engine.security.PseudonymisationFilter;
 import imagejai.engine.security.RedactionReport;
 import imagejai.engine.security.SelectionBroker;
 import imagejai.engine.security.VisualOverrideRegistry;
+import imagejai.engine.automation.AutomationBridge;
+import imagejai.engine.automation.AutomationCommandHandler;
+import imagejai.engine.automation.AutomationPolicy;
+import imagejai.engine.automation.ConsoleBootstrapService;
 import imagejai.engine.safeMode.DestructiveScanner;
 import imagejai.engine.safeMode.RoiAutoBackup;
+import imagejai.engine.safeMode.SourceImageTagger;
 import imagejai.ui.ChatPanelController;
 
 import javax.swing.SwingUtilities;
-import java.io.BufferedReader;
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
-import java.io.InputStreamReader;
+import java.io.InputStream;
 import java.io.OutputStream;
 import java.io.OutputStreamWriter;
 import java.io.PrintWriter;
@@ -48,7 +54,10 @@ import java.net.ServerSocket;
 import java.net.Socket;
 import java.net.SocketException;
 import java.nio.charset.Charset;
+import java.nio.charset.CharacterCodingException;
+import java.nio.charset.CodingErrorAction;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.security.MessageDigest;
@@ -58,9 +67,11 @@ import java.awt.Dialog;
 import java.awt.Frame;
 import java.awt.Rectangle;
 import java.awt.Window;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.Deque;
 import java.util.Enumeration;
 import java.util.HashSet;
 import java.util.List;
@@ -70,15 +81,18 @@ import java.util.Optional;
 import java.util.Properties;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutionException;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.LinkedBlockingDeque;
+import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.ThreadFactory;
+import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 import javax.script.ScriptEngine;
 import javax.script.ScriptEngineManager;
 import javax.script.ScriptException;
@@ -105,68 +119,8 @@ public class TCPCommandServer {
 
     private static final Gson GSON = new GsonBuilder().create();
     private static final Charset UTF8 = Charset.forName("UTF-8");
-    private static final List<String> KNOWN_COMMANDS = Collections.unmodifiableList(
-            Arrays.asList(
-                    "hello",
-                    "ping",
-                    "emit_methods_table",
-                    "execute_macro",
-                    "get_state",
-                    "get_image_info",
-                    "get_results_table",
-                    "capture_image",
-                    "request_visual",
-                    "open_image",
-                    "open_image_by_token",
-                    "browse_pending_brief",
-                    "get_pending_brief",
-                    "run_pipeline",
-                    "explore_thresholds",
-                    "get_state_context",
-                    "get_log",
-                    "get_histogram",
-                    "get_open_windows",
-                    "get_metadata",
-                    "batch",
-                    "run",
-                    "get_pixels",
-                    "3d_viewer",
-                    "get_dialogs",
-                    "close_dialogs",
-                    "close_windows",
-                    "probe_command",
-                    "list_commands",
-                    "run_script",
-                    "interact_dialog",
-                    "get_progress",
-                    "get_friction_log",
-                    "get_friction_patterns",
-                    "clear_friction_log",
-                    "intent",
-                    "intent_teach",
-                    "intent_list",
-                    "intent_forget",
-                    "gui_action",
-                    "execute_macro_async",
-                    "job_status",
-                    "job_cancel",
-                    "job_list",
-                    "list_reactive_rules",
-                    "reactive_stats",
-                    "reactive_enable",
-                    "reactive_disable",
-                    "reactive_reload",
-                    "get_roi_state",
-                    "get_display_state",
-                    "get_console",
-                    "get_image_graph",
-                    "ledger_lookup",
-                    "ledger_confirm",
-                    "rewind",
-                    "branch",
-                    "branch_list",
-                    "branch_switch",
-                    "branch_delete"));
+    private static final List<String> KNOWN_COMMANDS =
+            CommandManifest.requestResponseNames();
     // 10-minute synchronous-macro ceiling. Long enough for batch 3D Object
     // Counter runs on dense masks without blocking the TCP thread forever.
     // Callers can override per-request with `"timeout_ms": N` (pass 0 or a
@@ -175,6 +129,48 @@ public class TCPCommandServer {
     // connection is closed).
     private static final long MACRO_TIMEOUT_MS = 600_000;
     private static final long PIPELINE_TIMEOUT_MS = 600_000;
+    public static final int MAX_CONNECTION_WORKERS = 16;
+    public static final int CONNECTION_QUEUE_CAPACITY = 64;
+    public static final int MAX_BATCH_COMMANDS = 64;
+    public static final int MAX_BATCH_DEPTH = 4;
+    public static final int MAX_COMPOUND_WORK = 64;
+    public static final long MAX_BATCH_RESPONSE_BYTES = 4L * 1024L * 1024L;
+    public static final long MAX_RESULTS_TABLE_BYTES = 2L * 1024L * 1024L;
+    public static final int MAX_CAPTURE_DIMENSION = 4096;
+    public static final int MAX_CAPTURE_PNG_BYTES = 16 * 1024 * 1024;
+    public static final int MAX_PROCESS_OUTPUT_BYTES = 1024 * 1024;
+    public static final long METHODS_PROCESS_TIMEOUT_MS = 30_000L;
+    public static final int MAX_HANDSHAKE_IDENTITY_CHARS = 256;
+    public static final int MAX_HANDSHAKE_OUTPUT_FORMAT_CHARS = 64;
+    public static final int MAX_ACCEPT_EVENT_TOPICS = 64;
+    public static final int MAX_ACCEPT_EVENT_TOPIC_CHARS = 128;
+    /**
+     * Upper bound on how many paths a single {@code pseudonymise_paths}
+     * request may mint tokens for. The caller is an interactive file picker:
+     * a handful of selections per prompt is normal, sixty-four is already
+     * generous, and the ceiling keeps one request from filling the
+     * process-local {@link PathTokenMap}.
+     */
+    public static final int MAX_PSEUDONYMISE_PATHS = 64;
+    /**
+     * Longest single path {@code pseudonymise_paths} accepts. Matched to
+     * {@link PathTokenMap#MAX_PATH_CHARS} so an over-long path is refused
+     * with a structured error here instead of throwing inside the map.
+     */
+    public static final int MAX_PSEUDONYMISE_PATH_CHARS = PathTokenMap.MAX_PATH_CHARS;
+    public static final int MAX_REQUEST_JSON_DEPTH = 64;
+    public static final int MAX_REQUEST_JSON_NODES = 16_384;
+    public static final int MAX_REQUEST_CONTAINER_ENTRIES = 4_096;
+    public static final int MAX_REQUEST_TOP_LEVEL_FIELDS = 128;
+    public static final int MAX_REQUEST_KEY_CHARS = 256;
+    public static final int MAX_REQUEST_JSON_BYTES = Constants.TCP_MAX_MESSAGE_SIZE;
+    public static final long MAX_PER_SESSION_TELEMETRY_BYTES =
+            (long) ResponseDedupCache.DEFAULT_MAX_RETAINED_KEY_BYTES
+                    + SessionStats.MAX_RETAINED_BYTES;
+    public static final long MAX_GLOBAL_SESSION_TELEMETRY_BYTES =
+            (long) SessionCapsRegistry.DEFAULT_CAPACITY
+                    * MAX_PER_SESSION_TELEMETRY_BYTES;
+    private static final long COMPOUND_RESPONSE_OVERHEAD_BYTES = 2048L;
 
     /**
      * Resolve the per-request timeout override, falling back to the default.
@@ -189,11 +185,6 @@ public class TCPCommandServer {
         } catch (Exception e) {
             return defaultMs;
         }
-    }
-
-    /** Has this request opted out of the watchdog? */
-    private static boolean timeoutDisabled(long timeoutMs) {
-        return timeoutMs <= 0L;
     }
 
     // -----------------------------------------------------------------------
@@ -216,55 +207,100 @@ public class TCPCommandServer {
      * loopback).
      */
     private static String loadOrGenerateToken() {
-        java.nio.file.Path p = tokenFilePath();
-        try {
-            if (java.nio.file.Files.exists(p)) {
+        return loadOrGenerateToken(tokenFilePath());
+    }
+
+    /** Package-private seam for persistence failure and atomic-write tests. */
+    static String loadOrGenerateToken(java.nio.file.Path p) {
+        if (java.nio.file.Files.exists(p)) {
+            try {
+                if (!java.nio.file.Files.isRegularFile(p)) {
+                    throw new java.io.IOException("token path is not a regular file");
+                }
+                long bytes = java.nio.file.Files.size(p);
+                if (bytes > 4096L) {
+                    throw new java.io.IOException("token file exceeds 4096 bytes");
+                }
                 String existing = new String(
                         java.nio.file.Files.readAllBytes(p),
                         StandardCharsets.UTF_8).trim();
-                if (existing.length() >= 32) return existing;
+                if (existing.length() < 32) {
+                    throw new java.io.IOException("token file is empty or invalid");
+                }
+                return existing;
+            } catch (java.io.IOException unreadable) {
+                throw new IllegalStateException("Existing server token is unreadable: "
+                        + unreadable.getMessage(), unreadable);
             }
-        } catch (java.io.IOException ignored) {
-            // fall through to regenerate
         }
         byte[] raw = new byte[32];
         new java.security.SecureRandom().nextBytes(raw);
         String token = java.util.Base64.getUrlEncoder()
                 .withoutPadding().encodeToString(raw);
+        java.nio.file.Path pending = null;
         try {
             java.nio.file.Files.createDirectories(p.getParent());
-            java.nio.file.Files.write(p,
-                    token.getBytes(StandardCharsets.UTF_8));
+            pending = java.nio.file.Files.createTempFile(
+                    p.getParent(), ".server-token-", ".tmp");
+            java.nio.file.Files.write(pending,
+                    token.getBytes(StandardCharsets.UTF_8),
+                    java.nio.file.StandardOpenOption.TRUNCATE_EXISTING);
             try {
                 java.util.Set<java.nio.file.attribute.PosixFilePermission> perms =
                         java.util.EnumSet.of(
                                 java.nio.file.attribute.PosixFilePermission.OWNER_READ,
                                 java.nio.file.attribute.PosixFilePermission.OWNER_WRITE);
-                java.nio.file.Files.setPosixFilePermissions(p, perms);
-            } catch (UnsupportedOperationException | java.io.IOException ignored) {
-                // Windows + non-POSIX file systems silently no-op here. The
+                java.nio.file.Files.setPosixFilePermissions(pending, perms);
+            } catch (UnsupportedOperationException ignored) {
+                // Windows + non-POSIX file systems do not expose POSIX modes. The
                 // loopback bind plus default user-private home directory
                 // ACL is the actual protection on those platforms.
             }
+            java.nio.file.Files.move(pending, p,
+                    java.nio.file.StandardCopyOption.ATOMIC_MOVE);
+            pending = null;
+
+            // Do not advertise a server whose credential exists only in memory.
+            // Verify the durable bytes before returning the token used by hello.
+            String persisted = new String(java.nio.file.Files.readAllBytes(p),
+                    StandardCharsets.UTF_8).trim();
+            if (!token.equals(persisted)) {
+                throw new java.io.IOException("persisted token verification failed");
+            }
         } catch (java.io.IOException e) {
-            System.err.println("[ImageJAI-TCP] Failed to persist server token: "
-                    + e.getMessage());
+            if (pending != null) {
+                try {
+                    java.nio.file.Files.deleteIfExists(pending);
+                } catch (java.io.IOException ignored) {
+                    // Preserve the original persistence failure.
+                }
+            }
+            throw new IllegalStateException("Failed to persist server token: "
+                    + e.getMessage(), e);
         }
         return token;
     }
 
     /**
      * Whether to enforce token auth on every non-hello/non-ping command.
-     * Off by default to preserve compatibility with existing CLI wrappers
-     * that have not yet been updated to read {@link #tokenFilePath()}. Flip
-     * via system property {@code imagejai.tcp.requireToken=true} or env
-     * var {@code IMAGEJAI_TCP_REQUIRE_TOKEN=1}.
+     * Authentication is fail-secure by default. A local installation may
+     * explicitly opt into the restricted read-only compatibility surface via
+     * {@code imagejai.tcp.requireToken=false} or
+     * {@code IMAGEJAI_TCP_REQUIRE_TOKEN=0} while an old client is upgraded.
      */
     private static boolean tokenAuthRequired() {
         String prop = System.getProperty("imagejai.tcp.requireToken");
-        if (prop != null) return Boolean.parseBoolean(prop);
+        if (prop != null) return !isExplicitFalse(prop);
         String env = System.getenv("IMAGEJAI_TCP_REQUIRE_TOKEN");
-        return env != null && (env.equals("1") || env.equalsIgnoreCase("true"));
+        return env == null || !isExplicitFalse(env);
+    }
+
+    private static boolean isExplicitFalse(String value) {
+        String normalised = value == null ? "" : value.trim();
+        return "0".equals(normalised)
+                || "false".equalsIgnoreCase(normalised)
+                || "no".equalsIgnoreCase(normalised)
+                || "off".equalsIgnoreCase(normalised);
     }
 
     /** Constant-time string equality. */
@@ -281,26 +317,21 @@ public class TCPCommandServer {
     // Phase 2: event-bus subscription caps.
     private static final int MAX_SUBSCRIBERS = 8;
     private static final int SUBSCRIBER_QUEUE_CAPACITY = 256;
+    private static final int MAX_SUBSCRIPTION_TOPICS = 64;
+    private static final int MAX_SUBSCRIPTION_TOPIC_LENGTH = 128;
     private static final long SUBSCRIBER_HEARTBEAT_MS = 30_000L;
     private final AtomicInteger activeSubscribers = new AtomicInteger(0);
+    private final Set<Socket> subscriberSockets =
+            Collections.newSetFromMap(new ConcurrentHashMap<Socket, Boolean>());
+    private final Set<Thread> subscriberThreads =
+            Collections.newSetFromMap(new ConcurrentHashMap<Thread, Boolean>());
+    private final Set<Socket> activeClientSockets =
+            Collections.newSetFromMap(new ConcurrentHashMap<Socket, Boolean>());
     private final EventBus eventBus = EventBus.getInstance();
     // Monotonic macro-id counter so TCP-path execute_macro emits a well-formed
     // macro.started/macro.completed pair like CommandEngine does.
     private static final java.util.concurrent.atomic.AtomicLong MACRO_ID_SEQ =
             new java.util.concurrent.atomic.AtomicLong(0);
-    // JVM-wide mutex serializing every IJ.runMacro call. ImageJ has a single
-    // global Interpreter / WindowManager; two macros running concurrently
-    // (e.g. client A blocked on a dialog while client B starts a new macro)
-    // corrupt each other's active-image state. Every client thread acquires
-    // this before submitting to the executor and releases after the worker
-    // actually terminates (or the abort timeout elapses).
-    private static final Object MACRO_MUTEX = new Object();
-    // How long we wait for IJ.Macro.abort() + thread-interrupt to actually kill
-    // a running macro before giving up and returning the error response. The
-    // MACRO_MUTEX stays held for this whole window so the next macro cannot
-    // start until the zombie is either dead or demonstrably unkillable.
-    private static final long MACRO_ABORT_WAIT_MS = 1500L;
-
     /**
      * Commands treated as pure readers — eligible for hash dedup via the
      * optional {@code if_none_match} request field. Every entry must be a
@@ -339,43 +370,35 @@ public class TCPCommandServer {
      * {@code job_list} etc.) stay excluded because a repeat fetch of those
      * often means "tell me what changed" and dedup would defeat the intent.
      */
-    private static final Set<String> DEDUP_COMMANDS = new HashSet<String>(Arrays.asList(
-            "get_state",
-            "get_image_info",
-            "get_results_table",
-            "get_log",
-            "get_histogram",
-            "get_open_windows",
-            "get_metadata",
-            "get_dialogs",
-            "get_roi_state",
-            "get_display_state"
-    ));
+    private static final Set<String> DEDUP_COMMANDS =
+            new HashSet<String>(CommandManifest.hashDedupNames());
 
     /**
      * Server version string emitted in the {@code hello} handshake response.
      * Bumped by steps that change the reply schema so clients can adapt.
      */
-    static final String SERVER_VERSION = "1.7.5";
+    static final String SERVER_VERSION = "1.8.0";
 
     /**
-     * Per-connection capability record negotiated via the {@code hello} handler.
-     * Clients that never call {@code hello} fall back to {@link #DEFAULT_CAPS}
-     * so today's reply shape is preserved. Fields are package-private because
+     * Per-session capability record negotiated via the {@code hello} handler.
+     * Network clients that never call {@code hello} receive deliberately
+     * restricted compatibility caps. Fields are package-private because
      * future-step handlers ({@code 02-07}) in this package read them directly.
      */
     static final class AgentCaps {
         String agent = "unknown";
         String agentId = null;
         String sessionId = "";
+        String clientSessionId = "";
         String modelEndpoint = "";
         // True when the connecting client presented the correct shared token
         // in its hello handshake. Read by dispatchCore to gate non-hello
-        // commands when token auth is required (system property
-        // imagejai.tcp.requireToken=true or env IMAGEJAI_TCP_REQUIRE_TOKEN=1).
+        // commands. Token auth is enabled by default and can only be disabled
+        // through an explicit local compatibility setting.
         // Defaults to false so a forgotten/wrong token cannot accidentally
         // unlock the server when the gate is later flipped on.
         boolean authenticated = false;
+        boolean compatibility = false;
         boolean vision = false;
         String outputFormat = "json";
         int tokenBudget = Integer.MAX_VALUE;
@@ -390,10 +413,9 @@ public class TCPCommandServer {
         // dismissedDialogs) into a single "stateDelta" sub-object. Clients
         // that set state_delta=false in hello keep the legacy flat shape.
         boolean stateDelta = true;
-        // Safe-mode master switch. The field default stays false so
-        // DEFAULT_CAPS, used for sockets that never call hello, preserves the
-        // legacy unguarded path. Clients that do say hello negotiate
-        // safe_mode=true by default in handleHello.
+        // Safe-mode master switch. The field default stays false for trusted
+        // in-process handler calls. Network compatibility caps override it to
+        // true, and handshake clients negotiate true by default.
         boolean safeMode = false;
         SafeModeOptions safeModeOptions = new SafeModeOptions();
         // Step 02: opt-in to typed error objects
@@ -476,6 +498,13 @@ public class TCPCommandServer {
         // auto-attach behaviour so agents that manage their own lookup
         // path can opt out via capabilities.ledger=false.
         boolean ledger = true;
+        // Test automation bridge (docs/automation-bridge/PROTOCOL.md). Two keys
+        // must both turn: Fiji started with -Dimagejai.testAutomation.enabled,
+        // and this authenticated session explicitly asked for
+        // capabilities.test_automation. Never granted to a compatibility
+        // session, and always false by default so a normal agent cannot reach
+        // the UI surface even on a test-mode instance it did not provision.
+        boolean testAutomation = false;
         // Step 15: per-image rolling undo stack
         // (docs/tcp_upgrade/15_undo_stack_api.md). Default OFF for every
         // agent — the memory cost (compressed pixel snapshots, up to
@@ -498,8 +527,30 @@ public class TCPCommandServer {
         public boolean scientificIntegrityScan = true;
     }
 
-    /** Fallback caps applied to any request from a socket that never said hello. */
+    /** Trusted in-process fallback used by package-level handler tests. */
     static final AgentCaps DEFAULT_CAPS = new AgentCaps();
+
+    /** Restricted network policy for old clients that do not send sessions. */
+    private static final AgentCaps LEGACY_CAPS = legacyCaps();
+
+    private static AgentCaps legacyCaps() {
+        AgentCaps caps = new AgentCaps();
+        caps.compatibility = true;
+        caps.safeMode = true;
+        caps.vision = false;
+        caps.structuredErrors = false;
+        caps.pulse = false;
+        caps.stateDelta = false;
+        caps.dedup = false;
+        caps.patternHints = false;
+        caps.graphDelta = false;
+        caps.ledger = false;
+        caps.undo = false;
+        caps.autoDismissPhantoms = false;
+        caps.testAutomation = false;
+        caps.acceptEvents = Collections.emptySet();
+        return caps;
+    }
 
     enum MacroState { RUNNING, PAUSED_ON_DIALOG }
 
@@ -530,6 +581,10 @@ public class TCPCommandServer {
     static final class StateDelta {
         JsonArray newImages;
         String resultsTable;
+        long resultsTableOriginalBytes;
+        int resultsTableReturnedRows;
+        int resultsTableTotalRows;
+        boolean resultsTableTruncated;
         String logDelta;
         JsonArray dismissedDialogs;
 
@@ -542,8 +597,9 @@ public class TCPCommandServer {
         JsonObject toJsonObject() {
             JsonObject obj = new JsonObject();
             if (newImages != null) obj.add("newImages", newImages);
-            if (resultsTable != null) obj.addProperty("resultsTable", resultsTable);
-            if (logDelta != null) obj.addProperty("logDelta", logDelta);
+            if (resultsTable != null) addBoundedResultsCsv(obj);
+            if (logDelta != null) addBoundedUtf8Property(obj,
+                    "logDelta", logDelta, MAX_RESULTS_TABLE_BYTES);
             if (dismissedDialogs != null) obj.add("dismissedDialogs", dismissedDialogs);
             return obj;
         }
@@ -560,24 +616,93 @@ public class TCPCommandServer {
                 result.add("stateDelta", toJsonObject());
             } else {
                 if (newImages != null) result.add("newImages", newImages);
-                if (resultsTable != null) result.addProperty("resultsTable", resultsTable);
-                if (logDelta != null) result.addProperty("logDelta", logDelta);
+                if (resultsTable != null) addBoundedResultsCsv(result);
+                if (logDelta != null) addBoundedUtf8Property(result,
+                        "logDelta", logDelta, MAX_RESULTS_TABLE_BYTES);
                 if (dismissedDialogs != null) result.add("dismissedDialogs", dismissedDialogs);
             }
         }
+
+        void setResultsTable(StateInspector.BoundedCsv csv) {
+            if (csv == null) return;
+            resultsTable = csv.text();
+            resultsTableOriginalBytes = csv.originalBytes();
+            resultsTableReturnedRows = csv.returnedRows();
+            resultsTableTotalRows = csv.totalRows();
+            resultsTableTruncated = csv.truncated();
+        }
+
+        private void addBoundedResultsCsv(JsonObject target) {
+            target.addProperty("resultsTable", resultsTable);
+            target.addProperty("resultsTable_truncated", resultsTableTruncated);
+            target.addProperty("resultsTable_original_bytes", resultsTableOriginalBytes);
+            target.addProperty("resultsTable_returned_bytes", utf8Length(resultsTable));
+            target.addProperty("resultsTable_returned_rows", resultsTableReturnedRows);
+            target.addProperty("resultsTable_total_rows", resultsTableTotalRows);
+        }
     }
 
-    /**
-     * Caps keyed by the connection that negotiated them. Populated by
-     * {@link #handleHello}, read by {@link #dispatch}, cleared in
-     * {@link #handleClient}'s finally block on disconnect.
-     */
-    private final Map<Socket, AgentCaps> capsBySocket = new ConcurrentHashMap<Socket, AgentCaps>();
+    /** Durable caps keyed by an opaque, expiring protocol session. */
+    private final SessionCapsRegistry<AgentCaps> sessionRegistry;
 
     java.util.List<AgentCaps> capsWitnessForTest = null;
 
     static java.util.function.BiFunction<JsonObject, AgentCaps, JsonObject>
             executeMacroForTest = null;
+    java.util.function.Function<String, ScriptEngine> scriptEngineResolverForTest = null;
+    interface OpenImageOperation {
+        void open(String path, int series) throws Exception;
+    }
+    OpenImageOperation openImageOperationForTest = null;
+    java.util.function.Supplier<List<ImageGraph.ImageRef>> openImagesForTest = null;
+    java.util.function.Supplier<ImagePlus> currentImageForTest = null;
+    java.util.function.Function<JsonObject, JsonObject> dialogInteractionForTest = null;
+    Runnable pixelExtractionStartedForTest = null;
+    interface RawPixelReader {
+        float read(ImageProcessor processor, int x, int y);
+    }
+    RawPixelReader rawPixelReaderForTest = null;
+
+    private final ImageRevisionTracker imageRevisionTracker =
+            ImageRevisionTracker.getInstance();
+    /**
+     * Tracks EDT mutations whose request deadline expires after execution has
+     * started.  The registry is replaceable after stop/start because shutdown
+     * deliberately closes its observer thread.
+     */
+    private volatile EdtOperationRegistry edtOperationRegistry =
+            new EdtOperationRegistry();
+
+    private static final class ActiveImageSnapshot {
+        final ImagePlus image;
+        final String imageId;
+        final long imageRevision;
+        final long displayRevision;
+        final int channel;
+        final int slice;
+        final int frame;
+        final int channels;
+        final int slices;
+        final int frames;
+
+        final ImageRevisionTracker.Snapshot revisionSnapshot;
+
+        ActiveImageSnapshot(ImagePlus image,
+                            ImageRevisionTracker.Snapshot revisionSnapshot,
+                            int channel, int slice, int frame) {
+            this.image = image;
+            this.revisionSnapshot = revisionSnapshot;
+            this.imageId = revisionSnapshot.imageId;
+            this.imageRevision = revisionSnapshot.imageRevision;
+            this.displayRevision = revisionSnapshot.displayRevision;
+            this.channel = channel;
+            this.slice = slice;
+            this.frame = frame;
+            this.channels = image.getNChannels();
+            this.slices = image.getNSlices();
+            this.frames = image.getNFrames();
+        }
+    }
 
     /**
      * Step 13: session-scoped image provenance DAG shared across all
@@ -615,8 +740,8 @@ public class TCPCommandServer {
     final SessionUndo sessionUndo = new SessionUndo();
 
     /**
-     * Step 15: number of mutating handlers currently inside their
-     * synchronized(MACRO_MUTEX) block. Read by the rewind / branch
+     * Step 15: number of coordinator-backed mutating handlers in flight.
+     * Read by the rewind / branch
      * handlers so a rewind that races a still-running macro returns
      * UNDO_BUSY instead of corrupting the state mid-flight.
      * Incremented at the top of every mutating handler, decremented in a
@@ -648,14 +773,46 @@ public class TCPCommandServer {
     private final FrictionLog frictionLog = new FrictionLog();
     private final PseudonymisationFilter pseudonymisationFilter =
             PseudonymisationFilter.getInstance();
+    private AuditLog auditLog = AuditLog.getInstance();
     IntentRouter intentRouter = new IntentRouter();
+    private final MutationCoordinator mutationCoordinator;
     private final JobRegistry jobRegistry;
     // Phase 8: reactive rules engine. Subscribes to the bus, fires rule
     // actions in response to matching events. Lifecycle tied to the TCP
     // server — {@link #start} / {@link #stop}.
     private final ReactiveEngine reactiveEngine;
-    private ServerSocket serverSocket;
+    private volatile ServerSocket serverSocket;
     private Thread serverThread;
+    private volatile ThreadPoolExecutor connectionWorkers;
+    private final AtomicLong rejectedConnections = new AtomicLong(0L);
+    private final ThreadLocal<Integer> batchDepth = new ThreadLocal<Integer>() {
+        @Override protected Integer initialValue() { return Integer.valueOf(0); }
+    };
+    private final ThreadLocal<Long> compoundResponseBudget = new ThreadLocal<Long>() {
+        @Override protected Long initialValue() { return Long.valueOf(Long.MAX_VALUE); }
+    };
+    private final ThreadLocal<CompoundWorkBudget> compoundWorkBudget =
+            new ThreadLocal<CompoundWorkBudget>();
+
+    private static final class CompoundWorkBudget {
+        int consumed;
+        boolean exhausted;
+
+        boolean tryConsume() {
+            if (consumed >= MAX_COMPOUND_WORK) {
+                exhausted = true;
+                return false;
+            }
+            consumed++;
+            return true;
+        }
+
+        int remaining() { return Math.max(0, MAX_COMPOUND_WORK - consumed); }
+    }
+    private final Object serverLifecycleLock = new Object();
+    /** Monotonic ownership fence for stop/start overlap between server threads. */
+    private volatile long serverGeneration;
+    private volatile Runnable beforeBindHookForTest;
     private volatile boolean running;
     private ServerListener listener;
 
@@ -667,18 +824,67 @@ public class TCPCommandServer {
     // {@link #setChatPanelController} once the chat panel is built.
     private volatile GuiActionDispatcher guiActionDispatcher = new GuiActionDispatcher(null);
 
+    /**
+     * Test automation bridge. Resolved from the immutable startup policy, so on
+     * a normal Fiji it is an inert object: it installs no event queue, starts no
+     * thread, writes no ready file, and answers every automation command with
+     * {@code test_automation_disabled}.
+     */
+    private volatile AutomationBridge automationBridge = AutomationBridge.shared();
+
     public TCPCommandServer(int port, CommandEngine commandEngine,
                             StateInspector stateInspector,
                             PipelineBuilder pipelineBuilder,
                             ExplorationEngine explorationEngine) {
+        this(port, commandEngine, stateInspector, pipelineBuilder,
+                explorationEngine, new SessionCapsRegistry<AgentCaps>(), null);
+    }
+
+    /**
+     * Construct the TCP surface with an application-owned coordinator so
+     * other in-process assistants can share the same mutation boundary.
+     */
+    public TCPCommandServer(int port, CommandEngine commandEngine,
+                            StateInspector stateInspector,
+                            PipelineBuilder pipelineBuilder,
+                            ExplorationEngine explorationEngine,
+                            MutationCoordinator coordinator) {
+        this(port, commandEngine, stateInspector, pipelineBuilder,
+                explorationEngine, new SessionCapsRegistry<AgentCaps>(), coordinator);
+    }
+
+    TCPCommandServer(int port, CommandEngine commandEngine,
+                     StateInspector stateInspector,
+                     PipelineBuilder pipelineBuilder,
+                     ExplorationEngine explorationEngine,
+                     SessionCapsRegistry<AgentCaps> sessionRegistry) {
+        this(port, commandEngine, stateInspector, pipelineBuilder,
+                explorationEngine, sessionRegistry, null);
+    }
+
+    TCPCommandServer(int port, CommandEngine commandEngine,
+                     StateInspector stateInspector,
+                     PipelineBuilder pipelineBuilder,
+                     ExplorationEngine explorationEngine,
+                     SessionCapsRegistry<AgentCaps> sessionRegistry,
+                     MutationCoordinator coordinator) {
         this.port = port;
         this.commandEngine = commandEngine;
         this.stateInspector = stateInspector;
         this.pipelineBuilder = pipelineBuilder;
         this.explorationEngine = explorationEngine;
-        this.jobRegistry = new JobRegistry(commandEngine);
+        this.sessionRegistry = sessionRegistry;
+        // One application-owned coordinator spans every mutation surface.
+        this.mutationCoordinator = coordinator != null ? coordinator
+                : new MutationCoordinator();
+        if (commandEngine != null) {
+            commandEngine.setMutationCoordinator(mutationCoordinator);
+        }
+
+        this.jobRegistry = new JobRegistry(commandEngine, mutationCoordinator);
         this.reactiveEngine = new ReactiveEngine(
-                eventBus, commandEngine, intentRouter, guiActionDispatcher);
+                eventBus, commandEngine, intentRouter, guiActionDispatcher,
+                mutationCoordinator);
         // Step 15: surface global LRU evictions to FrictionLog so an
         // over-tight session cap shows up in the same place as other
         // recurring failures. Plan §Memory management.
@@ -699,25 +905,67 @@ public class TCPCommandServer {
         return jobRegistry;
     }
 
+    /** The single coordinator shared by every mutation producer in this app. */
+    public MutationCoordinator getMutationCoordinator() {
+        return mutationCoordinator;
+    }
+
     /**
      * Start the TCP server on a background daemon thread.
      *
      * @param listener callback for server events (may be null)
      */
     public void start(ServerListener listener) {
-        this.listener = listener;
-        running = true;
+        synchronized (serverLifecycleLock) {
+            if (running) return;
+            if (edtOperationRegistry.isShutdown()) {
+                if (edtOperationRegistry.activeCount() != 0) {
+                    if (listener != null) {
+                        listener.onError("TCP server restart deferred while EDT operations finish");
+                    }
+                    return;
+                }
+                edtOperationRegistry = new EdtOperationRegistry();
+            }
+            final long generation = ++serverGeneration;
+            this.listener = listener;
+            running = true;
+        sessionRegistry.activate();
+        connectionWorkers = new ThreadPoolExecutor(
+                MAX_CONNECTION_WORKERS, MAX_CONNECTION_WORKERS,
+                0L, TimeUnit.MILLISECONDS,
+                new ArrayBlockingQueue<Runnable>(CONNECTION_QUEUE_CAPACITY),
+                new ThreadFactory() {
+                    private final AtomicLong sequence = new AtomicLong(0L);
+                    @Override public Thread newThread(Runnable task) {
+                        Thread thread = new Thread(task, "imagej-ai-tcp-client-"
+                                + sequence.incrementAndGet());
+                        thread.setDaemon(true);
+                        return thread;
+                    }
+                }, new ThreadPoolExecutor.AbortPolicy());
 
         // Generate or reload the per-install shared token before opening the
         // listen socket. Always loaded — hello accepts and verifies it.
         // Enforcement (refusing non-hello commands when the token is missing)
-        // is gated on tokenAuthRequired() so existing CLI wrappers keep
-        // working until they ship the token-reading code path.
+        // is enabled by default. The explicit compatibility opt-out exposes
+        // only the read-only whitelist.
         try {
-            this.serverToken = loadOrGenerateToken();
+            if (this.serverToken == null) {
+                this.serverToken = loadOrGenerateToken();
+            }
         } catch (Throwable t) {
             System.err.println("[ImageJAI-TCP] Token init failed: " + t.getMessage());
             this.serverToken = null;
+            running = false;
+            edtOperationRegistry.shutdown();
+            sessionRegistry.revokeAll();
+            connectionWorkers.shutdownNow();
+            connectionWorkers = null;
+            if (listener != null) {
+                listener.onError("TCP authentication could not be initialized");
+            }
+            return;
         }
 
         // Step 07: install System.out / System.err tees into bounded ring
@@ -740,21 +988,50 @@ public class TCPCommandServer {
             System.err.println("[ImageJAI-TCP] Reactive engine start failed: " + t.getMessage());
         }
 
+        final EdtOperationRegistry runOperations = edtOperationRegistry;
+        final ThreadPoolExecutor runConnectionWorkers = connectionWorkers;
+        final ServerListener runListener = listener;
         serverThread = new Thread(new Runnable() {
             @Override
             public void run() {
-                runServer();
+                runServer(generation, runOperations, runConnectionWorkers,
+                        runListener);
             }
         }, "imagej-ai-tcp-server");
         serverThread.setDaemon(true);
         serverThread.start();
+        }
     }
 
     /**
      * Stop the server and close the listening socket.
      */
     public void stop() {
-        running = false;
+        // Swap the listener under the same lock used by runServer's bind.
+        // This prevents a delayed server thread from binding after stop().
+        ServerSocket listenerSocket;
+        synchronized (serverLifecycleLock) {
+            running = false;
+            listenerSocket = serverSocket;
+            serverSocket = null;
+            try {
+                edtOperationRegistry.shutdown();
+            } catch (Exception e) {
+                System.err.println("[ImageJAI-TCP] Error shutting down EDT operations: "
+                        + e.getMessage());
+            }
+        }
+        closeQuietly(listenerSocket);
+        sessionRegistry.revokeAll();
+        // A stopped server must not look ready. The bridge itself stays alive
+        // across a stop/start cycle; only the readiness signal is retired.
+        try {
+            AutomationBridge bridge = automationBridge;
+            if (bridge != null) bridge.retireReady();
+        } catch (Exception e) {
+            System.err.println("[ImageJAI-Automation] Error retiring readiness: "
+                    + e.getMessage());
+        }
         // Phase 8: stop the reactive engine first so it unsubscribes from the
         // bus and tears down the WatchService thread cleanly before the rest
         // of the plugin shuts down.
@@ -771,13 +1048,23 @@ public class TCPCommandServer {
         } catch (Exception e) {
             System.err.println("[ImageJAI-TCP] Error shutting down job registry: " + e.getMessage());
         }
-        if (serverSocket != null && !serverSocket.isClosed()) {
+        // Long-lived subscribers are not accepted through ServerSocket again,
+        // so closing only the listener would leave their client threads
+        // blocked in queue.poll until the next heartbeat.
+        for (Socket subscriber : subscriberSockets) {
             try {
-                serverSocket.close();
-            } catch (Exception e) {
-                System.err.println("[ImageJAI-TCP] Error closing server socket: " + e.getMessage());
+                subscriber.close();
+            } catch (Exception ignore) {
             }
         }
+        subscriberSockets.clear();
+        for (Thread subscriberThread : subscriberThreads) {
+            subscriberThread.interrupt();
+        }
+        subscriberThreads.clear();
+        shutdownConnectionWorkers();
+        for (Socket client : activeClientSockets) closeQuietly(client);
+        activeClientSockets.clear();
         // Step 07: restore the original System.out / System.err so a
         // subsequent plugin reload doesn't stack tees on top of the previous
         // ones. Safe to call even if install() never ran.
@@ -800,6 +1087,35 @@ public class TCPCommandServer {
             return serverSocket.getLocalPort();
         }
         return port;
+    }
+
+    /** Package-private deterministic token seam for loopback protocol tests. */
+    void setServerTokenForTest(String token) {
+        this.serverToken = token;
+    }
+
+    /**
+     * Package-private seam so gate tests can exercise an armed bridge without
+     * relaunching the JVM with the startup properties. Production code never
+     * calls this: the policy is read once from the startup properties.
+     */
+    void setAutomationBridgeForTest(AutomationBridge bridge) {
+        this.automationBridge = bridge == null ? AutomationBridge.shared() : bridge;
+    }
+
+    /** The bridge this server delegates gated automation commands to. */
+    AutomationBridge automationBridge() {
+        return automationBridge;
+    }
+
+    /** Package-private audit destination seam for side-effect-free tests. */
+    void setAuditLogForTest(AuditLog auditLog) {
+        this.auditLog = auditLog == null ? AuditLog.getInstance() : auditLog;
+    }
+
+    /** Package-private deterministic seam for stop-before-bind regression tests. */
+    void setBeforeBindHookForTest(Runnable hook) {
+        this.beforeBindHookForTest = hook;
     }
 
     /**
@@ -837,40 +1153,75 @@ public class TCPCommandServer {
     // Server main loop
     // -----------------------------------------------------------------------
 
-    private void runServer() {
+    private void runServer(long generation,
+                           EdtOperationRegistry operationRegistry,
+                           ThreadPoolExecutor runWorkers,
+                           ServerListener runListener) {
+        ServerSocket listenerSocket = null;
         try {
             // Loopback-only bind. Any non-loopback bind would expose the
-            // unauthenticated macro/script execution surface to the local
-            // network. Do not change without also shipping authentication
-            // and a TLS-or-equivalent transport.
-            serverSocket = new ServerSocket(port, 50, InetAddress.getLoopbackAddress());
-            serverSocket.setReuseAddress(true);
-            int boundPort = serverSocket.getLocalPort();
+            // server to the local network. Do not change without also shipping
+            // a TLS-or-equivalent transport and reviewing the trust boundary.
+            Runnable beforeBind = beforeBindHookForTest;
+            if (beforeBind != null) beforeBind.run();
+            listenerSocket = new ServerSocket();
+            listenerSocket.setReuseAddress(true);
+            synchronized (serverLifecycleLock) {
+                if (!running || serverGeneration != generation) return;
+                listenerSocket.bind(new java.net.InetSocketAddress(
+                        InetAddress.getLoopbackAddress(), port), 50);
+                // stop() cannot interleave between bind and publication.
+                serverSocket = listenerSocket;
+            }
+            int boundPort = listenerSocket.getLocalPort();
             System.err.println("[ImageJAI-TCP] Server listening on " +
                     InetAddress.getLoopbackAddress().getHostAddress() + ":" + boundPort);
-            if (listener != null) {
-                listener.onServerStarted(boundPort);
+            // Readiness is published only once the actual bound port is known.
+            // A harness that provisioned this instance waits for the file
+            // rather than probing a port that may belong to something else.
+            try {
+                AutomationBridge bridge = automationBridge;
+                if (bridge != null && bridge.isEnabled()) {
+                    bridge.publishReady(boundPort,
+                            InetAddress.getLoopbackAddress().getHostAddress(),
+                            SERVER_VERSION, CommandManifest.productVersion());
+                }
+            } catch (Throwable readinessFailure) {
+                System.err.println("[ImageJAI-Automation] readiness publish failed: "
+                        + readinessFailure.getClass().getSimpleName());
+            }
+            if (runListener != null && running
+                    && serverGeneration == generation) {
+                runListener.onServerStarted(boundPort);
             }
 
-            while (running) {
+            while (running && serverGeneration == generation) {
                 try {
-                    final Socket clientSocket = serverSocket.accept();
-                    String clientInfo = clientSocket.getRemoteSocketAddress().toString();
-                    if (listener != null) {
-                        listener.onClientConnected(clientInfo);
+                    final Socket clientSocket = listenerSocket.accept();
+                    ThreadPoolExecutor workers = runWorkers;
+                    if (workers == null || workers.isShutdown()) {
+                        closeQuietly(clientSocket);
+                        continue;
                     }
-
-                    Thread clientThread = new Thread(new Runnable() {
-                        @Override
-                        public void run() {
-                            handleClient(clientSocket);
+                    ClientTask task = new ClientTask(clientSocket);
+                    // Register before executor admission so stop() can close
+                    // both queued and already-running client sockets.
+                    activeClientSockets.add(clientSocket);
+                    try {
+                        workers.execute(task);
+                        if (runListener != null && running
+                                && serverGeneration == generation) {
+                            runListener.onClientConnected(
+                                    clientSocket.getRemoteSocketAddress().toString());
                         }
-                    }, "imagej-ai-tcp-client");
-                    clientThread.setDaemon(true);
-                    clientThread.start();
+                    } catch (RejectedExecutionException capacity) {
+                        rejectedConnections.incrementAndGet();
+                        writeCapacityRejection(clientSocket);
+                        task.close();
+                    }
                 } catch (SocketException e) {
                     // Expected when server is stopped
-                    if (running) {
+                    if (running && serverGeneration == generation) {
                         System.err.println("[ImageJAI-TCP] Accept error: " + e.getMessage());
                     }
                 }
@@ -878,19 +1229,68 @@ public class TCPCommandServer {
         } catch (java.net.BindException e) {
             String msg = "Port " + port + " already in use";
             System.err.println("[ImageJAI-TCP] " + msg);
-            if (listener != null) {
-                listener.onError(msg);
+            if (runListener != null && serverGeneration == generation) {
+                runListener.onError(msg);
             }
         } catch (Exception e) {
-            if (running) {
+            if (running && serverGeneration == generation) {
                 String msg = "Server error: " + e.getMessage();
                 System.err.println("[ImageJAI-TCP] " + msg);
-                if (listener != null) {
-                    listener.onError(msg);
+                if (runListener != null && serverGeneration == generation) {
+                    runListener.onError(msg);
                 }
             }
         } finally {
-            running = false;
+            closeQuietly(listenerSocket);
+            boolean currentGeneration;
+            boolean failedWhileRunning;
+            synchronized (serverLifecycleLock) {
+                currentGeneration = serverGeneration == generation;
+                failedWhileRunning = currentGeneration && running;
+                if (currentGeneration) {
+                    if (serverSocket == listenerSocket) serverSocket = null;
+                    running = false;
+                    operationRegistry.shutdown();
+                    if (failedWhileRunning) {
+                        try {
+                            reactiveEngine.stop();
+                        } catch (Exception cleanupFailure) {
+                            System.err.println("[ImageJAI-TCP] Error stopping reactive engine: "
+                                    + cleanupFailure.getMessage());
+                        }
+                        try {
+                            ConsoleCapture.uninstall();
+                        } catch (Exception cleanupFailure) {
+                            System.err.println("[ImageJAI-TCP] Error restoring console streams: "
+                                    + cleanupFailure.getMessage());
+                        }
+                    }
+                }
+            }
+            if (!currentGeneration) operationRegistry.shutdown();
+            if (currentGeneration) sessionRegistry.revokeAll();
+            shutdownConnectionWorkers(runWorkers);
+            if (currentGeneration) {
+                for (Socket client : activeClientSockets) closeQuietly(client);
+                activeClientSockets.clear();
+            }
+        }
+    }
+
+    private synchronized void shutdownConnectionWorkers() {
+        ThreadPoolExecutor workers = connectionWorkers;
+        connectionWorkers = null;
+        shutdownConnectionWorkers(workers);
+    }
+
+    private void shutdownConnectionWorkers(ThreadPoolExecutor workers) {
+        synchronized (this) {
+            if (connectionWorkers == workers) connectionWorkers = null;
+        }
+        if (workers == null) return;
+        List<Runnable> queued = workers.shutdownNow();
+        for (Runnable task : queued) {
+            if (task instanceof ClientTask) ((ClientTask) task).close();
         }
     }
 
@@ -899,52 +1299,73 @@ public class TCPCommandServer {
     // -----------------------------------------------------------------------
 
     private void handleClient(Socket socket) {
-        BufferedReader reader = null;
         PrintWriter writer = null;
         try {
             socket.setSoTimeout(60000); // 60s read timeout
-            reader = new BufferedReader(
-                    new InputStreamReader(socket.getInputStream(), UTF8));
             writer = new PrintWriter(
                     new OutputStreamWriter(socket.getOutputStream(), UTF8), true);
 
-            // Read one line (max 1MB enforced by checking length)
-            String line = readLine(reader);
+            // Enforce the wire-byte cap before decoding or JSON allocation.
+            RequestLine requestLine = readUtf8Line(socket.getInputStream(),
+                    Constants.TCP_MAX_MESSAGE_SIZE);
+            String line = requestLine == null ? null : requestLine.text;
             if (line == null || line.trim().isEmpty()) {
                 writeOutbound(writer, "error", errorJson("Empty request"));
-                return;
-            }
-
-            if (line.length() > Constants.TCP_MAX_MESSAGE_SIZE) {
-                writeOutbound(writer, "error", errorJson("Request too large (max "
-                        + Constants.TCP_MAX_MESSAGE_SIZE + " bytes)"));
                 return;
             }
 
             // Phase 2: intercept "subscribe" — upgrade to a streaming channel
             // instead of the standard request/response cycle.
             String trimmed = line.trim();
-            if (isSubscribeCommand(trimmed)) {
-                JsonObject req;
-                try {
-                    req = JsonParser.parseString(trimmed).getAsJsonObject();
-                } catch (Exception e) {
-                    writeOutbound(writer, "error", errorJson("Invalid JSON: "
-                            + e.getMessage()));
-                    return;
+            JsonObject request;
+            try {
+                JsonElement parsed = JsonParser.parseString(trimmed);
+                if (!parsed.isJsonObject()) {
+                    throw new IllegalArgumentException("Request must be a JSON object");
                 }
-                if (listener != null) {
-                    listener.onCommandReceived("subscribe");
-                }
-                handleSubscribeStream(socket, req);
+                request = parsed.getAsJsonObject();
+            } catch (StackOverflowError tooDeepForParser) {
+                writeOutbound(writer, "error", GSON.toJson(invalidRequest(
+                        "JSON nesting exceeds the supported request depth")));
+                return;
+            } catch (Exception e) {
+                writeOutbound(writer, "error", GSON.toJson(invalidRequest(
+                        "Invalid JSON: " + safeExceptionMessage(e))));
+                return;
+            }
+
+            // This is deliberately the first operation after parsing. No
+            // Gson serialisation, recursive canonicalisation, authentication
+            // lookup, or command dispatch sees an unbounded caller tree.
+            String shapeError = validateRequestShape(request);
+            if (shapeError != null) {
+                writeOutbound(writer, "error", GSON.toJson(invalidRequest(shapeError)));
+                return;
+            }
+
+            // Upgrade only an exactly parsed command. Text elsewhere in a
+            // request cannot turn a one-shot command into a stream.
+            String commandName = optString(request, "command", "");
+            if ("subscribe".equals(commandName)) {
+                handleSubscribeStream(socket, request,
+                        requestLine.byteCount);
                 return; // finally closes the socket
             }
 
-            // Parse and dispatch
-            String commandName = commandNameFromRequest(trimmed);
-            JsonObject response = dispatch(trimmed, socket);
+            JsonObject response = dispatch(request, socket);
             writeOutbound(writer, commandName, GSON.toJson(response));
 
+        } catch (RequestTooLargeException e) {
+            if (writer != null) {
+                writeOutbound(writer, "error", GSON.toJson(invalidRequest(
+                        "Request too large (max "
+                                + Constants.TCP_MAX_MESSAGE_SIZE + " UTF-8 bytes)")));
+            }
+        } catch (CharacterCodingException e) {
+            if (writer != null) {
+                writeOutbound(writer, "error", GSON.toJson(invalidRequest(
+                        "Request is not valid UTF-8")));
+            }
         } catch (Exception e) {
             System.err.println("[ImageJAI-TCP] Client error: " + e.getMessage());
             if (writer != null) {
@@ -956,13 +1377,6 @@ public class TCPCommandServer {
                 }
             }
         } finally {
-            // Drop this connection's caps first so a later socket cannot
-            // accidentally inherit stale state (ConcurrentHashMap keys are
-            // identity-based, but belt-and-braces keeps the map small).
-            capsBySocket.remove(socket);
-            try {
-                if (reader != null) reader.close();
-            } catch (Exception ignored) {}
             try {
                 if (writer != null) writer.close();
             } catch (Exception ignored) {}
@@ -970,13 +1384,6 @@ public class TCPCommandServer {
                 socket.close();
             } catch (Exception ignored) {}
         }
-    }
-
-    /** Cheap peek: true if the incoming line is a subscribe command. */
-    private boolean isSubscribeCommand(String jsonStr) {
-        if (jsonStr == null) return false;
-        // Fast path — avoid full JSON parse on non-subscribe commands.
-        return jsonStr.contains("\"subscribe\"") && jsonStr.contains("\"command\"");
     }
 
     /**
@@ -993,12 +1400,39 @@ public class TCPCommandServer {
      *   <li>Unsubscribes and releases the slot when the socket closes or the server stops.</li>
      * </ul>
      */
-    private void handleSubscribeStream(final Socket socket, JsonObject req) {
+    private void handleSubscribeStream(final Socket socket, JsonObject req,
+                                       int requestBytes) {
         final OutputStream rawOut;
         try {
             rawOut = socket.getOutputStream();
         } catch (IOException e) {
             return;
+        }
+
+        String sessionId = optString(req, "session_id", "");
+        String token = optString(req, "token", null);
+        SessionCapsRegistry.Lookup<AgentCaps> lookup =
+                sessionRegistry.lookup(sessionId, token);
+        req.remove("token");
+        if (lookup.status() != SessionCapsRegistry.Status.VALID) {
+            writeRawJson(rawOut, sessionFailure(lookup.status()));
+            return;
+        }
+        final AgentCaps caps = lookup.caps();
+        final List<String> patterns = parseSubscriptionPatterns(req);
+        if (patterns == null) {
+            writeRawJson(rawOut, protocolError("invalid_subscription",
+                    "topics must be an array of at most "
+                            + MAX_SUBSCRIPTION_TOPICS + " valid topic patterns."));
+            return;
+        }
+        if (!subscriptionTopicsAllowed(patterns, caps.acceptEvents)) {
+            writeRawJson(rawOut, protocolError("event_subscription_forbidden",
+                    "The session did not negotiate every requested event topic."));
+            return;
+        }
+        if (listener != null) {
+            listener.onCommandReceived("subscribe");
         }
 
         // Disable read timeout — subscriptions are long-lived write-only streams.
@@ -1012,69 +1446,43 @@ public class TCPCommandServer {
         int newCount = activeSubscribers.incrementAndGet();
         if (newCount > MAX_SUBSCRIBERS) {
             activeSubscribers.decrementAndGet();
-            writeRawJson(rawOut, errorJsonObject(
+            writeRawJson(rawOut, protocolError("subscriber_capacity",
                     "Subscriber cap reached (max " + MAX_SUBSCRIBERS + ")"));
             return;
         }
-
-        // Parse requested topic patterns. Default to "*" when omitted or empty.
-        final List<String> patterns = new ArrayList<String>();
-        JsonElement topicsEl = req.get("topics");
-        if (topicsEl != null && topicsEl.isJsonArray()) {
-            JsonArray arr = topicsEl.getAsJsonArray();
-            for (int i = 0; i < arr.size(); i++) {
-                JsonElement t = arr.get(i);
-                if (t != null && t.isJsonPrimitive()) {
-                    String s = t.getAsString();
-                    if (s != null && !s.isEmpty()) patterns.add(s);
-                }
-            }
-        }
-        if (patterns.isEmpty()) patterns.add("*");
+        subscriberSockets.add(socket);
+        subscriberThreads.add(Thread.currentThread());
 
         // Per-socket bounded queue with drop-oldest semantics.
         final LinkedBlockingDeque<JsonObject> queue =
                 new LinkedBlockingDeque<JsonObject>(SUBSCRIBER_QUEUE_CAPACITY);
-        final Object queueLock = new Object();
+        final AtomicLong droppedFrames = new AtomicLong(0L);
+        final AtomicLong sentFrames = new AtomicLong(0L);
 
         final EventBus.Listener listener = new EventBus.Listener() {
             @Override
             public void onEvent(JsonObject frame) {
-                synchronized (queueLock) {
-                    if (queue.offerLast(frame)) return;
-                    // Overflow: drop oldest, inject sentinel, retry with the new frame.
-                    JsonObject dropped = queue.pollFirst();
-                    JsonObject sentinel = new JsonObject();
-                    sentinel.addProperty("event", "event_dropped");
-                    JsonObject data = new JsonObject();
-                    if (dropped != null) {
-                        if (dropped.has("event")) {
-                            data.addProperty("oldest_event",
-                                    dropped.get("event").getAsString());
-                        }
-                        if (dropped.has("seq")) {
-                            data.addProperty("oldest_seq",
-                                    dropped.get("seq").getAsLong());
-                        }
-                    }
-                    data.addProperty("queue_capacity", SUBSCRIBER_QUEUE_CAPACITY);
-                    sentinel.add("data", data);
-                    sentinel.addProperty("ts", System.currentTimeMillis());
-                    sentinel.addProperty("seq", eventBus.nextSeq());
-                    // Defensive: if the deque is *still* full (extreme bursts),
-                    // keep discarding until both sentinel and new frame fit.
-                    while (!queue.offerLast(sentinel)) {
-                        if (queue.pollFirst() == null) break;
-                    }
-                    while (!queue.offerLast(frame)) {
-                        if (queue.pollFirst() == null) break;
-                    }
-                }
+                JsonObject governed = governEventFrame(frame, caps, socket);
+                if (governed == null) return;
+                droppedFrames.addAndGet(offerSubscriberFrame(
+                        queue, governed, caps, socket));
             }
         };
 
-        // Register the listener for every requested pattern.
-        for (String p : patterns) eventBus.subscribe(p, listener);
+        // Register every pattern atomically so an accepted ack never masks a
+        // partial/zero subscription at the global EventBus cap.
+        if (!eventBus.subscribeAll(patterns, listener)) {
+            subscriberSockets.remove(socket);
+            subscriberThreads.remove(Thread.currentThread());
+            activeSubscribers.decrementAndGet();
+            writeRawJson(rawOut, protocolError("event_subscription_capacity",
+                    "Event subscription capacity reached; no topics were registered."));
+            appendSubscriptionAudit("subscribe.open", req, caps, patterns,
+                    "event_bus_capacity", requestBytes, 0L, 0L);
+            return;
+        }
+        appendSubscriptionAudit("subscribe.open", req, caps, patterns,
+                "accepted", requestBytes, 0L, 0L);
 
         // Initial "subscribed" ack frame so the client can confirm connection.
         JsonObject ack = new JsonObject();
@@ -1090,9 +1498,14 @@ public class TCPCommandServer {
         ack.addProperty("seq", eventBus.nextSeq());
 
         try {
-            writeFrame(rawOut, ack);
+            writeFrame(rawOut, governEventFrame(ack, caps, socket));
+            sentFrames.incrementAndGet();
         } catch (IOException e) {
             eventBus.unsubscribe(listener);
+            subscriberSockets.remove(socket);
+            subscriberThreads.remove(Thread.currentThread());
+            appendSubscriptionAudit("subscribe.close", req, caps, patterns,
+                    "ack_write_failed", 0, sentFrames.get(), droppedFrames.get());
             activeSubscribers.decrementAndGet();
             return;
         }
@@ -1100,8 +1513,16 @@ public class TCPCommandServer {
         // Main pump: pull frames until the socket dies; inject heartbeats
         // during idle windows.
         long lastSent = System.currentTimeMillis();
+        String closeReason = "client_disconnected";
         try {
             while (running && !socket.isClosed()) {
+                SessionCapsRegistry.Lookup<AgentCaps> currentSession =
+                        sessionRegistry.lookup(sessionId, token);
+                if (currentSession.status() != SessionCapsRegistry.Status.VALID) {
+                    closeReason = "session_" + currentSession.status().name()
+                            .toLowerCase(Locale.ROOT);
+                    break;
+                }
                 long now = System.currentTimeMillis();
                 long sinceLastSent = now - lastSent;
                 long waitMs = SUBSCRIBER_HEARTBEAT_MS - sinceLastSent;
@@ -1113,8 +1534,10 @@ public class TCPCommandServer {
                     hb.addProperty("ts", now);
                     hb.addProperty("seq", eventBus.nextSeq());
                     try {
-                        writeFrame(rawOut, hb);
+                        writeFrame(rawOut, governEventFrame(hb, caps, socket));
+                        sentFrames.incrementAndGet();
                     } catch (IOException e) {
+                        closeReason = "write_failed";
                         break;
                     }
                     lastSent = now;
@@ -1126,20 +1549,395 @@ public class TCPCommandServer {
                     frame = queue.pollFirst(waitMs, TimeUnit.MILLISECONDS);
                 } catch (InterruptedException e) {
                     Thread.currentThread().interrupt();
+                    closeReason = "interrupted";
                     break;
                 }
                 if (frame == null) continue; // back to heartbeat check
+                SessionCapsRegistry.Lookup<AgentCaps> beforeWrite =
+                        sessionRegistry.lookup(sessionId, token);
+                if (beforeWrite.status() != SessionCapsRegistry.Status.VALID) {
+                    closeReason = "session_" + beforeWrite.status().name()
+                            .toLowerCase(Locale.ROOT);
+                    break;
+                }
                 try {
                     writeFrame(rawOut, frame);
+                    sentFrames.incrementAndGet();
                 } catch (IOException e) {
+                    closeReason = "write_failed";
                     break; // socket died
                 }
                 lastSent = System.currentTimeMillis();
             }
+            if (!running) closeReason = "server_stopped";
         } finally {
             eventBus.unsubscribe(listener);
+            subscriberSockets.remove(socket);
+            subscriberThreads.remove(Thread.currentThread());
+            appendSubscriptionAudit("subscribe.close", req, caps, patterns,
+                    closeReason, 0, sentFrames.get(), droppedFrames.get());
             activeSubscribers.decrementAndGet();
         }
+    }
+
+    private final class ClientTask implements Runnable {
+        private final Socket socket;
+        ClientTask(Socket socket) { this.socket = socket; }
+        @Override public void run() {
+            try {
+                handleClient(socket);
+            } finally {
+                activeClientSockets.remove(socket);
+            }
+        }
+        void close() {
+            activeClientSockets.remove(socket);
+            closeQuietly(socket);
+        }
+    }
+
+    private void writeCapacityRejection(Socket socket) {
+        if (socket == null) return;
+        try {
+            byte[] frame = (GSON.toJson(protocolError("connection_capacity",
+                    "Connection worker capacity reached; retry later.")) + "\n")
+                    .getBytes(UTF8);
+            socket.getOutputStream().write(frame);
+            socket.getOutputStream().flush();
+        } catch (IOException ignored) { }
+    }
+
+    private static void closeQuietly(Socket socket) {
+        if (socket == null) return;
+        try { socket.close(); } catch (IOException ignored) { }
+    }
+
+    private static void closeQuietly(ServerSocket socket) {
+        if (socket == null) return;
+        try { socket.close(); } catch (IOException ignored) { }
+    }
+
+    public int getActiveConnectionWorkerCount() {
+        ThreadPoolExecutor workers = connectionWorkers;
+        return workers == null ? 0 : workers.getActiveCount();
+    }
+
+    public int getQueuedConnectionCount() {
+        ThreadPoolExecutor workers = connectionWorkers;
+        return workers == null ? 0 : workers.getQueue().size();
+    }
+
+    int getTrackedClientSocketCountForTest() {
+        return activeClientSockets.size();
+    }
+
+    public long getRejectedConnectionCount() {
+        return rejectedConnections.get();
+    }
+
+    private List<String> parseSubscriptionPatterns(JsonObject req) {
+        List<String> patterns = new ArrayList<String>();
+        JsonElement topics = req == null ? null : req.get("topics");
+        if (topics == null || topics.isJsonNull()) {
+            patterns.add("*");
+            return patterns;
+        }
+        if (!topics.isJsonArray()) return null;
+        JsonArray values = topics.getAsJsonArray();
+        if (values.size() == 0 || values.size() > MAX_SUBSCRIPTION_TOPICS) return null;
+        for (JsonElement value : values) {
+            if (value == null || !value.isJsonPrimitive()
+                    || !value.getAsJsonPrimitive().isString()) return null;
+            String pattern = value.getAsString();
+            if (!validTopicPattern(pattern)) return null;
+            if (!patterns.contains(pattern)) patterns.add(pattern);
+        }
+        return patterns.isEmpty() ? null : patterns;
+    }
+
+    private static boolean validTopicPattern(String value) {
+        if (value == null || value.isEmpty()
+                || value.length() > MAX_SUBSCRIPTION_TOPIC_LENGTH) return false;
+        return "*".equals(value) || value.matches("[A-Za-z0-9_.-]+\\*?");
+    }
+
+    private static boolean subscriptionTopicsAllowed(List<String> requested,
+                                                     Set<String> accepted) {
+        if (requested == null || accepted == null || accepted.isEmpty()) return false;
+        for (String request : requested) {
+            boolean allowed = false;
+            for (String grant : accepted) {
+                if (patternContains(grant, request)) {
+                    allowed = true;
+                    break;
+                }
+            }
+            if (!allowed) return false;
+        }
+        return true;
+    }
+
+    private static boolean patternContains(String grant, String request) {
+        if (grant == null || request == null) return false;
+        if ("*".equals(grant) || grant.equals(request)) return true;
+        if ("*".equals(request) || !grant.endsWith("*")) return false;
+        String grantPrefix = grant.substring(0, grant.length() - 1);
+        if (!request.startsWith(grantPrefix)) return false;
+        return !request.endsWith("*")
+                || request.substring(0, request.length() - 1)
+                .startsWith(grantPrefix);
+    }
+
+    /**
+     * Queue a governed frame. State-like frames replace only an older frame
+     * with the same topic and identity; lifecycle frames always retain their
+     * own slot. Returns the number dropped because the hard cap was reached.
+     */
+    int offerSubscriberFrame(LinkedBlockingDeque<JsonObject> queue,
+                             JsonObject frame, AgentCaps caps, Socket socket) {
+        if (queue == null || frame == null) return 0;
+        synchronized (queue) {
+            String key = EventBus.coalescingKey(frame);
+            if (key != null) {
+                java.util.Iterator<JsonObject> iterator = queue.descendingIterator();
+                while (iterator.hasNext()) {
+                    JsonObject previous = iterator.next();
+                    if (key.equals(EventBus.coalescingKey(previous))) {
+                        iterator.remove();
+                        break;
+                    }
+                }
+            }
+            if (queue.offerLast(frame)) return 0;
+
+            JsonObject oldest = queue.pollFirst();
+            int dropped = oldest == null ? 0 : 1;
+            while (queue.remainingCapacity() < 2) {
+                if (queue.pollFirst() == null) break;
+                dropped++;
+            }
+
+            JsonObject sentinel = new JsonObject();
+            sentinel.addProperty("event", "event_dropped");
+            JsonObject data = new JsonObject();
+            if (oldest != null) {
+                data.addProperty("oldest_event", safeEventTopic(
+                        optString(oldest, "event", "")));
+                if (oldest.has("seq") && oldest.get("seq").isJsonPrimitive()) {
+                    data.addProperty("oldest_seq", oldest.get("seq").getAsLong());
+                }
+            }
+            data.addProperty("queue_capacity", queue.size() + queue.remainingCapacity());
+            data.addProperty("dropped_count", dropped);
+            sentinel.add("data", data);
+            sentinel.addProperty("ts", System.currentTimeMillis());
+            sentinel.addProperty("seq", eventBus.nextSeq());
+            sentinel = governEventFrame(sentinel, caps, socket);
+
+            if (queue.remainingCapacity() >= 2) {
+                queue.offerLast(sentinel);
+            }
+            queue.offerLast(frame);
+            return dropped;
+        }
+    }
+
+    private JsonObject governEventFrame(JsonObject source, AgentCaps caps,
+                                        Socket socket) {
+        JsonObject frame = source == null ? new JsonObject() : source.deepCopy();
+        PrivacyPosture posture = PostureController.getInstance().current();
+        String topic = optString(frame, "event", "");
+        JsonObject data = frame.has("data") && frame.get("data").isJsonObject()
+                ? frame.getAsJsonObject("data") : null;
+        if (topic.startsWith("job.") && data != null
+                && data.has(JobRegistry.EVENT_OWNER_FIELD)) {
+            String owner = optString(data, JobRegistry.EVENT_OWNER_FIELD, "");
+            data.remove(JobRegistry.EVENT_OWNER_FIELD);
+            String subscriber = caps == null || caps.sessionId == null
+                    ? "" : caps.sessionId;
+            if (owner.isEmpty() || !owner.equals(subscriber)) {
+                return null;
+            }
+        }
+        boolean eventRedacted = false;
+        if (posture != null && posture != PrivacyPosture.STANDARD) {
+            String safeTopic = safeEventTopic(topic);
+            if (!safeTopic.equals(topic)) {
+                frame.addProperty("event", safeTopic);
+                topic = safeTopic;
+                eventRedacted = true;
+            }
+            eventRedacted |= pseudonymiseEventPayload(topic, data);
+        }
+        pseudonymisationFilter.apply(frame, "event:" + topic, posture,
+                sessionKey(caps, socket));
+        if (eventRedacted && frame.has("_governance")
+                && frame.get("_governance").isJsonObject()) {
+            JsonObject governance = frame.getAsJsonObject("_governance");
+            JsonArray fields = governance.has("fields_pseudonymised")
+                    && governance.get("fields_pseudonymised").isJsonArray()
+                    ? governance.getAsJsonArray("fields_pseudonymised")
+                    : new JsonArray();
+            boolean present = false;
+            for (JsonElement field : fields) {
+                if (field.isJsonPrimitive()
+                        && "event_sensitive".equals(field.getAsString())) {
+                    present = true;
+                }
+            }
+            if (!present) fields.add("event_sensitive");
+            governance.add("fields_pseudonymised", fields);
+        }
+        return frame;
+    }
+
+    private boolean pseudonymiseEventPayload(String topic, JsonObject data) {
+        if (data == null) return false;
+        boolean changed = false;
+        String[] titles = {
+                "title", "window_title", "image_title", "dialog_title",
+                "blocking_dialog_title", "target_image"
+        };
+        for (String key : titles) {
+            changed |= replaceEventString(data, key, "image");
+        }
+        String[] sensitiveText = {
+                "preview", "text", "code", "macro", "script", "error"
+        };
+        for (String key : sensitiveText) {
+            changed |= replaceEventString(data, key, "event");
+        }
+        if (topic != null && topic.startsWith("dialog.")) {
+            changed |= tokeniseStringArray(data, "buttons", "dialog-option");
+        }
+        changed |= tokeniseStringArray(data, "new_images", "image");
+        changed |= tokeniseStringArray(data, "newImages", "image");
+        if (topic != null && topic.startsWith("job.") && data.has("result")) {
+            data.remove("result");
+            data.addProperty("result_available", true);
+            changed = true;
+        }
+        return changed;
+    }
+
+    private boolean replaceEventString(JsonObject data, String key, String prefix) {
+        JsonElement value = data.get(key);
+        if (value == null || !value.isJsonPrimitive()
+                || !value.getAsJsonPrimitive().isString()) return false;
+        String original = value.getAsString();
+        if (original.isEmpty()) return false;
+        data.addProperty(key, pseudonymisationFilter.pathTokenMap()
+                .tokenForSensitiveText(original, prefix));
+        return true;
+    }
+
+    private boolean tokeniseStringArray(JsonObject data, String key, String prefix) {
+        JsonElement value = data.get(key);
+        if (value == null || !value.isJsonArray()) return false;
+        boolean changed = false;
+        JsonArray array = value.getAsJsonArray();
+        for (int i = 0; i < array.size(); i++) {
+            JsonElement item = array.get(i);
+            if (item != null && item.isJsonPrimitive()
+                    && item.getAsJsonPrimitive().isString()
+                    && !item.getAsString().isEmpty()) {
+                array.set(i, new JsonPrimitive(pseudonymisationFilter.pathTokenMap()
+                        .tokenForSensitiveText(item.getAsString(), prefix)));
+                changed = true;
+            }
+        }
+        return changed;
+    }
+
+    private static String safeEventTopic(String topic) {
+        String value = topic == null ? "" : topic;
+        if ("heartbeat".equals(value) || "subscribed".equals(value)
+                || "event_dropped".equals(value)) return value;
+        String[] prefixes = {
+                "image.", "job.", "dialog.", "macro.", "results.",
+                "memory.", "safe_mode.", "gui_action.",
+                "data_governance.", "reactive.",
+                // Test-automation lifecycle. Payloads are ids, enums, counts,
+                // and durations only — never labels, titles, or pixels — so the
+                // topic survives a strict posture without redaction.
+                "ui."
+        };
+        for (String prefix : prefixes) {
+            if (value.startsWith(prefix)
+                    && value.matches("[a-z0-9_.-]{1,128}")) return value;
+        }
+        return value.isEmpty() ? "event" : "custom";
+    }
+
+    private void appendSubscriptionAudit(String command, JsonObject request,
+                                         AgentCaps caps, List<String> patterns,
+                                         String reason, int bytesIn,
+                                         long frames, long dropped) {
+        try {
+            PrivacyPosture posture = PostureController.getInstance().current();
+            List<String> fields = posture == PrivacyPosture.STANDARD
+                    ? Collections.<String>emptyList()
+                    : Collections.singletonList("stream_payload");
+            StringBuilder notes = new StringBuilder();
+            notes.append("topics=");
+            for (int i = 0; i < patterns.size(); i++) {
+                if (i > 0) notes.append(',');
+                notes.append(safeAuditTopic(patterns.get(i)));
+            }
+            notes.append(" reason=").append(scrubAuditTokenNote(reason));
+            notes.append(" frames=").append(Math.max(0L, frames));
+            notes.append(" dropped=").append(Math.max(0L, dropped));
+            auditLog.append(new AuditRow(
+                    java.time.Instant.now(),
+                    sessionAuditPseudonym(caps == null ? "" : caps.sessionId),
+                    command,
+                    posture,
+                    "",
+                    "",
+                    0,
+                    Math.max(0, bytesIn),
+                    "",
+                    posture != PrivacyPosture.STANDARD,
+                    fields,
+                    truncateAuditNote(notes.toString()),
+                    ""));
+        } catch (Throwable t) {
+            System.err.println("[ImageJAI-Audit] subscription row failed: "
+                    + t.getMessage());
+        }
+    }
+
+    private static String sessionAuditPseudonym(String sessionId) {
+        String value = sessionId == null ? "" : sessionId;
+        if (value.isEmpty()) return "";
+        try {
+            byte[] digest = MessageDigest.getInstance("SHA-256")
+                    .digest(value.getBytes(StandardCharsets.UTF_8));
+            StringBuilder out = new StringBuilder("session-");
+            for (byte b : digest) {
+                int v = b & 0xff;
+                if (v < 16) out.append('0');
+                out.append(Integer.toHexString(v));
+                if (out.length() >= 24) break;
+            }
+            return out.toString();
+        } catch (Exception impossible) {
+            return "session-redacted";
+        }
+    }
+
+    private static String safeAuditTopic(String pattern) {
+        if ("*".equals(pattern)) return "*";
+        String value = pattern == null ? "" : pattern;
+        String[] prefixes = {
+                "image.", "job.", "dialog.", "macro.", "results.",
+                "memory.", "safe_mode.", "gui_action.",
+                "data_governance.", "reactive.", "ui."
+        };
+        for (String prefix : prefixes) {
+            if (value.startsWith(prefix) && validTopicPattern(value)) return value;
+        }
+        return value.isEmpty() ? "custom" : "custom-" + sessionAuditPseudonym(value);
     }
 
     /** Write a JSON frame followed by '\n' to the raw output stream. */
@@ -1149,14 +1947,9 @@ public class TCPCommandServer {
             out.write(bytes);
             out.flush();
         }
-        String command = "stream";
-        try {
-            if (frame != null && frame.has("event")) {
-                command = "stream:" + frame.get("event").getAsString();
-            }
-        } catch (Exception ignore) {
-        }
-        OutboundEvent.publish(command, bytes.length);
+        String topic = optString(frame, "event", "");
+        String identity = EventBus.coalescingKey(frame);
+        OutboundEvent.publishStream(topic, identity, bytes.length);
     }
 
     /** Best-effort raw JSON write — swallows IO errors. Used for rejection frames. */
@@ -1166,64 +1959,253 @@ public class TCPCommandServer {
         } catch (IOException ignore) {}
     }
 
-    private JsonObject errorJsonObject(String msg) {
-        JsonObject o = new JsonObject();
-        o.addProperty("ok", false);
-        o.addProperty("error", msg);
-        return o;
+    static final class RequestLine {
+        final String text;
+        final int byteCount;
+        RequestLine(String text, int byteCount) {
+            this.text = text;
+            this.byteCount = byteCount;
+        }
+    }
+
+    static final class RequestTooLargeException extends IOException {
+        RequestTooLargeException() { super("request byte limit exceeded"); }
     }
 
     /**
-     * Read a single line from the reader, enforcing max size.
+     * Iteratively validate an already-parsed request tree. Returns a bounded
+     * diagnostic on rejection, or {@code null} when the shape is safe.
      */
-    private String readLine(BufferedReader reader) throws Exception {
-        StringBuilder sb = new StringBuilder();
-        int c;
-        while ((c = reader.read()) != -1) {
-            if (c == '\n') {
-                break;
+    static String validateRequestShape(JsonElement root) {
+        if (root == null || !root.isJsonObject()) {
+            return "Request must be a JSON object";
+        }
+        JsonObject top = root.getAsJsonObject();
+        if (top.size() > MAX_REQUEST_TOP_LEVEL_FIELDS) {
+            return "Request has too many top-level fields (max "
+                    + MAX_REQUEST_TOP_LEVEL_FIELDS + ")";
+        }
+        Deque<RequestNode> pending = new ArrayDeque<RequestNode>();
+        pending.push(new RequestNode(root, 1));
+        int nodes = 0;
+        long estimatedJsonBytes = 0L;
+        while (!pending.isEmpty()) {
+            RequestNode node = pending.pop();
+            if (++nodes > MAX_REQUEST_JSON_NODES) {
+                return "Request JSON is too complex (max "
+                        + MAX_REQUEST_JSON_NODES + " values)";
             }
-            if (c == '\r') {
+            if (node.depth > MAX_REQUEST_JSON_DEPTH) {
+                return "Request JSON nesting exceeds max depth "
+                        + MAX_REQUEST_JSON_DEPTH;
+            }
+            JsonElement element = node.element;
+            if (element == null || element.isJsonNull()) continue;
+            if (element.isJsonPrimitive()) {
+                JsonPrimitive primitive = element.getAsJsonPrimitive();
+                estimatedJsonBytes += primitive.isString()
+                        ? escapedJsonStringBytes(primitive.getAsString())
+                        : utf8Length(primitive.toString());
+                if (estimatedJsonBytes > MAX_REQUEST_JSON_BYTES) {
+                    return "Request JSON exceeds max "
+                            + MAX_REQUEST_JSON_BYTES + " UTF-8 bytes";
+                }
                 continue;
             }
-            sb.append((char) c);
-            if (sb.length() > Constants.TCP_MAX_MESSAGE_SIZE) {
-                return sb.toString(); // Will be rejected by size check
+            if (element.isJsonArray()) {
+                JsonArray array = element.getAsJsonArray();
+                if (array.size() > MAX_REQUEST_CONTAINER_ENTRIES) {
+                    return "Request array exceeds max "
+                            + MAX_REQUEST_CONTAINER_ENTRIES + " entries";
+                }
+                estimatedJsonBytes += 2L + Math.max(0, array.size() - 1);
+                if (estimatedJsonBytes > MAX_REQUEST_JSON_BYTES) {
+                    return "Request JSON exceeds max "
+                            + MAX_REQUEST_JSON_BYTES + " UTF-8 bytes";
+                }
+                for (JsonElement child : array) {
+                    pending.push(new RequestNode(child, node.depth + 1));
+                }
+                continue;
+            }
+            JsonObject object = element.getAsJsonObject();
+            if (object.size() > MAX_REQUEST_CONTAINER_ENTRIES) {
+                return "Request object exceeds max "
+                        + MAX_REQUEST_CONTAINER_ENTRIES + " fields";
+            }
+            estimatedJsonBytes += 2L + Math.max(0, object.size() - 1);
+            if (estimatedJsonBytes > MAX_REQUEST_JSON_BYTES) {
+                return "Request JSON exceeds max "
+                        + MAX_REQUEST_JSON_BYTES + " UTF-8 bytes";
+            }
+            for (Map.Entry<String, JsonElement> entry : object.entrySet()) {
+                String key = entry.getKey();
+                if (key == null || key.length() > MAX_REQUEST_KEY_CHARS) {
+                    return "Request field name exceeds max "
+                            + MAX_REQUEST_KEY_CHARS + " characters";
+                }
+                estimatedJsonBytes += escapedJsonStringBytes(key) + 1L;
+                if (estimatedJsonBytes > MAX_REQUEST_JSON_BYTES) {
+                    return "Request JSON exceeds max "
+                            + MAX_REQUEST_JSON_BYTES + " UTF-8 bytes";
+                }
+                pending.push(new RequestNode(entry.getValue(), node.depth + 1));
             }
         }
-        return sb.length() > 0 ? sb.toString() : null;
+
+        JsonElement command = top.get("command");
+        if (command == null || !command.isJsonPrimitive()
+                || !command.getAsJsonPrimitive().isString()) {
+            return "Missing or invalid 'command' string field";
+        }
+        String commandName = command.getAsString();
+        if (commandName.isEmpty()
+                || utf8Length(commandName) > SessionStats.MAX_COMMAND_BYTES) {
+            return "Command name length must be 1.."
+                    + SessionStats.MAX_COMMAND_BYTES;
+        }
+        CommandManifest.Descriptor descriptor = CommandManifest.descriptor(commandName);
+        if (descriptor == null) return "Unknown command: " + commandName;
+        return null;
+    }
+
+    private static long escapedJsonStringBytes(String value) {
+        if (value == null) return 2L;
+        long bytes = 2L; // quotes
+        for (int offset = 0; offset < value.length();) {
+            int codePoint = value.codePointAt(offset);
+            if (codePoint == '"' || codePoint == '\\'
+                    || codePoint == '\b' || codePoint == '\f'
+                    || codePoint == '\n' || codePoint == '\r'
+                    || codePoint == '\t') {
+                bytes += 2L;
+            } else if (codePoint < 0x20
+                    || codePoint == '<' || codePoint == '>'
+                    || codePoint == '&' || codePoint == '='
+                    || codePoint == '\'') {
+                bytes += 6L;
+            } else {
+                bytes += codePoint <= 0x7f ? 1L
+                        : codePoint <= 0x7ff ? 2L
+                        : codePoint <= 0xffff ? 3L : 4L;
+            }
+            if (bytes > MAX_REQUEST_JSON_BYTES) return bytes;
+            offset += Character.charCount(codePoint);
+        }
+        return bytes;
+    }
+
+    private static String safeExceptionMessage(Throwable failure) {
+        if (failure == null) return "invalid input";
+        String message = failure.getMessage();
+        if (message == null || message.trim().isEmpty()) {
+            message = failure.getClass().getSimpleName();
+        }
+        return message.length() <= 240 ? message : message.substring(0, 240);
+    }
+
+    private static final class RequestNode {
+        final JsonElement element;
+        final int depth;
+
+        RequestNode(JsonElement element, int depth) {
+            this.element = element;
+            this.depth = depth;
+        }
+    }
+
+    /** Package-private exact UTF-8 request reader used by boundary tests. */
+    static RequestLine readUtf8Line(InputStream input, int maxBytes)
+            throws IOException, CharacterCodingException {
+        if (input == null) throw new IOException("input is required");
+        if (maxBytes < 1) throw new IllegalArgumentException("maxBytes must be positive");
+        ByteArrayOutputStream bytes = new ByteArrayOutputStream(
+                Math.min(8192, maxBytes));
+        int payloadBytes = 0;
+        boolean sawAny = false;
+        boolean pendingCarriageReturn = false;
+        int next;
+        while ((next = input.read()) != -1) {
+            sawAny = true;
+            if (next == '\n') {
+                // A CR immediately before LF is framing, not payload.
+                pendingCarriageReturn = false;
+                break;
+            }
+            if (pendingCarriageReturn) {
+                payloadBytes++;
+                if (payloadBytes > maxBytes) throw new RequestTooLargeException();
+                bytes.write('\r');
+                pendingCarriageReturn = false;
+            }
+            if (next == '\r') {
+                pendingCarriageReturn = true;
+            } else {
+                payloadBytes++;
+                if (payloadBytes > maxBytes) throw new RequestTooLargeException();
+                bytes.write(next);
+            }
+        }
+        // A final CR at EOF is also line framing, matching readLine().
+        if (!sawAny && bytes.size() == 0) return null;
+        String decoded = UTF8.newDecoder()
+                .onMalformedInput(CodingErrorAction.REPORT)
+                .onUnmappableCharacter(CodingErrorAction.REPORT)
+                .decode(java.nio.ByteBuffer.wrap(bytes.toByteArray()))
+                .toString();
+        return new RequestLine(decoded, payloadBytes);
     }
 
     // -----------------------------------------------------------------------
     // Command dispatch
     // -----------------------------------------------------------------------
 
-    private JsonObject dispatch(String jsonStr, Socket sock) {
-        JsonObject request;
-        try {
-            request = JsonParser.parseString(jsonStr).getAsJsonObject();
-        } catch (Exception e) {
-            return errorResponse("Invalid JSON: " + e.getMessage());
-        }
-        return dispatch(request, sock);
-    }
-
     JsonObject dispatch(JsonObject request, AgentCaps caps) {
+        String shapeError = validateRequestShape(request);
+        if (shapeError != null) return invalidRequest(shapeError);
         return dispatchInternal(request, caps == null ? DEFAULT_CAPS : caps, null);
     }
 
     private JsonObject dispatch(JsonObject request, Socket sock) {
-        AgentCaps caps = (sock != null)
-                ? capsBySocket.getOrDefault(sock, DEFAULT_CAPS)
-                : DEFAULT_CAPS;
-        return dispatchInternal(request, caps, sock);
+        String shapeError = validateRequestShape(request);
+        if (shapeError != null) return invalidRequest(shapeError);
+        if (sock == null) {
+            return dispatchInternal(request, DEFAULT_CAPS, null);
+        }
+        String command = optString(request, "command", "");
+        if (!KNOWN_COMMANDS.contains(command)) {
+            return invalidRequest("Unknown command: " + command);
+        }
+        if ("hello".equals(command)) {
+            return dispatchInternal(request, DEFAULT_CAPS, sock);
+        }
+        // ping intentionally remains a public liveness probe. It never
+        // exposes image state or negotiated capabilities.
+        if ("ping".equals(command) && !request.has("session_id")) {
+            request.remove("token");
+            return dispatchInternal(request, LEGACY_CAPS, sock);
+        }
+
+        String sessionId = optString(request, "session_id", "");
+        String token = optString(request, "token", null);
+        SessionCapsRegistry.Lookup<AgentCaps> lookup =
+                sessionRegistry.lookup(sessionId, token);
+        request.remove("token");
+        if (lookup.status() == SessionCapsRegistry.Status.VALID) {
+            return dispatchInternal(request, lookup.caps(), sock);
+        }
+        if (lookup.status() == SessionCapsRegistry.Status.MISSING
+                && !tokenAuthRequired()) {
+            return dispatchInternal(request, LEGACY_CAPS, sock);
+        }
+        return sessionFailure(lookup.status());
     }
 
     private JsonObject dispatchInternal(JsonObject request, AgentCaps caps, Socket sock) {
         final int requestBytes = jsonBytes(request);
         JsonElement cmdElement = request.get("command");
         if (cmdElement == null || !cmdElement.isJsonPrimitive()) {
-            return errorResponse("Missing 'command' field");
+            return invalidRequest("Missing or invalid 'command' string field");
         }
         String command = cmdElement.getAsString();
 
@@ -1246,6 +2228,13 @@ public class TCPCommandServer {
                 PostureController.getInstance().current());
 
         JsonObject response = dispatchCore(command, request, caps, sock);
+
+        if (response != null && caps != null && caps.compatibility) {
+            JsonObject compatibility = new JsonObject();
+            compatibility.addProperty("mode", "legacy_restricted");
+            compatibility.addProperty("safe_mode", true);
+            response.add("_session", compatibility);
+        }
 
         // Phase 7: surface a handler-attached gui_action piggyback into the
         // outer response. Handlers may set result.gui_action = {...}; this
@@ -1369,7 +2358,7 @@ public class TCPCommandServer {
                     || (rowPosture != PrivacyPosture.STANDARD
                     && response != null && response.has("_governance"));
             String sessionId = auditSessionId(request, caps, sock);
-            AuditLog.getInstance().append(new AuditRow(
+            auditLog.append(new AuditRow(
                     java.time.Instant.now(),
                     sessionId,
                     command,
@@ -1422,15 +2411,6 @@ public class TCPCommandServer {
         writer.flush();
         int newlineBytes = System.lineSeparator().getBytes(UTF8).length;
         OutboundEvent.publish(command, body.getBytes(UTF8).length + newlineBytes);
-    }
-
-    private String commandNameFromRequest(String rawJson) {
-        try {
-            JsonObject request = JsonParser.parseString(rawJson).getAsJsonObject();
-            return optString(request, "cmd", optString(request, "command", ""));
-        } catch (Exception e) {
-            return "";
-        }
     }
 
     private String auditSessionId(JsonObject request, AgentCaps caps, Socket sock) {
@@ -1503,7 +2483,7 @@ public class TCPCommandServer {
             }
         } else if ("open_image".equals(command)) {
             String target = auditOpenTarget(request);
-            if (target.matches("(?i)image-[0-9a-f]{4,12}.*")) {
+            if (target.matches("(?i)image-[0-9a-f]{4,32}.*")) {
                 appendNote(notes, "token", target);
             }
         } else if ("get_pending_brief".equals(command)) {
@@ -1531,7 +2511,7 @@ public class TCPCommandServer {
         if (request == null) {
             return "";
         }
-        String[] keys = {"token", "image_token", "path", "file"};
+        String[] keys = {"image_token", "path", "file"};
         for (String key : keys) {
             String value = optString(request, key, "");
             if (!value.trim().isEmpty()) {
@@ -1697,20 +2677,21 @@ public class TCPCommandServer {
                                     JsonObject response, AgentCaps caps) {
         SessionStats stats = caps.stats;
         long now = System.currentTimeMillis();
-        String canonicalArgs = ResponseDedupCache.canonicalArgs(request);
+        String argsDigest = ResponseDedupCache.canonicalArgs(request);
+        String argsSummary = summariseArgs(request);
         String errorCode = extractErrorCode(response);
 
         // Track probe_command results so probe_before_run_missed can suppress
         // the hint once the agent has already probed the plugin.
         if ("probe_command".equals(command) && request != null) {
-            JsonElement nameEl = request.get("name");
-            if (nameEl == null) nameEl = request.get("command");
+            JsonElement nameEl = request.get("plugin");
+            if (nameEl == null) nameEl = request.get("name");
             if (nameEl != null && nameEl.isJsonPrimitive()) {
                 stats.noteProbed(nameEl.getAsString());
             }
         }
 
-        stats.record(command, canonicalArgs, now, errorCode);
+        stats.recordDigest(command, argsDigest, argsSummary, now, errorCode);
 
         if (!caps.patternHints) return;
         List<PatternDetector.Hint> hints = PatternDetector.check(stats, now);
@@ -1727,10 +2708,23 @@ public class TCPCommandServer {
     }
 
     private JsonObject dispatchCore(String command, JsonObject request, AgentCaps caps, Socket sock) {
-        // Token auth gate. Off by default — see tokenAuthRequired() for the
-        // env-var/system-property switches. When on, only hello and ping are
-        // allowed before authentication; every other handler refuses with a
-        // structured auth_required error so the client can see how to fix it.
+        // A deliberately enabled compatibility session is read-only. Keep
+        // this as a whitelist so new mutating or host-code commands fail
+        // closed until they are explicitly classified and authenticated.
+        if (sock != null
+                && caps != null
+                && caps.compatibility
+                && !"hello".equals(command)
+                && !"ping".equals(command)
+                && !READONLY_COMMANDS.contains(command)) {
+            return protocolError("compatibility_read_only",
+                    "This command requires an authenticated protocol session.");
+        }
+
+        // Token auth gate. The env-var/system-property switch is default-on.
+        // Only hello and ping are allowed before authentication; every other
+        // handler refuses with a structured auth_required error so the client
+        // can see how to fix it.
         if (tokenAuthRequired()
                 && sock != null
                 && !"hello".equals(command)
@@ -1745,13 +2739,13 @@ public class TCPCommandServer {
         } else if ("ping".equals(command)) {
             return handlePing();
         } else if ("emit_methods_table".equals(command)) {
-            return handleEmitMethodsTable(request);
+            return handleEmitMethodsTable(request, caps);
         } else if ("execute_macro".equals(command)) {
             return handleExecuteMacro(request, caps);
         } else if ("get_state".equals(command)) {
             return handleGetState();
         } else if ("get_image_info".equals(command)) {
-            return handleGetImageInfo();
+            return handleGetImageInfo(request);
         } else if ("get_results_table".equals(command)) {
             return handleGetResultsTable();
         } else if ("capture_image".equals(command)) {
@@ -1759,9 +2753,9 @@ public class TCPCommandServer {
         } else if ("request_visual".equals(command)) {
             return handleRequestVisual(request, caps, sock);
         } else if ("open_image".equals(command)) {
-            return handleOpenImage(request, false);
+            return handleOpenImage(request, false, caps, sock, command);
         } else if ("open_image_by_token".equals(command)) {
-            return handleOpenImage(request, true);
+            return handleOpenImage(request, true, caps, sock, command);
         } else if ("browse_pending_brief".equals(command)) {
             return handleBrowsePendingBrief(request, caps, sock);
         } else if ("get_pending_brief".equals(command)) {
@@ -1775,11 +2769,11 @@ public class TCPCommandServer {
         } else if ("get_log".equals(command)) {
             return handleGetLog();
         } else if ("get_histogram".equals(command)) {
-            return handleGetHistogram();
+            return handleGetHistogram(request);
         } else if ("get_open_windows".equals(command)) {
             return handleGetOpenWindows();
         } else if ("get_metadata".equals(command)) {
-            return handleGetMetadata();
+            return handleGetMetadata(request);
         } else if ("batch".equals(command)) {
             return handleBatch(request, caps);
         } else if ("run".equals(command)) {
@@ -1791,9 +2785,9 @@ public class TCPCommandServer {
         } else if ("get_dialogs".equals(command)) {
             return handleGetDialogs();
         } else if ("close_dialogs".equals(command)) {
-            return handleCloseDialogs(request);
+            return handleCloseDialogs(request, caps, sock, command);
         } else if ("close_windows".equals(command)) {
-            return handleCloseDialogs(request);
+            return handleCloseDialogs(request, caps, sock, command);
         } else if ("probe_command".equals(command)) {
             return handleProbeCommand(request);
         } else if ("list_commands".equals(command)) {
@@ -1801,7 +2795,7 @@ public class TCPCommandServer {
         } else if ("run_script".equals(command)) {
             return handleRunScript(request, caps);
         } else if ("interact_dialog".equals(command)) {
-            return handleInteractDialog(request, caps);
+            return handleInteractDialog(request, caps, sock, command);
         } else if ("get_progress".equals(command)) {
             return handleGetProgress();
         } else if ("get_friction_log".equals(command)) {
@@ -1826,13 +2820,13 @@ public class TCPCommandServer {
         } else if ("gui_action".equals(command)) {
             return handleGuiAction(request);
         } else if ("execute_macro_async".equals(command)) {
-            return handleExecuteMacroAsync(request);
+            return handleExecuteMacroAsync(request, caps);
         } else if ("job_status".equals(command)) {
-            return handleJobStatus(request);
+            return handleJobStatus(request, caps);
         } else if ("job_cancel".equals(command)) {
-            return handleJobCancel(request);
+            return handleJobCancel(request, caps);
         } else if ("job_list".equals(command)) {
-            return handleJobList();
+            return handleJobList(caps);
         } else if ("list_reactive_rules".equals(command)) {
             return handleListReactiveRules();
         } else if ("reactive_stats".equals(command)) {
@@ -1851,6 +2845,8 @@ public class TCPCommandServer {
             return handleGetConsole(request, caps);
         } else if ("get_image_graph".equals(command)) {
             return handleGetImageGraph();
+        } else if ("pseudonymise_paths".equals(command)) {
+            return handlePseudonymisePaths(request);
         } else if ("ledger_lookup".equals(command)) {
             return handleLedgerLookup(request);
         } else if ("ledger_confirm".equals(command)) {
@@ -1865,9 +2861,97 @@ public class TCPCommandServer {
             return handleBranchSwitch(request, caps);
         } else if ("branch_delete".equals(command)) {
             return handleBranchDelete(request, caps);
+        } else if ("get_ui_tree".equals(command)
+                || "get_ui_component".equals(command)
+                || "perform_ui_action".equals(command)
+                || "wait_for_ui_state".equals(command)
+                || "wait_for_ui_idle".equals(command)
+                || "capture_ui".equals(command)
+                || "start_ui_trace".equals(command)
+                || "stop_ui_trace".equals(command)
+                || "get_ui_metrics".equals(command)) {
+            return handleAutomation(command, request, caps, sock);
         } else {
-            return errorResponse("Unknown command: " + command);
+            return invalidRequest("Unknown command: " + command);
         }
+    }
+
+    /**
+     * Delegate a gated test-automation command. The bridge owns validation,
+     * bounds, and structured errors; this server only supplies the EDT
+     * operation contract and the negotiated capability.
+     */
+    private JsonObject handleAutomation(String command, JsonObject request,
+                                        final AgentCaps caps, final Socket sock) {
+        AutomationBridge bridge = automationBridge;
+        if (bridge == null) {
+            return protocolError("test_automation_disabled",
+                    "Test automation is not enabled for this Fiji instance and session.");
+        }
+        boolean granted = caps != null && caps.testAutomation;
+        return bridge.handler().handle(command, request, granted,
+                automationHost(request, caps, sock));
+    }
+
+    /**
+     * Bridge the automation handler to this server's session-owned EDT
+     * operation registry, so a timed-out UI action becomes a pollable
+     * {@code operation_in_progress} handle rather than a replayed mutation.
+     */
+    private AutomationCommandHandler.Host automationHost(final JsonObject request,
+                                                         final AgentCaps caps,
+                                                         final Socket sock) {
+        return new AutomationCommandHandler.Host() {
+            @Override
+            public JsonObject pollExistingOperation(String command) {
+                return pollEdtOperation(request, caps, sock, command);
+            }
+
+            @Override
+            public JsonObject submitEdtOperation(
+                    String command,
+                    final java.util.function.Supplier<JsonObject> work,
+                    long timeoutMs) {
+                final JsonObject[] holder = new JsonObject[1];
+                final Runnable action = new Runnable() {
+                    @Override public void run() {
+                        try {
+                            holder[0] = work.get();
+                        } catch (Throwable failure) {
+                            holder[0] = protocolError("ui_internal_error",
+                                    "The UI operation failed on the event thread: "
+                                            + failure.getClass().getSimpleName());
+                        }
+                    }
+                };
+                final String owner = edtOperationOwner(caps, sock, command);
+                long bounded = timeoutMs <= 0L
+                        ? AutomationPolicy.MAX_COMMAND_TIMEOUT_MS
+                        : Math.max(1L, Math.min(
+                                AutomationPolicy.MAX_COMMAND_TIMEOUT_MS, timeoutMs));
+                try {
+                    EdtOperationRegistry.Operation operation =
+                            edtOperationRegistry.admit(owner,
+                                    new EdtOperationRegistry.ActionStarter() {
+                                        @Override
+                                        public GuiActionDispatcher.ActionToken start() {
+                                            return GuiActionDispatcher
+                                                    .queueSwingAction(action);
+                                        }
+                                    },
+                                    new EdtOperationRegistry.CompletionSupplier() {
+                                        @Override public JsonObject complete() {
+                                            return holder[0];
+                                        }
+                                    });
+                    return awaitEdtOperation(operation, owner,
+                            canPollEdtOperation(caps, sock) ? bounded : 0L);
+                } catch (RejectedExecutionException rejected) {
+                    return protocolError("edt_operation_capacity",
+                            "The bounded EDT operation queue is full or stopped.");
+                }
+            }
+        };
     }
 
     // -----------------------------------------------------------------------
@@ -2022,17 +3106,19 @@ public class TCPCommandServer {
         }
         // Strip volatile keys (usedMB, freeMB, percent, ...) before hashing so
         // a fresh memory reading on an otherwise-identical get_state doesn't
-        // bust the cache. Reuses HASH_EXCLUDED_KEYS and the canonicalise()
-        // helper already trusted by the if_none_match layer.
+        // bust the cache. The iterative digest omits HASH_EXCLUDED_KEYS
+        // without constructing a recursive canonical copy.
         JsonObject hashInput = new JsonObject();
         hashInput.addProperty("command", command);
         JsonElement resultEl = response.get("result");
         if (resultEl != null) {
-            hashInput.add("result", canonicalise(resultEl));
+            hashInput.add("result", resultEl);
         }
         String args = ResponseDedupCache.canonicalArgs(request);
+        String freshHash = ResponseDedupCache.hash(hashInput, HASH_EXCLUDED_KEYS);
         java.util.Optional<JsonObject> dedup =
-                caps.dedupCache.checkOrStore(command, args, hashInput);
+                caps.dedupCache.checkOrStoreHash(
+                        command, args, freshHash, System.currentTimeMillis());
         if (!dedup.isPresent()) {
             return response;
         }
@@ -2047,13 +3133,13 @@ public class TCPCommandServer {
     }
 
     /**
-     * For readonly responses: compute an MD5 hash over the canonical JSON of
+     * For readonly responses: compute a stable truncated SHA-256 identity of
      * the {@code result} field and either (a) return the full payload plus
      * {@code hash}, or (b) if the caller's {@code if_none_match} matches,
      * strip the payload and return {@code unchanged: true}.
      *
-     * <p>The hash is computed over a canonicalised copy of the result
-     * (volatile fields stripped, JsonObject keys sorted) so that logically
+     * <p>The hash is computed iteratively over the result (volatile fields
+     * stripped, JsonObject keys sorted) so that logically
      * identical state always hashes identically even though the wire payload
      * preserves insertion order.
      */
@@ -2065,7 +3151,8 @@ public class TCPCommandServer {
         }
 
         JsonElement result = response.get("result");
-        String hash = md5Hex(canonicalForHash(result));
+        String hash = canonicalForHash(result);
+        if (hash.isEmpty()) return response;
 
         String ifNone = null;
         JsonElement ifNoneEl = request.get("if_none_match");
@@ -2092,31 +3179,7 @@ public class TCPCommandServer {
      */
     private static String canonicalForHash(JsonElement el) {
         if (el == null) return "";
-        return GSON.toJson(canonicalise(el));
-    }
-
-    private static JsonElement canonicalise(JsonElement el) {
-        if (el == null || el.isJsonNull()) return JsonNull.INSTANCE;
-        if (el.isJsonPrimitive()) return el;
-        if (el.isJsonArray()) {
-            JsonArray src = el.getAsJsonArray();
-            JsonArray dst = new JsonArray();
-            for (int i = 0; i < src.size(); i++) dst.add(canonicalise(src.get(i)));
-            return dst;
-        }
-        // Object — sort keys, strip volatile.
-        JsonObject src = el.getAsJsonObject();
-        java.util.TreeMap<String, JsonElement> sorted = new java.util.TreeMap<String, JsonElement>();
-        for (Map.Entry<String, JsonElement> e : src.entrySet()) {
-            String k = e.getKey();
-            if (HASH_EXCLUDED_KEYS.contains(k)) continue;
-            sorted.put(k, canonicalise(e.getValue()));
-        }
-        JsonObject dst = new JsonObject();
-        for (Map.Entry<String, JsonElement> e : sorted.entrySet()) {
-            dst.add(e.getKey(), e.getValue());
-        }
-        return dst;
+        return ResponseDedupCache.hash(el, HASH_EXCLUDED_KEYS);
     }
 
     private void recordFrictionIfFailure(String command, JsonObject request, JsonObject response, AgentCaps caps) {
@@ -2125,6 +3188,14 @@ public class TCPCommandServer {
                 || "get_friction_patterns".equals(command)
                 || "clear_friction_log".equals(command)) {
             return;
+        }
+        JsonElement structured = response == null ? null : response.get("error");
+        if (structured != null && structured.isJsonObject()) {
+            JsonElement code = structured.getAsJsonObject().get("code");
+            if (code != null && code.isJsonPrimitive()
+                    && "operation_in_progress".equals(code.getAsString())) {
+                return;
+            }
         }
 
         String error = extractErrorString(response);
@@ -2243,22 +3314,6 @@ public class TCPCommandServer {
         return sb.toString();
     }
 
-    private static String md5Hex(String s) {
-        try {
-            MessageDigest md = MessageDigest.getInstance("MD5");
-            byte[] bytes = md.digest(s.getBytes(StandardCharsets.UTF_8));
-            StringBuilder sb = new StringBuilder(bytes.length * 2);
-            for (byte b : bytes) {
-                int v = b & 0xff;
-                if (v < 0x10) sb.append('0');
-                sb.append(Integer.toHexString(v));
-            }
-            return sb.toString();
-        } catch (Exception e) {
-            return "";
-        }
-    }
-
     // -----------------------------------------------------------------------
     // Command handlers
     // -----------------------------------------------------------------------
@@ -2275,19 +3330,26 @@ public class TCPCommandServer {
      */
     JsonObject handleHello(JsonObject request, Socket sock) {
         AgentCaps c = new AgentCaps();
-        // Validate shared token if presented. Always loaded; enforcement is
-        // gated by tokenAuthRequired(). The authenticated flag is recorded
-        // either way so the dispatch gate can refuse non-hello commands
-        // when enforcement flips on.
+        // Validate before parsing or storing any caller-controlled caps. A
+        // supplied-but-wrong token is always an error; it never degrades to a
+        // compatibility session. The null-token-server case exists only for
+        // direct headless unit tests because start() initializes the token
+        // before opening the listen socket.
         String supplied = optString(request, "token", null);
-        if (serverToken != null && supplied != null
-                && tokensEqual(serverToken, supplied)) {
+        request.remove("token"); // credentials must never reach audit payloads
+        if (supplied != null && serverToken != null
+                && !tokensEqual(serverToken, supplied)) {
+            return protocolError("invalid_token", "The installation token is invalid.");
+        }
+        if (serverToken == null || (supplied != null
+                && tokensEqual(serverToken, supplied))) {
             c.authenticated = true;
         }
         if (tokenAuthRequired() && !c.authenticated) {
-            return errorResponse("auth_required: hello must include a valid 'token' field. "
-                    + "Read the token from " + tokenFilePath().toString() + ".");
+            return protocolError("auth_required",
+                    "hello requires the installation token.");
         }
+        c.compatibility = !c.authenticated;
         c.agent = optString(request, "agent", "unknown");
         JsonObject caps = (request.has("capabilities")
                 && request.get("capabilities").isJsonObject())
@@ -2295,10 +3357,27 @@ public class TCPCommandServer {
                 : new JsonObject();
         c.sessionId = optString(request, "session_id",
                 optString(caps, "session_id", ""));
+        c.clientSessionId = optString(request, "client_session_id", "");
         c.modelEndpoint = optString(request, "model_endpoint",
                 optString(caps, "model_endpoint", ""));
         c.vision       = optBool(caps, "vision", false);
         c.outputFormat = optString(caps, "output_format", "json");
+        JsonObject helloFieldError = validateHelloField(
+                "agent", c.agent, MAX_HANDSHAKE_IDENTITY_CHARS);
+        if (helloFieldError != null) return helloFieldError;
+        helloFieldError = validateHelloField(
+                "session_id", c.sessionId, MAX_HANDSHAKE_IDENTITY_CHARS);
+        if (helloFieldError != null) return helloFieldError;
+        helloFieldError = validateHelloField(
+                "client_session_id", c.clientSessionId,
+                MAX_HANDSHAKE_IDENTITY_CHARS);
+        if (helloFieldError != null) return helloFieldError;
+        helloFieldError = validateHelloField(
+                "model_endpoint", c.modelEndpoint, MAX_HANDSHAKE_IDENTITY_CHARS);
+        if (helloFieldError != null) return helloFieldError;
+        helloFieldError = validateHelloField(
+                "output_format", c.outputFormat, MAX_HANDSHAKE_OUTPUT_FORMAT_CHARS);
+        if (helloFieldError != null) return helloFieldError;
         c.tokenBudget  = optInt(caps, "token_budget", Integer.MAX_VALUE);
         c.verbose      = optBool(caps, "verbose", false);
         // Step 05: pulse / state_delta default ON for clients that said hello
@@ -2374,30 +3453,105 @@ public class TCPCommandServer {
         // shouldn't pay for it. Per plan:
         // docs/tcp_upgrade/15_undo_stack_api.md.
         c.undo = optBool(caps, "undo", false);
-        int sockPort = (sock != null) ? sock.getPort() : 0;
-        c.agentId = optString(caps, "agent_id", c.agent + "-" + sockPort);
-        c.acceptEvents = parseStringSet(caps, "accept_events");
-        if (sock != null) {
-            capsBySocket.put(sock, c);
+        // Test automation: both gates or nothing. The startup property arms the
+        // instance; this flag arms the session. Neither alone is sufficient, and
+        // an unauthenticated compatibility session is never eligible.
+        boolean automationRequested = optBool(caps, "test_automation", false);
+        c.testAutomation = automationRequested && c.authenticated && !c.compatibility
+                && automationBridge != null && automationBridge.isEnabled();
+        if (c.compatibility) {
+            // Compatibility sessions expose only the dispatcher's explicit
+            // read-only whitelist and refuse privileged capability opt-ins.
+            c.vision = false;
+            c.safeMode = true;
+            c.autoDismissPhantoms = false;
+            c.undo = false;
+            c.testAutomation = false;
+            c.acceptEvents = Collections.emptySet();
+            c.pulse = false;
+            c.dedup = false;
+            c.patternHints = false;
+            c.graphDelta = false;
+            c.ledger = false;
         }
+        int sockPort = (sock != null) ? sock.getPort() : 0;
+        c.agentId = optString(caps, "agent_id",
+                !c.clientSessionId.isEmpty()
+                        ? c.clientSessionId : c.agent + "-" + sockPort);
+        helloFieldError = validateHelloField(
+                "agent_id", c.agentId, MAX_HANDSHAKE_IDENTITY_CHARS);
+        if (helloFieldError != null) return helloFieldError;
+        if (!c.compatibility) {
+            try {
+                c.acceptEvents = parseStringSet(caps, "accept_events");
+            } catch (IllegalArgumentException malformedEvents) {
+                return protocolError("invalid_hello", malformedEvents.getMessage());
+            }
+        }
+
+        SessionCapsRegistry.Created<AgentCaps> created;
+        try {
+            created = sessionRegistry.create(c, c.authenticated ? supplied : null);
+        } catch (SessionCapsRegistry.CapacityException e) {
+            return protocolError("session_capacity",
+                    "The server has reached its active session limit.");
+        } catch (IllegalStateException e) {
+            return protocolError("server_stopping",
+                    "The server is not accepting new sessions.");
+        }
+        c.sessionId = created.id();
 
         JsonObject result = new JsonObject();
         result.addProperty("server_version", SERVER_VERSION);
-        result.addProperty("session_id", c.sessionId == null || c.sessionId.trim().isEmpty()
-                ? sessionIdFor(sock)
-                : c.sessionId.trim());
-        result.add("enabled", enabledCapsFor(c));
+        result.addProperty("session_id", created.id());
+        result.addProperty("expires_at", created.expiresAtEpochMillis());
+        JsonArray enabled = enabledCapsFor(c);
+        result.add("enabled", enabled);
+        result.add("capabilities", enabled.deepCopy());
+        result.addProperty("compatibility", c.compatibility);
         result.addProperty("server_time_ms", System.currentTimeMillis());
+        if (c.authenticated) {
+            try {
+                result.addProperty("installation_uri",
+                        ConsoleBootstrapService.currentFijiRoot().toUri().toString());
+            } catch (Exception e) {
+                // A path probe must never prevent an otherwise valid handshake.
+            }
+        }
+        if (automationRequested) {
+            result.add("automation", automationNegotiation(c));
+        }
         return successResponse(result);
     }
 
-    /** Stable-ish session tag for this connection. Port + millis suffix is
-     *  enough to tell two concurrent sessions apart in logs without needing
-     *  a full UUID generator. */
-    private String sessionIdFor(Socket sock) {
-        int sockPort = (sock != null) ? sock.getPort() : 0;
-        return "s-" + Integer.toHexString(sockPort) + "-"
-                + Long.toHexString(System.currentTimeMillis() & 0xffffL);
+    /**
+     * Explain the test-automation outcome to a client that asked for it. A
+     * refusal names the gate that refused and nothing else — never a path, a
+     * workspace, or any token state.
+     */
+    private JsonObject automationNegotiation(AgentCaps caps) {
+        JsonObject negotiation = new JsonObject();
+        negotiation.addProperty("granted", caps.testAutomation);
+        if (caps.testAutomation) {
+            AutomationCommandHandler handler = automationBridge.handler();
+            JsonObject descriptor = handler.capabilityDescriptor();
+            for (Map.Entry<String, JsonElement> field : descriptor.entrySet()) {
+                negotiation.add(field.getKey(), field.getValue());
+            }
+            return negotiation;
+        }
+        String reason;
+        if (!caps.authenticated || caps.compatibility) {
+            reason = "requires_authenticated_session";
+        } else if (automationBridge == null) {
+            reason = "bridge_not_initialised";
+        } else {
+            reason = automationBridge.policy().disabledReason();
+        }
+        negotiation.addProperty("reason", reason);
+        negotiation.addProperty("required_property", AutomationPolicy.PROP_ENABLED);
+        negotiation.addProperty("required_capability", AutomationPolicy.CAPABILITY);
+        return negotiation;
     }
 
     private String sessionKey(AgentCaps caps, Socket sock) {
@@ -2411,6 +3565,105 @@ public class TCPCommandServer {
             return caps.agent;
         }
         return sock == null ? "default" : "socket-" + sock.getPort();
+    }
+
+    /** Scope EDT operation handles to both the durable session and command. */
+    private String edtOperationOwner(AgentCaps caps, Socket sock, String command) {
+        String session = sessionKey(caps, sock);
+        String suffix = "|" + command;
+        int maxSession = EdtOperationRegistry.MAX_OWNER_CHARS - suffix.length();
+        if (session.length() > maxSession) session = session.substring(0, maxSession);
+        return session + suffix;
+    }
+
+    private static boolean canPollEdtOperation(AgentCaps caps, Socket sock) {
+        return sock == null || (caps != null && caps.sessionId != null
+                && !caps.sessionId.trim().isEmpty());
+    }
+
+    /**
+     * Poll before validating fields required only when creating an operation.
+     * An operation id is deliberately meaningful only to the command that
+     * created it, preventing a cross-command poll from exposing a result.
+     */
+    private JsonObject pollEdtOperation(JsonObject request, AgentCaps caps,
+                                        Socket sock, String command) {
+        if (request == null || !request.has("operation_id")) return null;
+        JsonElement idElement = request.get("operation_id");
+        if (idElement == null || !idElement.isJsonPrimitive()
+                || !idElement.getAsJsonPrimitive().isString()
+                || !EdtOperationRegistry.isValidOperationId(
+                        idElement.getAsString())) {
+            return protocolError("invalid_operation_id",
+                    "operation_id must be the opaque string returned by this command.");
+        }
+        JsonObject status = edtOperationRegistry.operationStatus(
+                edtOperationOwner(caps, sock, command), idElement.getAsString());
+        if (status == null) {
+            return protocolError("operation_unknown",
+                    "No operation with that id belongs to this session and command.");
+        }
+        if (status.get("terminal").getAsBoolean()) {
+            return terminalEdtOperationResult(status, true);
+        }
+        return successResponse(status);
+    }
+
+    /** Return an old-style immediate result or a truthful nonterminal handle. */
+    private JsonObject awaitEdtOperation(EdtOperationRegistry.Operation operation,
+                                         String owner, long timeoutMs) {
+        boolean terminal = false;
+        try {
+            terminal = operation.awaitTerminal(timeoutMs <= 0L
+                    ? Long.MAX_VALUE : timeoutMs);
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+        }
+        if (!terminal) {
+            // Queued work can be invalidated safely. It remains nonterminal
+            // until the queued wrapper actually runs and observes the token.
+            if (!operation.hasStarted()) {
+                edtOperationRegistry.cancel(owner, operation.id());
+            }
+            JsonObject latest = operation.toJson();
+            // The wrapper can finish between the timed wait and cancellation.
+            // Never describe a terminal embedded status as "in progress".
+            if (!latest.get("terminal").getAsBoolean()) {
+                return operationInProgress(latest);
+            }
+            return terminalEdtOperationResult(latest, false);
+        }
+
+        return terminalEdtOperationResult(operation.toJson(), false);
+    }
+
+    private JsonObject terminalEdtOperationResult(JsonObject status,
+                                                  boolean attachStatus) {
+        JsonElement result = status.get("result");
+        if (result != null && result.isJsonObject()) {
+            JsonObject response = result.getAsJsonObject().deepCopy();
+            if (attachStatus) response.add("operation", status.deepCopy());
+            return response;
+        }
+        JsonObject failed = protocolError("edt_operation_failed",
+                status.has("error") ? status.get("error").getAsString()
+                        : "The EDT operation did not produce a result.");
+        failed.add("operation", status);
+        return failed;
+    }
+
+    private JsonObject operationInProgress(JsonObject status) {
+        JsonObject response = new JsonObject();
+        response.addProperty("ok", false);
+        JsonObject error = new JsonObject();
+        error.addProperty("code", "operation_in_progress");
+        error.addProperty("message",
+                "The EDT operation is still in progress; poll this command with operation_id.");
+        error.addProperty("category", "operation");
+        error.addProperty("retry_safe", false);
+        response.add("error", error);
+        response.add("operation", status);
+        return response;
     }
 
     /**
@@ -2515,6 +3768,15 @@ public class TCPCommandServer {
         arr.add(new JsonPrimitive("branch_list"));
         arr.add(new JsonPrimitive("branch_switch"));
         arr.add(new JsonPrimitive("branch_delete"));
+        // Test automation is advertised only when both gates turned. A normal
+        // Fiji never lists it, so a client can feature-detect the bridge
+        // instead of probing a command that would be refused.
+        if (caps != null && caps.testAutomation) {
+            arr.add(new JsonPrimitive(AutomationPolicy.CAPABILITY));
+            for (String command : AutomationPolicy.COMMANDS) {
+                arr.add(new JsonPrimitive(command));
+            }
+        }
         return arr;
     }
 
@@ -2581,14 +3843,35 @@ public class TCPCommandServer {
         Set<String> result = new HashSet<String>();
         if (obj == null) return result;
         JsonElement el = obj.get(key);
-        if (el == null || !el.isJsonArray()) return result;
+        if (el == null || el.isJsonNull()) return result;
+        if (!el.isJsonArray()) {
+            throw new IllegalArgumentException(key + " must be an array of strings");
+        }
+        if (el.getAsJsonArray().size() > MAX_ACCEPT_EVENT_TOPICS) {
+            throw new IllegalArgumentException(key + " exceeds "
+                    + MAX_ACCEPT_EVENT_TOPICS + " topics");
+        }
         for (JsonElement item : el.getAsJsonArray()) {
-            if (item != null && item.isJsonPrimitive()) {
-                try { result.add(item.getAsString()); }
-                catch (Exception ignore) {}
+            if (item == null || !item.isJsonPrimitive()
+                    || !item.getAsJsonPrimitive().isString()) {
+                throw new IllegalArgumentException(key + " must contain only strings");
             }
+            String topic = item.getAsString();
+            if (topic.length() == 0 || topic.length() > MAX_ACCEPT_EVENT_TOPIC_CHARS) {
+                throw new IllegalArgumentException(key + " topic length must be 1.."
+                        + MAX_ACCEPT_EVENT_TOPIC_CHARS);
+            }
+            result.add(topic);
         }
         return result;
+    }
+
+    private JsonObject validateHelloField(String field, String value, int maxChars) {
+        if (value != null && value.length() > maxChars) {
+            return protocolError("invalid_hello", field + " exceeds "
+                    + maxChars + " characters");
+        }
+        return null;
     }
 
     // -----------------------------------------------------------------------
@@ -2665,19 +3948,65 @@ public class TCPCommandServer {
      * {@code {"activeImage": null}} when no image is open.
      */
     JsonObject handleGetDisplayState(JsonObject request, AgentCaps caps) {
-        ImagePlus imp = WindowManager.getCurrentImage();
+        final Object[] holder = new Object[1];
+        final CountDownLatch latch = new CountDownLatch(1);
+        GuiActionDispatcher.ActionToken actionToken =
+                GuiActionDispatcher.queueSwingAction(new Runnable() {
+            @Override public void run() {
+                try {
+                    holder[0] = readDisplayStateAtomic(request);
+                } catch (Throwable failure) {
+                    holder[0] = failure;
+                } finally {
+                    latch.countDown();
+                }
+            }
+        });
+        try {
+            if (!latch.await(5000L, TimeUnit.MILLISECONDS)) {
+                actionToken.invalidate();
+                return errorResponse("Timed out getting display state");
+            }
+        } catch (InterruptedException interrupted) {
+            actionToken.invalidate();
+            Thread.currentThread().interrupt();
+            return errorResponse("Interrupted");
+        }
+        if (holder[0] instanceof Throwable) {
+            Throwable failure = (Throwable) holder[0];
+            return errorResponse("Error reading display state: " + failure.getMessage());
+        }
+        return (JsonObject) holder[0];
+    }
+
+    /** Runs wholly on the EDT so cursor, ROI, overlay and LUT are one read. */
+    private JsonObject readDisplayStateAtomic(JsonObject request) {
+        ImagePlus imp = currentImage();
         JsonObject out = new JsonObject();
         if (imp == null) {
+            if (request.has("image_id") || request.has("image_revision")) {
+                return imageSnapshotChanged();
+            }
             out.add("activeImage", JsonNull.INSTANCE);
             return successResponse(out);
         }
+        ActiveImageSnapshot snapshot;
+        try {
+            snapshot = activeImageSnapshot(imp);
+        } catch (RuntimeException failure) {
+            return errorResponse("Error reading active image revision: "
+                    + failure.getMessage());
+        }
+        JsonObject mismatch = validateImageSnapshot(request, snapshot);
+        if (mismatch == null) mismatch = validateExpectedPlane(request, snapshot);
+        if (mismatch != null) return mismatch;
         out.addProperty("activeImage", imp.getTitle());
-        out.addProperty("c", imp.getC());
-        out.addProperty("z", imp.getZ());
-        out.addProperty("t", imp.getT());
-        out.addProperty("channels", imp.getNChannels());
-        out.addProperty("slices", imp.getNSlices());
-        out.addProperty("frames", imp.getNFrames());
+        out.addProperty("c", snapshot.channel);
+        out.addProperty("z", snapshot.slice);
+        out.addProperty("t", snapshot.frame);
+        out.addProperty("channels", snapshot.channels);
+        out.addProperty("slices", snapshot.slices);
+        out.addProperty("frames", snapshot.frames);
         if (imp instanceof CompositeImage) {
             CompositeImage ci = (CompositeImage) imp;
             out.addProperty("compositeMode", compositeModeName(ci.getMode()));
@@ -2705,7 +4034,23 @@ public class TCPCommandServer {
         } else {
             out.add("lut", JsonNull.INSTANCE);
         }
-        return successResponse(out);
+        Roi activeRoi = imp.getRoi();
+        out.addProperty("hasRoi", activeRoi != null);
+        if (activeRoi != null) {
+            out.addProperty("roiType", activeRoi.getTypeAsString());
+            Rectangle bounds = activeRoi.getBounds();
+            if (bounds != null) {
+                out.addProperty("roiWidth", bounds.width);
+                out.addProperty("roiHeight", bounds.height);
+            }
+        }
+        ij.gui.Overlay overlay = imp.getOverlay();
+        out.addProperty("hasOverlay", overlay != null);
+        if (overlay != null) out.addProperty("overlaySize", overlay.size());
+        attachImageSnapshot(out, snapshot, snapshot.channel,
+                snapshot.slice, snapshot.slice, snapshot.frame);
+        return imageSnapshotStillCurrent(snapshot)
+                ? successResponse(out) : imageSnapshotChanged();
     }
 
     /**
@@ -2722,8 +4067,15 @@ public class TCPCommandServer {
         JsonObject out = new JsonObject();
         out.addProperty("stdout", stdout);
         out.addProperty("stderr", stderr);
-        out.addProperty("combined",
-                AgentContextSanitizer.wrap(combineConsoleStreams(stdout, stderr), "CONSOLE"));
+        // Same ambiguity as get_log: a wrapped empty buffer and a buffer whose
+        // contents are the string <empty> produce the same envelope. The tag
+        // and the flag say which, and both sit inside result so the dedup hash
+        // covers them. stdout and stderr are unwrapped, so they need neither.
+        String combined = combineConsoleStreams(stdout, stderr);
+        boolean combinedEmpty = AgentContextSanitizer.isEmptyAfterSanitising(combined);
+        out.addProperty("combined", AgentContextSanitizer.wrap(
+                combined, combinedEmpty ? "CONSOLE:empty" : "CONSOLE"));
+        out.addProperty("combinedEmpty", combinedEmpty);
         long stdoutBuffered = ConsoleCapture.stdoutSize();
         long stderrBuffered = ConsoleCapture.stderrSize();
         boolean truncated = tail >= 0
@@ -2744,6 +4096,178 @@ public class TCPCommandServer {
      */
     JsonObject handleGetImageGraph() {
         return successResponse(imageGraph.snapshot());
+    }
+
+    // -----------------------------------------------------------------------
+    // pseudonymise_paths
+    //
+    // The terminal console lets the user type "@" and pick a file. Under the
+    // Pseudonymised and On-premises postures the prompt must carry a token,
+    // never the real path. A token the console mints itself is useless: the
+    // JVM-side {@link PathTokenMap} salt is process-local, so when the model
+    // echoes that token back in a macro or a tool call the plugin cannot
+    // resolve it. Minting here instead puts the token in the one map the
+    // outbound filter and {@code deTokeniseRequest} already share, so the
+    // round trip works with no new reversal path.
+    // -----------------------------------------------------------------------
+
+    /**
+     * {@code pseudonymise_paths}: mint a stable session token for each of the
+     * supplied absolute paths.
+     *
+     * <p>Posture decides the content, never the shape. Under
+     * {@link PrivacyPosture#STANDARD} there is nothing to hide, so each entry
+     * echoes the real path as its own "token" and {@code pseudonymised} is
+     * {@code false}. Under Pseudonymised and On-premises each entry carries a
+     * {@link PathTokenMap} token and the real path never appears in the reply
+     * — not even as a JSON key, because the outbound free-text scrub rewrites
+     * values only.
+     *
+     * <p>The reply lists {@code mappings} in request order rather than using
+     * an object keyed by path for exactly that reason: an object key holding
+     * {@code C:\Patients\H31L21.lif} would leave the JVM unscrubbed.
+     *
+     * <p>Every refusal is a structured error, never an exception: unreadable,
+     * missing, relative, over-long, malformed, or too many paths.
+     */
+    /**
+     * Filesystem probe for {@link #handlePseudonymisePaths}. Behind an
+     * interface only so the "path is outside a readable location" refusal can
+     * be tested: an unreadable file cannot be created portably — Windows
+     * ignores POSIX permission bits — and that branch is exactly the one that
+     * must not go untested.
+     */
+    interface PathAccessProbe {
+        boolean exists(Path path);
+
+        boolean readable(Path path);
+    }
+
+    private static final PathAccessProbe DEFAULT_PATH_ACCESS_PROBE =
+            new PathAccessProbe() {
+                @Override public boolean exists(Path path) {
+                    return Files.exists(path);
+                }
+
+                @Override public boolean readable(Path path) {
+                    return Files.isReadable(path);
+                }
+            };
+
+    /** Test-only override for {@link #DEFAULT_PATH_ACCESS_PROBE}. */
+    volatile PathAccessProbe pathAccessProbeForTest;
+
+    JsonObject handlePseudonymisePaths(JsonObject request) {
+        JsonElement pathsElement = request == null ? null : request.get("paths");
+        if (pathsElement == null || !pathsElement.isJsonArray()) {
+            return invalidRequest("pseudonymise_paths requires a 'paths' array "
+                    + "of absolute path strings.");
+        }
+        JsonArray paths = pathsElement.getAsJsonArray();
+        if (paths.size() == 0) {
+            return invalidRequest("pseudonymise_paths requires at least one path.");
+        }
+        if (paths.size() > MAX_PSEUDONYMISE_PATHS) {
+            return validationError("too_many_paths",
+                    "pseudonymise_paths accepts at most " + MAX_PSEUDONYMISE_PATHS
+                            + " paths per request; received " + paths.size() + ".");
+        }
+
+        PrivacyPosture posture = PostureController.getInstance().current();
+        if (posture == null) posture = PrivacyPosture.defaultPosture();
+        boolean tokenise = posture != PrivacyPosture.STANDARD;
+
+        // Validate the whole batch before minting anything. A half-minted
+        // batch would leave the caller unable to tell which entries landed.
+        List<Path> resolved = new ArrayList<Path>(paths.size());
+        List<String> raw = new ArrayList<String>(paths.size());
+        for (int i = 0; i < paths.size(); i++) {
+            JsonElement element = paths.get(i);
+            if (element == null || !element.isJsonPrimitive()
+                    || !element.getAsJsonPrimitive().isString()
+                    || element.getAsString().trim().isEmpty()) {
+                return validationError("invalid_path",
+                        "paths[" + i + "] must be a non-blank path string.");
+            }
+            String value = element.getAsString().trim();
+            if (value.length() > MAX_PSEUDONYMISE_PATH_CHARS) {
+                return validationError("path_too_long",
+                        "paths[" + i + "] is " + value.length() + " characters; the "
+                                + "limit is " + MAX_PSEUDONYMISE_PATH_CHARS + ".");
+            }
+            Path candidate;
+            try {
+                candidate = Paths.get(value).toAbsolutePath().normalize();
+            } catch (RuntimeException e) {
+                return validationError("invalid_path",
+                        "paths[" + i + "] is not a valid filesystem path.");
+            }
+            if (!Paths.get(value).isAbsolute()) {
+                return validationError("path_not_absolute",
+                        "paths[" + i + "] must be an absolute path.");
+            }
+            PathAccessProbe probe = pathAccessProbeForTest == null
+                    ? DEFAULT_PATH_ACCESS_PROBE : pathAccessProbeForTest;
+            boolean exists;
+            boolean readable;
+            try {
+                exists = probe.exists(candidate);
+                readable = exists && probe.readable(candidate);
+            } catch (SecurityException e) {
+                exists = true;
+                readable = false;
+            }
+            if (!exists) {
+                return validationError("path_not_found",
+                        "paths[" + i + "] does not exist.");
+            }
+            if (!readable) {
+                return validationError("path_not_readable",
+                        "paths[" + i + "] is outside any location this Fiji "
+                                + "session can read.");
+            }
+            resolved.add(candidate);
+            raw.add(value);
+        }
+
+        JsonArray mappings = new JsonArray();
+        for (int i = 0; i < resolved.size(); i++) {
+            String token;
+            if (tokenise) {
+                try {
+                    // tokenForPathString registers the caller's spelling as an
+                    // alias too, so the outbound scrub catches both forms.
+                    token = pseudonymisationFilter.pathTokenMap()
+                            .tokenForPathString(raw.get(i));
+                } catch (RuntimeException e) {
+                    return validationError("token_capacity_exhausted",
+                            "The session pseudonym map cannot hold another path; "
+                                    + "restart Fiji to clear it.");
+                }
+            } else {
+                token = resolved.get(i).toString();
+            }
+            JsonObject mapping = new JsonObject();
+            mapping.addProperty("index", i);
+            // Under a tokenising posture 'path' is deliberately the token as
+            // well: the reply must never carry the real path.
+            mapping.addProperty("path", token);
+            mapping.addProperty("token", token);
+            mappings.add(mapping);
+        }
+
+        JsonObject result = new JsonObject();
+        result.addProperty("posture", posture.name());
+        result.addProperty("posture_label", posture.label());
+        result.addProperty("pseudonymised", tokenise);
+        result.addProperty("count", mappings.size());
+        result.add("mappings", mappings);
+        result.addProperty("note", tokenise
+                ? "Tokens resolve inside this Fiji session only. Send the token "
+                        + "back in macros or commands; the server reverses it."
+                : "Standard posture: there is nothing to hide, so each path was "
+                        + "returned unchanged.");
+        return successResponse(result);
     }
 
     // -----------------------------------------------------------------------
@@ -2898,15 +4422,24 @@ public class TCPCommandServer {
             }
         }
 
+        final String rewindImageTitle = imageTitle;
+        final String rewindToCallId = toCallId;
+        final int rewindCount = n;
+        Future<JsonObject> rewindFuture;
+        try {
+            MutationCoordinator.Handle<JsonObject> handle = mutationCoordinator.submit(
+                    MutationCoordinator.Request.<JsonObject>builder()
+                            .ownerSession(mutationOwnerOrInternal(caps))
+                            .sourceKind("rewind")
+                            .code(request.toString())
+                            .timeoutMs(resolveTimeoutMs(request, MACRO_TIMEOUT_MS))
+                            .operation(new MutationCoordinator.Operation<JsonObject>() {
+                                @Override public JsonObject run() {
+        String imageTitle = rewindImageTitle;
+        String toCallId = rewindToCallId;
+        int n = rewindCount;
         List<UndoFrame> popped;
-        // Wrap the entire frame walk + restore in MACRO_MUTEX so a concurrent
-        // execute_macro that bumps macroInFlight after our fast-path check
-        // cannot race the pixel write. The macroInFlight check above is
-        // still the cheap early-fail; this is the correctness guarantee.
-        // Plan §Failure modes: "Concurrent rewind during an in-flight macro.
-        // Reject with UNDO_BUSY error — serialise via the existing macro
-        // mutex." The MACRO_MUTEX block below is that serialisation.
-        synchronized (MACRO_MUTEX) {
+        final UndoRestoreSummary undoRestore = new UndoRestoreSummary();
         if (toCallId != null && !toCallId.isEmpty()) {
             String resolvedTitle = imageTitle;
             if (resolvedTitle == null) {
@@ -2932,7 +4465,15 @@ public class TCPCommandServer {
                       + " rewind; create a branch before run_script if you"
                       + " need to explore.", caps);
             }
-            popped = sessionUndo.rewindByCallId(resolvedTitle, toCallId);
+            try {
+                popped = sessionUndo.rewindByCallIdAtomic(resolvedTitle, toCallId,
+                        target -> restoreUndoFrameAtomically(target, undoRestore));
+            } catch (IllegalArgumentException e) {
+                return undoRestoreError(e, caps);
+            } catch (Exception e) {
+                return undoErrorResponse("UNDO_RESTORE_FAILED",
+                        "Restore failed: " + String.valueOf(e.getMessage()), caps);
+            }
             imageTitle = resolvedTitle;
             if (popped.isEmpty()) {
                 return undoErrorResponse("UNDO_NOT_FOUND",
@@ -2949,7 +4490,15 @@ public class TCPCommandServer {
                       + "'. Reduce n or use branch_switch to a branch that"
                       + " did not run a script.", caps);
             }
-            popped = sessionUndo.rewindByCount(imageTitle, n);
+            try {
+                popped = sessionUndo.rewindByCountAtomic(imageTitle, n,
+                        target -> restoreUndoFrameAtomically(target, undoRestore));
+            } catch (IllegalArgumentException e) {
+                return undoRestoreError(e, caps);
+            } catch (Exception e) {
+                return undoErrorResponse("UNDO_RESTORE_FAILED",
+                        "Restore failed: " + String.valueOf(e.getMessage()), caps);
+            }
             if (popped.isEmpty()) {
                 return undoErrorResponse("UNDO_NOT_FOUND",
                         "No undo frames on stack for image '" + imageTitle
@@ -2960,11 +4509,11 @@ public class TCPCommandServer {
         // The frame we restore from is the LAST one popped. Earlier ones
         // are intermediate states the agent walked past — discarded.
         UndoFrame target = popped.get(popped.size() - 1);
-        boolean restored = false;
-        int restoredSlices = 0;
+        boolean restored = undoRestore.applied;
+        int restoredSlices = undoRestore.restoredPlanes;
         String restoreError = null;
         String restoreErrorCode = null;
-        try {
+        if (!undoRestore.applied) try {
             ImagePlus imp = WindowManager.getImage(target.imageTitle);
             if (imp == null) {
                 // Image was closed since the frame was captured — this is a
@@ -2994,8 +4543,8 @@ public class TCPCommandServer {
         // ROI restoration is best-effort and bounded — we replay the names
         // and bounding boxes only. Pixel-precise Roi geometry is a future
         // refinement.
-        int restoredRois = 0;
-        try {
+        int restoredRois = undoRestore.restoredRois;
+        if (!undoRestore.applied) try {
             RoiManager rm = RoiManager.getInstance2();
             if (rm != null && !target.rois.isEmpty()) {
                 rm.reset();
@@ -3016,8 +4565,8 @@ public class TCPCommandServer {
         // Results CSV restoration — wipe + replay. Fiji has no public CSV
         // import on ResultsTable; a future refinement could rebuild the
         // table from the captured CSV. v1 reports the byte count restored.
-        int restoredResultsRows = 0;
-        try {
+        int restoredResultsRows = undoRestore.restoredResultsRows;
+        if (!undoRestore.applied) try {
             if (target.resultsCsv != null && !target.resultsCsv.isEmpty()) {
                 // Count rows = newlines - 1 (header).
                 int nl = 0;
@@ -3050,7 +4599,27 @@ public class TCPCommandServer {
             }
         }
         return successResponse(result);
-        } // end synchronized (MACRO_MUTEX)
+                                }
+                            })
+                            .build());
+            rewindFuture = new CoordinatorFuture<JsonObject>(handle);
+        } catch (IllegalArgumentException
+                 | java.util.concurrent.RejectedExecutionException e) {
+            return errorResponse("Mutation admission rejected: " + e.getMessage());
+        }
+        try {
+            return rewindFuture.get();
+        } catch (InterruptedException e) {
+            rewindFuture.cancel(true);
+            awaitFutureTerminal(rewindFuture);
+            Thread.currentThread().interrupt();
+            return errorResponse("Rewind interrupted");
+        } catch (ExecutionException e) {
+            Throwable failure = e.getCause();
+            return errorResponse("Rewind failed: "
+                    + (failure == null || failure.getMessage() == null
+                            ? "unknown error" : failure.getMessage()));
+        }
     }
 
     private int remainingFramesFor(String imageTitle) {
@@ -3060,6 +4629,77 @@ public class TCPCommandServer {
         if (active == null) return 0;
         UndoStack s = active.byImageTitle.get(imageTitle);
         return s == null ? 0 : s.size();
+    }
+
+    private static final class UndoRestoreSummary {
+        boolean applied;
+        int restoredPlanes;
+        int restoredRois;
+        int restoredResultsRows;
+    }
+
+    private void restoreUndoFrameAtomically(UndoFrame target,
+                                            UndoRestoreSummary summary) throws Exception {
+        ImagePlus image = resolveUndoTarget(target);
+        if (image == null) {
+            throw new IllegalArgumentException(
+                    "target image is closed: " + target.imageTitle);
+        }
+        UndoFrame.RestorePlan targetPlan = target.prepareRestore(image);
+        String currentCsv = boundedExactResultsCsvForUndo();
+        UndoFrame rollbackFrame = UndoFrame.capture(
+                "rollback-" + target.callId, image, RoiManager.getRawInstance(),
+                currentCsv, false);
+        if (rollbackFrame == null) {
+            throw new IllegalArgumentException("could not capture rollback snapshot");
+        }
+        UndoFrame.RestorePlan rollbackPlan = rollbackFrame.prepareRestore(image);
+        try {
+            int planes = targetPlan.applyPixelsAndCalibration();
+            int rois = targetPlan.applySideState();
+            summary.restoredPlanes = planes;
+            summary.restoredRois = rois;
+            summary.restoredResultsRows = targetPlan.restoredResultsRows();
+            summary.applied = true;
+        } catch (Throwable failure) {
+            try {
+                rollbackPlan.applyPixelsAndCalibration();
+                rollbackPlan.applySideState();
+            } catch (Throwable rollbackFailure) {
+                failure.addSuppressed(rollbackFailure);
+            }
+            if (failure instanceof Exception) throw (Exception) failure;
+            throw new RuntimeException(failure);
+        }
+    }
+
+    private ImagePlus resolveUndoTarget(UndoFrame target) {
+        ImagePlus image = target.imageId == Integer.MIN_VALUE
+                ? WindowManager.getImage(target.imageTitle)
+                : WindowManager.getImage(target.imageId);
+        if (image == null) {
+            ImagePlus current = WindowManager.getCurrentImage();
+            if (current != null && (target.imageId == Integer.MIN_VALUE
+                    ? target.imageTitle.equals(current.getTitle())
+                    : target.imageId == current.getID())) {
+                image = current;
+            }
+        }
+        if (image == null) image = target.capturedImageFallback();
+        return image;
+    }
+
+    private JsonObject undoRestoreError(IllegalArgumentException error,
+                                        AgentCaps caps) {
+        String message = String.valueOf(error.getMessage());
+        String lower = message.toLowerCase(java.util.Locale.ROOT);
+        String code = lower.contains("closed") ? "UNDO_IMAGE_CLOSED"
+                : lower.contains("identity") || lower.contains("title")
+                ? "UNDO_IDENTITY_MISMATCH"
+                : lower.contains("type") ? "UNDO_TYPE_MISMATCH"
+                : lower.contains("raw") || lower.contains("snapshot")
+                ? "UNDO_SNAPSHOT_INVALID" : "UNDO_GEOMETRY_MISMATCH";
+        return undoErrorResponse(code, message, caps);
     }
 
     /**
@@ -3073,21 +4713,64 @@ public class TCPCommandServer {
             return undoErrorResponse("UNDO_DISABLED",
                     "Undo is off for this connection.", caps);
         }
-        String fromCallId = optString(request, "from_call_id", null);
+        final String fromCallId = optString(request, "from_call_id", null);
+        final ImagePlus currentHint = WindowManager.getCurrentImage();
         try {
-            SessionUndo.Branch fresh = sessionUndo.createBranch(fromCallId);
-            sessionUndo.switchBranch(fresh.id);
-            JsonObject result = new JsonObject();
-            result.addProperty("branchId", fresh.id);
-            result.addProperty("baseCallId",
-                    fresh.baseCallId == null ? "" : fresh.baseCallId);
-            result.addProperty("activeBranch", sessionUndo.activeBranchId());
-            result.addProperty("totalBranches",
-                    sessionUndo.listBranches().size());
-            return successResponse(result);
-        } catch (IllegalStateException ise) {
-            return undoErrorResponse("UNDO_BRANCH_CAP",
-                    ise.getMessage(), caps);
+            MutationCoordinator.Handle<JsonObject> handle = mutationCoordinator.submit(
+                    MutationCoordinator.Request.<JsonObject>builder()
+                            .ownerSession(mutationOwnerOrInternal(caps))
+                            .sourceKind("branch")
+                            .code(request.toString())
+                            .timeoutMs(resolveTimeoutMs(request, MACRO_TIMEOUT_MS))
+                            .operation(new MutationCoordinator.Operation<JsonObject>() {
+                                @Override public JsonObject run() {
+                                    String sourceId = sessionUndo.activeBranchId();
+                                    List<UndoFrame> live;
+                                    try {
+                                        live = captureLiveBranchCheckpoint(sourceId, currentHint);
+                                        sessionUndo.setBranchCheckpoint(sourceId, live);
+                                    } catch (Exception e) {
+                                        return undoErrorResponse("UNDO_SNAPSHOT_INVALID",
+                                                "Could not capture branch checkpoint: "
+                                                        + String.valueOf(e.getMessage()), caps);
+                                    }
+                                    SessionUndo.Branch fresh;
+                                    try {
+                                        fresh = sessionUndo.createBranch(fromCallId);
+                                    } catch (IllegalArgumentException e) {
+                                        return undoErrorResponse("UNDO_NOT_FOUND", e.getMessage(), caps);
+                                    } catch (IllegalStateException e) {
+                                        return undoErrorResponse("UNDO_BRANCH_CAP", e.getMessage(), caps);
+                                    }
+                                    try {
+                                        if (fromCallId == null || fromCallId.isEmpty()) {
+                                            sessionUndo.setBranchCheckpoint(fresh.id, live);
+                                        } else {
+                                            restoreBranchCheckpointAtomically(fresh.id);
+                                        }
+                                        if (!sessionUndo.switchBranch(fresh.id)) {
+                                            throw new IllegalStateException(
+                                                    "new branch disappeared before checkout");
+                                        }
+                                    } catch (Exception e) {
+                                        sessionUndo.deleteBranch(fresh.id);
+                                        return undoRestoreErrorForBranch(e, caps);
+                                    }
+                                    JsonObject result = new JsonObject();
+                                    result.addProperty("branchId", fresh.id);
+                                    result.addProperty("baseCallId",
+                                            fresh.baseCallId == null ? "" : fresh.baseCallId);
+                                    result.addProperty("activeBranch", sessionUndo.activeBranchId());
+                                    result.addProperty("checkpointFrames",
+                                            sessionUndo.branchCheckpoint(fresh.id).size());
+                                    result.addProperty("totalBranches",
+                                            sessionUndo.listBranches().size());
+                                    return successResponse(result);
+                                }
+                            }).build());
+            return awaitBranchMutation(handle, caps);
+        } catch (IllegalArgumentException | java.util.concurrent.RejectedExecutionException e) {
+            return errorResponse("Mutation admission rejected: " + e.getMessage());
         }
     }
 
@@ -3109,6 +4792,7 @@ public class TCPCommandServer {
             o.addProperty("createdMs", b.createdMs);
             o.addProperty("frames", b.totalFrames());
             o.addProperty("bytes", b.totalBytes());
+            o.addProperty("checkpointFrames", b.checkpointFrames().size());
             JsonArray titles = new JsonArray();
             for (String t : b.imageTitles()) titles.add(new JsonPrimitive(t));
             o.add("imageTitles", titles);
@@ -3125,19 +4809,178 @@ public class TCPCommandServer {
             return undoErrorResponse("UNDO_DISABLED",
                     "Undo is off for this connection.", caps);
         }
-        String id = optString(request, "branch_id", "");
+        final String id = optString(request, "branch_id", "");
+        final ImagePlus currentHint = WindowManager.getCurrentImage();
         if (id == null || id.isEmpty()) {
             return undoErrorResponse("UNDO_BAD_REQUEST",
                     "branch_switch requires branch_id.", caps);
         }
-        boolean ok = sessionUndo.switchBranch(id);
-        if (!ok) {
+        if (sessionUndo.getBranch(id) == null) {
             return undoErrorResponse("UNDO_NOT_FOUND",
                     "No branch with id '" + id + "'.", caps);
         }
-        JsonObject result = new JsonObject();
-        result.addProperty("activeBranch", sessionUndo.activeBranchId());
-        return successResponse(result);
+        if (id.equals(sessionUndo.activeBranchId())) {
+            JsonObject result = new JsonObject();
+            result.addProperty("activeBranch", id);
+            return successResponse(result);
+        }
+        try {
+            MutationCoordinator.Handle<JsonObject> handle = mutationCoordinator.submit(
+                    MutationCoordinator.Request.<JsonObject>builder()
+                            .ownerSession(mutationOwnerOrInternal(caps))
+                            .sourceKind("branch_switch")
+                            .code(request.toString())
+                            .timeoutMs(resolveTimeoutMs(request, MACRO_TIMEOUT_MS))
+                            .operation(new MutationCoordinator.Operation<JsonObject>() {
+                                @Override public JsonObject run() {
+                                    String sourceId = sessionUndo.activeBranchId();
+                                    try {
+                                        List<UndoFrame> live = captureLiveBranchCheckpoint(
+                                                sourceId, currentHint);
+                                        sessionUndo.setBranchCheckpoint(sourceId, live);
+                                        restoreBranchCheckpointAtomically(id);
+                                        if (!sessionUndo.switchBranch(id)) {
+                                            throw new IllegalStateException(
+                                                    "branch disappeared before checkout");
+                                        }
+                                    } catch (Exception e) {
+                                        return undoRestoreErrorForBranch(e, caps);
+                                    }
+                                    JsonObject result = new JsonObject();
+                                    result.addProperty("activeBranch", sessionUndo.activeBranchId());
+                                    result.addProperty("checkpointFrames",
+                                            sessionUndo.branchCheckpoint(id).size());
+                                    return successResponse(result);
+                                }
+                            }).build());
+            return awaitBranchMutation(handle, caps);
+        } catch (IllegalArgumentException | java.util.concurrent.RejectedExecutionException e) {
+            return errorResponse("Mutation admission rejected: " + e.getMessage());
+        }
+    }
+
+    private JsonObject awaitBranchMutation(MutationCoordinator.Handle<JsonObject> handle,
+                                           AgentCaps caps) {
+        try {
+            MutationCoordinator.Completion<JsonObject> completion = handle.awaitCompletion();
+            if (completion.state() == MutationCoordinator.State.SUCCEEDED
+                    && completion.result() != null) {
+                return completion.result();
+            }
+            Throwable error = completion.error();
+            return undoErrorResponse("UNDO_RESTORE_FAILED",
+                    error == null ? "Branch mutation did not complete"
+                            : String.valueOf(error.getMessage()), caps);
+        } catch (InterruptedException e) {
+            handle.cancel();
+            Thread.currentThread().interrupt();
+            return undoErrorResponse("UNDO_RESTORE_FAILED",
+                    "Branch mutation interrupted", caps);
+        }
+    }
+
+    private List<UndoFrame> captureLiveBranchCheckpoint(String branchId,
+                                                        ImagePlus currentHint) {
+        List<UndoFrame> frames = new ArrayList<UndoFrame>();
+        java.util.HashSet<Integer> capturedIds = new java.util.HashSet<Integer>();
+        int[] ids = WindowManager.getIDList();
+        if (ids != null) {
+            for (int id : ids) {
+                ImagePlus image = WindowManager.getImage(id);
+                if (image != null && capturedIds.add(image.getID())) {
+                    frames.add(captureBranchFrame(branchId, image));
+                }
+            }
+        }
+        ImagePlus current = WindowManager.getCurrentImage();
+        if (current != null && capturedIds.add(current.getID())) {
+            frames.add(captureBranchFrame(branchId, current));
+        }
+        if (currentHint != null && capturedIds.add(currentHint.getID())) {
+            frames.add(captureBranchFrame(branchId, currentHint));
+        }
+        return frames;
+    }
+
+    private UndoFrame captureBranchFrame(String branchId, ImagePlus image) {
+        String csv = boundedExactResultsCsvForUndo();
+        UndoFrame frame = UndoFrame.capture(
+                "checkpoint-" + branchId + "-" + nextCallId(), image,
+                RoiManager.getRawInstance(), csv, false);
+        if (frame == null) {
+            throw new IllegalArgumentException("could not snapshot " + image.getTitle());
+        }
+        return frame;
+    }
+
+    private static final class BranchRestoreEntry {
+        final UndoFrame.RestorePlan target;
+        final UndoFrame.RestorePlan rollback;
+
+        BranchRestoreEntry(UndoFrame.RestorePlan target,
+                           UndoFrame.RestorePlan rollback) {
+            this.target = target;
+            this.rollback = rollback;
+        }
+    }
+
+    private void restoreBranchCheckpointAtomically(String branchId) throws Exception {
+        List<UndoFrame> checkpoint = sessionUndo.branchCheckpoint(branchId);
+        List<BranchRestoreEntry> entries = new ArrayList<BranchRestoreEntry>();
+        String csv = boundedExactResultsCsvForUndo();
+        for (UndoFrame frame : checkpoint) {
+            ImagePlus image = resolveUndoTarget(frame);
+            if (image == null) {
+                throw new IllegalArgumentException(
+                        "target image is closed: " + frame.imageTitle);
+            }
+            UndoFrame.RestorePlan target = frame.prepareRestore(image);
+            UndoFrame rollbackFrame = UndoFrame.capture(
+                    "branch-rollback-" + nextCallId(), image,
+                    RoiManager.getRawInstance(), csv, false);
+            if (rollbackFrame == null) {
+                throw new IllegalArgumentException("could not capture rollback snapshot");
+            }
+            entries.add(new BranchRestoreEntry(
+                    target, rollbackFrame.prepareRestore(image)));
+        }
+
+        try {
+            for (BranchRestoreEntry entry : entries) {
+                entry.target.applyPixelsAndCalibration();
+            }
+            if (!entries.isEmpty()) entries.get(0).target.applySideState();
+        } catch (Throwable failure) {
+            for (BranchRestoreEntry entry : entries) {
+                try {
+                    entry.rollback.applyPixelsAndCalibration();
+                } catch (Throwable rollbackFailure) {
+                    failure.addSuppressed(rollbackFailure);
+                }
+            }
+            if (!entries.isEmpty()) {
+                try {
+                    entries.get(0).rollback.applySideState();
+                } catch (Throwable rollbackFailure) {
+                    failure.addSuppressed(rollbackFailure);
+                }
+            }
+            if (failure instanceof Exception) throw (Exception) failure;
+            throw new RuntimeException(failure);
+        }
+    }
+
+    private JsonObject undoRestoreErrorForBranch(Exception error, AgentCaps caps) {
+        if (error instanceof IllegalArgumentException) {
+            JsonObject response = undoRestoreError((IllegalArgumentException) error, caps);
+            JsonObject result = response.getAsJsonObject("result");
+            if (result != null) {
+                result.addProperty("activeBranch", sessionUndo.activeBranchId());
+            }
+            return response;
+        }
+        return undoErrorResponse("UNDO_RESTORE_FAILED",
+                "Branch checkout failed: " + String.valueOf(error.getMessage()), caps);
     }
 
     /** {@code branch_delete}: discard a branch's state. {@link
@@ -3187,24 +5030,20 @@ public class TCPCommandServer {
         try {
             ImagePlus imp = WindowManager.getCurrentImage();
             if (imp == null) return null;
-            String csv = null;
-            try {
-                csv = stateInspector != null
-                        ? stateInspector.getResultsTableCSV() : null;
-            } catch (Throwable ignore) {}
-            RoiManager rm = RoiManager.getInstance();
+            String csv = stateInspector != null
+                    ? boundedExactResultsCsvForUndo() : null;
+            RoiManager rm = RoiManager.getRawInstance();
             boolean diskWrite = UndoFrame.macroHasDiskWrites(macroSrc);
             UndoFrame f = UndoFrame.capture(callId, imp, rm, csv, diskWrite);
             if (f != null) sessionUndo.pushFrame(f);
             return f;
         } catch (Throwable t) {
-            // Snapshot failure is non-fatal. Log and move on so the macro
-            // path is unaffected.
             try {
-                IJ.log("[ImageJAI-Undo] capture skipped: "
+                IJ.log("[ImageJAI-Undo] capture failed; mutation rejected: "
                         + String.valueOf(t.getMessage()));
             } catch (Throwable ignore) {}
-            return null;
+            throw new IllegalStateException(
+                    "Undo snapshot failed; mutation was not started", t);
         }
     }
 
@@ -3327,7 +5166,8 @@ public class TCPCommandServer {
         final JsonObject result = new JsonObject();
         final CountDownLatch latch = new CountDownLatch(1);
 
-        SwingUtilities.invokeLater(new Runnable() {
+        GuiActionDispatcher.ActionToken actionToken =
+                GuiActionDispatcher.queueSwingAction(new Runnable() {
             public void run() {
                 try {
                     ij.ImageJ ijInstance = IJ.getInstance();
@@ -3393,9 +5233,14 @@ public class TCPCommandServer {
         });
 
         try {
-            latch.await(5, TimeUnit.SECONDS);
+            if (!latch.await(5, TimeUnit.SECONDS)) {
+                actionToken.invalidate();
+                return errorResponse("Progress check timed out");
+            }
         } catch (InterruptedException e) {
-            return errorResponse("Progress check timed out");
+            actionToken.invalidate();
+            Thread.currentThread().interrupt();
+            return errorResponse("Interrupted");
         }
 
         return successResponse(result);
@@ -3422,29 +5267,7 @@ public class TCPCommandServer {
             }
         }
 
-        if (isScientificIntegrityScanEnabled(caps)) {
-            DestructiveScanner.Context scanCtx = captureScannerContext(caps);
-            List<DestructiveScanner.DestructiveOp> findings =
-                    DestructiveScanner.scan(code, scanCtx);
-            if (!findings.isEmpty()) {
-                List<DestructiveScanner.DestructiveOp> rejects =
-                        DestructiveScanner.rejections(findings);
-                if (!rejects.isEmpty()) {
-                    return destructiveBlockedReply(rejects, caps);
-                }
-                for (DestructiveScanner.DestructiveOp op : DestructiveScanner.backups(findings)) {
-                    if (DestructiveScanner.RULE_ROI_WIPE.equals(op.ruleId)
-                            && caps.safeModeOptions != null
-                            && caps.safeModeOptions.autoBackupRoiOnReset) {
-                        runRoiAutoBackup(op, caps);
-                    }
-                }
-            }
-        }
-
-        if (executeMacroForTest != null) {
-            return executeMacroForTest.apply(request, caps);
-        }
+        final boolean safetyEnabled = isScientificIntegrityScanEnabled(caps);
 
         // Step 04: fuzzy plugin-name validation. Gate on caps.fuzzyMatch so
         // clients that opted out (or never said hello — DEFAULT_CAPS has the
@@ -3466,6 +5289,18 @@ public class TCPCommandServer {
         final String codeToRun = (validation != null && validation.hasCorrections())
                 ? validation.patchedCode
                 : code;
+        final List<DestructiveScanner.DestructiveOp> safetyFindings =
+                collectMacroSafetyFindings(codeToRun, caps, safetyEnabled);
+
+        if (executeMacroForTest != null) {
+            if (DestructiveScanner.hasRejection(safetyFindings)) {
+                return destructiveBlockedReply(
+                        DestructiveScanner.rejections(safetyFindings), caps);
+            }
+            return executeMacroForTest.apply(request, caps);
+        }
+        final SessionCodeJournal.DatasetBinding journalDataset =
+                SessionCodeJournal.captureInitiatingDataset();
 
         // Step 10: snapshot the set of modal dialogs on screen BEFORE the
         // macro runs. Any new modal that is still present after the call
@@ -3484,8 +5319,6 @@ public class TCPCommandServer {
         // docs/tcp_upgrade/13_provenance_graph.md. Captured regardless of
         // caps.graphDelta — the graph itself is always maintained; the flag
         // only gates whether the reply carries a graphDelta field.
-        final Set<String> graphTitlesBefore = ImageGraph.captureOpenTitles();
-        final String graphActiveTitleBefore = ImageGraph.captureActiveTitle();
         final long graphMarkerBefore = imageGraph.currentMarker();
 
         // Step 15: capture an undo frame BEFORE the macro mutates pixels,
@@ -3494,10 +5327,6 @@ public class TCPCommandServer {
         // subsequent {@code rewind to_call_id} can restore precisely. Per
         // plan: docs/tcp_upgrade/15_undo_stack_api.md. Snapshot failures
         // are swallowed so undo never blocks the macro path.
-        final String undoCallId = nextCallId();
-        final UndoFrame undoFrame = captureUndoFrameIfEnabled(
-                undoCallId, code, caps);
-
         // Gate image.* events while this macro runs. The agent's event
         // subscribers react to image.opened by sending get_image_info /
         // get_histogram — those wrap work in SwingUtilities.invokeLater
@@ -3557,20 +5386,18 @@ public class TCPCommandServer {
         String priorInterpError = readInterpreterErrorMessage();
         String priorIjError = readIjErrorMessage();
 
-        // Snapshot active title + results-CSV length BEFORE IJ.runMacro so the
+        // Snapshot open identities + results-CSV length BEFORE IJ.runMacro so the
         // failure branch can tell "plugin actually produced output before the
         // dialog-pause" apart from "dialog-pause on the very first line,
         // nothing happened". Without this, mirroring the success-path snapshot
         // on failure would always report stale state as a side effect.
-        String preActiveTitle = null;
-        int preResultsLen = 0;
+        long preResultsLen = 0L;
+        final List<ImageGraph.ImageRef> preOpenImages =
+                ImageGraph.captureOpenImages();
         try {
-            ImageInfo preActive = stateInspector.getActiveImageInfo();
-            preActiveTitle = preActive != null ? preActive.getTitle() : null;
-        } catch (Throwable ignore) {}
-        try {
-            String preCsv = stateInspector.getResultsTableCSV();
-            preResultsLen = preCsv != null ? preCsv.length() : 0;
+            StateInspector.BoundedCsv preCsv = stateInspector
+                    .getResultsTableCSVBounded((int) MAX_RESULTS_TABLE_BYTES);
+            preResultsLen = preCsv.originalBytes();
         } catch (Throwable ignore) {}
 
         // Step 09: snapshot the active image's intensity distribution BEFORE
@@ -3586,37 +5413,21 @@ public class TCPCommandServer {
         }
 
         long startTime = System.currentTimeMillis();
+        MacroMutationContext mutationContext = null;
         // Step 15: announce we're about to start mutating so a concurrent
         // rewind (from another socket) returns UNDO_BUSY rather than
         // racing the in-flight macro. Decrement happens in the matching
         // finally below so an exception unwinds the counter cleanly.
         macroInFlight.incrementAndGet();
         try {
-        // Serialize every execute_macro call JVM-wide. ImageJ has a single global
-        // Interpreter / WindowManager — two overlapping macros (one zombied on a
-        // blocking dialog, a second sent by the agent after it received the
-        // server's error) corrupt each other's active-image state. Root cause of
-        // the "orig gets thresholded and every Duplicate inherits" bug.
-        synchronized (MACRO_MUTEX) {
-        // Prior-error *messages* are now snapshotted, but a Macro Error
-        // *dialog* from the previous failed call can still be sitting on the
-        // AWT event queue. Dismiss it only while holding MACRO_MUTEX so a
-        // second request cannot close a live Macro Error dialog that still
-        // belongs to the previous synchronized caller.
-        dismissOpenDialogs("Macro Error");
-
-        ExecutorService executor = Executors.newSingleThreadExecutor();
+        // MutationCoordinator owns JVM-wide serialization and worker lifetime.
+        {
         Future<String> future = null;
         try {
-            future = executor.submit(new java.util.concurrent.Callable<String>() {
-                @Override
-                public String call() {
-                    // Step 04: codeToRun is the fuzzy-validated macro — either
-                    // the original (no corrections) or a patched string with
-                    // run("name") spellings replaced by canonical names.
-                    return IJ.runMacro(codeToRun);
-                }
-            });
+            mutationContext = submitTcpMacroMutation(code, codeToRun,
+                    macroTimeoutMs, caps, true, safetyFindings,
+                    graphMarkerBefore);
+            future = mutationContext.future;
 
             while (true) {
                 try {
@@ -3637,7 +5448,7 @@ public class TCPCommandServer {
                     }
                     String detected = detectIjMacroError(logLenBefore, priorInterpError, priorIjError, dialogs);
                     if (detected != null) {
-                        abortMacroFuture(future);
+                        future.cancel(true);
                         failureMessage = detected;
                         break;
                     }
@@ -3647,7 +5458,7 @@ public class TCPCommandServer {
                     // instead of waiting the full MACRO_TIMEOUT_MS.
                     String blocking = detectBlockingDialog(dialogs);
                     if (blocking != null) {
-                        abortMacroFuture(future);
+                        future.cancel(true);
                         // Actively dismiss the blocking dialog so it does not
                         // linger on screen and block subsequent macros. The
                         // dismiss runs on the EDT and waits up to 2 s and
@@ -3684,32 +5495,45 @@ public class TCPCommandServer {
                         }
                         break;
                     }
-                    if (!timeoutDisabled(macroTimeoutMs)
-                            && (System.currentTimeMillis() - startTime) > macroTimeoutMs) {
-                        abortMacroFuture(future);
-                        failureMessage = "Macro execution timed out after " + macroTimeoutMs + "ms";
-                        break;
-                    }
                 } catch (ExecutionException e) {
                     Throwable cause = e.getCause();
-                    String msg = cause != null ? cause.getMessage() : e.getMessage();
-                    failureMessage = "Macro error: " + (msg != null ? msg : "unknown error");
+                    if (cause instanceof DestructiveMacroException) {
+                        publishTcpMacroCompleted(macroId, false,
+                                System.currentTimeMillis() - startTime,
+                                cause.getMessage());
+                        return destructiveBlockedReply(
+                                ((DestructiveMacroException) cause).rejections, caps);
+                    }
+                    if (cause instanceof MutationTimedOutException) {
+                        failureMessage = "Macro execution timed out after "
+                                + macroTimeoutMs + "ms";
+                    } else if (cause instanceof InterruptedException) {
+                        failureMessage = "Macro execution interrupted";
+                    } else {
+                        String msg = cause != null ? cause.getMessage() : e.getMessage();
+                        failureMessage = "Macro error: "
+                                + (msg != null ? msg : "unknown error");
+                    }
                     break;
                 }
             }
+        } catch (IllegalArgumentException
+                 | java.util.concurrent.RejectedExecutionException e) {
+            publishTcpMacroCompleted(macroId, false,
+                    System.currentTimeMillis() - startTime, e.getMessage());
+            return errorResponse("Mutation admission rejected: " + e.getMessage());
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
-            if (future != null && !future.isDone()) abortMacroFuture(future);
-            executor.shutdownNow();
+            if (future != null && !future.isDone()) future.cancel(true);
+            awaitFutureTerminal(future);
+            publishTcpMacroCompleted(macroId, false,
+                    System.currentTimeMillis() - startTime, "Interrupted");
             return errorResponse("Interrupted");
         } finally {
-            // Belt-and-braces: if we broke out of the loop without the worker
-            // actually terminating (e.g. IJ.Macro.abort() failed or the user
-            // had an OpenDialog the dismiss path could not kill), force-kill
-            // now so the next synchronized(MACRO_MUTEX) caller does not start
-            // on top of a live interpreter.
-            if (future != null && !future.isDone()) abortMacroFuture(future);
-            executor.shutdownNow();
+            // Do not inspect or report state until the coordinator has
+            // observed the real worker exit.
+            if (future != null && !future.isDone()) future.cancel(true);
+            awaitFutureTerminal(future);
         }
         if (success) {
             dialogs = safeDetectOpenDialogs();
@@ -3719,10 +5543,9 @@ public class TCPCommandServer {
                 failureMessage = detected;
             }
         }
-        } // end synchronized (MACRO_MUTEX)
+        } // end coordinator-backed macro wait block
         } finally {
-            // Step 15: in-flight counter must drop even if the synchronized
-            // block threw — otherwise rewind locks out forever.
+            // In-flight accounting unwinds after coordinator completion.
             macroInFlight.decrementAndGet();
         }
 
@@ -3759,15 +5582,15 @@ public class TCPCommandServer {
             }
 
             try {
-                ImageInfo active = stateInspector.getActiveImageInfo();
-                if (active != null) {
-                    JsonArray newImages = new JsonArray();
-                    newImages.add(active.getTitle());
-                    delta.newImages = newImages;
+                List<ImageGraph.ImageRef> opened = newImageRefs(
+                        preOpenImages, ImageGraph.captureOpenImages());
+                if (!opened.isEmpty()) {
+                    delta.newImages = imageTitles(opened);
                 }
-                String csv = stateInspector.getResultsTableCSV();
-                if (csv != null && !csv.isEmpty()) {
-                    delta.resultsTable = csv;
+                StateInspector.BoundedCsv csv = stateInspector
+                        .getResultsTableCSVBounded((int) MAX_RESULTS_TABLE_BYTES);
+                if (!csv.text().isEmpty()) {
+                    delta.setResultsTable(csv);
                 }
                 stateInspector.checkResultsTableChange();
             } catch (Exception ignore) {
@@ -3791,27 +5614,24 @@ public class TCPCommandServer {
             // is only attached when caps.structuredErrors is on.
             JsonObject sideEffectsObj = new JsonObject();
             try {
-                ImageInfo postActive = stateInspector.getActiveImageInfo();
-                String postTitle = postActive != null ? postActive.getTitle() : null;
-                if (postTitle != null && !postTitle.isEmpty()
-                        && !postTitle.equals(preActiveTitle)) {
-                    JsonArray newImages = new JsonArray();
-                    newImages.add(postTitle);
+                List<ImageGraph.ImageRef> opened = newImageRefs(
+                        preOpenImages, ImageGraph.captureOpenImages());
+                if (!opened.isEmpty()) {
+                    JsonArray newImages = imageTitles(opened);
                     // Step 05: failure-path newImages routes through the delta
                     // struct so the grouped shape stays consistent with the
                     // success path. sideEffectsObj keeps its own copy — that
                     // lives inside the structured error payload (step 02) and
                     // is a separate contract from the top-level diff shape.
                     delta.newImages = newImages;
-                    JsonArray newImagesCopy = new JsonArray();
-                    newImagesCopy.add(postTitle);
-                    sideEffectsObj.add("newImages", newImagesCopy);
+                    sideEffectsObj.add("newImages", imageTitles(opened));
                     sideEffectsLanded = true;
                 }
-                String csv = stateInspector.getResultsTableCSV();
-                int postLen = csv != null ? csv.length() : 0;
-                if (csv != null && !csv.isEmpty() && postLen != preResultsLen) {
-                    delta.resultsTable = csv;
+                StateInspector.BoundedCsv csv = stateInspector
+                        .getResultsTableCSVBounded((int) MAX_RESULTS_TABLE_BYTES);
+                long postLen = csv.originalBytes();
+                if (!csv.text().isEmpty() && postLen != preResultsLen) {
+                    delta.setResultsTable(csv);
                     sideEffectsObj.addProperty("resultsChanged", true);
                     sideEffectsLanded = true;
                 }
@@ -3878,7 +5698,7 @@ public class TCPCommandServer {
         // wire, no event stream changes, no new response fields.
         try {
             String source = request.has("source") ? request.get("source").getAsString() : "tcp";
-            SessionCodeJournal.INSTANCE.record("ijm", code, source,
+            SessionCodeJournal.INSTANCE.record(journalDataset, "ijm", code, source,
                     macroId, startTime, elapsed, success, failureMessage);
         } catch (Throwable t) {
             IJ.log("[ImageJAI-Journal] record failed: " + t);
@@ -3957,14 +5777,11 @@ public class TCPCommandServer {
         // failure paths so partial work (e.g. a plugin that ran to
         // completion before a dialog-pause) still lands in the graph.
         try {
-            Set<String> graphTitlesAfter = ImageGraph.captureOpenTitles();
-            imageGraph.trackMacroChange(graphTitlesBefore, graphActiveTitleBefore,
-                    graphTitlesAfter, code, "macro");
-            if (caps != null && caps.graphDelta) {
-                ImageGraph.Delta gDelta = imageGraph.deltaSince(graphMarkerBefore);
-                if (!gDelta.isEmpty()) {
-                    result.add("graphDelta", gDelta.toJson());
-                }
+            ImageGraph.Delta gDelta = mutationContext == null
+                    ? null : mutationContext.graphDelta.get();
+            if (caps != null && caps.graphDelta
+                    && gDelta != null && !gDelta.isEmpty()) {
+                result.add("graphDelta", gDelta.toJson());
             }
         } catch (Throwable ignore) {}
         if (caps != null && caps.pulse) {
@@ -3991,6 +5808,379 @@ public class TCPCommandServer {
                 && caps.safeMode
                 && caps.safeModeOptions != null
                 && caps.safeModeOptions.scientificIntegrityScan;
+    }
+
+    /**
+     * Macro-language host and filesystem access is a mandatory boundary, not
+     * a Safe Mode preference. Scientific-integrity rules remain controlled by
+     * the negotiated Safe Mode options, while host escapes and File.* access
+     * are rejected even when a client disables those optional guards.
+     */
+    private List<DestructiveScanner.DestructiveOp> collectMacroSafetyFindings(
+            String code, AgentCaps caps, boolean scientificRulesEnabled) {
+        DestructiveScanner.Context context = captureScannerContext(caps);
+        List<DestructiveScanner.DestructiveOp> findings =
+                new ArrayList<DestructiveScanner.DestructiveOp>(
+                        scientificRulesEnabled
+                                ? DestructiveScanner.scan(code, context)
+                                : DestructiveScanner.scan(code, null));
+        findings.addAll(DestructiveScanner.scanMacroFilesystem(
+                code, context == null ? null : context.aiExportsRoot));
+        return findings;
+    }
+
+    private String boundedExactResultsCsvForUndo() {
+        if (stateInspector == null) return "";
+        StateInspector.BoundedCsv csv = stateInspector
+                .getResultsTableCSVBounded((int) MAX_RESULTS_TABLE_BYTES);
+        if (csv.truncated()) {
+            throw new IllegalStateException("Results table exceeds the exact undo "
+                    + "snapshot limit of " + MAX_RESULTS_TABLE_BYTES + " bytes");
+        }
+        return csv.text();
+    }
+
+    private static final class DestructiveMacroException
+            extends MutationCoordinator.SafetyException {
+        final List<DestructiveScanner.DestructiveOp> rejections;
+
+        DestructiveMacroException(List<DestructiveScanner.DestructiveOp> rejections) {
+            super("Macro blocked by safe-mode scanner");
+            this.rejections = rejections;
+        }
+    }
+
+    private static final class MutationTimedOutException extends Exception {
+        MutationTimedOutException(String message) { super(message); }
+    }
+
+    /** Future compatibility adapter used by the legacy dialog polling loop. */
+    private static final class CoordinatorFuture<T> implements Future<T> {
+        private final MutationCoordinator.Handle<T> handle;
+
+        CoordinatorFuture(MutationCoordinator.Handle<T> handle) {
+            this.handle = handle;
+        }
+
+        @Override public boolean cancel(boolean mayInterruptIfRunning) {
+            return handle.cancel();
+        }
+
+        @Override public boolean isCancelled() {
+            MutationCoordinator.State state = handle.state();
+            return state == MutationCoordinator.State.CANCELLED
+                    || state == MutationCoordinator.State.TIMED_OUT
+                    || state == MutationCoordinator.State.CANCEL_REQUESTED
+                    || state == MutationCoordinator.State.TIMEOUT_REQUESTED;
+        }
+
+        @Override public boolean isDone() { return handle.isTerminal(); }
+
+        @Override public T get() throws InterruptedException, ExecutionException {
+            return unwrap(handle.awaitCompletion());
+        }
+
+        @Override public T get(long timeout, TimeUnit unit)
+                throws InterruptedException, ExecutionException, TimeoutException {
+            MutationCoordinator.Completion<T> completion =
+                    handle.awaitCompletion(timeout, unit);
+            if (completion == null) throw new TimeoutException();
+            return unwrap(completion);
+        }
+
+        private T unwrap(MutationCoordinator.Completion<T> completion)
+                throws ExecutionException {
+            if (completion.state() == MutationCoordinator.State.SUCCEEDED) {
+                return completion.result();
+            }
+            Throwable failure = completion.error();
+            if (completion.state() == MutationCoordinator.State.TIMED_OUT) {
+                failure = new MutationTimedOutException("Mutation timed out");
+            } else if (failure == null) {
+                failure = new InterruptedException("Mutation cancelled");
+            }
+            throw new ExecutionException(failure);
+        }
+    }
+
+    private static void awaitFutureTerminal(Future<?> future) {
+        if (future == null) return;
+        boolean interrupted = false;
+        while (true) {
+            try {
+                future.get();
+                break;
+            } catch (InterruptedException e) {
+                interrupted = true;
+            } catch (ExecutionException e) {
+                break;
+            }
+        }
+        if (interrupted) Thread.currentThread().interrupt();
+    }
+
+    private static final class MacroMutationContext {
+        final Future<String> future;
+        final java.util.concurrent.atomic.AtomicReference<ImageGraph.Delta> graphDelta;
+
+        MacroMutationContext(Future<String> future,
+                             java.util.concurrent.atomic.AtomicReference<ImageGraph.Delta> graphDelta) {
+            this.future = future;
+            this.graphDelta = graphDelta;
+        }
+    }
+
+    private static final class ScriptMutationContext {
+        final Future<Object> future;
+        final java.util.concurrent.atomic.AtomicReference<ImageGraph.Delta> graphDelta;
+
+        ScriptMutationContext(Future<Object> future,
+                              java.util.concurrent.atomic.AtomicReference<ImageGraph.Delta> graphDelta) {
+            this.future = future;
+            this.graphDelta = graphDelta;
+        }
+    }
+
+    private static final class PipelineMutationContext {
+        final Future<PipelineBuilder.Pipeline> future;
+        final java.util.concurrent.atomic.AtomicReference<ImageGraph.Delta> graphDelta;
+
+        PipelineMutationContext(Future<PipelineBuilder.Pipeline> future,
+                                java.util.concurrent.atomic.AtomicReference<ImageGraph.Delta> graphDelta) {
+            this.future = future;
+            this.graphDelta = graphDelta;
+        }
+    }
+
+    private MacroMutationContext submitTcpMacroMutation(
+            final String submittedCode,
+            final String executableCode,
+            final long timeoutMs,
+            final AgentCaps caps,
+            final boolean safetyEnabled,
+            final List<DestructiveScanner.DestructiveOp> safetyFindings,
+            final long graphMarkerBefore) {
+        final java.util.concurrent.atomic.AtomicReference<ImageGraph.Delta> graphDelta =
+                new java.util.concurrent.atomic.AtomicReference<ImageGraph.Delta>();
+        MutationCoordinator.Lifecycle<String> lifecycle =
+                new MutationCoordinator.Lifecycle<String>() {
+            private List<ImageGraph.ImageRef> graphImagesBefore;
+            private ImageGraph.ImageRef graphActiveBefore;
+            private SourceImageTagger sourceTagger;
+
+            @Override public void checkSafety() throws Exception {
+                enforceMacroSafety(safetyFindings, caps);
+            }
+
+            @Override public void beforeMutation() {
+                dismissOpenDialogs("Macro Error");
+                graphImagesBefore = ImageGraph.captureOpenImages();
+                graphActiveBefore = ImageGraph.captureActiveImage();
+                if (caps != null && caps.undo) {
+                    captureUndoFrameIfEnabled(nextCallId(), submittedCode, caps);
+                }
+                sourceTagger = SourceImageTagger.beginIfEnabled(
+                        caps != null && caps.safeMode
+                                && caps.safeModeOptions != null
+                                && caps.safeModeOptions.autoSourceImageColumn,
+                        submittedCode, WindowManager.getCurrentImage());
+            }
+
+            @Override public void afterMutation(MutationCoordinator.Outcome<String> outcome) {
+                if (sourceTagger != null) {
+                    sourceTagger.postExec(WindowManager.getCurrentImage());
+                }
+                if (graphImagesBefore != null) {
+                    imageGraph.trackImageChange(graphImagesBefore, graphActiveBefore,
+                            ImageGraph.captureOpenImages(), submittedCode, "macro");
+                    graphDelta.set(imageGraph.deltaSince(graphMarkerBefore));
+                }
+            }
+        };
+        MutationCoordinator.Request<String> request =
+                MutationCoordinator.Request.<String>builder()
+                        .ownerSession(mutationOwnerOrInternal(caps))
+                        .sourceKind("macro")
+                        .code(executableCode)
+                        .timeoutMs(timeoutMs)
+                        .safetyEnabled(safetyEnabled)
+                        .undoEnabled(caps != null && caps.undo)
+                        .provenanceEnabled(true)
+                        .operation(new MutationCoordinator.Operation<String>() {
+                            @Override public String run() { return IJ.runMacro(executableCode); }
+                        })
+                        .cancellationAction(new MutationCoordinator.CancellationAction() {
+                            @Override public void cancel() {
+                                CommandEngine.requestOwnedMacroAbort();
+                            }
+                        })
+                        .lifecycle(lifecycle)
+                        .build();
+        return new MacroMutationContext(
+                new CoordinatorFuture<String>(mutationCoordinator.submit(request)), graphDelta);
+    }
+
+    private ScriptMutationContext submitScriptMutation(
+            final String language,
+            final String code,
+            final ScriptEngine engine,
+            final long timeoutMs,
+            final AgentCaps caps,
+            final boolean safetyEnabled,
+            final List<DestructiveScanner.DestructiveOp> safetyFindings,
+            final long graphMarkerBefore) {
+        final java.util.concurrent.atomic.AtomicReference<ImageGraph.Delta> graphDelta =
+                new java.util.concurrent.atomic.AtomicReference<ImageGraph.Delta>();
+        MutationCoordinator.Lifecycle<Object> lifecycle =
+                new MutationCoordinator.Lifecycle<Object>() {
+            private List<ImageGraph.ImageRef> graphImagesBefore;
+            private ImageGraph.ImageRef graphActiveBefore;
+            private SourceImageTagger sourceTagger;
+
+            @Override public void checkSafety() throws Exception {
+                enforceMacroSafety(safetyFindings, caps);
+            }
+
+            @Override public void beforeMutation() {
+                graphImagesBefore = ImageGraph.captureOpenImages();
+                graphActiveBefore = ImageGraph.captureActiveImage();
+                if (caps != null && caps.undo) {
+                    ImagePlus active = WindowManager.getCurrentImage();
+                    if (active != null) {
+                        sessionUndo.pushBoundary(active.getTitle(), nextCallId());
+                    }
+                }
+                sourceTagger = SourceImageTagger.beginIfEnabled(
+                        caps != null && caps.safeMode
+                                && caps.safeModeOptions != null
+                                && caps.safeModeOptions.autoSourceImageColumn,
+                        code, WindowManager.getCurrentImage());
+            }
+
+            @Override public void afterMutation(MutationCoordinator.Outcome<Object> outcome) {
+                if (sourceTagger != null) {
+                    sourceTagger.postExec(WindowManager.getCurrentImage());
+                }
+                if (graphImagesBefore != null) {
+                    imageGraph.trackImageChange(graphImagesBefore, graphActiveBefore,
+                            ImageGraph.captureOpenImages(), code, "script");
+                    graphDelta.set(imageGraph.deltaSince(graphMarkerBefore));
+                }
+            }
+        };
+        MutationCoordinator.Request<Object> request =
+                MutationCoordinator.Request.<Object>builder()
+                        .ownerSession(mutationOwnerOrInternal(caps))
+                        .sourceKind("script")
+                        .code(code)
+                        .timeoutMs(timeoutMs)
+                        .safetyEnabled(safetyEnabled)
+                        .undoEnabled(caps != null && caps.undo)
+                        .provenanceEnabled(true)
+                        .operation(new MutationCoordinator.Operation<Object>() {
+                            @Override public Object run() throws ScriptException {
+                                return engine.eval(code);
+                            }
+                        })
+                        .cancellationAction(new MutationCoordinator.CancellationAction() {
+                            @Override public void cancel() {
+                                CommandEngine.requestOwnedMacroAbort();
+                            }
+                        })
+                        .lifecycle(lifecycle)
+                        .build();
+        return new ScriptMutationContext(
+                new CoordinatorFuture<Object>(mutationCoordinator.submit(request)), graphDelta);
+    }
+
+    private PipelineMutationContext submitPipelineMutation(
+            final PipelineBuilder.Pipeline pipeline,
+            final String code,
+            final long timeoutMs,
+            final AgentCaps caps,
+            final boolean safetyEnabled,
+            final List<DestructiveScanner.DestructiveOp> safetyFindings,
+            final long graphMarkerBefore) {
+        final java.util.concurrent.atomic.AtomicReference<ImageGraph.Delta> graphDelta =
+                new java.util.concurrent.atomic.AtomicReference<ImageGraph.Delta>();
+        MutationCoordinator.Lifecycle<PipelineBuilder.Pipeline> lifecycle =
+                new MutationCoordinator.Lifecycle<PipelineBuilder.Pipeline>() {
+            private List<ImageGraph.ImageRef> graphImagesBefore;
+            private ImageGraph.ImageRef graphActiveBefore;
+            private SourceImageTagger sourceTagger;
+
+            @Override public void checkSafety() throws Exception {
+                enforceMacroSafety(safetyFindings, caps);
+            }
+
+            @Override public void beforeMutation() {
+                graphImagesBefore = ImageGraph.captureOpenImages();
+                graphActiveBefore = ImageGraph.captureActiveImage();
+                if (caps != null && caps.undo) {
+                    ImagePlus active = WindowManager.getCurrentImage();
+                    if (active != null) {
+                        sessionUndo.pushBoundary(active.getTitle(), nextCallId());
+                    }
+                }
+                sourceTagger = SourceImageTagger.beginIfEnabled(
+                        caps != null && caps.safeMode
+                                && caps.safeModeOptions != null
+                                && caps.safeModeOptions.autoSourceImageColumn,
+                        code, WindowManager.getCurrentImage());
+            }
+
+            @Override public void afterMutation(
+                    MutationCoordinator.Outcome<PipelineBuilder.Pipeline> outcome) {
+                if (sourceTagger != null) {
+                    sourceTagger.postExec(WindowManager.getCurrentImage());
+                }
+                if (graphImagesBefore != null) {
+                    imageGraph.trackImageChange(graphImagesBefore, graphActiveBefore,
+                            ImageGraph.captureOpenImages(), code, "pipeline");
+                    graphDelta.set(imageGraph.deltaSince(graphMarkerBefore));
+                }
+            }
+        };
+        MutationCoordinator.Request<PipelineBuilder.Pipeline> request =
+                MutationCoordinator.Request.<PipelineBuilder.Pipeline>builder()
+                        .ownerSession(mutationOwnerOrInternal(caps))
+                        .sourceKind("pipeline")
+                        .code(code)
+                        .timeoutMs(timeoutMs)
+                        .safetyEnabled(safetyEnabled)
+                        .undoEnabled(caps != null && caps.undo)
+                        .provenanceEnabled(true)
+                        .operation(new MutationCoordinator.Operation<PipelineBuilder.Pipeline>() {
+                            @Override public PipelineBuilder.Pipeline run() {
+                                pipelineBuilder.executePipelineOnCurrentThread(pipeline, null);
+                                return pipeline;
+                            }
+                        })
+                        .cancellationAction(new MutationCoordinator.CancellationAction() {
+                            @Override public void cancel() {
+                                CommandEngine.requestOwnedMacroAbort();
+                            }
+                        })
+                        .lifecycle(lifecycle)
+                        .build();
+        return new PipelineMutationContext(
+                new CoordinatorFuture<PipelineBuilder.Pipeline>(
+                        mutationCoordinator.submit(request)), graphDelta);
+    }
+
+    private void enforceMacroSafety(
+            List<DestructiveScanner.DestructiveOp> findings,
+            AgentCaps caps) throws DestructiveMacroException {
+        List<DestructiveScanner.DestructiveOp> rejections =
+                DestructiveScanner.rejections(findings);
+        if (!rejections.isEmpty()) throw new DestructiveMacroException(rejections);
+        for (DestructiveScanner.DestructiveOp op : DestructiveScanner.backups(findings)) {
+            if (DestructiveScanner.RULE_ROI_WIPE.equals(op.ruleId)
+                    && caps != null && caps.safeModeOptions != null
+                    && caps.safeModeOptions.autoBackupRoiOnReset) {
+                runRoiAutoBackup(op, caps);
+            }
+        }
     }
 
     private DestructiveScanner.Context captureScannerContext(AgentCaps caps) {
@@ -4212,54 +6402,6 @@ public class TCPCommandServer {
         try {
             eventBus.publish(topic, data == null ? new JsonObject() : data);
         } catch (Throwable ignore) {}
-    }
-
-    /**
-     * Stop a running IJ.runMacro future for real. {@code Future.cancel(true)}
-     * by itself only interrupts the worker thread, and the ImageJ macro
-     * interpreter silently swallows {@link Thread#interrupted()} — the macro
-     * keeps stepping through the remaining statements against global
-     * WindowManager state while the TCP handler returns an error to the
-     * client. That zombie is what lets a later macro's threshold/mask steps
-     * land on the wrong image.
-     *
-     * Order of operations, mirroring {@code JobRegistry.cancel}: reflectively
-     * invoke {@code ij.Macro.abort()} (the interpreter's cooperative stop
-     * signal), then cancel the Future to interrupt the worker, then poll for
-     * up to {@link #MACRO_ABORT_WAIT_MS} so the MACRO_MUTEX is not released
-     * until the zombie is actually gone.
-     *
-     * Returns {@code true} when the worker terminates within the window,
-     * {@code false} when it is still alive (genuinely unkillable). Callers
-     * currently ignore the boolean but it is logged so future diagnostics can
-     * see unkillable-macro incidents.
-     */
-    private static boolean abortMacroFuture(Future<?> future) {
-        if (future == null) return true;
-        try {
-            Class<?> macroClass = Class.forName("ij.Macro");
-            java.lang.reflect.Method abort = macroClass.getMethod("abort");
-            abort.invoke(null);
-        } catch (Throwable ignore) {
-            // ij.Macro absent or signature changed — fall through to interrupt.
-        }
-        future.cancel(true);
-        long deadline = System.currentTimeMillis() + MACRO_ABORT_WAIT_MS;
-        while (System.currentTimeMillis() < deadline) {
-            if (future.isDone()) return true;
-            try {
-                Thread.sleep(25);
-            } catch (InterruptedException ie) {
-                Thread.currentThread().interrupt();
-                return future.isDone();
-            }
-        }
-        boolean dead = future.isDone();
-        if (!dead) {
-            System.err.println("[ImageJAI-TCP] WARNING: macro did not terminate within "
-                    + MACRO_ABORT_WAIT_MS + "ms of IJ.Macro.abort() — proceeding with zombie interpreter");
-        }
-        return dead;
     }
 
     private JsonArray safeDetectOpenDialogs() {
@@ -4554,17 +6696,24 @@ public class TCPCommandServer {
         }
         final String code = codeElement.getAsString();
         final long scriptTimeoutMs = resolveTimeoutMs(request, MACRO_TIMEOUT_MS);
+        final boolean safetyEnabled = isScientificIntegrityScanEnabled(caps);
+        final List<DestructiveScanner.DestructiveOp> safetyFindings = safetyEnabled
+                ? DestructiveScanner.scanElevatedScript(code, captureScannerContext(caps))
+                : java.util.Collections.<DestructiveScanner.DestructiveOp>emptyList();
 
         JsonObject result = new JsonObject();
         result.addProperty("language", language);
 
-        ScriptEngineManager manager = new ScriptEngineManager();
-        final ScriptEngine engine = manager.getEngineByName(language);
+        final ScriptEngine engine = scriptEngineResolverForTest != null
+                ? scriptEngineResolverForTest.apply(language)
+                : new ScriptEngineManager().getEngineByName(language);
 
         if (engine == null) {
             return errorResponse("ScriptEngine not found for language: " + language
                     + ". Available: groovy, jython, javascript");
         }
+        final SessionCodeJournal.DatasetBinding journalDataset =
+                SessionCodeJournal.captureInitiatingDataset();
 
         // Step 09: histogram snapshot before the script runs. Same contract
         // as handleExecuteMacro — on-by-default, skipped for huge images,
@@ -4586,30 +6735,19 @@ public class TCPCommandServer {
         // handleExecuteMacro — scripts that create images get the derived
         // node and edge in the same shape. Per plan:
         // docs/tcp_upgrade/13_provenance_graph.md.
-        final Set<String> graphTitlesBefore = ImageGraph.captureOpenTitles();
-        final String graphActiveTitleBefore = ImageGraph.captureActiveTitle();
         final long graphMarkerBefore = imageGraph.currentMarker();
 
         // Step 15: scripts are uninvertible side-effects. Plan §Out-of-scope
         // marks them a "branch boundary" — push a sentinel onto the active
         // image's undo stack so a later rewind cannot walk past this point.
         // Best-effort: capture failures must not block the script.
-        if (caps != null && caps.undo) {
-            try {
-                ImagePlus boundaryImp = WindowManager.getCurrentImage();
-                if (boundaryImp != null) {
-                    sessionUndo.pushBoundary(boundaryImp.getTitle(), nextCallId());
-                }
-            } catch (Throwable ignore) {}
-        }
-
-        // Mirror handleExecuteMacro: run the script on a single-thread executor
-        // and poll for blocking dialogs every 150 ms. Without this, a Groovy
+        // Poll the coordinator-owned script worker for blocking dialogs every
+        // 150 ms. Without this, a Groovy
         // hallucination like IJ.run("setAutoThreshold", ...) opens a command
         // dialog and pins Fiji until the client socket times out — leaving the
         // dialog on screen to block every subsequent call.
         long startTime = System.currentTimeMillis();
-        ExecutorService executor = Executors.newSingleThreadExecutor();
+        ScriptMutationContext scriptMutationContext = null;
         Future<Object> future = null;
         Object scriptResult = null;
         Throwable scriptError = null;
@@ -4623,18 +6761,13 @@ public class TCPCommandServer {
         // unwinds the counter cleanly. Plan §Failure modes.
         macroInFlight.incrementAndGet();
         try {
-        // Step 15: serialise behind MACRO_MUTEX too — same global
-        // Interpreter / WindowManager state that handleExecuteMacro guards
-        // against, plus mutual exclusion with the rewind handler's
-        // synchronized(MACRO_MUTEX) restoration block.
-        synchronized (MACRO_MUTEX) {
+        // MutationCoordinator owns script serialization and worker lifetime.
+        {
         try {
-            future = executor.submit(new java.util.concurrent.Callable<Object>() {
-                @Override
-                public Object call() throws ScriptException {
-                    return engine.eval(code);
-                }
-            });
+            scriptMutationContext = submitScriptMutation(language, code, engine,
+                    scriptTimeoutMs, caps, safetyEnabled, safetyFindings,
+                    graphMarkerBefore);
+            future = scriptMutationContext.future;
 
             while (true) {
                 try {
@@ -4652,29 +6785,35 @@ public class TCPCommandServer {
                                 : blocking;
                         break;
                     }
-                    if (!timeoutDisabled(scriptTimeoutMs)
-                            && (System.currentTimeMillis() - startTime) > scriptTimeoutMs) {
-                        future.cancel(true);
-                        blockingFailure = "Script execution timed out after " + scriptTimeoutMs + "ms";
-                        break;
-                    }
                 } catch (ExecutionException ee) {
-                    scriptError = ee.getCause() != null ? ee.getCause() : ee;
+                    Throwable cause = ee.getCause() != null ? ee.getCause() : ee;
+                    if (cause instanceof DestructiveMacroException) {
+                        return destructiveBlockedReply(
+                                ((DestructiveMacroException) cause).rejections, caps);
+                    }
+                    if (cause instanceof MutationTimedOutException) {
+                        blockingFailure = "Script execution timed out after "
+                                + scriptTimeoutMs + "ms";
+                    } else {
+                        scriptError = cause;
+                    }
                     break;
                 }
             }
+        } catch (IllegalArgumentException
+                 | java.util.concurrent.RejectedExecutionException e) {
+            return errorResponse("Mutation admission rejected: " + e.getMessage());
         } catch (InterruptedException ie) {
             Thread.currentThread().interrupt();
             if (future != null && !future.isDone()) future.cancel(true);
-            executor.shutdownNow();
             return errorResponse("Interrupted");
         } finally {
             if (future != null && !future.isDone()) future.cancel(true);
-            executor.shutdownNow();
+            awaitFutureTerminal(future);
         }
-        } // end synchronized (MACRO_MUTEX)
+        } // end coordinator-backed script wait block
         } finally {
-            // Step 15: counter must drop even if MACRO_MUTEX block threw.
+            // Counter must drop even if coordinator execution failed.
             macroInFlight.decrementAndGet();
         }
 
@@ -4737,12 +6876,14 @@ public class TCPCommandServer {
         // ("groovy" / "jython" / …) so the journal file extension is accurate.
         try {
             String source = request.has("source") ? request.get("source").getAsString() : "tcp";
-            boolean scriptSuccess = completed && blockingFailure == null && scriptError == null;
-            String scriptFailure = blockingFailure != null
-                    ? blockingFailure
-                    : (scriptError != null ? String.valueOf(scriptError.getMessage()) : null);
-            SessionCodeJournal.INSTANCE.record(language, code, source,
-                    0L, startTime, elapsed, scriptSuccess, scriptFailure);
+            if (!"rail:script-editor".equals(source)) {
+                boolean scriptSuccess = completed && blockingFailure == null && scriptError == null;
+                String scriptFailure = blockingFailure != null
+                        ? blockingFailure
+                        : (scriptError != null ? String.valueOf(scriptError.getMessage()) : null);
+                SessionCodeJournal.INSTANCE.record(journalDataset, language, code, source,
+                        0L, startTime, elapsed, scriptSuccess, scriptFailure);
+            }
         } catch (Throwable t) {
             IJ.log("[ImageJAI-Journal] record failed: " + t);
         }
@@ -4777,14 +6918,11 @@ public class TCPCommandServer {
         // origin tag is "script" so the agent can tell at a glance whether
         // a derived node came from a macro run or a Groovy/Jython script.
         try {
-            Set<String> graphTitlesAfter = ImageGraph.captureOpenTitles();
-            imageGraph.trackMacroChange(graphTitlesBefore, graphActiveTitleBefore,
-                    graphTitlesAfter, code, "script");
-            if (caps != null && caps.graphDelta) {
-                ImageGraph.Delta gDelta = imageGraph.deltaSince(graphMarkerBefore);
-                if (!gDelta.isEmpty()) {
-                    result.add("graphDelta", gDelta.toJson());
-                }
+            ImageGraph.Delta gDelta = scriptMutationContext == null
+                    ? null : scriptMutationContext.graphDelta.get();
+            if (caps != null && caps.graphDelta
+                    && gDelta != null && !gDelta.isEmpty()) {
+                result.add("graphDelta", gDelta.toJson());
             }
         } catch (Throwable ignore) {}
         if (caps != null && caps.pulse) {
@@ -4797,7 +6935,8 @@ public class TCPCommandServer {
         final Object[] holder = new Object[1];
         final CountDownLatch latch = new CountDownLatch(1);
 
-        SwingUtilities.invokeLater(new Runnable() {
+        GuiActionDispatcher.ActionToken actionToken =
+                GuiActionDispatcher.queueSwingAction(new Runnable() {
             @Override
             public void run() {
                 try {
@@ -4820,7 +6959,9 @@ public class TCPCommandServer {
                     state.add("allImages", imagesArray);
 
                     // Results table
-                    state.addProperty("resultsTable", stateInspector.getResultsTableCSV());
+                    StateInspector.BoundedCsv resultsCsv = stateInspector
+                            .getResultsTableCSVBounded((int) MAX_RESULTS_TABLE_BYTES);
+                    addBoundedResultsCsv(state, resultsCsv);
 
                     // Memory
                     MemoryInfo mem = stateInspector.getMemoryInfo();
@@ -4842,9 +6983,11 @@ public class TCPCommandServer {
 
         try {
             if (!latch.await(10000, TimeUnit.MILLISECONDS)) {
+                actionToken.invalidate();
                 return errorResponse("Timed out getting state");
             }
         } catch (InterruptedException e) {
+            actionToken.invalidate();
             Thread.currentThread().interrupt();
             return errorResponse("Interrupted");
         }
@@ -4855,19 +6998,34 @@ public class TCPCommandServer {
         return successResponse((JsonObject) holder[0]);
     }
 
-    private JsonObject handleGetImageInfo() {
+    private JsonObject handleGetImageInfo(final JsonObject request) {
         final Object[] holder = new Object[1];
         final CountDownLatch latch = new CountDownLatch(1);
 
-        SwingUtilities.invokeLater(new Runnable() {
+        GuiActionDispatcher.ActionToken actionToken =
+                GuiActionDispatcher.queueSwingAction(new Runnable() {
             @Override
             public void run() {
                 try {
-                    ImageInfo info = stateInspector.getActiveImageInfo();
-                    if (info != null) {
-                        holder[0] = imageInfoToJson(info);
-                    } else {
+                    ImagePlus image = currentImage();
+                    if (image == null) {
                         holder[0] = null;
+                    } else {
+                        ActiveImageSnapshot snapshot = activeImageSnapshot(image);
+                        JsonObject mismatch = validateImageSnapshot(request, snapshot);
+                        if (mismatch == null) {
+                            mismatch = validateExpectedPlane(request, snapshot);
+                        }
+                        if (mismatch != null) {
+                            holder[0] = mismatch;
+                        } else {
+                            JsonObject result = imageInfoToJson(image);
+                            result.add("value_domain", valueDomain(image));
+                            attachImageSnapshot(result, snapshot, snapshot.channel,
+                                    snapshot.slice, snapshot.slice, snapshot.frame);
+                            holder[0] = imageSnapshotStillCurrent(snapshot)
+                                    ? result : imageSnapshotChanged();
+                        }
                     }
                 } catch (Exception e) {
                     holder[0] = e;
@@ -4879,9 +7037,11 @@ public class TCPCommandServer {
 
         try {
             if (!latch.await(5000, TimeUnit.MILLISECONDS)) {
+                actionToken.invalidate();
                 return errorResponse("Timed out getting image info");
             }
         } catch (InterruptedException e) {
+            actionToken.invalidate();
             Thread.currentThread().interrupt();
             return errorResponse("Interrupted");
         }
@@ -4892,6 +7052,10 @@ public class TCPCommandServer {
         if (holder[0] == null) {
             return errorResponse("No active image");
         }
+        if (holder[0] instanceof JsonObject
+                && ((JsonObject) holder[0]).has("ok")) {
+            return (JsonObject) holder[0];
+        }
         return successResponse((JsonObject) holder[0]);
     }
 
@@ -4899,11 +7063,13 @@ public class TCPCommandServer {
         final Object[] holder = new Object[1];
         final CountDownLatch latch = new CountDownLatch(1);
 
-        SwingUtilities.invokeLater(new Runnable() {
+        GuiActionDispatcher.ActionToken actionToken =
+                GuiActionDispatcher.queueSwingAction(new Runnable() {
             @Override
             public void run() {
                 try {
-                    holder[0] = stateInspector.getResultsTableCSV();
+                    holder[0] = stateInspector.getResultsTableCSVBounded(
+                            (int) MAX_RESULTS_TABLE_BYTES);
                 } catch (Exception e) {
                     holder[0] = e;
                 } finally {
@@ -4914,9 +7080,11 @@ public class TCPCommandServer {
 
         try {
             if (!latch.await(5000, TimeUnit.MILLISECONDS)) {
+                actionToken.invalidate();
                 return errorResponse("Timed out getting results table");
             }
         } catch (InterruptedException e) {
+            actionToken.invalidate();
             Thread.currentThread().interrupt();
             return errorResponse("Interrupted");
         }
@@ -4924,21 +7092,41 @@ public class TCPCommandServer {
         if (holder[0] instanceof Exception) {
             return errorResponse("Error: " + ((Exception) holder[0]).getMessage());
         }
-        return successResponse(new JsonPrimitive((String) holder[0]));
+        StateInspector.BoundedCsv csv = (StateInspector.BoundedCsv) holder[0];
+        if (csv.truncated()) {
+            JsonObject tooLarge = errorResponse("Results table is "
+                    + csv.originalBytes()
+                    + " UTF-8 bytes; direct TCP return is limited to "
+                    + MAX_RESULTS_TABLE_BYTES + " bytes. Export it to AI_Exports instead.");
+            tooLarge.addProperty("actual_bytes", csv.originalBytes());
+            tooLarge.addProperty("limit_bytes", MAX_RESULTS_TABLE_BYTES);
+            tooLarge.addProperty("total_rows", csv.totalRows());
+            tooLarge.addProperty("returned_rows", 0);
+            return tooLarge;
+        }
+        return successResponse(new JsonPrimitive(csv.text()));
     }
 
     private JsonObject handleCaptureImage(JsonObject request, AgentCaps caps, Socket sock) {
+        final long responseBudget = compoundResponseBudget.get().longValue();
+        final int capturePngLimit = maxBinaryBytesForCompoundBudget(
+                responseBudget, MAX_CAPTURE_PNG_BYTES);
+        if (capturePngLimit <= 0) {
+            return compoundBudgetError("capture_image", responseBudget);
+        }
         JsonElement maxSizeElement = request.get("maxSize");
-        int requestedMaxSize = (maxSizeElement != null && maxSizeElement.isJsonPrimitive())
-                ? maxSizeElement.getAsInt()
-                : Constants.MAX_THUMBNAIL_SIZE;
+        final int requestedMaxSize;
+        try {
+            requestedMaxSize = (maxSizeElement != null && maxSizeElement.isJsonPrimitive())
+                    ? maxSizeElement.getAsInt()
+                    : Constants.MAX_THUMBNAIL_SIZE;
+        } catch (RuntimeException invalidSize) {
+            return errorResponse("capture_image maxSize must be an integer");
+        }
         final CaptureSource source = CaptureSource.from(
                 request.has("source") ? request.get("source").getAsString() : null);
-        PrivacyPosture posture = PostureController.getInstance().current();
-        boolean fullResolutionOverride = posture == PrivacyPosture.PSEUDONYMISED
-                && source == CaptureSource.ACTIVE_IMAGE_CONTENT
-                && VisualOverrideRegistry.getInstance().hasGrant(sessionKey(caps, sock));
-        final int maxSize = fullResolutionOverride ? Integer.MAX_VALUE : requestedMaxSize;
+        final PrivacyPosture posture = PostureController.getInstance().current();
+        final String visualSession = sessionKey(caps, sock);
 
         if (source.isRefusedScreenshot()) {
             JsonObject result = new JsonObject();
@@ -4949,26 +7137,56 @@ public class TCPCommandServer {
         final Object[] holder = new Object[1];
         final CountDownLatch latch = new CountDownLatch(1);
 
-        SwingUtilities.invokeLater(new Runnable() {
+        GuiActionDispatcher.ActionToken actionToken =
+                GuiActionDispatcher.queueSwingAction(new Runnable() {
             @Override
             public void run() {
                 try {
-                    ij.ImagePlus imp = ij.WindowManager.getCurrentImage();
+                    ij.ImagePlus imp = currentImage();
                     if (imp == null) {
                         holder[0] = "NO_IMAGE";
                     } else {
+                        ActiveImageSnapshot snapshot = activeImageSnapshot(imp);
+                        JsonObject mismatch = validateImageSnapshot(request, snapshot);
+                        if (mismatch == null) mismatch = validateExpectedPlane(request, snapshot);
+                        if (mismatch != null) {
+                            holder[0] = mismatch;
+                            return;
+                        }
+                        String imageToken = visualImageToken(imp);
+                        boolean fullResolutionOverride =
+                                posture == PrivacyPosture.PSEUDONYMISED
+                                && source == CaptureSource.ACTIVE_IMAGE_CONTENT
+                                && VisualOverrideRegistry.getInstance().hasGrant(
+                                        visualSession, imageToken);
+                        int maxSize = Math.max(1, Math.min(MAX_CAPTURE_DIMENSION,
+                                fullResolutionOverride
+                                        ? MAX_CAPTURE_DIMENSION : requestedMaxSize));
                         byte[] png = source == CaptureSource.ACTIVE_IMAGE_WITH_OVERLAY
-                                ? ImageCapture.captureWithOverlays(imp, maxSize)
-                                : ImageCapture.captureImage(imp, maxSize);
+                                ? ImageCapture.captureWithOverlays(
+                                        imp, maxSize, capturePngLimit)
+                                : ImageCapture.captureImage(
+                                        imp, maxSize, capturePngLimit);
                         if (png == null) {
                             holder[0] = "CAPTURE_FAILED";
+                        } else if (png.length > capturePngLimit) {
+                            holder[0] = "CAPTURE_TOO_LARGE:" + png.length;
                         } else {
                             JsonObject result = new JsonObject();
                             result.addProperty("base64", base64Encode(png));
                             result.addProperty("width", imp.getWidth());
                             result.addProperty("height", imp.getHeight());
                             result.addProperty("source", source.name());
-                            holder[0] = result;
+                            attachImageSnapshot(result, snapshot, snapshot.channel,
+                                    snapshot.slice, snapshot.slice, snapshot.frame);
+                            if (posture == PrivacyPosture.PSEUDONYMISED
+                                    && source == CaptureSource.ACTIVE_IMAGE_CONTENT) {
+                                // Internal hand-off: CaptureHandler removes this
+                                // after atomically consuming the exact image grant.
+                                result.addProperty("_visual_image_token", imageToken);
+                            }
+                            holder[0] = imageSnapshotStillCurrent(snapshot)
+                                    ? result : imageSnapshotChanged();
                         }
                     }
                 } catch (Exception e) {
@@ -4981,21 +7199,42 @@ public class TCPCommandServer {
 
         try {
             if (!latch.await(10000, TimeUnit.MILLISECONDS)) {
+                actionToken.invalidate();
                 return errorResponse("Timed out capturing image");
             }
         } catch (InterruptedException e) {
+            actionToken.invalidate();
             Thread.currentThread().interrupt();
             return errorResponse("Interrupted");
         }
 
         if (holder[0] instanceof Exception) {
+            if (holder[0] instanceof ImageCapture.CaptureTooLargeException) {
+                if (capturePngLimit < MAX_CAPTURE_PNG_BYTES) {
+                    return compoundBudgetError("capture_image", responseBudget);
+                }
+                return errorResponse("Captured PNG exceeds " + capturePngLimit
+                        + " bytes; crop or reduce maxSize.");
+            }
             return errorResponse("Capture error: " + ((Exception) holder[0]).getMessage());
+        }
+        if (holder[0] instanceof JsonObject
+                && ((JsonObject) holder[0]).has("ok")) {
+            return (JsonObject) holder[0];
         }
         if ("NO_IMAGE".equals(holder[0])) {
             return errorResponse("No active image");
         }
         if ("CAPTURE_FAILED".equals(holder[0])) {
             return errorResponse("Failed to capture image");
+        }
+        if (holder[0] instanceof String
+                && ((String) holder[0]).startsWith("CAPTURE_TOO_LARGE:")) {
+            if (capturePngLimit < MAX_CAPTURE_PNG_BYTES) {
+                return compoundBudgetError("capture_image", responseBudget);
+            }
+            return errorResponse("Captured PNG exceeds " + capturePngLimit
+                    + " bytes; crop or reduce maxSize.");
         }
         return successResponse((JsonObject) holder[0]);
     }
@@ -5016,12 +7255,16 @@ public class TCPCommandServer {
                 ? request.get("reason").getAsString()
                 : "";
         String session = sessionKey(caps, sock);
+        ImagePlus requestedImage = currentImage();
+        String imageToken = visualImageToken(requestedImage);
         VisualOverrideRegistry.PendingRequest pending =
-                VisualOverrideRegistry.getInstance().request(session, reason);
+                VisualOverrideRegistry.getInstance().request(session, reason, imageToken);
         JsonObject event = new JsonObject();
         event.addProperty("session", session);
         event.addProperty("request_id", pending.requestId);
         event.addProperty("reason", reason);
+        event.addProperty("image_token", imageToken);
+        event.addProperty("image_display_token", visualImageDisplayToken(requestedImage));
         eventBus.publish("data_governance.visual.requested", event);
 
         result.addProperty("status", "pending_user_consent");
@@ -5030,12 +7273,42 @@ public class TCPCommandServer {
         return successResponse(result);
     }
 
-    private JsonObject handleOpenImage(JsonObject request, boolean tokenOnly) {
-        JsonElement targetElement = firstPresent(request, "token", "image_token", "path", "file");
+    /** Stable, process-local scope for the exact image a visual request covers. */
+    static String visualImageToken(ImagePlus image) {
+        String identity = ImageGraph.stableIdentity(image);
+        return identity == null ? "" : identity;
+    }
+
+    /** Pseudonymous path/title label for display and audit only, never grants. */
+    private static String visualImageDisplayToken(ImagePlus image) {
+        if (image == null) return "";
+        try {
+            ij.io.FileInfo info = image.getOriginalFileInfo();
+            if (info != null && info.directory != null && info.fileName != null) {
+                return PathTokenMap.getInstance().tokenForPath(
+                        Paths.get(info.directory, info.fileName));
+            }
+            return PathTokenMap.getInstance().tokenForSensitiveText(
+                    image.getTitle() == null ? "" : image.getTitle(), "image");
+        } catch (Throwable tokenFailure) {
+            return "image";
+        }
+    }
+
+    private JsonObject handleOpenImage(JsonObject request, boolean tokenOnly,
+                                       AgentCaps caps, Socket sock,
+                                       String command) {
+        JsonObject poll = pollEdtOperation(request, caps, sock, command);
+        if (poll != null) return poll;
+        // `token` is reserved for installation/session authentication at the
+        // transport boundary. Governed file handles always use image_token.
+        JsonElement targetElement = tokenOnly
+                ? request.get("image_token")
+                : firstPresent(request, "image_token", "path", "file");
         if (targetElement == null || !targetElement.isJsonPrimitive()) {
             return errorResponse(tokenOnly
-                    ? "Missing token for open_image_by_token"
-                    : "Missing path or token for open_image");
+                    ? "Missing image_token for open_image_by_token"
+                    : "Missing path, file, or image_token for open_image");
         }
 
         String target = targetElement.getAsString();
@@ -5051,7 +7324,11 @@ public class TCPCommandServer {
             realPath = resolved.realPath();
             series = resolved.series();
         } else {
-            realPath = Paths.get(target);
+            try {
+                realPath = Paths.get(target);
+            } catch (RuntimeException e) {
+                return errorResponse("open_image_failed: invalid path");
+            }
             if (request.has("series") && request.get("series").isJsonPrimitive()) {
                 try {
                     series = request.get("series").getAsInt();
@@ -5061,57 +7338,416 @@ public class TCPCommandServer {
             }
         }
 
-        final String realPathString = realPath.toString();
+        final Path normalizedPath;
+        try {
+            normalizedPath = realPath.toAbsolutePath().normalize();
+        } catch (RuntimeException e) {
+            return errorResponse("open_image_failed: invalid path");
+        }
+        final String realPathString = normalizedPath.toString();
         final int requestedSeries = series;
-        final Object[] holder = new Object[1];
-        final CountDownLatch latch = new CountDownLatch(1);
-        SwingUtilities.invokeLater(new Runnable() {
-            @Override
-            public void run() {
+        final List<ImageGraph.ImageRef> before = currentOpenImageRefs();
+        final ImagePlus activeBefore = currentImage();
+        final Object[] holder = new Object[2];
+        long requestedTimeout = resolveTimeoutMs(request, 30000L);
+        final long timeoutMs = requestedTimeout <= 0L ? 0L
+                : Math.max(1L, Math.min(120000L, requestedTimeout));
+        final String owner = edtOperationOwner(caps, sock, command);
+        try {
+            EdtOperationRegistry.Operation operation = edtOperationRegistry.admit(
+                    owner,
+                    new EdtOperationRegistry.ActionStarter() {
+                        @Override public GuiActionDispatcher.ActionToken start() {
+                            return GuiActionDispatcher.queueSwingAction(new Runnable() {
+                                @Override public void run() {
+                                    try {
+                                        if (openImageOperationForTest != null) {
+                                            openImageOperationForTest.open(
+                                                    realPathString, requestedSeries);
+                                        } else if (requestedSeries >= 0) {
+                                            String options = "open=["
+                                                    + realPathString.replace("]", "\\]") + "] "
+                                                    + "autoscale color_mode=Default view=Hyperstack "
+                                                    + "stack_order=XYCZT series_" + requestedSeries;
+                                            IJ.run("Bio-Formats Importer", options);
+                                        } else {
+                                            IJ.open(realPathString);
+                                        }
+                                    } catch (Throwable failure) {
+                                        holder[0] = failure;
+                                        restoreActiveImageOnEdt(activeBefore);
+                                    }
+                                }
+                            });
+                        }
+                    },
+                    new EdtOperationRegistry.CompletionSupplier() {
+                        private long observationStartedNanos;
+                        private boolean observationStarted;
+
+                        @Override public boolean isReady() {
+                            if (holder[0] instanceof Throwable || holder[1] != null) {
+                                return true;
+                            }
+                            ImageGraph.ImageRef opened = findRequestedOpenedImage(
+                                    before, currentOpenImageRefs(), normalizedPath);
+                            if (opened != null) {
+                                holder[1] = opened;
+                                return true;
+                            }
+                            long now = System.nanoTime();
+                            if (!observationStarted) {
+                                observationStartedNanos = now;
+                                observationStarted = true;
+                            }
+                            long observationMs = timeoutMs <= 0L
+                                    ? 120000L : Math.max(1000L, timeoutMs);
+                            return now - observationStartedNanos
+                                    >= TimeUnit.MILLISECONDS.toNanos(observationMs);
+                        }
+
+                        @Override public JsonObject complete() {
+                            if (holder[0] instanceof Throwable) {
+                                return errorResponse("open_image_failed");
+                            }
+                            ImageGraph.ImageRef opened =
+                                    (ImageGraph.ImageRef) holder[1];
+                            if (opened == null) {
+                                restoreActiveImageAfterEdt(activeBefore);
+                                return errorResponse(
+                                        "open_image_failed: requested image did not open");
+                            }
+                            imageGraph.addOpenedImage(opened);
+                            String baseToken = pseudonymisationFilter.pathTokenMap()
+                                    .tokenForPath(normalizedPath);
+                            JsonObject result = new JsonObject();
+                            result.addProperty("opened", true);
+                            result.addProperty("path_token", requestedSeries >= 0
+                                    ? pseudonymisationFilter.pathTokenMap().tokenForSeries(
+                                            normalizedPath, requestedSeries)
+                                    : baseToken);
+                            result.addProperty("series", requestedSeries);
+                            result.addProperty("resolved_from_token", tokenResolved);
+                            result.addProperty("title", opened.title);
+                            result.addProperty("image_id", opened.identity);
+                            return successResponse(result);
+                        }
+                    });
+            return awaitEdtOperation(operation, owner,
+                    canPollEdtOperation(caps, sock) ? timeoutMs : 0L);
+        } catch (RejectedExecutionException rejected) {
+            return protocolError("edt_operation_capacity",
+                    "The bounded EDT operation queue is full or stopped.");
+        }
+    }
+
+    private List<ImageGraph.ImageRef> currentOpenImageRefs() {
+        return openImagesForTest != null
+                ? openImagesForTest.get() : ImageGraph.captureOpenImages();
+    }
+
+    private ImagePlus currentImage() {
+        return currentImageForTest != null
+                ? currentImageForTest.get() : WindowManager.getCurrentImage();
+    }
+
+    private ActiveImageSnapshot activeImageSnapshot(ImagePlus image) {
+        if (image == null) return null;
+        ImageRevisionTracker.Snapshot revision = imageRevisionTracker.snapshot(image);
+        return new ActiveImageSnapshot(image, revision,
+                image.getC(), image.getZ(), image.getT());
+    }
+
+    /**
+     * Validate an optional optimistic read binding. A caller obtains the
+     * fields from get_image_info, then echoes them on every related read. A
+     * same-shaped active-image switch or in-place dataset edit therefore
+     * fails closed instead of returning data attributed to the old image.
+     */
+    private JsonObject validateImageSnapshot(JsonObject request,
+                                             ActiveImageSnapshot snapshot) {
+        if (request == null || snapshot == null) return null;
+        boolean hasId = request.has("image_id");
+        boolean hasRevision = request.has("image_revision");
+        if (hasId != hasRevision) {
+            return protocolError("invalid_image_snapshot",
+                    "image_id and image_revision must be supplied together.");
+        }
+        JsonElement id = request.get("image_id");
+        if (id != null) {
+            if (!id.isJsonPrimitive() || !id.getAsJsonPrimitive().isString()
+                    || id.getAsString().trim().isEmpty()) {
+                return protocolError("invalid_image_snapshot",
+                        "image_id must be an opaque string from get_image_info.");
+            }
+            if (!snapshot.imageId.equals(id.getAsString())) {
+                return protocolError("image_snapshot_mismatch",
+                        "The active image changed after the initiating read.");
+            }
+        }
+        JsonElement revision = request.get("image_revision");
+        if (revision != null) {
+            try {
+                long expected = strictPositiveLong(revision, "image_revision");
+                if (snapshot.imageRevision != expected) {
+                    return protocolError("image_snapshot_mismatch",
+                            "The active image dataset changed after the initiating read.");
+                }
+            } catch (IllegalArgumentException invalid) {
+                return protocolError("invalid_image_snapshot",
+                        "image_revision must be a positive integer from get_image_info.");
+            }
+        }
+        JsonElement displayRevision = request.get("display_revision");
+        if (displayRevision != null) {
+            if (!hasId) {
+                return protocolError("invalid_image_snapshot",
+                        "display_revision requires image_id and image_revision.");
+            }
+            try {
+                long expected = strictPositiveLong(displayRevision, "display_revision");
+                if (snapshot.displayRevision != expected) {
+                    return protocolError("image_snapshot_mismatch",
+                            "The active image display or annotations changed after the initiating read.");
+                }
+            } catch (IllegalArgumentException invalid) {
+                return protocolError("invalid_image_snapshot",
+                        "display_revision must be a positive integer from get_image_info.");
+            }
+        }
+        return null;
+    }
+
+    private JsonObject validateExpectedPlane(JsonObject request,
+                                             ActiveImageSnapshot snapshot) {
+        try {
+            Integer channel = strictOptionalInt(request, "channel");
+            Integer slice = strictOptionalInt(request, "slice");
+            Integer frame = strictOptionalInt(request, "frame");
+            if ((channel != null && channel.intValue() != snapshot.channel)
+                    || (slice != null && slice.intValue() != snapshot.slice)
+                    || (frame != null && frame.intValue() != snapshot.frame)) {
+                return protocolError("image_snapshot_mismatch",
+                        "The active C/Z/T plane changed after the initiating read.");
+            }
+        } catch (IllegalArgumentException invalid) {
+            return protocolError("invalid_image_plane",
+                    "channel, slice, and frame must be canonical 1-based integers.");
+        }
+        return null;
+    }
+
+    private boolean imageSnapshotStillCurrent(ActiveImageSnapshot snapshot) {
+        return snapshot != null && currentImage() == snapshot.image
+                && imageRevisionTracker.isCurrent(snapshot.revisionSnapshot);
+    }
+
+    private JsonObject imageSnapshotChanged() {
+        return protocolError("image_snapshot_mismatch",
+                "The active image, dataset, display, or annotations changed during the read.");
+    }
+
+    private static long strictPositiveLong(JsonElement element, String field) {
+        if (element == null || !element.isJsonPrimitive()
+                || !element.getAsJsonPrimitive().isNumber()) {
+            throw new IllegalArgumentException(field + " must be an integer");
+        }
+        String raw = element.toString();
+        if (!raw.matches("[1-9][0-9]*")) {
+            throw new IllegalArgumentException(field + " must be a canonical positive integer");
+        }
+        try {
+            return Long.parseLong(raw);
+        } catch (NumberFormatException invalid) {
+            throw new IllegalArgumentException(field + " is outside integer range", invalid);
+        }
+    }
+
+    private static Integer strictOptionalInt(JsonObject request, String field) {
+        if (request == null || !request.has(field)) return null;
+        JsonElement element = request.get(field);
+        if (element == null || !element.isJsonPrimitive()
+                || !element.getAsJsonPrimitive().isNumber()) {
+            throw new IllegalArgumentException(field + " must be an integer");
+        }
+        String raw = element.toString();
+        if (!raw.matches("-?(?:0|[1-9][0-9]*)")) {
+            throw new IllegalArgumentException(field + " must be a canonical integer");
+        }
+        try {
+            return Integer.valueOf(Integer.parseInt(raw));
+        } catch (NumberFormatException invalid) {
+            throw new IllegalArgumentException(field + " is outside integer range", invalid);
+        }
+    }
+
+    private static void attachImageSnapshot(JsonObject result,
+                                            ActiveImageSnapshot snapshot,
+                                            int channel, int sliceStart,
+                                            int sliceEnd, int frame) {
+        result.addProperty("image_id", snapshot.imageId);
+        result.addProperty("image_revision", snapshot.imageRevision);
+        result.addProperty("display_revision", snapshot.displayRevision);
+        result.addProperty("channel", channel);
+        result.addProperty("sliceStart", sliceStart);
+        result.addProperty("sliceEnd", sliceEnd);
+        result.addProperty("sliceAxis", "Z");
+        result.addProperty("frame", frame);
+        result.addProperty("channels", snapshot.channels);
+        result.addProperty("slices", snapshot.slices);
+        result.addProperty("frames", snapshot.frames);
+    }
+
+    /**
+     * Respect a timeout only while an EDT mutation is still queued. Once the
+     * action has started, join its actual completion before returning any
+     * terminal reply; otherwise Fiji could keep mutating after the client was
+     * told the operation had timed out.
+     */
+    private static boolean awaitEdtMutation(CountDownLatch completed,
+                                            GuiActionDispatcher.ActionToken token,
+                                            long timeoutMs)
+            throws InterruptedException {
+        boolean actionCompleted = false;
+        boolean interrupted = false;
+        try {
+            if (timeoutMs <= 0L) {
+                completed.await();
+                actionCompleted = true;
+            } else {
+                actionCompleted = completed.await(timeoutMs, TimeUnit.MILLISECONDS);
+            }
+        } catch (InterruptedException beforeExit) {
+            if (token.invalidate()) throw beforeExit;
+            interrupted = true;
+        }
+        if (!actionCompleted && !interrupted && token.invalidate()) return false;
+
+        while (!actionCompleted) {
+            try {
+                completed.await();
+                actionCompleted = true;
+            } catch (InterruptedException ignored) {
+                interrupted = true;
+            }
+        }
+        // The handler's latch is released from inside the queued runnable's
+        // finally block. Join the ActionToken as well so the wrapper itself
+        // has returned and terminal really means the EDT action exited.
+        while (!token.isFinished()) {
+            try {
+                token.awaitFinished();
+            } catch (InterruptedException ignored) {
+                interrupted = true;
+            }
+        }
+        if (interrupted) Thread.currentThread().interrupt();
+        return true;
+    }
+
+    static ImageGraph.ImageRef findRequestedOpenedImage(
+            List<ImageGraph.ImageRef> before, List<ImageGraph.ImageRef> after,
+            Path requestedPath) {
+        Set<String> prior = new HashSet<String>();
+        if (before != null) {
+            for (ImageGraph.ImageRef ref : before) prior.add(ref.identity);
+        }
+        List<ImageGraph.ImageRef> added = new ArrayList<ImageGraph.ImageRef>();
+        if (after != null) {
+            for (ImageGraph.ImageRef ref : after) {
+                if (!prior.contains(ref.identity)) added.add(ref);
+            }
+        }
+        for (ImageGraph.ImageRef ref : added) {
+            if (ref.sourcePath != null && requestedPath != null) {
                 try {
-                    if (requestedSeries >= 0) {
-                        String options = "open=[" + realPathString.replace("]", "\\]") + "] "
-                                + "autoscale color_mode=Default view=Hyperstack "
-                                + "stack_order=XYCZT series_" + requestedSeries;
-                        IJ.run("Bio-Formats Importer", options);
-                    } else {
-                        IJ.open(realPathString);
+                    if (Paths.get(ref.sourcePath).toAbsolutePath().normalize()
+                            .equals(requestedPath.toAbsolutePath().normalize())) {
+                        return ref;
                     }
-                    ImagePlus imp = WindowManager.getCurrentImage();
-                    holder[0] = imp == null ? "OPEN_FAILED" : imp.getTitle();
-                } catch (Exception e) {
-                    holder[0] = e;
+                } catch (RuntimeException ignore) {}
+            }
+        }
+        // Some readers do not retain OriginalFileInfo. A single new identity
+        // created by this completed open call is still causal evidence; never
+        // accept a pre-existing active image or choose among ambiguous opens.
+        return added.size() == 1 && added.get(0).sourcePath == null
+                ? added.get(0) : null;
+    }
+
+    static List<ImageGraph.ImageRef> newImageRefs(
+            List<ImageGraph.ImageRef> before, List<ImageGraph.ImageRef> after) {
+        Set<String> prior = new HashSet<String>();
+        if (before != null) {
+            for (ImageGraph.ImageRef ref : before) prior.add(ref.identity);
+        }
+        List<ImageGraph.ImageRef> added = new ArrayList<ImageGraph.ImageRef>();
+        if (after != null) {
+            for (ImageGraph.ImageRef ref : after) {
+                if (!prior.contains(ref.identity)) added.add(ref);
+            }
+        }
+        return added;
+    }
+
+    private static JsonArray imageTitles(List<ImageGraph.ImageRef> images) {
+        JsonArray titles = new JsonArray();
+        for (ImageGraph.ImageRef ref : images) titles.add(ref.title);
+        return titles;
+    }
+
+    private void restoreActiveImage(final ImagePlus activeBefore) {
+        if (activeBefore == null || currentImage() == activeBefore) return;
+        final ImageWindow window = activeBefore.getWindow();
+        if (window == null) return;
+        final CountDownLatch restored = new CountDownLatch(1);
+        GuiActionDispatcher.ActionToken token =
+                GuiActionDispatcher.queueSwingAction(new Runnable() {
+            @Override public void run() {
+                try {
+                    WindowManager.setCurrentWindow(window);
                 } finally {
-                    latch.countDown();
+                    restored.countDown();
                 }
             }
         });
-
         try {
-            if (!latch.await(30000, TimeUnit.MILLISECONDS)) {
-                return errorResponse("Timed out opening image");
-            }
+            if (!restored.await(2000L, TimeUnit.MILLISECONDS)) token.invalidate();
         } catch (InterruptedException e) {
+            token.invalidate();
             Thread.currentThread().interrupt();
-            return errorResponse("Interrupted");
         }
-        if (holder[0] instanceof Exception) {
-            return errorResponse("open_image_failed");
-        }
-        if ("OPEN_FAILED".equals(holder[0])) {
-            return errorResponse("open_image_failed");
-        }
+    }
 
-        String baseToken = pseudonymisationFilter.pathTokenMap().tokenForPath(realPath);
-        JsonObject result = new JsonObject();
-        result.addProperty("opened", true);
-        result.addProperty("path_token", requestedSeries >= 0
-                ? pseudonymisationFilter.pathTokenMap().tokenForSeries(realPath, requestedSeries)
-                : baseToken);
-        result.addProperty("series", requestedSeries);
-        result.addProperty("resolved_from_token", tokenResolved);
-        result.addProperty("title", String.valueOf(holder[0]));
-        return successResponse(result);
+    /** Restore directly when the caller is already inside the EDT action. */
+    private void restoreActiveImageOnEdt(ImagePlus activeBefore) {
+        if (activeBefore == null || currentImage() == activeBefore) return;
+        ImageWindow window = activeBefore.getWindow();
+        if (window != null) WindowManager.setCurrentWindow(window);
+    }
+
+    /** Join the restoration mutation before publishing a terminal failure. */
+    private void restoreActiveImageAfterEdt(final ImagePlus activeBefore) {
+        if (activeBefore == null || currentImage() == activeBefore) return;
+        if (SwingUtilities.isEventDispatchThread()) {
+            restoreActiveImageOnEdt(activeBefore);
+            return;
+        }
+        GuiActionDispatcher.ActionToken token =
+                GuiActionDispatcher.queueSwingAction(new Runnable() {
+                    @Override public void run() {
+                        restoreActiveImageOnEdt(activeBefore);
+                    }
+                });
+        boolean interrupted = false;
+        while (!token.isFinished()) {
+            try {
+                token.awaitFinished();
+            } catch (InterruptedException ignored) {
+                interrupted = true;
+            }
+        }
+        if (interrupted) Thread.currentThread().interrupt();
     }
 
     private JsonObject handleBrowsePendingBrief(JsonObject request, AgentCaps caps, Socket sock) {
@@ -5173,6 +7809,7 @@ public class TCPCommandServer {
         }
 
         JsonArray stepsArray = stepsElement.getAsJsonArray();
+        final long pipelineTimeoutMs = resolveTimeoutMs(request, PIPELINE_TIMEOUT_MS);
         final List<PipelineBuilder.PipelineStep> steps = new ArrayList<PipelineBuilder.PipelineStep>();
         // Step 04: mirror handleExecuteMacro's pre-validation for each step's
         // macro code. Any rejection short-circuits the whole pipeline; a
@@ -5220,40 +7857,55 @@ public class TCPCommandServer {
         // stored on derived nodes is the concatenated step code so the
         // graph carries enough provenance to rerun the full chain. Per
         // plan: docs/tcp_upgrade/13_provenance_graph.md.
-        final Set<String> graphTitlesBefore = ImageGraph.captureOpenTitles();
-        final String graphActiveTitleBefore = ImageGraph.captureActiveTitle();
         final long graphMarkerBefore = imageGraph.currentMarker();
         final StringBuilder pipelineMacro = new StringBuilder();
         for (PipelineBuilder.PipelineStep s : steps) {
             if (pipelineMacro.length() > 0) pipelineMacro.append('\n');
             if (s.macroCode != null) pipelineMacro.append(s.macroCode);
         }
+        final String pipelineCode = pipelineMacro.toString();
+        final boolean safetyEnabled = isScientificIntegrityScanEnabled(caps);
+        final List<DestructiveScanner.DestructiveOp> safetyFindings =
+                collectMacroSafetyFindings(
+                        pipelineCode, caps, safetyEnabled);
 
         // Step 15: pipelines are macro chains; treat them as a script-level
         // boundary so a later rewind cannot undo only some of the steps.
         // Plan §Out-of-scope on script-runs applies here by extension.
-        if (caps != null && caps.undo) {
-            try {
-                ImagePlus boundaryImp = WindowManager.getCurrentImage();
-                if (boundaryImp != null) {
-                    sessionUndo.pushBoundary(boundaryImp.getTitle(), nextCallId());
-                }
-            } catch (Throwable ignore) {}
-        }
-
-        // executePipeline calls commandEngine.executeMacro() which handles EDT
-        // dispatch internally, so call directly from TCP handler thread.
-        // Step 15: announce in-flight + serialise behind MACRO_MUTEX so a
-        // concurrent rewind sees UNDO_BUSY rather than racing the chain.
+        // Submit the complete chain once so no stage can interleave with
+        // another mutation. In-flight accounting keeps rewind fail-closed.
+        PipelineMutationContext pipelineMutationContext = null;
         macroInFlight.incrementAndGet();
         try {
-        synchronized (MACRO_MUTEX) {
             try {
-                pipelineBuilder.executePipeline(pipeline, null);
-            } catch (Exception e) {
-                return errorResponse("Pipeline error: " + e.getMessage());
+                pipelineMutationContext = submitPipelineMutation(pipeline,
+                        pipelineCode, pipelineTimeoutMs, caps, true,
+                        safetyFindings, graphMarkerBefore);
+                pipelineMutationContext.future.get();
+            } catch (IllegalArgumentException
+                     | java.util.concurrent.RejectedExecutionException e) {
+                return errorResponse("Mutation admission rejected: " + e.getMessage());
+            } catch (InterruptedException e) {
+                if (pipelineMutationContext != null) {
+                    pipelineMutationContext.future.cancel(true);
+                    awaitFutureTerminal(pipelineMutationContext.future);
+                }
+                Thread.currentThread().interrupt();
+                return errorResponse("Pipeline interrupted");
+            } catch (ExecutionException e) {
+                Throwable cause = e.getCause();
+                if (cause instanceof DestructiveMacroException) {
+                    return destructiveBlockedReply(
+                            ((DestructiveMacroException) cause).rejections, caps);
+                }
+                if (cause instanceof MutationTimedOutException) {
+                    return errorResponse("Pipeline timed out after "
+                            + pipelineTimeoutMs + "ms");
+                }
+                return errorResponse("Pipeline error: "
+                        + (cause == null || cause.getMessage() == null
+                                ? "unknown error" : cause.getMessage()));
             }
-        }
         } finally {
             macroInFlight.decrementAndGet();
         }
@@ -5298,14 +7950,11 @@ public class TCPCommandServer {
         // single reply field. Origin is "pipeline" so downstream agents can
         // distinguish pipeline-built provenance from ad-hoc macros.
         try {
-            Set<String> graphTitlesAfter = ImageGraph.captureOpenTitles();
-            imageGraph.trackMacroChange(graphTitlesBefore, graphActiveTitleBefore,
-                    graphTitlesAfter, pipelineMacro.toString(), "pipeline");
-            if (caps != null && caps.graphDelta) {
-                ImageGraph.Delta gDelta = imageGraph.deltaSince(graphMarkerBefore);
-                if (!gDelta.isEmpty()) {
-                    resultJson.add("graphDelta", gDelta.toJson());
-                }
+            ImageGraph.Delta gDelta = pipelineMutationContext == null
+                    ? null : pipelineMutationContext.graphDelta.get();
+            if (caps != null && caps.graphDelta
+                    && gDelta != null && !gDelta.isEmpty()) {
+                resultJson.add("graphDelta", gDelta.toJson());
             }
         } catch (Throwable ignore) {}
         return successResponse(resultJson);
@@ -5346,7 +7995,14 @@ public class TCPCommandServer {
             rJson.addProperty("objectCount", r.objectCount);
             rJson.addProperty("meanArea", r.meanArea);
             rJson.addProperty("meanCircularity", r.meanCircularity);
-            rJson.addProperty("coverage", r.coverage);
+            rJson.addProperty("binaryMask", r.binaryMask);
+            rJson.addProperty("metricLabel", r.metricLabel);
+            if (!Double.isNaN(r.coverage)) {
+                rJson.addProperty("coverage", r.coverage);
+            }
+            if (!Double.isNaN(r.metricValue)) {
+                rJson.addProperty("metricValue", r.metricValue);
+            }
             rJson.addProperty("summary", r.summary);
             if (r.thumbnail != null && r.thumbnail.length > 0) {
                 rJson.addProperty("thumbnail", base64Encode(r.thumbnail));
@@ -5361,7 +8017,8 @@ public class TCPCommandServer {
         final Object[] holder = new Object[1];
         final CountDownLatch latch = new CountDownLatch(1);
 
-        SwingUtilities.invokeLater(new Runnable() {
+        GuiActionDispatcher.ActionToken actionToken =
+                GuiActionDispatcher.queueSwingAction(new Runnable() {
             @Override
             public void run() {
                 try {
@@ -5376,9 +8033,11 @@ public class TCPCommandServer {
 
         try {
             if (!latch.await(5000, TimeUnit.MILLISECONDS)) {
+                actionToken.invalidate();
                 return errorResponse("Timed out getting state context");
             }
         } catch (InterruptedException e) {
+            actionToken.invalidate();
             Thread.currentThread().interrupt();
             return errorResponse("Interrupted");
         }
@@ -5389,24 +8048,153 @@ public class TCPCommandServer {
         return successResponse(new JsonPrimitive((String) holder[0]));
     }
 
+    /**
+     * {@code get_log} — the ImageJ Log window contents.
+     *
+     * <p>Three states have to stay distinguishable, and the envelope alone
+     * cannot keep them apart: {@code IJ.getLog()} returns null until the Log
+     * window has been created, an existing Log window can be empty, and a log
+     * whose whole contents are the string {@code <empty>} wraps to exactly what
+     * both of those wrap to. A Fiji that has never logged used to report one
+     * line of log.</p>
+     *
+     * <p>So the state goes in the source tag — {@code LOG}, {@code LOG:empty}
+     * or {@code LOG:absent} — which is generated here and which content can
+     * never forge, and is repeated as booleans for clients that would rather
+     * not parse it. The tag lives inside {@code result}, so it is covered by
+     * the readonly dedup hash and a caller polling with {@code if_none_match}
+     * still sees the transition.</p>
+     */
     private JsonObject handleGetLog() {
         String log = IJ.getLog();
-        return successResponse(new JsonPrimitive(AgentContextSanitizer.wrap(log, "LOG")));
+        boolean present = log != null;
+        boolean empty = AgentContextSanitizer.isEmptyAfterSanitising(log);
+        String tag = !present ? "LOG:absent" : empty ? "LOG:empty" : "LOG";
+        JsonObject response = successResponse(
+                new JsonPrimitive(AgentContextSanitizer.wrap(log, tag)));
+        response.addProperty("log_present", present);
+        response.addProperty("log_empty", empty);
+        return response;
     }
 
-    private JsonObject handleGetHistogram() {
+    private JsonObject handleGetHistogram(final JsonObject request) {
+        final Integer requestedChannel;
+        final Integer requestedSlice;
+        final Integer requestedFrame;
+        final String scope;
+        try {
+            requestedChannel = strictOptionalInt(request, "channel");
+            requestedSlice = strictOptionalInt(request, "slice");
+            requestedFrame = strictOptionalInt(request, "frame");
+            JsonElement scopeElement = request.get("scope");
+            if (scopeElement == null) {
+                scope = "active_roi";
+            } else if (scopeElement.isJsonPrimitive()
+                    && scopeElement.getAsJsonPrimitive().isString()
+                    && ("active_roi".equals(scopeElement.getAsString())
+                    || "full_plane".equals(scopeElement.getAsString()))) {
+                scope = scopeElement.getAsString();
+            } else {
+                throw new IllegalArgumentException("invalid scope");
+            }
+        } catch (IllegalArgumentException invalid) {
+            return protocolError("invalid_image_plane",
+                    "scope must be active_roi or full_plane; C/Z/T must be canonical integers.");
+        }
         final Object[] holder = new Object[1];
         final CountDownLatch latch = new CountDownLatch(1);
 
-        SwingUtilities.invokeLater(new Runnable() {
+        GuiActionDispatcher.ActionToken actionToken =
+                GuiActionDispatcher.queueSwingAction(new Runnable() {
             @Override
             public void run() {
                 try {
-                    ImagePlus imp = WindowManager.getCurrentImage();
+                    ImagePlus imp = currentImage();
                     if (imp == null) {
                         holder[0] = "NO_IMAGE";
                     } else {
-                        ImageStatistics stats = imp.getStatistics();
+                        ActiveImageSnapshot snapshot = activeImageSnapshot(imp);
+                        JsonObject mismatch = validateImageSnapshot(request, snapshot);
+                        if (mismatch != null) {
+                            holder[0] = mismatch;
+                            return;
+                        }
+                        int channel = requestedChannel == null
+                                ? snapshot.channel : requestedChannel.intValue();
+                        int slice = requestedSlice == null
+                                ? snapshot.slice : requestedSlice.intValue();
+                        int frame = requestedFrame == null
+                                ? snapshot.frame : requestedFrame.intValue();
+                        if (channel < 1 || channel > snapshot.channels
+                                || slice < 1 || slice > snapshot.slices
+                                || frame < 1 || frame > snapshot.frames) {
+                            holder[0] = protocolError("invalid_image_plane",
+                                    "Requested C/Z/T plane is outside the active image.");
+                            return;
+                        }
+                        int stackIndex = imp.getStackIndex(channel, slice, frame);
+                        // ImagePlus retains the live processor (including a
+                        // ColorProcessor's local RGB weights) only for the
+                        // current plane. ImageStack reconstructs processors
+                        // from stored pixels and therefore loses that local
+                        // override. Use the live processor when it represents
+                        // the requested plane; other planes use ImageJ's
+                        // global conversion weights, just as their reconstructed
+                        // processors do.
+                        ImageProcessor source = stackIndex == imp.getCurrentSlice()
+                                ? imp.getProcessor()
+                                : imp.getStack().getProcessor(stackIndex);
+                        double[] rgbWeights = rgbScalarizationWeights(source);
+                        if (source instanceof ColorProcessor
+                                && !supportedRgbScalarizationWeights(rgbWeights)) {
+                            holder[0] = stateConfigurationError(
+                                    "unsupported_rgb_weights",
+                                    UNSUPPORTED_RGB_WEIGHTS_MESSAGE,
+                                    UNSUPPORTED_RGB_WEIGHTS_RECOVERY_HINT);
+                            return;
+                        }
+                        ImageProcessor statisticsProcessor = source.duplicate();
+                        if (rgbWeights != null
+                                && statisticsProcessor instanceof ColorProcessor) {
+                            // ColorProcessor.duplicate() drops processor-local RGB
+                            // weights. Preserve the exact conversion used by the
+                            // source so the statistics and their metadata agree.
+                            ((ColorProcessor) statisticsProcessor)
+                                    .setRGBWeights(rgbWeights.clone());
+                        }
+                        statisticsProcessor.setCalibrationTable(null);
+                        Roi activeRoi = "active_roi".equals(scope) ? imp.getRoi() : null;
+                        if (activeRoi != null
+                                && roiAppliesToPlane(activeRoi, channel, slice, frame)) {
+                            statisticsProcessor.setRoi(activeRoi);
+                        } else {
+                            activeRoi = null;
+                            statisticsProcessor.resetRoi();
+                        }
+                        ImageStatistics stats = ImageStatistics.getStatistics(statisticsProcessor);
+                        AcquisitionLimits limits = acquisitionLimits(imp);
+                        long lowCount = 0L;
+                        long highCount = 0L;
+                        if (limits.known()) {
+                            // ImageStatistics reads the processor's clipped ROI and
+                            // byte mask, not Roi.contains(). Those semantics differ
+                            // for line/point selections and can differ after an
+                            // irregular ROI is clipped at the image boundary. Reuse
+                            // the exact processor state that produced the histogram.
+                            Rectangle bounds = statisticsProcessor.getRoi();
+                            byte[] mask = statisticsProcessor.getMaskArray();
+                            for (int y = bounds.y, maskY = 0;
+                                 y < bounds.y + bounds.height; y++, maskY++) {
+                                int maskIndex = maskY * bounds.width;
+                                for (int x = bounds.x; x < bounds.x + bounds.width;
+                                     x++, maskIndex++) {
+                                    if (mask != null && mask[maskIndex] == 0) continue;
+                                    double value = statisticsProcessor.getf(x, y);
+                                    if (value == limits.rawMin.doubleValue()) lowCount++;
+                                    if (value == limits.rawMax.doubleValue()) highCount++;
+                                }
+                            }
+                        }
                         JsonObject result = new JsonObject();
                         result.addProperty("min", stats.min);
                         result.addProperty("max", stats.max);
@@ -5421,7 +8209,13 @@ public class TCPCommandServer {
                             }
                         }
                         result.add("bins", bins);
-                        holder[0] = result;
+                        result.addProperty("scope", scope);
+                        result.add("value_domain",
+                                histogramValueDomain(imp, rgbWeights));
+                        attachLimitCounts(result, limits, lowCount, highCount);
+                        attachImageSnapshot(result, snapshot, channel, slice, slice, frame);
+                        holder[0] = imageSnapshotStillCurrent(snapshot)
+                                ? result : imageSnapshotChanged();
                     }
                 } catch (Exception e) {
                     holder[0] = e;
@@ -5433,9 +8227,11 @@ public class TCPCommandServer {
 
         try {
             if (!latch.await(5000, TimeUnit.MILLISECONDS)) {
+                actionToken.invalidate();
                 return errorResponse("Timed out getting histogram");
             }
         } catch (InterruptedException e) {
+            actionToken.invalidate();
             Thread.currentThread().interrupt();
             return errorResponse("Interrupted");
         }
@@ -5446,14 +8242,26 @@ public class TCPCommandServer {
         if ("NO_IMAGE".equals(holder[0])) {
             return errorResponse("No active image");
         }
+        if (holder[0] instanceof JsonObject
+                && ((JsonObject) holder[0]).has("ok")) {
+            return (JsonObject) holder[0];
+        }
         return successResponse((JsonObject) holder[0]);
+    }
+
+    private static boolean roiAppliesToPlane(Roi roi, int channel, int slice, int frame) {
+        return roi == null
+                || ((roi.getCPosition() == 0 || roi.getCPosition() == channel)
+                && (roi.getZPosition() == 0 || roi.getZPosition() == slice)
+                && (roi.getTPosition() == 0 || roi.getTPosition() == frame));
     }
 
     private JsonObject handleGetOpenWindows() {
         final Object[] holder = new Object[1];
         final CountDownLatch latch = new CountDownLatch(1);
 
-        SwingUtilities.invokeLater(new Runnable() {
+        GuiActionDispatcher.ActionToken actionToken =
+                GuiActionDispatcher.queueSwingAction(new Runnable() {
             @Override
             public void run() {
                 try {
@@ -5472,16 +8280,15 @@ public class TCPCommandServer {
                     }
                     result.add("images", images);
 
-                    // Non-image windows
+                    // Non-image windows. WindowManager only knows frames that
+                    // registered with ImageJ itself; ordinary Swing frames
+                    // such as ImageJAI's assistant are absent even while they
+                    // are visible and present in get_ui_tree. Fold in every
+                    // showing AWT Frame/Dialog so get_open_windows and the
+                    // automation tree describe the same desktop.
                     JsonArray nonImages = new JsonArray();
-                    Frame[] frames = WindowManager.getNonImageWindows();
-                    if (frames != null) {
-                        for (int i = 0; i < frames.length; i++) {
-                            String title = frames[i].getTitle();
-                            if (title != null && !title.isEmpty()) {
-                                nonImages.add(new JsonPrimitive(title));
-                            }
-                        }
+                    for (String title : collectNonImageWindowTitles()) {
+                        nonImages.add(new JsonPrimitive(title));
                     }
                     result.add("nonImages", nonImages);
 
@@ -5496,9 +8303,11 @@ public class TCPCommandServer {
 
         try {
             if (!latch.await(5000, TimeUnit.MILLISECONDS)) {
+                actionToken.invalidate();
                 return errorResponse("Timed out getting open windows");
             }
         } catch (InterruptedException e) {
+            actionToken.invalidate();
             Thread.currentThread().interrupt();
             return errorResponse("Interrupted");
         }
@@ -5509,18 +8318,59 @@ public class TCPCommandServer {
         return successResponse((JsonObject) holder[0]);
     }
 
-    private JsonObject handleGetMetadata() {
+    static java.util.List<String> collectNonImageWindowTitles() {
+        java.util.LinkedHashSet<String> titles =
+                new java.util.LinkedHashSet<String>();
+
+        Frame[] frames = WindowManager.getNonImageWindows();
+        if (frames != null) {
+            for (Frame frame : frames) {
+                if (frame == null || !frame.isShowing()) continue;
+                String title = frame.getTitle();
+                if (title != null && !title.trim().isEmpty()) {
+                    titles.add(title);
+                }
+            }
+        }
+
+        for (java.awt.Window window : java.awt.Window.getWindows()) {
+            if (window == null || !window.isShowing()
+                    || window instanceof ij.gui.ImageWindow) {
+                continue;
+            }
+            String title = null;
+            if (window instanceof Frame) {
+                title = ((Frame) window).getTitle();
+            } else if (window instanceof java.awt.Dialog) {
+                title = ((java.awt.Dialog) window).getTitle();
+            }
+            if (title != null && !title.trim().isEmpty()) {
+                titles.add(title);
+            }
+        }
+        return new java.util.ArrayList<String>(titles);
+    }
+
+    private JsonObject handleGetMetadata(final JsonObject request) {
         final Object[] holder = new Object[1];
         final CountDownLatch latch = new CountDownLatch(1);
 
-        SwingUtilities.invokeLater(new Runnable() {
+        GuiActionDispatcher.ActionToken actionToken =
+                GuiActionDispatcher.queueSwingAction(new Runnable() {
             @Override
             public void run() {
                 try {
-                    ImagePlus imp = WindowManager.getCurrentImage();
+                    ImagePlus imp = currentImage();
                     if (imp == null) {
                         holder[0] = "NO_IMAGE";
                     } else {
+                        ActiveImageSnapshot snapshot = activeImageSnapshot(imp);
+                        JsonObject mismatch = validateImageSnapshot(request, snapshot);
+                        if (mismatch == null) mismatch = validateExpectedPlane(request, snapshot);
+                        if (mismatch != null) {
+                            holder[0] = mismatch;
+                            return;
+                        }
                         JsonObject result = new JsonObject();
                         result.addProperty("title", imp.getTitle());
 
@@ -5559,7 +8409,11 @@ public class TCPCommandServer {
                             result.add("calibration", calJson);
                         }
 
-                        holder[0] = result;
+                        result.add("value_domain", valueDomain(imp));
+                        attachImageSnapshot(result, snapshot, snapshot.channel,
+                                snapshot.slice, snapshot.slice, snapshot.frame);
+                        holder[0] = imageSnapshotStillCurrent(snapshot)
+                                ? result : imageSnapshotChanged();
                     }
                 } catch (Exception e) {
                     holder[0] = e;
@@ -5571,9 +8425,11 @@ public class TCPCommandServer {
 
         try {
             if (!latch.await(5000, TimeUnit.MILLISECONDS)) {
+                actionToken.invalidate();
                 return errorResponse("Timed out getting metadata");
             }
         } catch (InterruptedException e) {
+            actionToken.invalidate();
             Thread.currentThread().interrupt();
             return errorResponse("Interrupted");
         }
@@ -5583,6 +8439,10 @@ public class TCPCommandServer {
         }
         if ("NO_IMAGE".equals(holder[0])) {
             return errorResponse("No active image");
+        }
+        if (holder[0] instanceof JsonObject
+                && ((JsonObject) holder[0]).has("ok")) {
+            return (JsonObject) holder[0];
         }
         return successResponse((JsonObject) holder[0]);
     }
@@ -5596,25 +8456,58 @@ public class TCPCommandServer {
      *
      * <p>Response shape: {@code {"ok":true,"result":{"path":"AI_Exports/methods.md","fieldCoverage":"21/33"}}}.
      */
-    JsonObject handleEmitMethodsTable(JsonObject request) {
+    JsonObject handleEmitMethodsTable(JsonObject request, AgentCaps caps) {
+        final SessionCodeJournal.DatasetBinding initiatingDataset =
+                SessionCodeJournal.captureInitiatingDataset();
         try {
-            ProcessBuilder pb = new ProcessBuilder(
-                    "python", "agent/methods_table.py");
-            pb.redirectErrorStream(true);
-            Process proc = pb.start();
-            StringBuilder sb = new StringBuilder();
-            try (BufferedReader rdr = new BufferedReader(new InputStreamReader(
-                    proc.getInputStream(), StandardCharsets.UTF_8))) {
-                String line;
-                while ((line = rdr.readLine()) != null) {
-                    sb.append(line).append('\n');
+            Path methodsScript = resolveMethodsTableScript();
+            List<String> command = new ArrayList<String>();
+            command.add(resolvePythonExecutable());
+            command.add(methodsScript.toString());
+            JsonObject datasetJson = new JsonObject();
+            if (initiatingDataset.identity != null) {
+                datasetJson.addProperty("identity", initiatingDataset.identity);
+            }
+            if (initiatingDataset.hash != null) {
+                datasetJson.addProperty("hash", initiatingDataset.hash);
+            }
+            datasetJson.addProperty("title", initiatingDataset.title);
+            if (initiatingDataset.sourcePath != null) {
+                datasetJson.addProperty("filePath", initiatingDataset.sourcePath);
+            }
+            datasetJson.addProperty("width", initiatingDataset.width);
+            datasetJson.addProperty("height", initiatingDataset.height);
+            datasetJson.addProperty("nSlices", initiatingDataset.slices);
+            datasetJson.addProperty("nChannels", initiatingDataset.channels);
+            datasetJson.addProperty("nFrames", initiatingDataset.frames);
+            datasetJson.addProperty("bitDepth", initiatingDataset.bitDepth);
+            attachMethodsSessionMetadata(datasetJson, caps);
+            command.add("--dataset-json");
+            command.add(datasetJson.toString());
+            if (initiatingDataset.sourcePath != null) {
+                Path source = Paths.get(initiatingDataset.sourcePath).toAbsolutePath().normalize();
+                Path parent = source.getParent();
+                if (parent != null) {
+                    command.add("--out");
+                    command.add(parent.resolve("AI_Exports").resolve("methods.md").toString());
                 }
             }
-            int exit = proc.waitFor();
-            String output = sb.toString();
-            if (exit != 0) {
-                return errorResponse("methods_table.py exited " + exit + ": "
-                        + output.trim());
+            BoundedProcessRunner.Result execution = BoundedProcessRunner.run(
+                    command, METHODS_PROCESS_TIMEOUT_MS, MAX_PROCESS_OUTPUT_BYTES);
+            String output = execution.output;
+            if (execution.timedOut) {
+                return errorResponse("methods_table.py timed out after "
+                        + METHODS_PROCESS_TIMEOUT_MS + " ms; process terminated="
+                        + execution.terminated + ": " + output.trim()
+                        + (execution.outputTruncated
+                        ? " [output truncated at " + MAX_PROCESS_OUTPUT_BYTES + " bytes]"
+                        : ""));
+            }
+            if (execution.exitCode != 0) {
+                return errorResponse("methods_table.py exited " + execution.exitCode + ": "
+                        + output.trim() + (execution.outputTruncated
+                        ? " [output truncated at " + MAX_PROCESS_OUTPUT_BYTES + " bytes]"
+                        : ""));
             }
             // stdout looks like:
             //   "emitted methods.md: 21/33 WG11 fields populated, 12 marked [unknown] -> /path/methods.md"
@@ -5630,13 +8523,68 @@ public class TCPCommandServer {
             JsonObject result = new JsonObject();
             if (path != null) result.addProperty("path", path);
             if (coverage != null) result.addProperty("fieldCoverage", coverage);
+            if (initiatingDataset.identity != null) {
+                result.addProperty("datasetIdentity", initiatingDataset.identity);
+            }
+            if (initiatingDataset.hash != null) {
+                result.addProperty("datasetHash", initiatingDataset.hash);
+            }
             result.addProperty("output", output.trim());
+            result.addProperty("output_truncated", execution.outputTruncated);
+            result.addProperty("output_total_bytes", execution.totalOutputBytes);
             return successResponse(result);
         } catch (IOException | InterruptedException e) {
             if (e instanceof InterruptedException) {
                 Thread.currentThread().interrupt();
             }
             return errorResponse("emit_methods_table failed: " + e.getMessage());
+        }
+    }
+
+    static void attachMethodsSessionMetadata(JsonObject datasetJson, AgentCaps caps) {
+        datasetJson.addProperty("imagejVersion", IJ.getVersion());
+        if (caps == null) return;
+        if (caps.sessionId != null && !caps.sessionId.trim().isEmpty()) {
+            datasetJson.addProperty("tcpSessionId", caps.sessionId.trim());
+        }
+        if (caps.clientSessionId != null && !caps.clientSessionId.trim().isEmpty()) {
+            datasetJson.addProperty("clientSessionId", caps.clientSessionId.trim());
+        }
+    }
+
+    static String resolvePythonExecutable() {
+        String configured = System.getenv("IMAGEJAI_PYTHON");
+        if (configured != null && !configured.trim().isEmpty()) {
+            return configured.trim();
+        }
+        String os = System.getProperty("os.name", "").toLowerCase(Locale.ROOT);
+        return os.contains("win") ? "python" : "python3";
+    }
+
+    static Path resolveMethodsTableScript() throws IOException {
+        List<Path> workspaces = new ArrayList<Path>();
+        addWorkspaceCandidate(workspaces,
+                System.getProperty("imagejai.agent.workspace"));
+        addWorkspaceCandidate(workspaces, System.getenv("IMAGEJAI_AGENT_WORKSPACE"));
+        String userDir = System.getProperty("user.dir");
+        if (userDir != null && !userDir.trim().isEmpty()) {
+            workspaces.add(Paths.get(userDir).resolve("agent"));
+        }
+        String userHome = System.getProperty("user.home");
+        if (userHome != null && !userHome.trim().isEmpty()) {
+            workspaces.add(Paths.get(userHome).resolve("ImageJAI").resolve("agent"));
+        }
+        for (Path workspace : workspaces) {
+            Path script = workspace.toAbsolutePath().normalize().resolve("methods_table.py");
+            if (Files.isRegularFile(script)) return script;
+        }
+        throw new IOException("methods_table.py not found; configure "
+                + "imagejai.agent.workspace or IMAGEJAI_AGENT_WORKSPACE");
+    }
+
+    private static void addWorkspaceCandidate(List<Path> workspaces, String value) {
+        if (value != null && !value.trim().isEmpty()) {
+            workspaces.add(Paths.get(value.trim()));
         }
     }
 
@@ -5647,19 +8595,114 @@ public class TCPCommandServer {
         }
 
         JsonArray commands = commandsElement.getAsJsonArray();
+        if (commands.size() > MAX_BATCH_COMMANDS) {
+            return errorResponse("Batch command count " + commands.size()
+                    + " exceeds max " + MAX_BATCH_COMMANDS);
+        }
+        int parentDepth = batchDepth.get().intValue();
+        if (parentDepth >= MAX_BATCH_DEPTH) {
+            return errorResponse("Batch nesting depth exceeds max " + MAX_BATCH_DEPTH);
+        }
+        CompoundWorkBudget workBudget = compoundWorkBudget.get();
+        boolean ownsWorkBudget = workBudget == null;
+        if (ownsWorkBudget) {
+            workBudget = new CompoundWorkBudget();
+            compoundWorkBudget.set(workBudget);
+        }
+        final CompoundWorkBudget sharedWorkBudget = workBudget;
+        final int workAtEntry = sharedWorkBudget.consumed;
+        batchDepth.set(Integer.valueOf(parentDepth + 1));
+        try {
         JsonArray results = new JsonArray();
+        boolean haltOnError = request.has("halt_on_error")
+                && request.get("halt_on_error").isJsonPrimitive()
+                && request.get("halt_on_error").getAsBoolean();
+        int firstFailureIndex = -1;
+        boolean halted = false;
+        long retainedBytes = 0L;
+        boolean responseTruncated = false;
+        int executedCount = 0;
+        int budgetExhaustedAtIndex = -1;
 
         for (int i = 0; i < commands.size(); i++) {
+            // Admission is charged before validation/dispatch so malformed or
+            // throwing children cannot bypass the shared nested-work cap.
+            if (!sharedWorkBudget.tryConsume()) {
+                halted = true;
+                budgetExhaustedAtIndex = i;
+                break;
+            }
             JsonElement elem = commands.get(i);
+            JsonObject subResult;
             if (elem.isJsonObject()) {
-                JsonObject subResult = dispatch(elem.getAsJsonObject(), caps);
-                results.add(subResult);
+                try {
+                    subResult = dispatchWithCompoundBudget(
+                            elem.getAsJsonObject(), caps, retainedBytes);
+                } catch (Throwable failure) {
+                    String detail = failure.getMessage();
+                    if (detail == null || detail.trim().isEmpty()) {
+                        detail = failure.getClass().getSimpleName();
+                    }
+                    subResult = errorResponse("Batch command at index " + i
+                            + " threw: " + detail);
+                }
             } else {
-                results.add(errorResponse("Invalid batch command at index " + i));
+                subResult = errorResponse("Invalid batch command at index " + i);
+            }
+            executedCount++;
+            JsonObject indexed = new JsonObject();
+            indexed.addProperty("index", i);
+            indexed.add("response", subResult);
+            long responseBytes = utf8Length(GSON.toJson(indexed));
+            if (retainedBytes + responseBytes > MAX_BATCH_RESPONSE_BYTES) {
+                responseTruncated = true;
+                halted = true;
+                if (firstFailureIndex < 0) firstFailureIndex = i;
+                break;
+            }
+            results.add(indexed);
+            retainedBytes += responseBytes;
+            if (isFailure(subResult) && firstFailureIndex < 0) {
+                firstFailureIndex = i;
+                if (haltOnError) {
+                    halted = true;
+                    break;
+                }
+            }
+            if (sharedWorkBudget.exhausted) {
+                halted = true;
+                budgetExhaustedAtIndex = Math.min(i + 1, commands.size());
+                break;
             }
         }
 
-        return successResponse(results);
+        JsonObject result = new JsonObject();
+        result.add("results", results);
+        result.addProperty("executed", executedCount);
+        result.addProperty("retained_responses", results.size());
+        result.addProperty("omitted_responses", executedCount - results.size());
+        result.addProperty("omitted_commands", commands.size() - executedCount);
+        result.addProperty("total", commands.size());
+        result.addProperty("halted", halted);
+        result.addProperty("response_truncated", responseTruncated);
+        result.addProperty("retained_response_bytes", retainedBytes);
+        result.addProperty("max_response_bytes", MAX_BATCH_RESPONSE_BYTES);
+        result.addProperty("work_executed",
+                sharedWorkBudget.consumed - workAtEntry);
+        result.addProperty("work_budget_remaining", sharedWorkBudget.remaining());
+        result.addProperty("max_work", MAX_COMPOUND_WORK);
+        result.addProperty("work_budget_exhausted", sharedWorkBudget.exhausted);
+        if (budgetExhaustedAtIndex >= 0) {
+            result.addProperty("budget_exhausted_at_index", budgetExhaustedAtIndex);
+        }
+        if (firstFailureIndex >= 0) {
+            result.addProperty("firstFailureIndex", firstFailureIndex);
+        }
+        return successResponse(result);
+        } finally {
+            batchDepth.set(Integer.valueOf(parentDepth));
+            if (ownsWorkBudget) compoundWorkBudget.remove();
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -5696,7 +8739,8 @@ public class TCPCommandServer {
 
         List<JsonObject> segments;
         try {
-            segments = BatchParser.parse(chainEl.getAsString());
+            segments = BatchParser.parse(
+                    chainEl.getAsString(), MAX_BATCH_COMMANDS);
         } catch (Exception e) {
             return errorResponse("Chain parse error: " + e.getMessage());
         }
@@ -5713,14 +8757,43 @@ public class TCPCommandServer {
             return successResponse(empty);
         }
 
+        CompoundWorkBudget workBudget = compoundWorkBudget.get();
+        boolean ownsWorkBudget = workBudget == null;
+        if (ownsWorkBudget) {
+            workBudget = new CompoundWorkBudget();
+            compoundWorkBudget.set(workBudget);
+        }
+        final CompoundWorkBudget sharedWorkBudget = workBudget;
+        final int workAtEntry = sharedWorkBudget.consumed;
+        try {
+
         JsonArray results = new JsonArray();
         boolean halted = false;
         int firstFailureIdx = -1;
+        long retainedBytes = 0L;
+        int executedCount = 0;
+        boolean responseTruncated = false;
+        int budgetExhaustedAtIndex = -1;
 
         for (int i = 0; i < segments.size(); i++) {
+            if (!sharedWorkBudget.tryConsume()) {
+                halted = true;
+                budgetExhaustedAtIndex = i;
+                break;
+            }
             JsonObject subReq = segments.get(i);
-            JsonObject subResp = dispatch(subReq, caps);
+            JsonObject subResp = dispatchWithCompoundBudget(
+                    subReq, caps, retainedBytes);
+            executedCount++;
+            long responseBytes = utf8Length(GSON.toJson(subResp));
+            if (retainedBytes + responseBytes > MAX_BATCH_RESPONSE_BYTES) {
+                responseTruncated = true;
+                halted = true;
+                if (firstFailureIdx < 0) firstFailureIdx = i;
+                break;
+            }
             results.add(subResp);
+            retainedBytes += responseBytes;
 
             boolean failed = isFailure(subResp);
             if (failed && firstFailureIdx < 0) firstFailureIdx = i;
@@ -5728,17 +8801,53 @@ public class TCPCommandServer {
                 halted = true;
                 break;
             }
+            if (sharedWorkBudget.exhausted) {
+                halted = true;
+                budgetExhaustedAtIndex = Math.min(i + 1, segments.size());
+                break;
+            }
         }
 
         JsonObject out = new JsonObject();
         out.add("results", results);
-        out.addProperty("executed", results.size());
+        out.addProperty("executed", executedCount);
+        out.addProperty("retained_responses", results.size());
+        out.addProperty("omitted_responses", executedCount - results.size());
+        out.addProperty("omitted_commands", segments.size() - executedCount);
         out.addProperty("total", segments.size());
         out.addProperty("halted", halted);
+        out.addProperty("response_truncated", responseTruncated);
+        out.addProperty("retained_response_bytes", retainedBytes);
+        out.addProperty("max_response_bytes", MAX_BATCH_RESPONSE_BYTES);
+        out.addProperty("work_executed",
+                sharedWorkBudget.consumed - workAtEntry);
+        out.addProperty("work_budget_remaining", sharedWorkBudget.remaining());
+        out.addProperty("max_work", MAX_COMPOUND_WORK);
+        out.addProperty("work_budget_exhausted", sharedWorkBudget.exhausted);
+        if (budgetExhaustedAtIndex >= 0) {
+            out.addProperty("budget_exhausted_at_index", budgetExhaustedAtIndex);
+        }
         if (firstFailureIdx >= 0) {
             out.addProperty("firstFailureIndex", firstFailureIdx);
         }
         return successResponse(out);
+        } finally {
+            if (ownsWorkBudget) compoundWorkBudget.remove();
+        }
+    }
+
+    private JsonObject dispatchWithCompoundBudget(JsonObject request,
+                                                   AgentCaps caps,
+                                                   long retainedBytes) {
+        long prior = compoundResponseBudget.get().longValue();
+        long localRemaining = Math.max(0L,
+                MAX_BATCH_RESPONSE_BYTES - Math.max(0L, retainedBytes));
+        compoundResponseBudget.set(Long.valueOf(Math.min(prior, localRemaining)));
+        try {
+            return dispatch(request, caps);
+        } finally {
+            compoundResponseBudget.set(Long.valueOf(prior));
+        }
     }
 
     private boolean isFailure(JsonObject resp) {
@@ -5833,55 +8942,166 @@ public class TCPCommandServer {
      * {@code execute_macro} — this command only wins when the caller cannot
      * afford to block the socket.
      */
-    private JsonObject handleExecuteMacroAsync(JsonObject request) {
+    private JsonObject handleExecuteMacroAsync(final JsonObject request,
+                                               final AgentCaps caps) {
         JsonElement codeEl = request.get("code");
         if (codeEl == null || !codeEl.isJsonPrimitive()) {
             return errorResponse("Missing 'code' field for execute_macro_async");
         }
-        String code = codeEl.getAsString();
-        JobRegistry.Job job = jobRegistry.submit(code);
+        final String owner = mutationOwner(caps);
+        if (owner == null) {
+            return errorResponse("execute_macro_async requires a durable session; call hello first");
+        }
+        final String code = codeEl.getAsString();
+        final PluginNameValidator.Result validation =
+                (caps != null && caps.fuzzyMatch)
+                        ? PluginNameValidator.validate(code) : null;
+        if (validation != null && validation.hasRejections()) {
+            JsonObject rejected = new JsonObject();
+            rejected.addProperty("success", false);
+            rejected.add("error", PluginNameValidator
+                    .buildPluginNotFoundError(validation.rejections)
+                    .buildJsonElement(caps));
+            return successResponse(rejected);
+        }
+        final String codeToRun = validation != null && validation.hasCorrections()
+                ? validation.patchedCode : code;
+        final String source = optString(request, "source", "tcp-async");
+        final SessionCodeJournal.DatasetBinding journalDataset =
+                SessionCodeJournal.captureInitiatingDataset();
+        final long timeoutMs = resolveTimeoutMs(request, MACRO_TIMEOUT_MS);
+        final boolean safetyEnabled = isScientificIntegrityScanEnabled(caps);
+        final boolean undoEnabled = caps != null && caps.undo;
+        final List<DestructiveScanner.DestructiveOp> safetyFindings =
+                collectMacroSafetyFindings(codeToRun, caps, safetyEnabled);
+
+        MutationCoordinator.Lifecycle<ExecutionResult> lifecycle =
+                new MutationCoordinator.Lifecycle<ExecutionResult>() {
+            private List<ImageGraph.ImageRef> graphImagesBefore;
+            private ImageGraph.ImageRef graphActiveBefore;
+            private long graphMarkerBefore;
+            private SourceImageTagger sourceTagger;
+            private boolean prepared;
+
+            @Override public void checkSafety() throws Exception {
+                enforceMacroSafety(safetyFindings, caps);
+            }
+
+            @Override public void beforeMutation() {
+                graphImagesBefore = ImageGraph.captureOpenImages();
+                graphActiveBefore = ImageGraph.captureActiveImage();
+                graphMarkerBefore = imageGraph.currentMarker();
+                prepared = true;
+                if (undoEnabled) {
+                    captureUndoFrameIfEnabled(nextCallId(), codeToRun, caps);
+                }
+                sourceTagger = SourceImageTagger.beginIfEnabled(
+                        caps != null && caps.safeMode
+                                && caps.safeModeOptions != null
+                                && caps.safeModeOptions.autoSourceImageColumn,
+                        codeToRun, WindowManager.getCurrentImage());
+            }
+
+            @Override public void afterMutation(
+                    MutationCoordinator.Outcome<ExecutionResult> outcome) {
+                if (!prepared) return;
+                if (sourceTagger != null) {
+                    sourceTagger.postExec(WindowManager.getCurrentImage());
+                }
+                List<ImageGraph.ImageRef> after = ImageGraph.captureOpenImages();
+                imageGraph.trackImageChange(graphImagesBefore, graphActiveBefore,
+                        after, codeToRun, "macro");
+                if (caps != null && caps.graphDelta) {
+                    // Materialise the delta while still serialized so later
+                    // mutations cannot move the marker before provenance is observed.
+                    imageGraph.deltaSince(graphMarkerBefore);
+                }
+            }
+
+            @Override public void onCompletion(
+                    MutationCoordinator.Completion<ExecutionResult> completion) {
+                boolean success = completion.state() == MutationCoordinator.State.SUCCEEDED
+                        && completion.result() != null
+                        && completion.result().isSuccess();
+                String failure = completion.error() == null
+                        ? null : completion.error().getMessage();
+                SessionCodeJournal.INSTANCE.record(journalDataset, "ijm", codeToRun, source, 0L,
+                        completion.startedAtMs(), completion.elapsedMs(), success, failure);
+            }
+        };
+
+        final JobRegistry.Job job;
+        try {
+            job = jobRegistry.submit(codeToRun, owner, timeoutMs,
+                    true, undoEnabled, true, lifecycle);
+        } catch (IllegalArgumentException | java.util.concurrent.RejectedExecutionException e) {
+            return errorResponse("Mutation admission rejected: " + e.getMessage());
+        }
         JsonObject result = new JsonObject();
         result.addProperty("job_id", job.id);
         result.addProperty("state", job.state);
         result.addProperty("startedAt", job.startedAt);
+        if (validation != null && validation.hasCorrections()) {
+            result.add("autocorrected",
+                    PluginNameValidator.buildAutocorrectedArray(validation.corrections));
+        }
         return successResponse(result);
     }
 
-    private JsonObject handleJobStatus(JsonObject request) {
+    private JsonObject handleJobStatus(JsonObject request, AgentCaps caps) {
         JsonElement idEl = request.get("job_id");
         if (idEl == null || !idEl.isJsonPrimitive()) {
             return errorResponse("Missing 'job_id' for job_status");
         }
+        String owner = mutationOwner(caps);
+        if (owner == null) return errorResponse("job_status requires a durable session");
         String id = idEl.getAsString();
-        JobRegistry.Job j = jobRegistry.get(id);
+        JobRegistry.Job j = jobRegistry.get(owner, id);
         if (j == null) return errorResponse("Unknown job_id: " + id);
         return successResponse(jobRegistry.toJson(j));
     }
 
-    private JsonObject handleJobCancel(JsonObject request) {
+    private JsonObject handleJobCancel(JsonObject request, AgentCaps caps) {
         JsonElement idEl = request.get("job_id");
         if (idEl == null || !idEl.isJsonPrimitive()) {
             return errorResponse("Missing 'job_id' for job_cancel");
         }
+        String owner = mutationOwner(caps);
+        if (owner == null) return errorResponse("job_cancel requires a durable session");
         String id = idEl.getAsString();
-        JobRegistry.Job j = jobRegistry.get(id);
+        JobRegistry.Job j = jobRegistry.get(owner, id);
         if (j == null) return errorResponse("Unknown job_id: " + id);
-        boolean signalled = jobRegistry.cancel(id);
+        boolean signalled = jobRegistry.cancel(owner, id);
         JsonObject result = new JsonObject();
         result.addProperty("job_id", id);
         result.addProperty("cancelled", signalled);
-        result.addProperty("state", j.state);
+        result.addProperty("state", jobRegistry.toJson(j).get("state").getAsString());
+        result.addProperty("workerExited", j.handle.isWorkerExited());
         return successResponse(result);
     }
 
-    private JsonObject handleJobList() {
-        List<JobRegistry.Job> all = jobRegistry.list();
+    private JsonObject handleJobList(AgentCaps caps) {
+        String owner = mutationOwner(caps);
+        if (owner == null) return errorResponse("job_list requires a durable session");
+        List<JobRegistry.Job> all = jobRegistry.list(owner);
         JsonArray arr = new JsonArray();
-        for (JobRegistry.Job j : all) arr.add(jobRegistry.toJson(j));
+        for (JobRegistry.Job j : all) arr.add(jobRegistry.toSummaryJson(j));
         JsonObject result = new JsonObject();
         result.addProperty("count", arr.size());
         result.add("jobs", arr);
         return successResponse(result);
+    }
+
+    private static String mutationOwner(AgentCaps caps) {
+        if (caps == null || caps.sessionId == null || caps.sessionId.trim().isEmpty()) {
+            return null;
+        }
+        return caps.sessionId;
+    }
+
+    private static String mutationOwnerOrInternal(AgentCaps caps) {
+        String owner = mutationOwner(caps);
+        return owner == null ? "__imagejai_tcp_internal__" : owner;
     }
 
     // -----------------------------------------------------------------------
@@ -6005,6 +9225,86 @@ public class TCPCommandServer {
         return response;
     }
 
+    private JsonObject protocolError(String code, String message) {
+        JsonObject response = new JsonObject();
+        response.addProperty("ok", false);
+        JsonObject error = new JsonObject();
+        error.addProperty("code", code);
+        error.addProperty("message", message);
+        error.addProperty("category", "authentication");
+        error.addProperty("retry_safe", false);
+        response.add("error", error);
+        return response;
+    }
+
+    private JsonObject stateConfigurationError(String code, String message,
+                                               String recoveryHint) {
+        JsonObject response = new JsonObject();
+        response.addProperty("ok", false);
+        JsonObject error = new JsonObject();
+        error.addProperty("code", code);
+        error.addProperty("message", message);
+        error.addProperty("category", ErrorReply.CAT_STATE);
+        error.addProperty("retry_safe", false);
+        if (recoveryHint != null && !recoveryHint.isEmpty()) {
+            error.addProperty("recovery_hint", recoveryHint);
+        }
+        response.add("error", error);
+        return response;
+    }
+
+    /**
+     * Structured refusal for a request that is well-formed JSON but asks for
+     * something the handler will not do. Distinct from
+     * {@link #invalidRequest(String)}: the shape was fine, the content was
+     * not, so {@code retry_safe} is false — resending the same request
+     * produces the same refusal.
+     */
+    private JsonObject validationError(String code, String message) {
+        JsonObject response = new JsonObject();
+        response.addProperty("ok", false);
+        JsonObject error = new JsonObject();
+        error.addProperty("code", code);
+        error.addProperty("message", message == null ? "Invalid request" : message);
+        error.addProperty("category", "validation");
+        error.addProperty("retry_safe", false);
+        response.add("error", error);
+        return response;
+    }
+
+    private JsonObject invalidRequest(String message) {
+        JsonObject response = new JsonObject();
+        response.addProperty("ok", false);
+        JsonObject error = new JsonObject();
+        error.addProperty("code", "invalid_request");
+        error.addProperty("message", message == null ? "Invalid request" : message);
+        error.addProperty("category", "validation");
+        error.addProperty("retry_safe", true);
+        response.add("error", error);
+        return response;
+    }
+
+    private JsonObject sessionFailure(SessionCapsRegistry.Status status) {
+        if (status == SessionCapsRegistry.Status.MISSING) {
+            return protocolError("session_required",
+                    "This command requires a negotiated session.");
+        }
+        if (status == SessionCapsRegistry.Status.EXPIRED) {
+            return protocolError("session_expired",
+                    "The protocol session has expired; negotiate a new session.");
+        }
+        if (status == SessionCapsRegistry.Status.TOKEN_MISMATCH) {
+            return protocolError("session_token_mismatch",
+                    "The session credentials are invalid.");
+        }
+        if (status == SessionCapsRegistry.Status.REVOKED) {
+            return protocolError("session_revoked",
+                    "The protocol session has been revoked.");
+        }
+        return protocolError("session_unknown",
+                "The protocol session is not known to this server.");
+    }
+
     private String errorJson(String message) {
         JsonObject response = errorResponse(message);
         return GSON.toJson(response);
@@ -6014,18 +9314,90 @@ public class TCPCommandServer {
         JsonObject json = new JsonObject();
         json.addProperty("success", result.isSuccess());
         if (result.isSuccess()) {
-            json.addProperty("output", result.getOutput() != null ? result.getOutput() : "");
-            json.addProperty("resultsTable", result.getResultsTable() != null ? result.getResultsTable() : "");
+            addBoundedUtf8Property(json, "output",
+                    result.getOutput() != null ? result.getOutput() : "",
+                    MAX_RESULTS_TABLE_BYTES);
+            addBoundedUtf8Property(json, "resultsTable",
+                    result.getResultsTable() != null ? result.getResultsTable() : "",
+                    MAX_RESULTS_TABLE_BYTES);
+            if (result.isResultsTableTruncated()) {
+                json.addProperty("resultsTable_truncated", true);
+                json.addProperty("resultsTable_original_bytes",
+                        result.getResultsTableOriginalBytes());
+                json.addProperty("resultsTable_returned_bytes",
+                        utf8Length(json.get("resultsTable").getAsString()));
+                json.addProperty("resultsTable_total_rows",
+                        result.getResultsTableTotalRows());
+                json.addProperty("resultsTable_returned_rows",
+                        result.getResultsTableReturnedRows());
+            }
             JsonArray newImages = new JsonArray();
-            for (String img : result.getNewImages()) {
+            List<String> images = result.getNewImages() == null
+                    ? Collections.<String>emptyList() : result.getNewImages();
+            int retained = Math.min(images.size(), JobRegistry.MAX_RESULT_IMAGES);
+            for (int i = 0; i < retained; i++) {
+                String img = images.get(i) == null ? "" : images.get(i);
+                if (img.length() > JobRegistry.MAX_IMAGE_NAME_CHARS) {
+                    img = img.substring(0, JobRegistry.MAX_IMAGE_NAME_CHARS);
+                }
                 newImages.add(new JsonPrimitive(img));
             }
             json.add("newImages", newImages);
+            json.addProperty("newImages_truncated", images.size() > retained);
+            json.addProperty("newImages_total", images.size());
             json.addProperty("executionTimeMs", result.getExecutionTimeMs());
         } else {
             json.addProperty("error", result.getError() != null ? result.getError() : "Unknown error");
         }
         return json;
+    }
+
+    static long utf8Length(String value) {
+        if (value == null || value.isEmpty()) return 0L;
+        long bytes = 0L;
+        for (int i = 0; i < value.length();) {
+            int cp = value.codePointAt(i);
+            bytes += cp <= 0x7f ? 1 : cp <= 0x7ff ? 2 : cp <= 0xffff ? 3 : 4;
+            i += Character.charCount(cp);
+        }
+        return bytes;
+    }
+
+    static void addBoundedUtf8Property(JsonObject target, String key,
+                                       String value, long maxBytes) {
+        String safe = value == null ? "" : value;
+        long originalBytes = utf8Length(safe);
+        if (originalBytes <= maxBytes) {
+            target.addProperty(key, safe);
+            target.addProperty(key + "_truncated", false);
+            target.addProperty(key + "_original_bytes", originalBytes);
+            return;
+        }
+        int chars = 0;
+        long returnedBytes = 0L;
+        while (chars < safe.length()) {
+            int cp = safe.codePointAt(chars);
+            int cpBytes = cp <= 0x7f ? 1 : cp <= 0x7ff ? 2 : cp <= 0xffff ? 3 : 4;
+            if (returnedBytes + cpBytes > maxBytes) break;
+            returnedBytes += cpBytes;
+            chars += Character.charCount(cp);
+        }
+        target.addProperty(key, safe.substring(0, chars));
+        target.addProperty(key + "_truncated", true);
+        target.addProperty(key + "_original_bytes", originalBytes);
+        target.addProperty(key + "_returned_bytes", returnedBytes);
+    }
+
+    static void addBoundedResultsCsv(JsonObject target,
+                                     StateInspector.BoundedCsv csv) {
+        StateInspector.BoundedCsv safe = csv == null
+                ? new StateInspector.BoundedCsv("", 0L, 0, 0, 0) : csv;
+        target.addProperty("resultsTable", safe.text());
+        target.addProperty("resultsTable_truncated", safe.truncated());
+        target.addProperty("resultsTable_original_bytes", safe.originalBytes());
+        target.addProperty("resultsTable_returned_bytes", safe.returnedBytes());
+        target.addProperty("resultsTable_total_rows", safe.totalRows());
+        target.addProperty("resultsTable_returned_rows", safe.returnedRows());
     }
 
     private JsonObject imageInfoToJson(ImageInfo info) {
@@ -6043,6 +9415,249 @@ public class TCPCommandServer {
         return json;
     }
 
+    /** Build image-info JSON from the exact ImagePlus captured for a read. */
+    private JsonObject imageInfoToJson(ImagePlus image) {
+        JsonObject json = new JsonObject();
+        json.addProperty("title", image.getTitle());
+        json.addProperty("width", image.getWidth());
+        json.addProperty("height", image.getHeight());
+        switch (image.getType()) {
+            case ImagePlus.GRAY8: json.addProperty("type", "8-bit"); break;
+            case ImagePlus.GRAY16: json.addProperty("type", "16-bit"); break;
+            case ImagePlus.GRAY32: json.addProperty("type", "32-bit"); break;
+            case ImagePlus.COLOR_RGB: json.addProperty("type", "RGB"); break;
+            case ImagePlus.COLOR_256: json.addProperty("type", "8-bit color"); break;
+            default: json.addProperty("type", "unknown"); break;
+        }
+        json.addProperty("slices", image.getNSlices());
+        json.addProperty("channels", image.getNChannels());
+        json.addProperty("frames", image.getNFrames());
+        Calibration calibration = image.getCalibration();
+        String calibrationText = calibration != null && calibration.scaled()
+                ? calibration.pixelWidth + " " + calibration.getUnit() + "/px" : "";
+        json.addProperty("calibration", calibrationText);
+        json.addProperty("isStack", image.getStackSize() > 1);
+        json.addProperty("isHyperstack", image.isHyperStack());
+        return json;
+    }
+
+    private static final class AcquisitionLimits {
+        final String pixelType;
+        final Boolean signed;
+        final Double rawMin;
+        final Double rawMax;
+
+        AcquisitionLimits(String pixelType, Boolean signed,
+                          Double rawMin, Double rawMax) {
+            this.pixelType = pixelType;
+            this.signed = signed;
+            this.rawMin = rawMin;
+            this.rawMax = rawMax;
+        }
+
+        boolean known() { return rawMin != null && rawMax != null; }
+    }
+
+    /** Largest discrete acquisition domain whose calibrated extrema we enumerate. */
+    private static final int MAX_CALIBRATED_ACQUISITION_CODES = 65536;
+    private static final double RGB_WEIGHT_SUM_TOLERANCE = 1e-9;
+    private static final String UNSUPPORTED_RGB_WEIGHTS_MESSAGE =
+            "RGB histogram weights must be finite, non-negative, and sum to 1.";
+    private static final String UNSUPPORTED_RGB_WEIGHTS_RECOVERY_HINT =
+            "Restore the first three ImageJ RGB weights to finite, non-negative "
+                    + "values that sum to 1, then retry.";
+
+    private static final class CalibratedAcquisitionLimits {
+        final Double min;
+        final Double max;
+
+        CalibratedAcquisitionLimits(Double min, Double max) {
+            this.min = min;
+            this.max = max;
+        }
+
+        static CalibratedAcquisitionLimits unavailable() {
+            return new CalibratedAcquisitionLimits(null, null);
+        }
+    }
+
+    private static AcquisitionLimits acquisitionLimits(ImagePlus image) {
+        switch (image.getType()) {
+            case ImagePlus.GRAY8:
+                return new AcquisitionLimits("uint8", Boolean.FALSE, 0.0, 255.0);
+            case ImagePlus.GRAY16:
+                return new AcquisitionLimits("uint16", Boolean.FALSE, 0.0, 65535.0);
+            case ImagePlus.GRAY32:
+                return new AcquisitionLimits("float32", Boolean.TRUE, null, null);
+            case ImagePlus.COLOR_256:
+                return new AcquisitionLimits("indexed8", Boolean.FALSE, 0.0, 255.0);
+            case ImagePlus.COLOR_RGB:
+                // getPixelValue() semantics for RGB are ImageJ-processor
+                // specific, so packed/channel clipping cannot be inferred.
+                return new AcquisitionLimits("rgb24", null, null, null);
+            default:
+                return new AcquisitionLimits("unknown", null, null, null);
+        }
+    }
+
+    private static JsonObject valueDomain(ImagePlus image) {
+        AcquisitionLimits limits = acquisitionLimits(image);
+        Calibration calibration = image.getCalibration();
+        boolean densityCalibrated = calibration != null && calibration.calibrated();
+        JsonObject domain = new JsonObject();
+        domain.addProperty("representation", "raw");
+        domain.addProperty("pixel_type", limits.pixelType);
+        if (limits.signed == null) domain.add("signed", JsonNull.INSTANCE);
+        else domain.addProperty("signed", limits.signed.booleanValue());
+        domain.addProperty("density_calibrated", densityCalibrated);
+        addNullableNumber(domain, "acquisition_min_raw", limits.rawMin);
+        addNullableNumber(domain, "acquisition_max_raw", limits.rawMax);
+        if (limits.known() && densityCalibrated) {
+            CalibratedAcquisitionLimits calibrated = calibratedAcquisitionLimits(
+                    calibration, limits);
+            addNullableNumber(domain, "acquisition_min_calibrated", calibrated.min);
+            addNullableNumber(domain, "acquisition_max_calibrated", calibrated.max);
+        } else {
+            domain.add("acquisition_min_calibrated", JsonNull.INSTANCE);
+            domain.add("acquisition_max_calibrated", JsonNull.INSTANCE);
+        }
+        return domain;
+    }
+
+    /**
+     * Value domain for ImageJ's histogram/statistics read. RGB pixels are
+     * packed 24-bit values when fetched by get_pixels, but ColorStatistics
+     * first converts them to a weighted 0..255 scalar. Publish that measured
+     * domain without changing the get_pixels contract.
+     */
+    private static JsonObject histogramValueDomain(ImagePlus image,
+                                                   double[] rgbWeights) {
+        JsonObject domain = valueDomain(image);
+        if (image.getType() != ImagePlus.COLOR_RGB || rgbWeights == null) {
+            return domain;
+        }
+
+        domain.addProperty("pixel_type", "uint8");
+        domain.addProperty("signed", false);
+        domain.addProperty("acquisition_min_raw", 0.0);
+        domain.addProperty("acquisition_max_raw", 255.0);
+        // ImageJ ColorStatistics operates on the raw scalar conversion. A
+        // density-calibrated RGB acquisition does not define a safe inverse
+        // mapping for that derived value.
+        domain.add("acquisition_min_calibrated", JsonNull.INSTANCE);
+        domain.add("acquisition_max_calibrated", JsonNull.INSTANCE);
+
+        JsonObject scalarization = new JsonObject();
+        scalarization.addProperty("method", "imagej_weighted_rgb_intensity");
+        scalarization.addProperty("source_pixel_type", "rgb24");
+        JsonObject weights = new JsonObject();
+        weights.addProperty("red", rgbWeights[0]);
+        weights.addProperty("green", rgbWeights[1]);
+        weights.addProperty("blue", rgbWeights[2]);
+        scalarization.add("weights", weights);
+        scalarization.addProperty("rounding", "nearest_integer_half_up");
+        domain.add("scalarization", scalarization);
+        return domain;
+    }
+
+    /** Capture the exact ImageJ conversion weights before duplicating RGB. */
+    private static double[] rgbScalarizationWeights(ImageProcessor source) {
+        if (!(source instanceof ColorProcessor)) return null;
+        double[] local = ((ColorProcessor) source).getRGBWeights();
+        double[] weights = local != null
+                ? local : ColorProcessor.getWeightingFactors();
+        // ImageJ reads exactly indices 0..2. Extra local entries are ignored;
+        // fewer than three would fail inside ColorProcessor.getHistogram().
+        return weights == null || weights.length < 3 ? null : new double[] {
+                weights[0], weights[1], weights[2]
+        };
+    }
+
+    /**
+     * ImageJ indexes a fixed 256-bin array with
+     * {@code (int)(r*rw + g*gw + b*bw + 0.5)} and does not validate weights.
+     * Reject configurations for which that operation is unsafe or for which
+     * the published unsigned 0..255, half-up scalar contract would be false.
+     */
+    private static boolean supportedRgbScalarizationWeights(double[] weights) {
+        if (weights == null || weights.length != 3) return false;
+        double sum = 0.0;
+        for (double weight : weights) {
+            if (Double.isNaN(weight) || Double.isInfinite(weight) || weight < 0.0) {
+                return false;
+            }
+            sum += weight;
+        }
+        return !Double.isNaN(sum) && !Double.isInfinite(sum)
+                && Math.abs(sum - 1.0) <= RGB_WEIGHT_SUM_TOLERANCE;
+    }
+
+    /**
+     * Return exact extrema across every representable integer acquisition code.
+     * Density-calibration functions and custom tables need not be monotonic, so
+     * evaluating only the two raw endpoints is not a valid bound. If even one
+     * code maps to NaN/infinity, no finite pair describes the full calibrated
+     * acquisition domain and both bounds remain unavailable.
+     */
+    private static CalibratedAcquisitionLimits calibratedAcquisitionLimits(
+            Calibration calibration, AcquisitionLimits limits) {
+        if (calibration == null || limits == null || !limits.known()) {
+            return CalibratedAcquisitionLimits.unavailable();
+        }
+        double rawMin = limits.rawMin.doubleValue();
+        double rawMax = limits.rawMax.doubleValue();
+        if (Double.isNaN(rawMin) || Double.isInfinite(rawMin)
+                || Double.isNaN(rawMax) || Double.isInfinite(rawMax)
+                || rawMin != Math.rint(rawMin) || rawMax != Math.rint(rawMax)
+                || rawMin < Integer.MIN_VALUE || rawMax > Integer.MAX_VALUE
+                || rawMax < rawMin) {
+            return CalibratedAcquisitionLimits.unavailable();
+        }
+
+        int firstRaw = (int) rawMin;
+        int lastRaw = (int) rawMax;
+        long codeCount = (long) lastRaw - (long) firstRaw + 1L;
+        if (codeCount <= 0L || codeCount > MAX_CALIBRATED_ACQUISITION_CODES) {
+            return CalibratedAcquisitionLimits.unavailable();
+        }
+
+        double min = Double.POSITIVE_INFINITY;
+        double max = Double.NEGATIVE_INFINITY;
+        for (int raw = firstRaw; ; raw++) {
+            double mapped = calibration.getCValue(raw);
+            if (Double.isNaN(mapped) || Double.isInfinite(mapped)) {
+                return CalibratedAcquisitionLimits.unavailable();
+            }
+            min = Math.min(min, mapped);
+            max = Math.max(max, mapped);
+            if (raw == lastRaw) break;
+        }
+        return new CalibratedAcquisitionLimits(
+                Double.valueOf(min), Double.valueOf(max));
+    }
+
+    private static void addNullableNumber(JsonObject target, String key, Double value) {
+        if (value == null || value.isNaN() || value.isInfinite()) {
+            target.add(key, JsonNull.INSTANCE);
+        } else {
+            target.addProperty(key, value.doubleValue());
+        }
+    }
+
+    private static void attachLimitCounts(JsonObject result,
+                                          AcquisitionLimits limits,
+                                          long lowCount, long highCount) {
+        if (limits.known()) {
+            result.addProperty("acquisition_min_count", lowCount);
+            result.addProperty("acquisition_max_count", highCount);
+            result.addProperty("acquisition_limit_counts_exact", true);
+        } else {
+            result.add("acquisition_min_count", JsonNull.INSTANCE);
+            result.add("acquisition_max_count", JsonNull.INSTANCE);
+            result.addProperty("acquisition_limit_counts_exact", false);
+        }
+    }
+
     /**
      * Base64-encode a byte array. Java 8 compatible using javax.xml.bind
      * or manual implementation since java.util.Base64 requires Java 8 update.
@@ -6052,11 +9667,37 @@ public class TCPCommandServer {
         return java.util.Base64.getEncoder().encodeToString(data);
     }
 
+    /** Maximum raw bytes whose base64 JSON representation can fit the budget. */
+    static int maxBinaryBytesForCompoundBudget(long remainingBytes, int absoluteMax) {
+        if (absoluteMax <= 0) return 0;
+        if (remainingBytes == Long.MAX_VALUE) return absoluteMax;
+        long usable = remainingBytes - COMPOUND_RESPONSE_OVERHEAD_BYTES;
+        if (usable < 4L) return 0;
+        long raw = (usable / 4L) * 3L;
+        return (int) Math.min((long) absoluteMax, Math.min(raw, Integer.MAX_VALUE));
+    }
+
+    private static long base64EncodedLength(long rawBytes) {
+        if (rawBytes <= 0L) return 0L;
+        return 4L * ((rawBytes + 2L) / 3L);
+    }
+
+    private JsonObject compoundBudgetError(String command, long remainingBytes) {
+        JsonObject error = errorResponse("compound_response_budget: " + command
+                + " output cannot fit the remaining compound response budget");
+        error.addProperty("error_code", "compound_response_budget");
+        error.addProperty("remaining_response_bytes", Math.max(0L, remainingBytes));
+        return error;
+    }
+
     /**
      * Return raw pixel data for the active image (or a region of it).
      * Supports optional parameters: x, y, width, height, slice.
      * Returns base64-encoded raw pixel values as floats (4 bytes each),
      * plus metadata for reconstruction.
+     * On hyperstacks, {@code slice} is a strict 1-based Z coordinate and
+     * {@code allSlices} reads every Z plane at the active channel and frame.
+     * It never walks into another channel or frame.
      *
      * Request:
      *   {"command": "get_pixels"}                              — full current slice
@@ -6065,30 +9706,115 @@ public class TCPCommandServer {
      *   {"command": "get_pixels", "allSlices": true}           — entire stack
      */
     private JsonObject handleGetPixels(JsonObject request) {
-        // Parse optional parameters
-        final int reqX = request.has("x") ? request.get("x").getAsInt() : -1;
-        final int reqY = request.has("y") ? request.get("y").getAsInt() : -1;
-        final int reqW = request.has("width") ? request.get("width").getAsInt() : -1;
-        final int reqH = request.has("height") ? request.get("height").getAsInt() : -1;
-        final int reqSlice = request.has("slice") ? request.get("slice").getAsInt() : -1;
-        final boolean allSlices = request.has("allSlices") && request.get("allSlices").getAsBoolean();
+        final long responseBudget = compoundResponseBudget.get().longValue();
+        final int reqX;
+        final int reqY;
+        final int reqW;
+        final int reqH;
+        final int reqSlice;
+        final int reqChannel;
+        final int reqFrame;
+        final boolean hasSlice;
+        final boolean hasChannel;
+        final boolean hasFrame;
+        final boolean allSlices;
+        try {
+            Integer x = strictOptionalInt(request, "x");
+            Integer y = strictOptionalInt(request, "y");
+            Integer width = strictOptionalInt(request, "width");
+            Integer height = strictOptionalInt(request, "height");
+            reqX = x == null ? -1 : x.intValue();
+            reqY = y == null ? -1 : y.intValue();
+            reqW = width == null ? -1 : width.intValue();
+            reqH = height == null ? -1 : height.intValue();
+            if ((x != null && reqX < 0) || (y != null && reqY < 0)
+                    || (width != null && reqW <= 0)
+                    || (height != null && reqH <= 0)) {
+                throw new IllegalArgumentException("invalid region bounds");
+            }
+            hasSlice = request.has("slice");
+            Integer slice = strictOptionalInt(request, "slice");
+            reqSlice = slice == null ? -1 : slice.intValue();
+            hasChannel = request.has("channel");
+            Integer channel = strictOptionalInt(request, "channel");
+            reqChannel = channel == null ? -1 : channel.intValue();
+            hasFrame = request.has("frame");
+            Integer frame = strictOptionalInt(request, "frame");
+            reqFrame = frame == null ? -1 : frame.intValue();
+            JsonElement all = request.get("allSlices");
+            if (all != null && (!all.isJsonPrimitive()
+                    || !all.getAsJsonPrimitive().isBoolean())) {
+                throw new IllegalArgumentException("allSlices must be boolean");
+            }
+            allSlices = all != null && all.getAsBoolean();
+            if (allSlices && hasSlice) {
+                throw new IllegalArgumentException("slice and allSlices are mutually exclusive");
+            }
+        } catch (IllegalArgumentException e) {
+            return protocolError("invalid_image_plane",
+                    "get_pixels region and C/Z/T fields must be canonical integers.");
+        }
 
         final Object[] holder = new Object[1];
         final CountDownLatch latch = new CountDownLatch(1);
 
-        SwingUtilities.invokeLater(new Runnable() {
+        GuiActionDispatcher.ActionToken actionToken =
+                GuiActionDispatcher.queueSwingAction(new Runnable() {
             @Override
             public void run() {
+                ImagePlus imp = null;
+                int originalC = 1, originalZ = 1, originalT = 1;
                 try {
-                    ImagePlus imp = WindowManager.getCurrentImage();
+                    imp = currentImage();
                     if (imp == null) {
                         holder[0] = "NO_IMAGE";
+                        return;
+                    }
+                    originalC = imp.getC();
+                    originalZ = imp.getZ();
+                    originalT = imp.getT();
+
+                    ActiveImageSnapshot snapshot = activeImageSnapshot(imp);
+                    JsonObject mismatch = validateImageSnapshot(request, snapshot);
+                    if (mismatch != null) {
+                        holder[0] = mismatch;
                         return;
                     }
 
                     int imgW = imp.getWidth();
                     int imgH = imp.getHeight();
-                    int nSlices = imp.getStackSize();
+                    int nChannels = imp.getNChannels();
+                    int nSlices = imp.getNSlices();
+                    int nFrames = imp.getNFrames();
+                    int stackSize = imp.getStackSize();
+                    if (imgW <= 0 || imgH <= 0 || nChannels <= 0
+                            || nSlices <= 0 || nFrames <= 0 || stackSize <= 0) {
+                        holder[0] = new Exception("Image has invalid dimensions");
+                        return;
+                    }
+                    if (originalC < 1 || originalC > nChannels
+                            || originalZ < 1 || originalZ > nSlices
+                            || originalT < 1 || originalT > nFrames) {
+                        holder[0] = new Exception("Image has invalid C/Z/T position");
+                        return;
+                    }
+                    if (hasSlice && (reqSlice < 1 || reqSlice > nSlices)) {
+                        holder[0] = new Exception("slice must be between 1 and "
+                                + nSlices + " (1-based Z)");
+                        return;
+                    }
+                    if (hasChannel && (reqChannel < 1 || reqChannel > nChannels)) {
+                        holder[0] = new Exception("channel must be between 1 and "
+                                + nChannels + " (1-based C)");
+                        return;
+                    }
+                    if (hasFrame && (reqFrame < 1 || reqFrame > nFrames)) {
+                        holder[0] = new Exception("frame must be between 1 and "
+                                + nFrames + " (1-based T)");
+                        return;
+                    }
+                    int selectedChannel = hasChannel ? reqChannel : originalC;
+                    int selectedFrame = hasFrame ? reqFrame : originalT;
 
                     // Determine region
                     int x = reqX >= 0 ? Math.min(reqX, imgW - 1) : 0;
@@ -6096,48 +9822,87 @@ public class TCPCommandServer {
                     int w = reqW > 0 ? Math.min(reqW, imgW - x) : imgW - x;
                     int h = reqH > 0 ? Math.min(reqH, imgH - y) : imgH - y;
 
-                    // Determine slices to extract
+                    // Determine Z planes to extract. For a plain stack C=T=1,
+                    // so this retains the historical linear-stack behavior.
                     int startSlice, endSlice;
                     if (allSlices) {
                         startSlice = 1;
                         endSlice = nSlices;
-                    } else if (reqSlice > 0) {
-                        startSlice = Math.min(reqSlice, nSlices);
+                    } else if (hasSlice) {
+                        startSlice = reqSlice;
                         endSlice = startSlice;
                     } else {
-                        startSlice = imp.getCurrentSlice();
+                        startSlice = originalZ;
                         endSlice = startSlice;
                     }
                     int sliceCount = endSlice - startSlice + 1;
 
                     // Safety: limit total pixels to avoid OOM
-                    long totalPixels = (long) w * h * sliceCount;
-                    if (totalPixels > 4000000) { // ~16MB as floats
+                    long totalPixels;
+                    long rawByteCount;
+                    try {
+                        totalPixels = Math.multiplyExact(
+                                Math.multiplyExact((long) w, (long) h),
+                                (long) sliceCount);
+                        rawByteCount = Math.multiplyExact(totalPixels, 4L);
+                    } catch (ArithmeticException overflow) {
+                        holder[0] = new Exception("Requested pixel allocation overflows");
+                        return;
+                    }
+                    if (totalPixels > 4000000L || rawByteCount > Integer.MAX_VALUE) {
                         holder[0] = new Exception("Region too large: " + totalPixels
                                 + " pixels. Max 4M. Use x/y/width/height to crop.");
                         return;
                     }
+                    if (responseBudget != Long.MAX_VALUE
+                            && base64EncodedLength(rawByteCount)
+                            + COMPOUND_RESPONSE_OVERHEAD_BYTES > responseBudget) {
+                        holder[0] = "COMPOUND_BUDGET";
+                        return;
+                    }
 
-                    // Extract pixel values as floats
-                    float[] allPixels = new float[w * h * sliceCount];
-                    int offset = 0;
-                    for (int s = startSlice; s <= endSlice; s++) {
-                        imp.setSliceWithoutUpdate(s);
-                        ij.process.ImageProcessor ip = imp.getProcessor();
+                    // Allocate only after all dimensions and byte arithmetic
+                    // have been bounded. Read processors directly from the
+                    // stack so extraction does not navigate the live image.
+                    byte[] rawBytes = new byte[(int) rawByteCount];
+                    java.nio.ByteBuffer buf = java.nio.ByteBuffer.wrap(rawBytes);
+                    buf.order(java.nio.ByteOrder.LITTLE_ENDIAN);
+                    AcquisitionLimits limits = acquisitionLimits(imp);
+                    long lowCount = 0L;
+                    long highCount = 0L;
+                    if (pixelExtractionStartedForTest != null) {
+                        pixelExtractionStartedForTest.run();
+                    }
+                    for (int z = startSlice; z <= endSlice; z++) {
+                        int stackIndex = imp.getStackIndex(selectedChannel, z, selectedFrame);
+                        if (stackIndex < 1 || stackIndex > stackSize) {
+                            throw new IllegalStateException("Invalid stack index for C="
+                                    + selectedChannel + ", Z=" + z + ", T=" + selectedFrame);
+                        }
+                        ij.process.ImageProcessor ip =
+                                imp.getStack().getProcessor(stackIndex);
                         for (int py = y; py < y + h; py++) {
                             for (int px = x; px < x + w; px++) {
-                                allPixels[offset++] = ip.getPixelValue(px, py);
+                                float value;
+                                if (rawPixelReaderForTest != null) {
+                                    value = rawPixelReaderForTest.read(ip, px, py);
+                                } else if (ip instanceof ColorProcessor) {
+                                    // ColorProcessor can retain a non-zero high byte.
+                                    // Mask before converting to float: converting the
+                                    // signed 32-bit value first would lose low RGB bits.
+                                    value = (float) (ip.get(px, py) & 0x00ffffff);
+                                } else {
+                                    value = ip.getf(px, py);
+                                }
+                                buf.putFloat(value);
+                                if (limits.known()) {
+                                    if (value == limits.rawMin.doubleValue()) lowCount++;
+                                    if (value == limits.rawMax.doubleValue()) highCount++;
+                                }
                             }
                         }
                     }
 
-                    // Convert float array to bytes then base64
-                    byte[] rawBytes = new byte[allPixels.length * 4];
-                    java.nio.ByteBuffer buf = java.nio.ByteBuffer.wrap(rawBytes);
-                    buf.order(java.nio.ByteOrder.LITTLE_ENDIAN);
-                    for (float v : allPixels) {
-                        buf.putFloat(v);
-                    }
                     String b64 = base64Encode(rawBytes);
 
                     JsonObject result = new JsonObject();
@@ -6148,34 +9913,58 @@ public class TCPCommandServer {
                     result.addProperty("sliceStart", startSlice);
                     result.addProperty("sliceEnd", endSlice);
                     result.addProperty("sliceCount", sliceCount);
-                    result.addProperty("nPixels", allPixels.length);
+                    result.addProperty("sliceAxis", "Z");
+                    attachImageSnapshot(result, snapshot, selectedChannel,
+                            startSlice, endSlice, selectedFrame);
+                    result.addProperty("nPixels", totalPixels);
                     result.addProperty("type", imp.getBitDepth() + "-bit");
                     result.addProperty("encoding", "base64_float32_le");
+                    result.add("value_domain", valueDomain(imp));
+                    attachLimitCounts(result, limits, lowCount, highCount);
                     result.addProperty("data", b64);
 
-                    holder[0] = result;
-                } catch (Exception e) {
+                    holder[0] = imageSnapshotStillCurrent(snapshot)
+                            ? result : imageSnapshotChanged();
+                } catch (Throwable e) {
                     holder[0] = e;
                 } finally {
+                    if (imp != null) {
+                        try {
+                            imp.setPositionWithoutUpdate(originalC, originalZ, originalT);
+                        } catch (Throwable ignored) {}
+                    }
                     latch.countDown();
                 }
             }
         });
 
         try {
-            if (!latch.await(30000, TimeUnit.MILLISECONDS)) {
+            long timeoutMs = Math.max(1L, Math.min(120000L,
+                    resolveTimeoutMs(request, 30000L)));
+            if (!latch.await(timeoutMs, TimeUnit.MILLISECONDS)) {
+                actionToken.invalidate();
                 return errorResponse("Timed out getting pixels");
             }
         } catch (InterruptedException e) {
+            actionToken.invalidate();
             Thread.currentThread().interrupt();
             return errorResponse("Interrupted");
         }
 
-        if (holder[0] instanceof Exception) {
-            return errorResponse("Error: " + ((Exception) holder[0]).getMessage());
+        if (holder[0] instanceof Throwable) {
+            Throwable failure = (Throwable) holder[0];
+            return errorResponse("Error: " + (failure.getMessage() == null
+                    ? failure.getClass().getSimpleName() : failure.getMessage()));
         }
         if ("NO_IMAGE".equals(holder[0])) {
             return errorResponse("No active image");
+        }
+        if ("COMPOUND_BUDGET".equals(holder[0])) {
+            return compoundBudgetError("get_pixels", responseBudget);
+        }
+        if (holder[0] instanceof JsonObject
+                && ((JsonObject) holder[0]).has("ok")) {
+            return (JsonObject) holder[0];
         }
         return successResponse((JsonObject) holder[0]);
     }
@@ -6588,7 +10377,8 @@ public class TCPCommandServer {
         final Object[] holder = new Object[1];
         final CountDownLatch latch = new CountDownLatch(1);
 
-        SwingUtilities.invokeLater(new Runnable() {
+        GuiActionDispatcher.ActionToken actionToken =
+                GuiActionDispatcher.queueSwingAction(new Runnable() {
             @Override
             public void run() {
                 try {
@@ -6603,9 +10393,11 @@ public class TCPCommandServer {
 
         try {
             if (!latch.await(5000, TimeUnit.MILLISECONDS)) {
+                actionToken.invalidate();
                 return errorResponse("Timed out detecting dialogs");
             }
         } catch (InterruptedException e) {
+            actionToken.invalidate();
             Thread.currentThread().interrupt();
             return errorResponse("Interrupted");
         }
@@ -6904,7 +10696,8 @@ public class TCPCommandServer {
      * its action. Used by {@link #handleProbeCommand} so probing does
      * not accidentally execute the plugin.
      */
-    private void clickCancelButton(Container root) {
+    static boolean clickCancelButton(Container root) {
+        if (root == null) return false;
         for (Component c : root.getComponents()) {
             if (c instanceof java.awt.Button) {
                 String lbl = ((java.awt.Button) c).getLabel();
@@ -6913,38 +10706,120 @@ public class TCPCommandServer {
                             new java.awt.event.ActionEvent(c,
                                     java.awt.event.ActionEvent.ACTION_PERFORMED,
                                     lbl));
-                    return;
+                    return true;
                 }
             } else if (c instanceof javax.swing.JButton) {
                 String lbl = ((javax.swing.JButton) c).getText();
                 if (isCancelLabel(lbl)) {
                     ((javax.swing.JButton) c).doClick();
-                    return;
+                    return true;
                 }
             }
             if (c instanceof Container) {
-                clickCancelButton((Container) c);
+                if (clickCancelButton((Container) c)) return true;
             }
         }
+        return false;
     }
 
-    private boolean isCancelLabel(String lbl) {
+    static boolean hasCancelButton(Container root) {
+        if (root == null) return false;
+        for (Component c : root.getComponents()) {
+            if (c instanceof java.awt.Button
+                    && isCancelLabel(((java.awt.Button) c).getLabel())) return true;
+            if (c instanceof javax.swing.JButton
+                    && isCancelLabel(((javax.swing.JButton) c).getText())) return true;
+            if (c instanceof Container && hasCancelButton((Container) c)) return true;
+        }
+        return false;
+    }
+
+    private static boolean markGenericDialogCancelled(Dialog dialog) {
+        if (dialog == null) return false;
+        Class<?> c = dialog.getClass();
+        while (c != null && c != Object.class) {
+            try {
+                java.lang.reflect.Field f = c.getDeclaredField("wasCanceled");
+                f.setAccessible(true);
+                f.setBoolean(dialog, true);
+                return true;
+            } catch (NoSuchFieldException e) {
+                c = c.getSuperclass();
+            } catch (Exception e) {
+                return false;
+            }
+        }
+        return false;
+    }
+
+    private static boolean hasGenericCancelFlag(Dialog dialog) {
+        if (dialog == null) return false;
+        Class<?> c = dialog.getClass();
+        while (c != null && c != Object.class) {
+            try {
+                c.getDeclaredField("wasCanceled");
+                return true;
+            } catch (NoSuchFieldException e) {
+                c = c.getSuperclass();
+            } catch (Exception e) {
+                return false;
+            }
+        }
+        return false;
+    }
+
+    private static boolean isCancelLabel(String lbl) {
         if (lbl == null) return false;
         String l = lbl.trim().toLowerCase();
         return l.equals("cancel") || l.equals("close") || l.equals("no");
     }
 
-    private JsonObject handleCloseDialogs(JsonObject request) {
+    private JsonObject handleCloseDialogs(JsonObject request, AgentCaps caps,
+                                          Socket sock, String command) {
+        JsonObject poll = pollEdtOperation(request, caps, sock, command);
+        if (poll != null) return poll;
         JsonElement patternElement = request.get("pattern");
         final String pattern = (patternElement != null && patternElement.isJsonPrimitive())
                 ? patternElement.getAsString()
                 : null;
-
-        int closed = dismissOpenDialogs(pattern);
-
-        JsonObject result = new JsonObject();
-        result.addProperty("closedCount", closed);
-        return successResponse(result);
+        // close_dialogs remains a conservative transient-dialog cleanup command.
+        // close_windows may additionally close an explicitly named application
+        // frame (for example the AI Assistant panel) so test harness teardown can
+        // leave no owned windows behind.  An absent/blank pattern never unlocks
+        // protected application frames.
+        final boolean closeExplicitApplicationFrame = "close_windows".equals(command)
+                && pattern != null && !pattern.trim().isEmpty();
+        final int[] closed = new int[1];
+        final String owner = edtOperationOwner(caps, sock, command);
+        long requestedTimeout = resolveTimeoutMs(request, 2000L);
+        final long timeoutMs = requestedTimeout <= 0L ? 0L
+                : Math.max(1L, Math.min(120000L, requestedTimeout));
+        try {
+            EdtOperationRegistry.Operation operation = edtOperationRegistry.admit(
+                    owner,
+                    new EdtOperationRegistry.ActionStarter() {
+                        @Override public GuiActionDispatcher.ActionToken start() {
+                            return GuiActionDispatcher.queueSwingAction(new Runnable() {
+                                @Override public void run() {
+                                    closed[0] = dismissOpenDialogsOnEdt(
+                                            pattern, closeExplicitApplicationFrame);
+                                }
+                            });
+                        }
+                    },
+                    new EdtOperationRegistry.CompletionSupplier() {
+                        @Override public JsonObject complete() {
+                            JsonObject result = new JsonObject();
+                            result.addProperty("closedCount", closed[0]);
+                            return successResponse(result);
+                        }
+                    });
+            return awaitEdtOperation(operation, owner,
+                    canPollEdtOperation(caps, sock) ? timeoutMs : 0L);
+        } catch (RejectedExecutionException rejected) {
+            return protocolError("edt_operation_capacity",
+                    "The bounded EDT operation queue is full or stopped.");
+        }
     }
 
     /**
@@ -6970,7 +10845,8 @@ public class TCPCommandServer {
         final int[] closedCount = new int[1];
         final CountDownLatch latch = new CountDownLatch(1);
 
-        SwingUtilities.invokeLater(new Runnable() {
+        GuiActionDispatcher.ActionToken actionToken =
+                GuiActionDispatcher.queueSwingAction(new Runnable() {
             @Override
             public void run() {
                 try {
@@ -7053,12 +10929,70 @@ public class TCPCommandServer {
         });
 
         try {
-            latch.await(2000, TimeUnit.MILLISECONDS);
+            if (!latch.await(2000, TimeUnit.MILLISECONDS)) {
+                actionToken.invalidate();
+                return 0;
+            }
         } catch (InterruptedException e) {
+            actionToken.invalidate();
             Thread.currentThread().interrupt();
+            return 0;
         }
 
         return closedCount[0];
+    }
+
+    /** Close matching dialogs synchronously; callers must already be on EDT. */
+    static int dismissOpenDialogsOnEdt(String pattern,
+                                       boolean closeExplicitApplicationFrame) {
+        int closedCount = 0;
+        for (java.awt.Window win : java.awt.Window.getWindows()) {
+            if (!win.isShowing()
+                    || !(win instanceof java.awt.Dialog || win instanceof java.awt.Frame)) {
+                continue;
+            }
+            String title = win instanceof java.awt.Dialog
+                    ? ((java.awt.Dialog) win).getTitle()
+                    : ((java.awt.Frame) win).getTitle();
+            if (title == null) title = "";
+            if (title.equals("ImageJ") || title.equals("Fiji")
+                    || title.contains("Startup")
+                    || win == IJ.getInstance() || win instanceof ImageWindow) {
+                continue;
+            }
+            if (title.contains("AI Assistant") && !closeExplicitApplicationFrame) {
+                continue;
+            }
+            if (pattern != null
+                    && !title.toLowerCase().contains(pattern.toLowerCase())) {
+                continue;
+            }
+            boolean canceled = false;
+            try {
+                Class<?> genericDialogClass = Class.forName("ij.gui.GenericDialog");
+                if (genericDialogClass.isInstance(win)) {
+                    Class<?> c = win.getClass();
+                    while (c != null && c != Object.class) {
+                        try {
+                            java.lang.reflect.Field f = c.getDeclaredField("wasCanceled");
+                            f.setAccessible(true);
+                            f.setBoolean(win, true);
+                            canceled = true;
+                            break;
+                        } catch (NoSuchFieldException missing) {
+                            c = c.getSuperclass();
+                        } catch (Exception inaccessible) {
+                            break;
+                        }
+                    }
+                }
+            } catch (Exception ignore) {}
+            if (!canceled && win instanceof Container) clickCancelButton((Container) win);
+            win.setVisible(false);
+            win.dispose();
+            closedCount++;
+        }
+        return closedCount;
     }
 
     /**
@@ -7178,11 +11112,12 @@ public class TCPCommandServer {
         result.addProperty("plugin", pluginName);
 
         if (newDialog == null) {
-            result.addProperty("hasDialog", false);
-            result.addProperty("note", "No dialog appeared within 5 seconds. "
-                    + "Plugin may have no parameters, may have already executed, "
-                    + "or may require an open image.");
-            return successResponse(result);
+            JsonObject response = errorResponse("probe_unsupported: no cancellable dialog appeared");
+            response.addProperty("plugin", pluginName);
+            response.addProperty("hasDialog", false);
+            response.addProperty("side_effect_risk", true);
+            response.addProperty("plugin_action_may_have_executed", true);
+            return response;
         }
 
         // Small delay to let dialog fully render its components
@@ -7197,7 +11132,31 @@ public class TCPCommandServer {
             isGD = Class.forName("ij.gui.GenericDialog").isInstance(newDialog);
         } catch (Exception e) {}
 
-        if (isGD) {
+        final boolean genericDialog = isGD;
+        final boolean verifiedCancelRoute = genericDialog
+                ? hasGenericCancelFlag(newDialog)
+                : hasCancelButton(newDialog);
+        if (!verifiedCancelRoute) {
+            JsonObject response = errorResponse(
+                    "probe_unsupported_dialog: no verified cancel/close route");
+            response.addProperty("plugin", pluginName);
+            response.addProperty("hasDialog", true);
+            response.addProperty("dialogTitle",
+                    newDialog.getTitle() == null ? "" : newDialog.getTitle());
+            response.addProperty("side_effect_risk", true);
+            response.addProperty("plugin_action_executed", false);
+            response.addProperty("dialog_left_open", true);
+            return response;
+        }
+
+        result.addProperty("side_effect_risk", true);
+        result.addProperty("side_effect_risk_detail",
+                "The plugin is launched until its dialog appears; initialization may have side effects.");
+        result.addProperty("plugin_action_executed", false);
+        result.addProperty("cancel_route", genericDialog
+                ? "GenericDialog.wasCanceled" : "cancel_button");
+
+        if (genericDialog) {
             result.addProperty("dialogType", "GenericDialog");
             JsonArray fields = probeGenericDialogFields(newDialog);
             result.add("fields", fields);
@@ -7223,33 +11182,44 @@ public class TCPCommandServer {
         // dialogs we fall back to clicking a Cancel-style button if the
         // plugin provides one.
         final Dialog dlg = newDialog;
-        SwingUtilities.invokeLater(new Runnable() {
+        final boolean[] cancelled = new boolean[1];
+        final CountDownLatch cancelLatch = new CountDownLatch(1);
+        GuiActionDispatcher.ActionToken cancelToken =
+                GuiActionDispatcher.queueSwingAction(new Runnable() {
             @Override
             public void run() {
-                boolean canceled = false;
-                Class<?> c = dlg.getClass();
-                while (c != null && c != Object.class) {
-                    try {
-                        java.lang.reflect.Field f = c.getDeclaredField("wasCanceled");
-                        f.setAccessible(true);
-                        f.setBoolean(dlg, true);
-                        canceled = true;
-                        break;
-                    } catch (NoSuchFieldException nsf) {
-                        c = c.getSuperclass();
-                    } catch (Exception ignore) {
-                        break;
-                    }
+                try {
+                    cancelled[0] = genericDialog
+                            ? markGenericDialogCancelled(dlg)
+                            : clickCancelButton(dlg);
+                    if (cancelled[0]) dlg.dispose();
+                } finally {
+                    cancelLatch.countDown();
                 }
-                if (!canceled) {
-                    clickCancelButton(dlg);
-                }
-                dlg.dispose();
             }
         });
 
-        // Brief wait for disposal to complete
-        try { Thread.sleep(200); } catch (InterruptedException e) {}
+        try {
+            if (!cancelLatch.await(2000L, TimeUnit.MILLISECONDS)) {
+                cancelToken.invalidate();
+                JsonObject response = errorResponse("probe_cancel_timed_out");
+                response.addProperty("side_effect_risk", true);
+                response.addProperty("dialog_left_open", true);
+                return response;
+            }
+        } catch (InterruptedException e) {
+            cancelToken.invalidate();
+            Thread.currentThread().interrupt();
+            JsonObject response = errorResponse("probe_interrupted");
+            response.addProperty("side_effect_risk", true);
+            return response;
+        }
+        if (!cancelled[0]) {
+            JsonObject response = errorResponse("probe_cancel_failed");
+            response.addProperty("side_effect_risk", true);
+            response.addProperty("dialog_left_open", true);
+            return response;
+        }
 
         return successResponse(result);
     }
@@ -7524,7 +11494,10 @@ public class TCPCommandServer {
      * "index" selects the Nth component of that type (0-based).
      * Both "target" and "index" can be used together for disambiguation.
      */
-    private JsonObject handleInteractDialog(JsonObject request, AgentCaps caps) {
+    private JsonObject handleInteractDialog(JsonObject request, AgentCaps caps,
+                                            Socket sock, String command) {
+        JsonObject poll = pollEdtOperation(request, caps, sock, command);
+        if (poll != null) return poll;
         JsonElement actionElement = request.get("action");
         if (actionElement == null || !actionElement.isJsonPrimitive()) {
             return errorResponse("Missing 'action' field for interact_dialog");
@@ -7550,8 +11523,10 @@ public class TCPCommandServer {
         // origin="dialog" so the agent sees the new node came from a GUI
         // interaction rather than an explicit macro. Per plan:
         // docs/tcp_upgrade/13_provenance_graph.md.
-        final Set<String> graphTitlesBefore = ImageGraph.captureOpenTitles();
-        final String graphActiveTitleBefore = ImageGraph.captureActiveTitle();
+        final List<ImageGraph.ImageRef> graphImagesBefore =
+                ImageGraph.captureOpenImages();
+        final ImageGraph.ImageRef graphActiveBefore =
+                ImageGraph.captureActiveImage();
         final long graphMarkerBefore = imageGraph.currentMarker();
         final String graphInteractionLabel =
                 "interact_dialog:" + action
@@ -7576,13 +11551,16 @@ public class TCPCommandServer {
 
         // Execute on EDT
         final Object[] holder = new Object[1];
-        final CountDownLatch latch = new CountDownLatch(1);
         final JsonElement valEl = valueElement;
 
-        SwingUtilities.invokeLater(new Runnable() {
+        final Runnable dialogAction = new Runnable() {
             @Override
             public void run() {
                 try {
+                    if (dialogInteractionForTest != null) {
+                        holder[0] = dialogInteractionForTest.apply(request);
+                        return;
+                    }
                     // Find the dialog
                     Dialog dlg = findDialog(dialogTitle);
                     if (dlg == null && !"list_components".equals(action)) {
@@ -7624,22 +11602,46 @@ public class TCPCommandServer {
                     }
                 } catch (Exception e) {
                     holder[0] = errorResponse("interact_dialog error: " + e.getMessage());
-                } finally {
-                    latch.countDown();
                 }
             }
-        });
+        };
 
+        final String owner = edtOperationOwner(caps, sock, command);
+        long requestedTimeout = resolveTimeoutMs(request, 5000L);
+        final long timeoutMs = requestedTimeout <= 0L ? 0L
+                : Math.max(1L, Math.min(120000L, requestedTimeout));
         try {
-            if (!latch.await(5000, TimeUnit.MILLISECONDS)) {
-                return errorResponse("interact_dialog timed out");
-            }
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            return errorResponse("Interrupted");
+            EdtOperationRegistry.Operation operation = edtOperationRegistry.admit(
+                    owner,
+                    new EdtOperationRegistry.ActionStarter() {
+                        @Override public GuiActionDispatcher.ActionToken start() {
+                            return GuiActionDispatcher.queueSwingAction(dialogAction);
+                        }
+                    },
+                    new EdtOperationRegistry.CompletionSupplier() {
+                        @Override public JsonObject complete() {
+                            return finalizeDialogInteraction((JsonObject) holder[0],
+                                    modalBefore, phantomAutoDismiss,
+                                    graphImagesBefore, graphActiveBefore,
+                                    graphInteractionLabel, graphMarkerBefore, caps);
+                        }
+                    });
+            return awaitEdtOperation(operation, owner,
+                    canPollEdtOperation(caps, sock) ? timeoutMs : 0L);
+        } catch (RejectedExecutionException rejected) {
+            return protocolError("edt_operation_capacity",
+                    "The bounded EDT operation queue is full or stopped.");
         }
+    }
 
-        JsonObject reply = (JsonObject) holder[0];
+    private JsonObject finalizeDialogInteraction(JsonObject reply,
+                                                  Set<Window> modalBefore,
+                                                  boolean phantomAutoDismiss,
+                                                  List<ImageGraph.ImageRef> graphImagesBefore,
+                                                  ImageGraph.ImageRef graphActiveBefore,
+                                                  String graphInteractionLabel,
+                                                  long graphMarkerBefore,
+                                                  AgentCaps caps) {
         // Step 10: attach phantomDialog to the interact_dialog reply if the
         // action opened a new modal. The detector runs regardless of whether
         // the interaction itself succeeded — a silent confirmation dialog on
@@ -7664,9 +11666,10 @@ public class TCPCommandServer {
         // Runs on success and error paths — a GenericDialog that ran its
         // plugin and then reported a validation failure still left work.
         try {
-            Set<String> graphTitlesAfter = ImageGraph.captureOpenTitles();
-            imageGraph.trackMacroChange(graphTitlesBefore, graphActiveTitleBefore,
-                    graphTitlesAfter, graphInteractionLabel, "dialog");
+            List<ImageGraph.ImageRef> graphImagesAfter =
+                    ImageGraph.captureOpenImages();
+            imageGraph.trackImageChange(graphImagesBefore, graphActiveBefore,
+                    graphImagesAfter, graphInteractionLabel, "dialog");
             if (reply != null && caps != null && caps.graphDelta) {
                 ImageGraph.Delta gDelta = imageGraph.deltaSince(graphMarkerBefore);
                 if (!gDelta.isEmpty()) {

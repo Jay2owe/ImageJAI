@@ -3,7 +3,26 @@ package imagejai.engine;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
+import ij.ImagePlus;
+import ij.process.ByteProcessor;
+import imagejai.engine.security.PathTokenMap;
 import org.junit.Test;
+
+import java.io.BufferedReader;
+import java.io.InputStreamReader;
+import java.io.OutputStreamWriter;
+import java.io.PrintWriter;
+import java.net.InetAddress;
+import java.net.Socket;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
@@ -22,6 +41,235 @@ public class TCPCommandServerHelloTest {
 
     private static TCPCommandServer newServer() {
         return new TCPCommandServer(0, null, null, null, null);
+    }
+
+    @Test
+    public void strictSessionCarriesImmutableCapsAcrossFreshSockets() throws Exception {
+        String previous = System.getProperty("imagejai.tcp.requireToken");
+        System.setProperty("imagejai.tcp.requireToken", "true");
+        TCPCommandServer server = newServer();
+        server.setServerTokenForTest("loopback-secret");
+        List<TCPCommandServer.AgentCaps> witness =
+                new ArrayList<TCPCommandServer.AgentCaps>();
+        server.capsWitnessForTest = witness;
+        try {
+            int port = startAndAwait(server);
+            JsonObject hello = exchange(port, parse(
+                    "{\"command\":\"hello\",\"agent\":\"test-client\"," +
+                    "\"token\":\"loopback-secret\",\"capabilities\":{" +
+                    "\"structured_errors\":true,\"safe_mode\":false," +
+                    "\"pulse\":false,\"dedup\":false,\"undo\":true}}"));
+
+            assertTrue(hello.toString(), hello.get("ok").getAsBoolean());
+            JsonObject result = hello.getAsJsonObject("result");
+            String sessionId = result.get("session_id").getAsString();
+            assertTrue(sessionId.length() >= 32);
+            assertTrue(result.get("expires_at").getAsLong()
+                    > System.currentTimeMillis());
+
+            JsonObject ping = new JsonObject();
+            ping.addProperty("command", "ping");
+            ping.addProperty("session_id", sessionId);
+            ping.addProperty("token", "loopback-secret");
+            JsonObject pingResponse = exchange(port, ping);
+
+            assertTrue(pingResponse.toString(),
+                    pingResponse.get("ok").getAsBoolean());
+            TCPCommandServer.AgentCaps carried = witness.get(witness.size() - 1);
+            assertTrue(carried.authenticated);
+            assertFalse(carried.compatibility);
+            assertTrue(carried.structuredErrors);
+            assertFalse(carried.safeMode);
+            assertFalse(carried.pulse);
+            assertFalse(carried.dedup);
+            assertTrue(carried.undo);
+
+            JsonObject missing = exchange(port,
+                    parse("{\"command\":\"get_state\"}"));
+            assertEquals("session_required", errorCode(missing));
+
+            JsonObject unknown = exchange(port, parse(
+                    "{\"command\":\"ping\",\"session_id\":" +
+                    "\"01234567890123456789012345678901\"," +
+                    "\"token\":\"loopback-secret\"}"));
+            assertEquals("session_unknown", errorCode(unknown));
+
+            JsonObject wrongToken = exchange(port, parse(
+                    "{\"command\":\"ping\",\"session_id\":\"" +
+                    sessionId + "\",\"token\":\"wrong\"}"));
+            assertEquals("session_token_mismatch", errorCode(wrongToken));
+        } finally {
+            server.stop();
+            restoreProperty("imagejai.tcp.requireToken", previous);
+        }
+    }
+
+    @Test
+    public void liveLoopbackRejectsExpiredAndPostStopSessions() throws Exception {
+        FakeClock clock = new FakeClock();
+        SessionCapsRegistry<TCPCommandServer.AgentCaps> registry =
+                new SessionCapsRegistry<TCPCommandServer.AgentCaps>(
+                        4, 1000L, clock, clock,
+                        new SessionCapsRegistry.IdSource() {
+                            @Override
+                            public String nextId() {
+                                return "01234567890123456789012345678901";
+                            }
+                        });
+        TCPCommandServer server = new TCPCommandServer(
+                0, null, null, null, null, registry);
+        server.setServerTokenForTest("expiry-secret");
+        String sessionId = null;
+        try {
+            int port = startAndAwait(server);
+            JsonObject hello = exchange(port, parse(
+                    "{\"command\":\"hello\",\"token\":\"expiry-secret\"}"));
+            sessionId = hello.getAsJsonObject("result")
+                    .get("session_id").getAsString();
+            clock.nanos = 1_000_000_000L;
+
+            JsonObject expired = exchange(port, parse(
+                    "{\"command\":\"ping\",\"session_id\":\"" +
+                    sessionId + "\",\"token\":\"expiry-secret\"}"));
+            assertEquals("session_expired", errorCode(expired));
+        } finally {
+            server.stop();
+        }
+
+        assertNotNull(sessionId);
+        assertEquals(SessionCapsRegistry.Status.REVOKED,
+                registry.lookup(sessionId, "expiry-secret").status());
+        registry.activate();
+        assertEquals(SessionCapsRegistry.Status.UNKNOWN,
+                registry.lookup(sessionId, "expiry-secret").status());
+    }
+
+    @Test
+    public void liveLoopbackRequiresAuthenticationByDefault() throws Exception {
+        String previous = System.getProperty("imagejai.tcp.requireToken");
+        System.clearProperty("imagejai.tcp.requireToken");
+        TCPCommandServer server = newServer();
+        server.setServerTokenForTest("default-secure-secret");
+        try {
+            int port = startAndAwait(server);
+
+            JsonObject ping = exchange(port, parse("{\"command\":\"ping\"}"));
+            assertTrue(ping.toString(), ping.get("ok").getAsBoolean());
+            assertEquals("pong", ping.get("result").getAsString());
+
+            assertEquals("auth_required", errorCode(exchange(port,
+                    parse("{\"command\":\"hello\"}"))));
+            assertEquals("session_required", errorCode(exchange(port,
+                    parse("{\"command\":\"get_state\"}"))));
+            assertEquals("session_required", errorCode(exchange(port,
+                    parse("{\"command\":\"run_script\",\"language\":\"groovy\"," +
+                            "\"code\":\"println(1)\"}"))));
+
+            JsonObject authenticated = exchange(port, parse(
+                    "{\"command\":\"hello\",\"token\":\"default-secure-secret\"}"));
+            assertTrue(authenticated.toString(),
+                    authenticated.get("ok").getAsBoolean());
+            assertFalse(authenticated.getAsJsonObject("result")
+                    .get("compatibility").getAsBoolean());
+        } finally {
+            server.stop();
+            restoreProperty("imagejai.tcp.requireToken", previous);
+        }
+    }
+
+    @Test
+    public void explicitCompatibilityOptOutStillDeniesHostCodeAndMutation()
+            throws Exception {
+        String previous = System.getProperty("imagejai.tcp.requireToken");
+        System.setProperty("imagejai.tcp.requireToken", "false");
+        TCPCommandServer server = newServer();
+        server.setServerTokenForTest("compatibility-secret");
+        try {
+            int port = startAndAwait(server);
+            JsonObject hello = exchange(port, parse("{\"command\":\"hello\"}"));
+            assertTrue(hello.toString(), hello.get("ok").getAsBoolean());
+            JsonObject result = hello.getAsJsonObject("result");
+            assertTrue(result.get("compatibility").getAsBoolean());
+            String session = result.get("session_id").getAsString();
+
+            JsonObject sessionlessScript = exchange(port, parse(
+                    "{\"command\":\"run_script\",\"language\":\"groovy\"," +
+                            "\"code\":\"println(1)\"}"));
+            assertEquals("compatibility_read_only", errorCode(sessionlessScript));
+
+            JsonObject sessionScript = exchange(port, parse(
+                    "{\"command\":\"run_script\",\"session_id\":\"" + session +
+                            "\",\"language\":\"groovy\",\"code\":\"println(1)\"}"));
+            assertEquals("compatibility_read_only", errorCode(sessionScript));
+
+            assertEquals("compatibility_read_only", errorCode(exchange(port, parse(
+                    "{\"command\":\"execute_macro\",\"code\":\"run(\\\"Close\\\");\"}"))));
+            assertEquals("compatibility_read_only", errorCode(exchange(port, parse(
+                    "{\"command\":\"run_pipeline\",\"steps\":[]}"))));
+        } finally {
+            server.stop();
+            restoreProperty("imagejai.tcp.requireToken", previous);
+        }
+    }
+
+    @Test
+    public void authenticatedLoopbackKeepsInstallationTokenSeparateFromImageToken()
+            throws Exception {
+        String previous = System.getProperty("imagejai.tcp.requireToken");
+        System.setProperty("imagejai.tcp.requireToken", "true");
+        TCPCommandServer server = newServer();
+        server.setServerTokenForTest("installation-secret");
+        Path requested = Paths.get("loopback-governed.tif")
+                .toAbsolutePath().normalize();
+        String imageToken = PathTokenMap.getInstance().tokenForPath(requested);
+        AtomicInteger attempts = new AtomicInteger();
+        AtomicReference<List<ImageGraph.ImageRef>> open =
+                new AtomicReference<List<ImageGraph.ImageRef>>(new ArrayList<ImageGraph.ImageRef>());
+        AtomicReference<ImagePlus> active = new AtomicReference<ImagePlus>();
+        server.openImagesForTest = open::get;
+        server.currentImageForTest = active::get;
+        server.openImageOperationForTest = (path, series) -> {
+            attempts.incrementAndGet();
+            ImagePlus image = new ImagePlus("loopback-governed.tif",
+                    new ByteProcessor(1, 1));
+            ImageGraph.ImageRef ref = new ImageGraph.ImageRef(image,
+                    ImageGraph.stableIdentity(image), 1, image.getTitle(),
+                    requested.toString());
+            active.set(image);
+            open.set(java.util.Collections.singletonList(ref));
+        };
+        try {
+            int port = startAndAwait(server);
+            JsonObject hello = exchange(port, parse(
+                    "{\"command\":\"hello\",\"token\":\"installation-secret\"}"));
+            String session = hello.getAsJsonObject("result")
+                    .get("session_id").getAsString();
+
+            JsonObject missingImageToken = new JsonObject();
+            missingImageToken.addProperty("command", "open_image_by_token");
+            missingImageToken.addProperty("session_id", session);
+            missingImageToken.addProperty("token", "installation-secret");
+            JsonObject missing = exchange(port, missingImageToken);
+            assertFalse(missing.toString(), missing.get("ok").getAsBoolean());
+            assertTrue(missing.toString().contains("image_token"));
+            assertEquals(0, attempts.get());
+
+            JsonObject openRequest = new JsonObject();
+            openRequest.addProperty("command", "open_image_by_token");
+            openRequest.addProperty("session_id", session);
+            openRequest.addProperty("token", "installation-secret");
+            openRequest.addProperty("image_token", imageToken);
+            openRequest.addProperty("timeout_ms", 1000);
+            JsonObject opened = exchange(port, openRequest);
+
+            assertTrue(opened.toString(), opened.get("ok").getAsBoolean());
+            assertTrue(opened.getAsJsonObject("result")
+                    .get("resolved_from_token").getAsBoolean());
+            assertEquals(1, attempts.get());
+        } finally {
+            server.stop();
+            restoreProperty("imagejai.tcp.requireToken", previous);
+        }
     }
 
     /** Full hello request maps every declared field onto the response. */
@@ -361,12 +609,7 @@ public class TCPCommandServerHelloTest {
         assertTrue(enabledContains(enabled, "safe_mode_option:auto_backup_roi_on_reset"));
     }
 
-    /**
-     * No-handshake fallback: {@link TCPCommandServer#DEFAULT_CAPS} preserves
-     * the legacy unguarded default so wrappers that never say hello keep
-     * today's behaviour. The breaking-change scope is limited to handshake
-     * clients (documented in the stage's "Known risks" section).
-     */
+    /** Trusted in-process calls retain their explicit package-level defaults. */
     @Test
     public void noHandshakeDefaultCapsKeepSafeModeOff() {
         assertFalse("DEFAULT_CAPS.safeMode preserves legacy fast path",
@@ -406,6 +649,125 @@ public class TCPCommandServerHelloTest {
         }
     }
 
+    @Test
+    public void helloRejectsOversizedRetainedIdentityFields() {
+        TCPCommandServer server = newServer();
+        JsonObject request = new JsonObject();
+        request.addProperty("command", "hello");
+        request.addProperty("agent", repeat('a',
+                TCPCommandServer.MAX_HANDSHAKE_IDENTITY_CHARS + 1));
+
+        JsonObject response = server.handleHello(request, null);
+
+        assertEquals("invalid_hello", errorCode(response));
+    }
+
+    @Test
+    public void helloRejectsUnboundedAcceptedEventAllowlist() {
+        TCPCommandServer server = newServer();
+        JsonObject request = new JsonObject();
+        request.addProperty("command", "hello");
+        request.addProperty("agent", "tester");
+        JsonObject caps = new JsonObject();
+        JsonArray events = new JsonArray();
+        for (int i = 0; i <= TCPCommandServer.MAX_ACCEPT_EVENT_TOPICS; i++) {
+            events.add("topic." + i);
+        }
+        caps.add("accept_events", events);
+        request.add("capabilities", caps);
+
+        assertEquals("invalid_hello", errorCode(server.handleHello(request, null)));
+
+        events = new JsonArray();
+        events.add(repeat('x', TCPCommandServer.MAX_ACCEPT_EVENT_TOPIC_CHARS + 1));
+        caps.add("accept_events", events);
+        assertEquals("invalid_hello", errorCode(server.handleHello(request, null)));
+    }
+
+    private static int startAndAwait(TCPCommandServer server) throws Exception {
+        final CountDownLatch started = new CountDownLatch(1);
+        final int[] boundPort = new int[1];
+        final String[] error = new String[1];
+        server.start(new TCPCommandServer.ServerListener() {
+            @Override
+            public void onServerStarted(int port) {
+                boundPort[0] = port;
+                started.countDown();
+            }
+
+            @Override
+            public void onServerStopped() {
+                // no-op
+            }
+
+            @Override
+            public void onClientConnected(String clientInfo) {
+                // no-op
+            }
+
+            @Override
+            public void onCommandReceived(String command) {
+                // no-op
+            }
+
+            @Override
+            public void onError(String message) {
+                error[0] = message;
+                started.countDown();
+            }
+        });
+        assertTrue("server did not bind", started.await(5, TimeUnit.SECONDS));
+        if (error[0] != null) {
+            throw new AssertionError(error[0]);
+        }
+        return boundPort[0];
+    }
+
+    private static JsonObject exchange(int port, JsonObject request) throws Exception {
+        try (Socket socket = new Socket(InetAddress.getLoopbackAddress(), port)) {
+            socket.setSoTimeout(5000);
+            PrintWriter writer = new PrintWriter(new OutputStreamWriter(
+                    socket.getOutputStream(), StandardCharsets.UTF_8), true);
+            BufferedReader reader = new BufferedReader(new InputStreamReader(
+                    socket.getInputStream(), StandardCharsets.UTF_8));
+            writer.println(request.toString());
+            String response = reader.readLine();
+            assertNotNull("server closed without a response", response);
+            return parse(response);
+        }
+    }
+
+    private static String errorCode(JsonObject response) {
+        assertFalse(response.toString(), response.get("ok").getAsBoolean());
+        JsonObject error = response.getAsJsonObject("error");
+        assertFalse(error.get("retry_safe").getAsBoolean());
+        return error.get("code").getAsString();
+    }
+
+    private static void restoreProperty(String name, String previous) {
+        if (previous == null) {
+            System.clearProperty(name);
+        } else {
+            System.setProperty(name, previous);
+        }
+    }
+
+    private static final class FakeClock
+            implements SessionCapsRegistry.Ticker, SessionCapsRegistry.WallClock {
+        long nanos;
+        long wallMillis = 1_700_000_000_000L;
+
+        @Override
+        public long nanoTime() {
+            return nanos;
+        }
+
+        @Override
+        public long currentTimeMillis() {
+            return wallMillis;
+        }
+    }
+
     private static JsonObject parse(String s) {
         return new JsonParser().parse(s).getAsJsonObject();
     }
@@ -415,5 +777,11 @@ public class TCPCommandServerHelloTest {
             if (name.equals(arr.get(i).getAsString())) return true;
         }
         return false;
+    }
+
+    private static String repeat(char value, int count) {
+        StringBuilder out = new StringBuilder(count);
+        for (int i = 0; i < count; i++) out.append(value);
+        return out.toString();
     }
 }

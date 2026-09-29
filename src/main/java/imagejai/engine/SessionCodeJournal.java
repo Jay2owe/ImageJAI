@@ -26,12 +26,16 @@ import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.Deque;
 import java.util.Iterator;
 import java.util.List;
+import java.util.Locale;
+import java.util.UUID;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Future;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
@@ -57,11 +61,52 @@ public final class SessionCodeJournal {
     public static final String PREF_PERSIST = "ai.assistant.history.persist";
     private static final int RING_CAP = 200;
     private static final int MIN_CODE_LEN = 20;
-    private static final DateTimeFormatter HMS = DateTimeFormatter.ofPattern("HHmmss");
+    static final int MAX_CODE_BYTES = 2 * 1024 * 1024;
+    static final int MAX_INDEX_BYTES = 8 * 1024 * 1024;
+    private static final DateTimeFormatter HMS =
+            DateTimeFormatter.ofPattern("HHmmss", Locale.ROOT);
+
+    /** Dataset captured when work is admitted, before any asynchronous switch. */
+    public static final class DatasetBinding {
+        public final String identity;
+        public final String hash;
+        public final String title;
+        public final String sourcePath;
+        public final int width;
+        public final int height;
+        public final int slices;
+        public final int channels;
+        public final int frames;
+        public final int bitDepth;
+        final Path codeDir;
+
+        DatasetBinding(String identity, String hash, String title,
+                       String sourcePath, Path codeDir) {
+            this(identity, hash, title, sourcePath, codeDir,
+                    -1, -1, -1, -1, -1, -1);
+        }
+
+        DatasetBinding(String identity, String hash, String title,
+                       String sourcePath, Path codeDir, int width, int height,
+                       int slices, int channels, int frames, int bitDepth) {
+            this.identity = identity;
+            this.hash = hash;
+            this.title = title == null ? "" : title;
+            this.sourcePath = sourcePath;
+            this.codeDir = codeDir;
+            this.width = width;
+            this.height = height;
+            this.slices = slices;
+            this.channels = channels;
+            this.frames = frames;
+            this.bitDepth = bitDepth;
+        }
+    }
 
     /** Immutable snapshot view of a journal entry. */
     public static final class Entry {
         public final long id;
+        public final String persistentId;
         public final String name;
         public final String language;
         public final String code;
@@ -70,18 +115,25 @@ public final class SessionCodeJournal {
         public final String source;
         public final long macroId;
         public final long firstRunAtMs;
-        public long lastRunAtMs;
+        public final long lastRunAtMs;
         public final long durationMs;
         public final boolean success;
         public final String failureMessage;
         public final boolean plumbingOnly;
-        public int runCount;
+        public final int runCount;
+        public final String datasetIdentity;
+        public final String datasetHash;
+        public final String datasetTitle;
+        public final String datasetSourcePath;
+        final Path codeDir;
 
-        Entry(long id, String name, String language, String code, String canonical,
+        Entry(long id, String persistentId, String name, String language, String code, String canonical,
               String fileName, String source, long macroId, long startedAtMs,
               long durationMs, boolean success, String failureMessage,
-              boolean plumbingOnly) {
+              boolean plumbingOnly, long lastRunAtMs, int runCount,
+              DatasetBinding dataset) {
             this.id = id;
+            this.persistentId = persistentId;
             this.name = name;
             this.language = language;
             this.code = code;
@@ -90,35 +142,67 @@ public final class SessionCodeJournal {
             this.source = source;
             this.macroId = macroId;
             this.firstRunAtMs = startedAtMs;
-            this.lastRunAtMs = startedAtMs;
+            this.lastRunAtMs = lastRunAtMs;
             this.durationMs = durationMs;
             this.success = success;
             this.failureMessage = failureMessage;
             this.plumbingOnly = plumbingOnly;
-            this.runCount = 1;
+            this.runCount = runCount;
+            this.datasetIdentity = dataset == null ? null : dataset.identity;
+            this.datasetHash = dataset == null ? null : dataset.hash;
+            this.datasetTitle = dataset == null ? "" : dataset.title;
+            this.datasetSourcePath = dataset == null ? null : dataset.sourcePath;
+            this.codeDir = dataset == null ? null : dataset.codeDir;
         }
 
         public boolean isPlumbingOnly() {
             return plumbingOnly;
+        }
+
+        Entry withRerun(long atMs) {
+            DatasetBinding dataset = new DatasetBinding(datasetIdentity, datasetHash,
+                    datasetTitle, datasetSourcePath, codeDir);
+            return new Entry(id, persistentId, name, language, code, canonical,
+                    fileName, source, macroId, firstRunAtMs, durationMs, success,
+                    failureMessage, plumbingOnly, atMs, runCount + 1, dataset);
         }
     }
 
     /** Called synchronously on every record / rerun / promotion. */
     public interface Listener { void onChange(); }
 
+    public static final class PersistenceException extends IllegalStateException {
+        public final String code;
+        PersistenceException(String code, String message) {
+            super(message);
+            this.code = code;
+        }
+    }
+
     // ---- state ----
     private final Deque<Entry> ring = new ArrayDeque<>();
     private final List<Listener> listeners = new CopyOnWriteArrayList<>();
     private final AtomicLong idSeq = new AtomicLong(0);
-    private final ExecutorService ioExecutor =
-            Executors.newSingleThreadExecutor(r -> {
-                Thread t = new Thread(r, "imagej-ai-journal-io");
-                t.setDaemon(true);
-                return t;
-            });
+    private final ExecutorService ioExecutor;
+    private final Path fixedCodeDir;
+    private final boolean forcePersistence;
     private final long sessionStartedAtMs = System.currentTimeMillis();
     private boolean indexLoadAttempted;
-    private SessionCodeJournal() {}
+    private boolean writeBlocked;
+    private String persistenceError;
+    private Path quarantinedIndex;
+
+    private SessionCodeJournal() { this(null, false); }
+
+    SessionCodeJournal(Path fixedCodeDir, boolean forcePersistence) {
+        this.fixedCodeDir = fixedCodeDir;
+        this.forcePersistence = forcePersistence;
+        this.ioExecutor = Executors.newSingleThreadExecutor(r -> {
+            Thread t = new Thread(r, "imagej-ai-journal-io");
+            t.setDaemon(true);
+            return t;
+        });
+    }
 
     public void addListener(Listener l) { listeners.add(l); }
     public void removeListener(Listener l) { listeners.remove(l); }
@@ -129,7 +213,7 @@ public final class SessionCodeJournal {
      */
     public synchronized List<Entry> snapshot() {
         loadFromIndexIfPersistEnabled();
-        return new ArrayList<>(ring);
+        return Collections.unmodifiableList(new ArrayList<Entry>(ring));
     }
 
     /**
@@ -146,7 +230,7 @@ public final class SessionCodeJournal {
                 current.add(e);
             }
         }
-        return current;
+        return Collections.unmodifiableList(current);
     }
 
     /**
@@ -157,27 +241,46 @@ public final class SessionCodeJournal {
     public void record(String language, String code, String source,
                        long macroId, long startedAtMs, long durationMs,
                        boolean success, String failureMessage) {
+        record(captureInitiatingDataset(), language, code, source, macroId,
+                startedAtMs, durationMs, success, failureMessage);
+    }
+
+    public void record(DatasetBinding dataset, String language, String code, String source,
+                       long macroId, long startedAtMs, long durationMs,
+                       boolean success, String failureMessage) {
         if (code == null) return;
         String trimmed = code.trim();
         if (trimmed.length() <= MIN_CODE_LEN) return;
+        requireBounded("code", code, MAX_CODE_BYTES);
+        requireBounded("source", source, 64 * 1024);
+        requireBounded("failureMessage", failureMessage, 256 * 1024);
+        if (dataset == null) dataset = captureInitiatingDataset();
 
         loadFromIndexIfPersistEnabled();
         String canonical = canonicalise(code);
         Entry toWrite = null;
         List<Entry> indexSnapshot = null;
+        Path targetDir = dataset == null ? resolveCodeDirNow() : dataset.codeDir;
         synchronized (this) {
+            if (writeBlocked) {
+                throw new PersistenceException("CORRUPT_HISTORY_BLOCKED",
+                        "journal writes are blocked after invalid INDEX: " + persistenceError);
+            }
             Entry head = ring.peekFirst();
-            if (head != null && head.canonical.equals(canonical)) {
-                head.runCount++;
-                head.lastRunAtMs = startedAtMs;
+            if (head != null && head.canonical.equals(canonical)
+                    && sameDataset(head, dataset)) {
+                Entry rerun = head.withRerun(startedAtMs);
+                ring.removeFirst();
+                ring.addFirst(rerun);
+                targetDir = rerun.codeDir;
                 indexSnapshot = new ArrayList<>(ring);
             } else for (Iterator<Entry> it = ring.iterator(); it.hasNext(); ) {
                 Entry e = it.next();
-                if (e.canonical.equals(canonical)) {
+                if (e.canonical.equals(canonical) && sameDataset(e, dataset)) {
                     it.remove();
-                    e.runCount++;
-                    e.lastRunAtMs = startedAtMs;
-                    ring.addFirst(e);
+                    Entry rerun = e.withRerun(startedAtMs);
+                    ring.addFirst(rerun);
+                    targetDir = rerun.codeDir;
                     indexSnapshot = new ArrayList<>(ring);
                     break;
                 }
@@ -188,18 +291,41 @@ public final class SessionCodeJournal {
                 String slug = name.slug;
                 slug = dedupSlug(slug);
                 String safeLanguage = language == null ? "ijm" : language;
-                String fileName = timeSuffix + "_" + slug + "." + extensionFor(safeLanguage);
-                Entry e = new Entry(idSeq.incrementAndGet(), slug, safeLanguage, code,
+                String persistentId = UUID.randomUUID().toString();
+                String fileName = timeSuffix + "_" + persistentId + "_" + slug
+                        + "." + extensionFor(safeLanguage);
+                Entry e = new Entry(idSeq.incrementAndGet(), persistentId, slug, safeLanguage, code,
                         canonical, fileName, source == null ? "tcp" : source, macroId,
-                        startedAtMs, durationMs, success, failureMessage, name.plumbingOnly);
+                        startedAtMs, durationMs, success, failureMessage, name.plumbingOnly,
+                        startedAtMs, 1, dataset);
                 ring.addFirst(e);
                 while (ring.size() > RING_CAP) ring.pollLast();
                 toWrite = e;
                 indexSnapshot = new ArrayList<>(ring);
             }
         }
-        writeAsync(toWrite, indexSnapshot);
+        writeAsync(toWrite, entriesForDirectory(indexSnapshot, targetDir), targetDir);
         fire();
+    }
+
+    public static DatasetBinding captureInitiatingDataset() {
+        ImageGraph.ImageRef ref = ImageGraph.captureActiveImage();
+        if (ref == null) {
+            Path dir = resolveFallbackCodeDir();
+            return new DatasetBinding(null, null, "", null, dir);
+        }
+        String hash = null;
+        try {
+            hash = StateInspector.datasetHash(ref.image);
+        } catch (Throwable t) {
+            IJ.log("[ImageJAI-Journal] dataset hash failed: " + t);
+        }
+        Path root = imageDirectory(ref.image);
+        Path dir = root == null ? resolveFallbackCodeDir()
+                : root.resolve("AI_Exports").resolve(".session").resolve("code");
+        return new DatasetBinding(ref.identity, hash, ref.title, ref.sourcePath, dir,
+                ref.image.getWidth(), ref.image.getHeight(), ref.image.getNSlices(),
+                ref.image.getNChannels(), ref.image.getNFrames(), ref.image.getBitDepth());
     }
 
     public synchronized Entry get(long id) {
@@ -235,14 +361,15 @@ public final class SessionCodeJournal {
         fire();
         ioExecutor.submit(() -> {
             try {
-                Path dir = resolveCodeDir();
-                if (dir == null) return;
+                List<Path> touched = new ArrayList<Path>();
                 for (Entry e : filesToDelete) {
-                    if (e.fileName != null && !e.fileName.trim().isEmpty()) {
+                    Path dir = e.codeDir;
+                    if (dir != null && e.fileName != null && !e.fileName.trim().isEmpty()) {
                         Files.deleteIfExists(dir.resolve(e.fileName));
+                        if (!touched.contains(dir)) touched.add(dir);
                     }
                 }
-                Files.deleteIfExists(dir.resolve("INDEX.json"));
+                for (Path dir : touched) Files.deleteIfExists(dir.resolve("INDEX.json"));
             } catch (Throwable t) {
                 IJ.log("[ImageJAI-Journal] clear files failed: " + t);
             }
@@ -250,60 +377,90 @@ public final class SessionCodeJournal {
     }
 
     public synchronized void loadFromIndexIfPresent() {
+        if (writeBlocked) {
+            throw new PersistenceException("CORRUPT_HISTORY_BLOCKED",
+                    "journal history is unavailable: " + persistenceError);
+        }
         if (indexLoadAttempted) return;
         indexLoadAttempted = true;
-        Path dir = resolveCodeDir();
+        Path dir = fixedCodeDir != null ? fixedCodeDir : resolveCodeDirNow();
         if (dir == null) return;
         Path index = dir.resolve("INDEX.json");
         if (!Files.isRegularFile(index)) return;
-        try (Reader reader = Files.newBufferedReader(index, StandardCharsets.UTF_8)) {
-            JsonElement root = JsonParser.parseReader(reader);
-            if (root == null || !root.isJsonArray()) return;
+        try {
+            JsonElement root = JsonParser.parseString(
+                    SafeFileIO.readUtf8Bounded(index, MAX_INDEX_BYTES));
+            if (root == null || !root.isJsonArray()) {
+                throw new IllegalArgumentException("INDEX root is not an array");
+            }
             JsonArray entries = root.getAsJsonArray();
-            ring.clear();
+            if (entries.size() > RING_CAP) {
+                throw new IllegalArgumentException("INDEX exceeds " + RING_CAP + " entries");
+            }
+            Deque<Entry> loaded = new ArrayDeque<Entry>();
             long maxId = idSeq.get();
             for (JsonElement element : entries) {
-                if (element == null || !element.isJsonObject()) continue;
+                if (element == null || !element.isJsonObject()) {
+                    throw new IllegalArgumentException("INDEX entry is not an object");
+                }
                 Entry e = entryFromIndexObject(dir, element.getAsJsonObject());
-                if (e == null) continue;
-                ring.addLast(e);
+                loaded.addLast(e);
                 if (e.id > maxId) maxId = e.id;
-                while (ring.size() > RING_CAP) ring.pollLast();
             }
+            ring.clear();
+            ring.addAll(loaded);
             idSeq.set(Math.max(idSeq.get(), maxId));
             IJ.log("[ImageJAI-Journal] loaded " + ring.size() + " entries from " + index);
         } catch (Throwable t) {
-            IJ.log("[ImageJAI-Journal] INDEX load failed: " + t);
+            writeBlocked = true;
+            persistenceError = t.getClass().getSimpleName() + ": " + t.getMessage();
+            try {
+                quarantinedIndex = SafeFileIO.quarantine(index, persistenceError);
+            } catch (IOException quarantineFailure) {
+                persistenceError += "; quarantine failed: " + quarantineFailure.getMessage();
+            }
+            IJ.log("[ImageJAI-Journal] invalid INDEX quarantined; writes blocked: "
+                    + persistenceError);
+            throw new PersistenceException("CORRUPT_HISTORY_BLOCKED",
+                    "journal history is unavailable: " + persistenceError);
         }
     }
 
     public Path filePathFor(Entry e) {
         if (e == null || e.fileName == null || e.fileName.trim().isEmpty()) return null;
-        Path dir = resolveCodeDir();
+        Path dir = e.codeDir != null ? e.codeDir : resolveCodeDirNow();
         return dir == null ? null : dir.resolve(e.fileName);
     }
 
     // ---- internals ----
 
     private void loadFromIndexIfPersistEnabled() {
-        if (Prefs.get(PREF_PERSIST, false)) {
+        if (forcePersistence || Prefs.get(PREF_PERSIST, false)) {
             loadFromIndexIfPresent();
         }
     }
 
     private static Entry entryFromIndexObject(Path dir, JsonObject obj) throws IOException {
-        String fileName = stringValue(obj, "file", "");
-        if (fileName.isEmpty()) return null;
+        String fileName = requiredString(obj, "file");
+        if (fileName.contains("..") || fileName.contains("/") || fileName.contains("\\")) {
+            throw new IllegalArgumentException("unsafe journal file name");
+        }
         Path file = dir.resolve(fileName);
-        if (!Files.isRegularFile(file)) return null;
-        String code = Files.readString(file, StandardCharsets.UTF_8);
+        if (!Files.isRegularFile(file)) throw new IOException("missing code file: " + fileName);
+        String code = SafeFileIO.readUtf8Bounded(file, MAX_CODE_BYTES);
         String language = stringValue(obj, "language", "ijm");
         long timestamp = longValue(obj, "timestamp", System.currentTimeMillis());
         boolean plumbingOnly = obj.has("plumbingOnly")
                 ? booleanValue(obj, "plumbingOnly", false)
                 : CodeAutoNamer.describeFor(language, code, timeSuffix(timestamp)).plumbingOnly;
-        Entry e = new Entry(
+        DatasetBinding dataset = new DatasetBinding(
+                stringValue(obj, "datasetIdentity", null),
+                stringValue(obj, "datasetHash", null),
+                stringValue(obj, "datasetTitle", ""),
+                stringValue(obj, "datasetSourcePath", null), dir);
+        return new Entry(
                 longValue(obj, "id", 0L),
+                stringValue(obj, "persistentId", UUID.randomUUID().toString()),
                 stringValue(obj, "name", CodeAutoNamer.nameFor(language, code, timeSuffix(timestamp))),
                 language,
                 code,
@@ -315,10 +472,9 @@ public final class SessionCodeJournal {
                 0L,
                 booleanValue(obj, "success", true),
                 stringValue(obj, "failureMessage", null),
-                plumbingOnly);
-        e.lastRunAtMs = longValue(obj, "lastRunAt", timestamp);
-        e.runCount = (int) longValue(obj, "runCount", 1L);
-        return e;
+                plumbingOnly,
+                longValue(obj, "lastRunAt", timestamp),
+                checkedRunCount(obj), dataset);
     }
 
     private static String stringValue(JsonObject obj, String key, String fallback) {
@@ -351,6 +507,27 @@ public final class SessionCodeJournal {
         }
     }
 
+    private static String requiredString(JsonObject obj, String key) {
+        if (obj == null || !obj.has(key) || obj.get(key).isJsonNull()) {
+            throw new IllegalArgumentException("missing " + key);
+        }
+        try {
+            String value = obj.get(key).getAsString();
+            if (value.isEmpty()) throw new IllegalArgumentException("empty " + key);
+            return value;
+        } catch (RuntimeException e) {
+            throw new IllegalArgumentException("invalid " + key, e);
+        }
+    }
+
+    private static int checkedRunCount(JsonObject obj) {
+        long value = longValue(obj, "runCount", 1L);
+        if (value < 1L || value > Integer.MAX_VALUE) {
+            throw new IllegalArgumentException("invalid runCount");
+        }
+        return (int) value;
+    }
+
     private String dedupSlug(String slug) {
         // Same slug + different canonical code → numeric suffix.
         int suffix = 2;
@@ -363,6 +540,34 @@ public final class SessionCodeJournal {
             if (!collision) return candidate;
             candidate = slug + "_" + suffix++;
             if (suffix > 99) return candidate; // give up, unique enough
+        }
+    }
+
+    private static boolean sameDataset(Entry entry, DatasetBinding dataset) {
+        if (entry == null || dataset == null) return entry != null && entry.codeDir == null;
+        if (entry.datasetIdentity != null || dataset.identity != null) {
+            return java.util.Objects.equals(entry.datasetIdentity, dataset.identity);
+        }
+        if (entry.datasetHash != null || dataset.hash != null) {
+            return java.util.Objects.equals(entry.datasetHash, dataset.hash);
+        }
+        return java.util.Objects.equals(entry.codeDir, dataset.codeDir);
+    }
+
+    private static List<Entry> entriesForDirectory(List<Entry> entries, Path dir) {
+        List<Entry> selected = new ArrayList<Entry>();
+        if (entries == null) return selected;
+        for (Entry entry : entries) {
+            if (java.util.Objects.equals(entry.codeDir, dir)) selected.add(entry);
+        }
+        return Collections.unmodifiableList(selected);
+    }
+
+    private static void requireBounded(String field, String value, int maxBytes) {
+        if (value == null) return;
+        int bytes = value.getBytes(StandardCharsets.UTF_8).length;
+        if (bytes > maxBytes) {
+            throw new IllegalArgumentException(field + " exceeds " + maxBytes + " UTF-8 bytes");
         }
     }
 
@@ -386,10 +591,16 @@ public final class SessionCodeJournal {
         }
     }
 
-    private void writeAsync(Entry e, List<Entry> indexSnapshot) {
+    private void writeAsync(Entry e, List<Entry> indexSnapshot, Path capturedDir) {
+        if (!forcePersistence && !Prefs.get(PREF_PERSIST, false)) return;
         ioExecutor.submit(() -> {
             try {
-                Path dir = resolveCodeDir();
+                synchronized (SessionCodeJournal.this) {
+                    if (writeBlocked) {
+                        throw new IllegalStateException("journal writes blocked: " + persistenceError);
+                    }
+                }
+                Path dir = capturedDir;
                 if (dir == null) return;
                 Files.createDirectories(dir);
                 if (e != null) {
@@ -408,7 +619,8 @@ public final class SessionCodeJournal {
      * workspace. Returns null if we can't figure it out — the in-memory
      * ring still works.
      */
-    private Path resolveCodeDir() {
+    private Path resolveCodeDirNow() {
+        if (fixedCodeDir != null) return fixedCodeDir;
         Path root = imageDirectory(WindowManager.getCurrentImage());
         if (root == null) {
             int[] ids = WindowManager.getIDList();
@@ -426,6 +638,23 @@ public final class SessionCodeJournal {
         return root == null ? null : root.resolve("AI_Exports").resolve(".session").resolve("code");
     }
 
+    private static Path resolveFallbackCodeDir() {
+        int[] ids = WindowManager.getIDList();
+        if (ids != null) {
+            int[] sorted = ids.clone();
+            java.util.Arrays.sort(sorted);
+            for (int id : sorted) {
+                Path root = imageDirectory(WindowManager.getImage(id));
+                if (root != null) {
+                    return root.resolve("AI_Exports").resolve(".session").resolve("code");
+                }
+            }
+        }
+        Path cwdExports = Paths.get(System.getProperty("user.dir", ".")).resolve("AI_Exports");
+        return Files.isDirectory(cwdExports)
+                ? cwdExports.resolve(".session").resolve("code") : null;
+    }
+
     private static Path imageDirectory(ImagePlus imp) {
         if (imp == null) return null;
         FileInfo fi = imp.getOriginalFileInfo();
@@ -435,7 +664,7 @@ public final class SessionCodeJournal {
 
     private static String extensionFor(String language) {
         if (language == null) return "ijm";
-        String l = language.toLowerCase();
+        String l = language.toLowerCase(Locale.ROOT);
         if (l.startsWith("groov")) return "groovy";
         if (l.startsWith("jython") || l.startsWith("python")) return "py";
         if (l.startsWith("java") || l.startsWith("js") || l.startsWith("ecma")) return "js";
@@ -456,6 +685,7 @@ public final class SessionCodeJournal {
                 Entry e = entries.get(i);
                 pw.print("  {");
                 pw.print("\"id\":" + e.id + ",");
+                pw.print("\"persistentId\":\"" + jsonEscape(e.persistentId) + "\",");
                 pw.print("\"name\":\"" + jsonEscape(e.name) + "\",");
                 pw.print("\"file\":\"" + jsonEscape(e.fileName) + "\",");
                 pw.print("\"language\":\"" + jsonEscape(e.language) + "\",");
@@ -465,26 +695,39 @@ public final class SessionCodeJournal {
                 pw.print("\"source\":\"" + jsonEscape(e.source) + "\",");
                 pw.print("\"success\":" + e.success + ",");
                 pw.print("\"failureMessage\":\"" + jsonEscape(e.failureMessage) + "\",");
-                pw.print("\"plumbingOnly\":" + e.plumbingOnly);
+                pw.print("\"plumbingOnly\":" + e.plumbingOnly + ",");
+                pw.print("\"datasetIdentity\":\"" + jsonEscape(e.datasetIdentity) + "\",");
+                pw.print("\"datasetHash\":\"" + jsonEscape(e.datasetHash) + "\",");
+                pw.print("\"datasetTitle\":\"" + jsonEscape(e.datasetTitle) + "\",");
+                pw.print("\"datasetSourcePath\":\"" + jsonEscape(e.datasetSourcePath) + "\"");
                 pw.print("}");
                 if (i < entries.size() - 1) pw.print(",");
                 pw.print("\n");
             }
             pw.print("]\n");
         }
-        Path tmp = Files.createTempFile(index.getParent(), "INDEX", ".tmp");
-        Files.writeString(tmp, sw.toString(), StandardCharsets.UTF_8,
-                StandardOpenOption.TRUNCATE_EXISTING);
-        try {
-            Files.move(tmp, index, StandardCopyOption.REPLACE_EXISTING,
-                    StandardCopyOption.ATOMIC_MOVE);
-        } catch (java.nio.file.AtomicMoveNotSupportedException amnse) {
-            Files.move(tmp, index, StandardCopyOption.REPLACE_EXISTING);
+        String json = sw.toString();
+        if (json.getBytes(StandardCharsets.UTF_8).length > MAX_INDEX_BYTES) {
+            throw new IOException("INDEX exceeds " + MAX_INDEX_BYTES + " bytes");
         }
+        SafeFileIO.writeUtf8Atomically(index, json);
     }
 
     private static String jsonEscape(String s) {
         if (s == null) return "";
         return s.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n");
+    }
+
+    synchronized boolean isWriteBlockedForTest() { return writeBlocked; }
+
+    synchronized Path quarantinedIndexForTest() { return quarantinedIndex; }
+
+    void awaitWritesForTest() throws Exception {
+        Future<?> marker = ioExecutor.submit(() -> { });
+        marker.get();
+    }
+
+    void shutdownForTest() {
+        ioExecutor.shutdownNow();
     }
 }

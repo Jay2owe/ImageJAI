@@ -83,7 +83,7 @@ public class ProviderDiscoveryCredentialVerifierTest {
     }
 
     @Test
-    public void curatedOnlyProvidersSkipNetwork() throws IOException {
+    public void ollamaCloudIsExplicitlyUnverifiedAndNeverHitsNetwork() throws IOException {
         Path tmp = Files.createTempDirectory("verifier-curated");
         ProviderCredentials creds = new ProviderCredentials(tmp);
         ProviderDiscovery.HttpFetcher fetcher = (endpoint, timeout) -> {
@@ -91,9 +91,15 @@ public class ProviderDiscoveryCredentialVerifierTest {
         };
         ProviderDiscoveryCredentialVerifier verifier =
                 new ProviderDiscoveryCredentialVerifier(creds, fetcher);
-        // ollama-cloud and perplexity have no live /models — verifier reports
-        // success without touching the network.
-        assertTrue(verifier.verify("ollama-cloud", 4000).ok);
+
+        CredentialVerifier.Result cloud = verifier.verifyCandidate(
+                "ollama-cloud", "arbitrary-secret", 4000);
+
+        assertFalse(cloud.ok);
+        assertTrue(cloud.message.contains("unverified"));
+        assertTrue(cloud.message.contains("not saved"));
+        assertFalse(cloud.message.contains("arbitrary-secret"));
+        // Preserve the existing non-Ollama curated catalogue behaviour.
         assertTrue(verifier.verify("perplexity", 4000).ok);
     }
 
@@ -128,5 +134,26 @@ public class ProviderDiscoveryCredentialVerifierTest {
         CredentialVerifier.Result result = verifier.verify("groq", 4000);
         assertFalse(result.ok);
         assertTrue(result.message.contains("did not respond"));
+    }
+
+    @Test
+    public void candidateCanBeVerifiedBeforeAnyCredentialIsSaved() throws IOException {
+        Path tmp = Files.createTempDirectory("verifier-candidate");
+        ProviderCredentials creds = new ProviderCredentials(tmp);
+        AtomicReference<String> authorization = new AtomicReference<String>();
+        ProviderDiscovery.HttpFetcher fetcher = (endpoint, timeout) -> {
+            authorization.set(endpoint.headers().get("Authorization"));
+            return new ProviderDiscovery.HttpFetcher.HttpResult(200,
+                    "{\"data\":[{\"id\":\"model\"}]}");
+        };
+        ProviderDiscoveryCredentialVerifier verifier =
+                new ProviderDiscoveryCredentialVerifier(creds, fetcher);
+
+        CredentialVerifier.Result result =
+                verifier.verifyCandidate("groq", "candidate-key", 4000);
+
+        assertTrue(result.ok);
+        assertEquals("Bearer candidate-key", authorization.get());
+        assertFalse(creds.hasCredentials("groq"));
     }
 }

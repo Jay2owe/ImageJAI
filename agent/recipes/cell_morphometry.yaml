@@ -1,3 +1,4 @@
+schema_version: 1
 name: Cell Morphometry (Shape Descriptors)
 id: cell_morphometry
 description: >

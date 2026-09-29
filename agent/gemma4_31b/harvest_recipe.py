@@ -242,6 +242,7 @@ def draft_recipe(name: str, description: str, promote: list[str]) -> dict:
     validation = _build_validation(outputs, workflow)
 
     recipe = {
+        "schema_version": 1,
         "name": display_name,
         "id": _slugify(display_name),
         "description": description_text,
@@ -349,15 +350,15 @@ def _build_step_row(entry: dict, idx: int) -> dict:
         "id": idx,
         "description": _step_description(code, source, idx),
         "source": source,
-        "code": code,
         "notes": "Captured automatically from a successful ImageJAI session.",
     }
     if source == "script":
         step["type"] = "script"
+        step["code"] = code
         language = str(entry.get("language") or "").strip().lower()
-        if language:
-            step["language"] = language
+        step["language"] = language or "groovy"
     else:
+        step["type"] = "macro"
         step["macro"] = code
     return step
 

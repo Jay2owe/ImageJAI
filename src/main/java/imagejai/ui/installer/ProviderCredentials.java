@@ -1,31 +1,35 @@
 package imagejai.ui.installer;
 
+import com.google.gson.Gson;
+import com.google.gson.reflect.TypeToken;
+import com.sun.jna.platform.win32.Crypt32Util;
 import imagejai.config.Settings;
 
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
 import java.nio.file.attribute.PosixFilePermission;
 import java.util.Collections;
+import java.util.Base64;
 import java.util.EnumSet;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Set;
 
 /**
- * Reads and writes per-provider credentials as {@code <provider>.env} files in
- * a dedicated secrets directory. Default location is
- * {@code <imagej-ai-config-dir>/secrets/}. The bundled
- * {@code agent/providers/proxy.py} loads the same files into the LiteLLM
- * sidecar's environment before launch.
- *
- * <p>Stored as plain {@code KEY=VALUE} lines so the proxy can source them
- * without a YAML dependency. Phase E ships plaintext-on-disk only — OS keychain
- * integration is explicitly out of scope per
- * docs/multi_provider/07_implementation_plan.md §E risks.
+ * Shared provider credentials for the Fiji plugin and Python console. On
+ * Windows, values are protected for the current user with DPAPI and stored as
+ * {@code <provider>.cred}. The bundled Python proxy reads the same format.
+ * Existing plaintext {@code .env} files migrate after a successful read.
+ * Other platforms retain owner-only {@code .env} files.
  */
 public final class ProviderCredentials {
+
+    private static final byte[] DPAPI_MAGIC =
+            "IMAGEJAI-DPAPI-1\n".getBytes(StandardCharsets.US_ASCII);
+    private static final Gson GSON = new Gson();
 
     /** Directory name beneath the imagej-ai config root. */
     public static final String SECRETS_DIRNAME = "secrets";
@@ -101,12 +105,8 @@ public final class ProviderCredentials {
         if (providerKey == null) {
             return false;
         }
-        Path file = fileFor(providerKey);
-        if (!Files.isRegularFile(file)) {
-            return false;
-        }
         try {
-            Map<String, String> entries = readEnvFile(file);
+            Map<String, String> entries = read(providerKey);
             String envName = ENV_VAR_FOR_PROVIDER.get(providerKey);
             if (envName == null) {
                 return !entries.isEmpty();
@@ -153,25 +153,47 @@ public final class ProviderCredentials {
             return;
         }
         Files.deleteIfExists(fileFor(providerKey));
+        Files.deleteIfExists(legacyFileFor(providerKey));
     }
 
     /** Return the on-disk path the env file for this provider would have. */
     public Path fileFor(String providerKey) {
-        return secretsDir.resolve(providerKey + ".env");
+        return secretsDir.resolve(providerKey + (isWindows() ? ".cred" : ".env"));
     }
 
     /** Read the env file's contents (KEY=VALUE pairs). Empty map if missing. */
     public Map<String, String> read(String providerKey) throws IOException {
         Path file = fileFor(providerKey);
-        if (!Files.isRegularFile(file)) {
-            return new LinkedHashMap<String, String>();
+        if (Files.isRegularFile(file)) {
+            return isWindows() ? readProtectedFile(file) : readEnvFile(file);
         }
-        return readEnvFile(file);
+        Path legacy = legacyFileFor(providerKey);
+        if (isWindows() && Files.isRegularFile(legacy)) {
+            Map<String, String> entries = readEnvFile(legacy);
+            write(providerKey, entries);
+            Files.deleteIfExists(legacy);
+            return entries;
+        }
+        return new LinkedHashMap<String, String>();
     }
 
     private void write(String providerKey, Map<String, String> entries) throws IOException {
         Files.createDirectories(secretsDir);
         Path file = fileFor(providerKey);
+        if (isWindows()) {
+            byte[] clear = GSON.toJson(entries).getBytes(StandardCharsets.UTF_8);
+            byte[] protectedBytes = Crypt32Util.cryptProtectData(clear);
+            byte[] encoded = Base64.getEncoder().encode(protectedBytes);
+            byte[] protectedBody = new byte[DPAPI_MAGIC.length + encoded.length + 1];
+            System.arraycopy(DPAPI_MAGIC, 0, protectedBody, 0, DPAPI_MAGIC.length);
+            System.arraycopy(encoded, 0, protectedBody, DPAPI_MAGIC.length, encoded.length);
+            protectedBody[protectedBody.length - 1] = '\n';
+            Path temp = file.resolveSibling(file.getFileName().toString() + ".tmp");
+            Files.write(temp, protectedBody);
+            Files.move(temp, file, StandardCopyOption.REPLACE_EXISTING);
+            Files.deleteIfExists(legacyFileFor(providerKey));
+            return;
+        }
         StringBuilder body = new StringBuilder();
         body.append("# ImageJAI credentials for ").append(providerKey).append('\n');
         body.append("# Loaded by agent/providers/proxy.py before LiteLLM starts.\n");
@@ -182,6 +204,41 @@ public final class ProviderCredentials {
         }
         Files.write(file, body.toString().getBytes(StandardCharsets.UTF_8));
         restrictPermissions(file);
+    }
+
+    private Path legacyFileFor(String providerKey) {
+        return secretsDir.resolve(providerKey + ".env");
+    }
+
+    private static boolean isWindows() {
+        return System.getProperty("os.name", "").toLowerCase().contains("win");
+    }
+
+    private static Map<String, String> readProtectedFile(Path file) throws IOException {
+        byte[] body = Files.readAllBytes(file);
+        if (body.length <= DPAPI_MAGIC.length) {
+            throw new IOException("empty protected credential file " + file);
+        }
+        for (int i = 0; i < DPAPI_MAGIC.length; i++) {
+            if (body[i] != DPAPI_MAGIC[i]) {
+                throw new IOException("unsupported protected credential format " + file);
+            }
+        }
+        String encoded = new String(
+                body, DPAPI_MAGIC.length, body.length - DPAPI_MAGIC.length,
+                StandardCharsets.US_ASCII).trim();
+        try {
+            byte[] clear = Crypt32Util.cryptUnprotectData(Base64.getDecoder().decode(encoded));
+            java.lang.reflect.Type type =
+                    new TypeToken<Map<String, String>>() { }.getType();
+            Map<String, String> values = GSON.fromJson(
+                    new String(clear, StandardCharsets.UTF_8), type);
+            return values == null
+                    ? new LinkedHashMap<String, String>()
+                    : new LinkedHashMap<String, String>(values);
+        } catch (RuntimeException e) {
+            throw new IOException("could not decrypt " + file.getFileName(), e);
+        }
     }
 
     private static void restrictPermissions(Path file) {

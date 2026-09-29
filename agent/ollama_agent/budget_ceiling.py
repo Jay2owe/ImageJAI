@@ -18,7 +18,10 @@ Java side is a long-running mirror used by the Swing UI.
 """
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
+from functools import lru_cache
+from pathlib import Path
 from typing import Callable
 
 
@@ -42,7 +45,10 @@ class CostBreakdown:
         if raw is None or str(raw).strip() == "":
             return cls(cost_usd=0.0, source="fallback")
         try:
-            return cls(cost_usd=float(raw), source="header")
+            value = float(raw)
+            if not math.isfinite(value) or value <= 0:
+                return cls(cost_usd=0.0, source="fallback")
+            return cls(cost_usd=value, source="header")
         except (TypeError, ValueError):
             return cls(cost_usd=0.0, source="fallback")
 
@@ -74,7 +80,7 @@ class BudgetCeilingTracker:
     ) -> float:
         """Accumulate one call's cost. Returns the new session total."""
 
-        if cost_breakdown.cost_usd <= 0:
+        if not math.isfinite(cost_breakdown.cost_usd) or cost_breakdown.cost_usd <= 0:
             return self.session_cost_usd
         self.session_cost_usd = round(self.session_cost_usd + cost_breakdown.cost_usd, 6)
         return self.session_cost_usd
@@ -110,6 +116,11 @@ class BudgetCeilingTracker:
             multiplier = 1.0
         if multiplier <= 0:
             multiplier = 1.0
+        try:
+            input_tokens = max(0, int(input_tokens))
+            output_tokens = max(0, int(output_tokens))
+        except (TypeError, ValueError, OverflowError):
+            return CostBreakdown(cost_usd=0.0, source="fallback")
         scaled_in = input_tokens * multiplier
         scaled_out = output_tokens * multiplier
         cost = (scaled_in / 1_000_000.0) * in_rate + (scaled_out / 1_000_000.0) * out_rate
@@ -271,3 +282,36 @@ def load_pricing_from_models_yaml(path: str) -> dict[str, dict[str, float]]:
             "tokenizer_multiplier": multiplier,
         }
     return out
+
+
+@lru_cache(maxsize=1)
+def default_pricing_table() -> dict[str, dict[str, float]]:
+    """Load the bundled pricing table once for provider runtime fallbacks."""
+
+    path = Path(__file__).resolve().parents[1] / "providers" / "models.yaml"
+    try:
+        return load_pricing_from_models_yaml(str(path))
+    except (OSError, ValueError, TypeError):
+        return {}
+
+
+def estimate_runtime_cost_usd(
+    provider_id: str,
+    model_id: str,
+    input_tokens: int,
+    output_tokens: int,
+) -> float:
+    """Estimate one paid provider call when no trusted cost header exists."""
+
+    provider = str(provider_id or "").strip()
+    model = str(model_id or "").strip()
+    prefix = provider + "/"
+    if prefix != "/" and model.startswith(prefix):
+        model = model[len(prefix):]
+    tracker = BudgetCeilingTracker(pricing_table=default_pricing_table())
+    return tracker.estimate_fallback_usd(
+        provider,
+        model,
+        input_tokens,
+        output_tokens,
+    ).cost_usd

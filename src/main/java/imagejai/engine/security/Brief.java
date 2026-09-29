@@ -12,7 +12,7 @@ import java.util.regex.Pattern;
  */
 public final class Brief {
     private static final Pattern TOKEN_PATTERN = Pattern.compile(
-            "(?i)image-[0-9a-f]{4,12}(?:\\.[A-Za-z0-9.]+)?(?::\\d+)?");
+            "(?i)image-[0-9a-f]{4,32}(?:\\.[A-Za-z0-9.]+)?(?::\\d+)?");
 
     private final String sessionId;
     private final List<String> tokens;

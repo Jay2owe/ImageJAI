@@ -34,8 +34,15 @@ import httpx
 from google import genai
 from google.genai import errors as genai_errors
 from google.genai import types as genai_types
+from agent.ollama_agent.budget_ceiling import estimate_runtime_cost_usd
 
-from .base import ProviderClient, ToolCall, to_gemini_tool
+from .base import (
+    ProviderClient,
+    ToolCall,
+    encode_capture_image,
+    prune_capture_images,
+    to_gemini_tool,
+)
 
 
 # Phase H — Gemini's API does not return the LiteLLM cost header (we bypass
@@ -74,6 +81,9 @@ def _emit_cost(value: float) -> None:
 
 
 _KNOWN_SERVER_TOOLS = frozenset({"google_search", "code_execution"})
+_TRANSIENT_STATUS_CODES = frozenset({408, 409, 429, 500, 502, 503, 504})
+DEFAULT_MAX_OUTPUT_TOKENS = 8192
+MAX_OUTPUT_TOKENS = 32768
 
 
 def _normalise_server_tools(server_tools: Any) -> set[str]:
@@ -98,16 +108,27 @@ def _normalise_server_tools(server_tools: Any) -> set[str]:
 
 
 def _estimate_cost_usd(model: str, response: Any) -> float:
-    pricing = GEMINI_PRICING_USD_PER_MTOK.get(model)
-    if not pricing:
-        return 0.0
     usage = getattr(response, "usage_metadata", None)
     if usage is None:
         return 0.0
     in_tok = int(getattr(usage, "prompt_token_count", 0) or 0)
     out_tok = int(getattr(usage, "candidates_token_count", 0) or 0)
+    pricing = GEMINI_PRICING_USD_PER_MTOK.get(model)
+    if not pricing:
+        return estimate_runtime_cost_usd("gemini", model, in_tok, out_tok)
     return (in_tok / 1_000_000.0) * pricing["input"] \
         + (out_tok / 1_000_000.0) * pricing["output"]
+
+
+def _is_transient_error(exc: BaseException) -> bool:
+    if isinstance(exc, httpx.TransportError):
+        return True
+    if isinstance(exc, genai_errors.APIError):
+        try:
+            return int(getattr(exc, "code", 0) or 0) in _TRANSIENT_STATUS_CODES
+        except (TypeError, ValueError):
+            return False
+    return False
 
 
 class GeminiNativeClient(ProviderClient):
@@ -117,22 +138,33 @@ class GeminiNativeClient(ProviderClient):
         self,
         *,
         api_key: str | None = None,
+        timeout: float = 120.0,
         max_retries: int = 2,
         retry_backoff: float = 0.25,
         server_tools: list[str] | None = None,
     ) -> None:
-        self._client = genai.Client(api_key=api_key) if api_key else genai.Client()
-        self.max_retries = max_retries
-        self.retry_backoff = retry_backoff
+        timeout_seconds = max(0.001, float(timeout))
+        client_kwargs: dict[str, Any] = {
+            "http_options": genai_types.HttpOptions(
+                timeout=max(1, round(timeout_seconds * 1000.0))
+            )
+        }
+        if api_key:
+            client_kwargs["api_key"] = api_key
+        self._client = genai.Client(**client_kwargs)
+        self.timeout = timeout_seconds
+        self.max_retries = min(5, max(0, int(max_retries)))
+        self.retry_backoff = min(10.0, max(0.0, float(retry_backoff)))
         self._default_server_tools = _normalise_server_tools(server_tools)
 
-    def chat(
+    def _chat_config(
         self,
         messages: list[dict[str, Any]],
         tools: list[Callable[..., Any]],
         model: str,
-        **opts: Any,
-    ) -> Any:
+        opts: dict[str, Any],
+    ):
+        """Build (config, contents) shared by chat() and chat_stream()."""
         per_call_server_tools = opts.pop("server_tools", None)
         active_server_tools = (
             _normalise_server_tools(per_call_server_tools)
@@ -145,7 +177,7 @@ class GeminiNativeClient(ProviderClient):
         enable_code_execution = bool(
             opts.pop("enable_code_execution", "code_execution" in active_server_tools)
         )
-        thinking_budget = int(opts.pop("thinking_budget", 0) or 0)
+        thinking_budget = min(MAX_OUTPUT_TOKENS, max(0, int(opts.pop("thinking_budget", 0) or 0)))
 
         config_kwargs: dict[str, Any] = {}
         tool_objects: list[Any] = []
@@ -178,21 +210,41 @@ class GeminiNativeClient(ProviderClient):
         if system_instruction:
             config_kwargs["system_instruction"] = system_instruction
 
+        if "max_tokens" in opts and "max_output_tokens" not in opts:
+            opts["max_output_tokens"] = opts.pop("max_tokens")
+        else:
+            opts.pop("max_tokens", None)
+        opts["max_output_tokens"] = min(
+            MAX_OUTPUT_TOKENS,
+            max(1, int(opts.get("max_output_tokens", DEFAULT_MAX_OUTPUT_TOKENS))),
+        )
         for key in ("temperature", "max_output_tokens", "top_p", "top_k"):
             if key in opts:
                 config_kwargs[key] = opts.pop(key)
         config_kwargs.update(opts)
 
         config = genai_types.GenerateContentConfig(**config_kwargs) if config_kwargs else None
+        contents = self._messages_to_contents(messages)
+        return config, contents
+
+    def chat(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[Callable[..., Any]],
+        model: str,
+        **opts: Any,
+    ) -> Any:
+        """Issue one non-streaming chat completion."""
+        config, contents = self._chat_config(messages, tools, model, opts)
         for attempt in range(self.max_retries + 1):
             try:
                 response = self._client.models.generate_content(
                     model=model,
-                    contents=self._messages_to_contents(messages),
+                    contents=contents,
                     config=config,
                 )
             except (genai_errors.APIError, httpx.TransportError) as exc:
-                if attempt >= self.max_retries:
+                if not _is_transient_error(exc) or attempt >= self.max_retries:
                     raise RuntimeError(f"Gemini chat failed for model {model!r}: {exc}") from exc
                 time.sleep(self.retry_backoff * (2**attempt))
                 continue
@@ -201,7 +253,80 @@ class GeminiNativeClient(ProviderClient):
             except Exception:
                 pass
             return response
-        raise RuntimeError(f"Gemini chat failed for model {model!r}: retry loop exhausted")
+        raise RuntimeError(f"Gemini chat failed for model {model!r}: retries exhausted")
+
+    def chat_stream(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[Callable[..., Any]],
+        model: str,
+        on_delta: Callable[[str], None] | None = None,
+        abort: Any | None = None,
+        on_thinking: Callable[[str], None] | None = None,
+        on_tool_preparing: Callable[[str], None] | None = None,
+        **opts: Any,
+    ) -> Any:
+        """Streaming chat: emits visible text deltas via ``on_delta`` and
+        returns one merged ``GenerateContentResponse`` with the same shape
+        ``chat()`` returns, so ``extract_*`` / ``append_*`` work unchanged.
+
+        Thought parts go to ``on_thinking`` and remain in the merged response.
+        """
+        config, contents = self._chat_config(messages, tools, model, opts)
+        parts: list[Any] = []
+        finish_reason = None
+        usage_metadata = None
+        model_version = None
+        try:
+            stream = self._client.models.generate_content_stream(
+                model=model, contents=contents, config=config)
+            closer = getattr(stream, "close", None)
+            if abort is not None and callable(closer):
+                abort.register(closer)
+            try:
+                for chunk in stream:
+                    if abort is not None and abort.set_flag:
+                        raise InterruptedError("interrupted by user")
+                    candidates = getattr(chunk, "candidates", None) or []
+                    if candidates:
+                        content = getattr(candidates[0], "content", None)
+                        chunk_parts = getattr(content, "parts", None) or []
+                        parts.extend(chunk_parts)
+                        for part in chunk_parts:
+                            call = getattr(part, "function_call", None)
+                            if call is not None and on_tool_preparing is not None:
+                                on_tool_preparing(call.name)
+                            callback = on_thinking if getattr(part, "thought", False) else on_delta
+                            text = getattr(part, "text", None)
+                            if text and callback is not None:
+                                callback(text)
+                        finish_reason = (
+                            getattr(candidates[0], "finish_reason", None) or finish_reason
+                        )
+                    usage_metadata = getattr(chunk, "usage_metadata", None) or usage_metadata
+                    model_version = getattr(chunk, "model_version", None) or model_version
+            finally:
+                if abort is not None and callable(closer):
+                    abort.unregister(closer)
+                    closer()
+        except (genai_errors.APIError, httpx.TransportError) as exc:
+            raise RuntimeError(f"Gemini stream failed for model {model!r}: {exc}") from exc
+
+        merged_candidate = genai_types.Candidate(
+            content=genai_types.Content(parts=parts, role="model") if parts else None,
+            finish_reason=finish_reason,
+        )
+        merged = genai_types.GenerateContentResponse(
+            candidates=[merged_candidate],
+            usage_metadata=usage_metadata,
+            model_version=model_version,
+        )
+        try:
+            _emit_cost(_estimate_cost_usd(model, merged))
+        except Exception:
+            pass
+        return merged
+
 
     def extract_text(self, response: Any) -> str:
         sdk_text = getattr(response, "text", None)
@@ -341,15 +466,23 @@ class GeminiNativeClient(ProviderClient):
         call: ToolCall,
         result: str,
     ) -> None:
-        messages.append(
-            {
-                "role": "user",
-                "function_response": {
-                    "name": call.name,
-                    "response": {"result": str(result)},
-                },
-            }
-        )
+        message: dict[str, Any] = {
+            "role": "user",
+            "function_response": {
+                "name": call.name,
+                "response": {"result": str(result)},
+            },
+        }
+        if call.name == "capture_image" and self.may_attach_image():
+            encoded = encode_capture_image(result)
+            if encoded is not None:
+                prune_capture_images(messages)
+                mime_type, data = encoded
+                message["capture_image"] = {
+                    "mime_type": mime_type,
+                    "data": data,
+                }
+        messages.append(message)
 
     @staticmethod
     def _extract_system(messages: list[dict[str, Any]]) -> str:
@@ -368,17 +501,28 @@ class GeminiNativeClient(ProviderClient):
 
             if role == "user" and "function_response" in message:
                 function_response = message["function_response"]
+                parts: list[dict[str, Any]] = [
+                    {
+                        "function_response": {
+                            "name": function_response["name"],
+                            "response": function_response["response"],
+                        }
+                    }
+                ]
+                capture = message.get("capture_image")
+                if isinstance(capture, dict) and capture.get("data"):
+                    parts.append(
+                        {
+                            "inline_data": {
+                                "mime_type": str(capture.get("mime_type") or "image/jpeg"),
+                                "data": str(capture["data"]),
+                            }
+                        }
+                    )
                 contents.append(
                     {
                         "role": "user",
-                        "parts": [
-                            {
-                                "function_response": {
-                                    "name": function_response["name"],
-                                    "response": function_response["response"],
-                                }
-                            }
-                        ],
+                        "parts": parts,
                     }
                 )
                 continue

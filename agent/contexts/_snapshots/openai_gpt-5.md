@@ -11,9 +11,17 @@ notes about your specific model family. Everything in this file is
 true for all agents.
 
 The Fiji TCP command server listens on `localhost:7746`. JSON in,
-JSON out. Around forty commands cover macro execution, state
-inspection, plugin probing, screenshot capture, results-table reads,
-dialog interaction, and a live event stream.
+<!-- BEGIN GENERATED COMMAND COUNT -->
+JSON out. The 71-command surface covers macro execution, state inspection, plugin probing, screenshot capture, results-table reads, dialog interaction, undo branches, and a live event stream. Python convenience helpers cover 54 commands; use `imagej_command({...})` for the 17 commands documented as raw-only.
+<!-- END GENERATED COMMAND COUNT -->
+
+Nine of those (`get_ui_tree`, `get_ui_component`, `perform_ui_action`,
+`wait_for_ui_state`, `wait_for_ui_idle`, `capture_ui`, `start_ui_trace`,
+`stop_ui_trace`, `get_ui_metrics`) belong to the test automation bridge. They
+exist only for the external plugin test harness, are inert unless Fiji was
+started in test mode, and will refuse your session with
+`test_automation_disabled`. Do not call them — use `get_dialogs` and
+`interact_dialog` for dialog work.
 
 ---
 
@@ -30,8 +38,11 @@ description.
 
 ## Workflow
 
-1. **Check state** — what images are open, what is selected, what
-   tables already exist. Never assume an image is open.
+1. **Check state once at the start of a task** — what images are open,
+   what is selected, what tables already exist. Reuse that result until
+   an action or event changes Fiji. Do not loop on `get_state` when
+   nothing has changed; if no image is open, ask the user or open the
+   image they named. Use `get_open_windows` for a targeted window check.
 2. **Check metadata** — is the image calibrated (μm vs px)? What
    are the channels, time points, z-slices? Bio-Formats metadata
    matters for measurement units.
@@ -128,6 +139,16 @@ For numbers, use the dedicated stats tools (histogram, region
 stats, line profile). The visual screenshot is lossy — never
 measure from it.
 
+RGB has two deliberate numeric representations. `get_pixels` returns
+packed `rgb24` as canonical unsigned `0x00RRGGBB` integers from 0 through
+16,777,215. `get_histogram` and its statistics return ImageJ's
+0–255 weighted RGB intensity instead; read `value_domain.scalarization`
+for the exact red, green, and blue weights and rounding rule. Never compare
+those scalar histogram values directly with packed RGB pixel integers.
+If `get_histogram` returns `unsupported_rgb_weights`, restore the first
+three ImageJ RGB weights to finite, non-negative values that sum to 1,
+then retry.
+
 ---
 
 ## Error handling
@@ -149,6 +170,16 @@ console buffer. If your script call returned a bare error and
 the Fiji log is empty, fetch the console buffer (the harness
 exposes this) before retrying — the stack trace there will tell
 you what actually failed.
+
+**Read the log's flags, not its text, to decide whether it is
+empty.** `get_log` wraps the log in a `[LOG: …]` envelope, and an
+envelope reading `<empty>` is not proof of anything: it is what a
+log containing that word produces too. The reply carries
+`log_present` (false until Fiji has created a Log window at all)
+and `log_empty` (true when there is nothing in it), and the source
+tag says the same thing — `LOG`, `LOG:empty` or `LOG:absent`.
+`get_console` does the same with `combinedEmpty`. A Fiji that has
+never logged is not a Fiji whose log says nothing went wrong.
 
 If a macro hung and the harness reports a timeout, do not
 blind-retry. Read the post-timeout state (what was open, what was
@@ -207,7 +238,8 @@ layer blocks the worst of them; you should avoid them up front:
 preconditions, parameters, decision points, validation, known
 issues. Always check it before building a workflow from scratch.
 When you solve a new generalisable workflow, write a recipe.
-Lab-specific notes go in `learnings.md`, not in a recipe.
+Notes that are specific to the user's own data go in
+`learnings.md`, not in a recipe.
 
 ---
 
@@ -268,14 +300,46 @@ OME-XML, batch-iterate-close patterns, see
 
 ---
 
-## Lab training
+## Reviewed knowledge (harness)
+
+Reviewed knowledge is shared by every ImageJAI agent through
+`agent/harness_access.py`. Use it instead of inventing your own
+memory file.
+
+```bash
+python agent/harness_access.py context --query "count nuclei" \
+    --state '{"format":"czi","channels":3}' --project <image-folder>
+python agent/harness_access.py skills --project <image-folder>
+python agent/harness_access.py skill --name safe-image-measurement \
+    --project <image-folder>
+python agent/harness_access.py propose --kind failure_fix --scope session \
+    --title "..." --content "..." --session-id <id>
+```
+
+Rules that do not change:
+
+- `context` returns only entries a human already approved.
+- `propose` always creates a candidate. There is no promote
+  command; a person approves knowledge in the console.
+- Never put a real path, sample name or patient identifier in a
+  proposal. Use the pseudonym token instead.
+- Skills are guidance only. A recipe named by a skill still has
+  to be run through the normal recipe path.
+
+---
+
+## Training on the user's own images
 
 When the user is new (no `lab_profile.json`), suggest running the
 trainer once on a representative image directory. It runs five
 phases (image characterization, threshold discovery, segmentation
 testing, parameter tuning, parameter sweep) and writes
-`lab_profile.json` + `learnings.md`. Subsequent agents inherit
-those defaults.
+`lab_profile.json` + `learnings.md`. Later sessions reuse those
+defaults.
+
+Both files describe one user's own data. They stay on that
+machine, are never shipped with the package, and must not be
+treated as general truth for anyone else.
 
 ---
 
@@ -289,164 +353,126 @@ explicitly promotes it.
 
 ---
 
-# Harness — CLI shell
+# Harness — Structured tool loop
 
-You operate Fiji by typing shell commands in a terminal. Use the
-`ij.py` helper for ALL ImageJ operations:
+You operate Fiji by emitting structured tool calls. The wrapper
+executes them and returns the result; you reason over the result
+and call the next tool. Use only tools present in the current schema.
+Host-code tools (`run_shell`, `run_script`, `run_saved_recipe`) are omitted by
+default and appear only when the user explicitly grants them to a trusted
+local provider; cloud providers never receive this grant.
 
-```bash
-python ij.py ping                                    # test connection
-python ij.py macro 'run("Blobs (25K)");'             # run macro code
-python ij.py state                                    # full ImageJ state
-python ij.py info                                     # active image details
-python ij.py results                                  # measurements as CSV
-python ij.py capture                                  # screenshot -> .tmp/capture.png
-python ij.py capture my_name                          # screenshot -> .tmp/my_name.png
-python ij.py explore Otsu Triangle Li                 # compare thresholds
-python ij.py log                                      # ImageJ Log window contents
-python ij.py histogram                                # intensity stats + bin counts
-python ij.py windows                                  # all open window titles
-python ij.py metadata                                 # Bio-Formats info + calibration
-python ij.py rois                                     # ROI Manager state (names, types, bounds)
-python ij.py display                                  # active C/Z/T, LUT, display range
-python ij.py console                                  # recent Fiji stdout/stderr (Groovy traces)
-python ij.py console --tail 5000                      # longer console window
-python ij.py dialogs                                  # check for open dialogs/errors
-python ij.py close_dialogs                            # dismiss open dialogs
-python ij.py 3d status                                # 3D Viewer: is it open?
-python ij.py 3d add IMAGE_TITLE volume 50             # 3D Viewer: add volume
-python ij.py 3d list                                  # 3D Viewer: list content
-python ij.py 3d snapshot 512 512                      # 3D Viewer: capture
-python ij.py 3d close                                 # 3D Viewer: close
-python ij.py probe "Gaussian Blur..."                 # discover plugin parameters
-python ij.py script 'println("hello")'                # run Groovy inside Fiji's JVM
-python ij.py script --file path/to/script.groovy      # run Groovy file
-python ij.py script --lang jython 'print("hello")'    # run Jython script
-python ij.py raw '{"command": "ping"}'                # raw JSON command
-python ij.py ui list                                  # list all dialog components
-python ij.py ui list "Dialog Title"                   # components in specific dialog
-python ij.py ui click "OK"                            # click button by text
-python ij.py ui check "3D Object Analysis" true       # set checkbox on/off
-python ij.py ui toggle "Create Bin File"              # flip checkbox state
-python ij.py ui text "sigma" 2.5                      # set text field by label
-python ij.py ui texti 0 hello                         # set text field by index
-python ij.py ui dropdown "Method" Otsu                # select dropdown value
-python ij.py ui slider 0 128                          # set slider by index
-python ij.py ui spinner 0 42                          # set spinner by index
-python ij.py ui scroll 0 50                           # set scrollbar by index
-python ij.py ui tab "Advanced"                        # focus a tab
-```
+## Tools
 
-### Plugin argument discovery (with caching)
+| Tool | Purpose |
+|------|---------|
+| `run_macro(code)` | Macro with auto-probed plugin args. Begin with `selectImage("<title>")` for any macro that touches the active image. |
+| `run_macro_async(code)` + `job_status(id)` | Anything > 2 s (segmentation, tracking, deconvolution). |
+| `run_script(code, language)` *(optional)* | Groovy / Jython / JavaScript inside Fiji's JVM. Present only with trusted-local host-code permission. |
+| `probe_plugin(name)` | Open a plugin's dialog, return real macro arg keys. Required on unfamiliar plugins. |
+| `threshold_shootout` | Otsu/Li/Triangle/Minimum/Huang side by side with counts + montage. Extensible via `methods=`/`manual_thresholds=`. **Its `count` IS the count — don't re-segment to re-count.** |
+| `describe_image` | Intensity stats, histogram shape, rough object counts. Skip when the `[triage]` banner already suffices. |
+| `get_state` / `get_image_info` / `get_metadata` / `windows` | State inspection. |
+| `list_lif_series(path)` / `open_lif_series(path, indices)` | Multi-series container files (`.lif` / `.czi` / `.nd2`). List series without opening pixels; open specific 0-indexed series. |
+| `get_log` / `get_results` / `get_histogram` | After-the-fact reads. **`print(...)` lines from a macro come back inline in `run_macro`'s `logDelta` field — do NOT auto-call `get_log` after every macro.** Use `get_log` only for the full Log history. Script-engine errors, probe rejections, lint blocks, TCP failures arrive in the tool reply — not here. |
+| `capture_image` | Screenshot of the active image, **auto-attached** to the next turn for visual sanity. Pair with `describe_image` for numbers. |
+| `region_stats` / `histogram_summary` / `line_profile` / `quick_object_count` / `count_bright_regions` | NumPy-side, cheap, no macro. |
+| `list_dialog_components` / `click_dialog_button` / `set_dialog_text` / `set_dialog_checkbox` / `set_dialog_dropdown` / `close_dialogs` | Drive Swing dialogs macros can't reach. |
+| `run_shell(argv, cwd)` *(optional)* | Structured host-OS process execution. Present only with trusted-local host-code permission. **Never** use it as a Fiji workaround. |
 
-```bash
-python probe_plugin.py "Gaussian Blur..."              # probe + cache + pretty print
-python probe_plugin.py --batch "Median..." "Subtract Background..." "Analyze Particles..."
-python probe_plugin.py --search threshold              # search cached probes
-python probe_plugin.py --lookup "Gaussian Blur..."     # check cache only
-python probe_plugin.py --list                          # list all cached
-```
+## Looking at images
 
-Probing opens the plugin's dialog, reads ALL fields (numeric,
-string, checkbox, choice with every option, slider with range),
-derives the macro argument key for each, generates example macro
-syntax, then cancels without executing. Some plugins need an
-image open first. Works for GenericDialog-based plugins (the vast
-majority); custom Swing dialogs get best-effort extraction.
+`capture_image` returns a path and the loop **auto-attaches** the
+screenshot (JPEG, 896 px max) to the next model turn. Use it for
+visual sanity checks after destructive steps (threshold,
+segmentation, filter). For precise numbers still use
+`describe_image` / `histogram_summary` / `region_stats` /
+`line_profile` — the attached image is lossy, never measure from it.
 
-### Pixel analysis (Python-side, no ImageJ needed)
+## Triage banners
 
-```bash
-python pixels.py                                     # stats for current slice
-python pixels.py find_cells                           # auto-detect bright objects
-python pixels.py region 100 100 50 50                 # stats for a region
-python pixels.py profile 0 512 1024 512               # line profile
-python pixels.py stack_stats                          # per-slice stats for z-stack
-```
+`[triage]` lines on input images surface saturation / calibration
+warnings — skip `get_state`/`get_image_info` when the banner
+already covered the state. `[triage] PLUGIN OUTPUT` (titles like
+`Objects map of X`, `Summary of X`, `Labels`, `Mask of X`,
+`Skeleton of X`) means the last plugin SUCCEEDED — call
+`get_results` and stop retrying.
 
-If `ij.py` is not available, use raw Python with sockets (see
-ij.py source for pattern).
+## Recovering from errors
 
-### Looking at images
+- **Read the error text first; don't reflex-call `get_log`.**
+  Script compile errors, probe/safety/lint rejections, TCP
+  failures, `No image is open` — all come in the tool reply.
+  `get_log` only helps when the macro itself wrote to `IJ.log()`.
+- **Two identical errors → stop.** Same `Macro Error`, same
+  `No Image`, same probe rejection twice in a row — don't send a
+  third macro. Call `windows({})` and ask the user.
+- **`No Image` → `windows({})` FIRST** before any retry.
+- **Inspect attached diagnostics** — `dismissedDialogs` (silent
+  popup zapped mid-macro) and `post_timeout_state` (what was
+  open/logged when the call hung). On `timeout: true`: read
+  `post_timeout_state`, don't blind-retry.
+- **Dialog-pause errors may still have produced output.** "Macro
+  paused on modal dialog — auto-dismissed by the server" means
+  the server killed the dialog; earlier macro steps ran to
+  completion. Check the error payload for `newImages` /
+  `resultsTable`, and watch for a `[triage] PLUGIN OUTPUT`
+  banner — that IS the success signal. Verify with `get_results`
+  / `get_state`; do not retry the same macro.
 
-You can see images by reading the captured PNG file:
+## Reference documents
 
-1. Run `python ij.py capture` — saves PNG to `agent/.tmp/capture.png`.
-2. Use your **file-read tool** on the PNG file — you will see the image visually.
-3. Use what you see to make decisions about the next step.
+`agent/references/` holds ~60 `-reference.md` docs. If `run_shell` is present,
+read them with a structured argv call; otherwise rely on the context already
+provided and do not invent a shell tool. `INDEX.md` lists all of them.
 
-**Do this after EVERY macro that changes the image.** This is
-your eyes.
+**Before writing any macro**, `macro-reference.md` is the
+exhaustive language reference. **Before writing any
+Groovy/Jython**, read `fiji-scripting-reference.md`'s Classes
+table. Unsure? Use `run_macro` instead — the macro language is
+auto-probed.
 
-- All captures go in `agent/.tmp/` (gitignored, safe to overwrite).
-- Use descriptive names: `capture before_threshold`,
-  `capture after_watershed`.
+## Groovy / Jython — pitfalls
 
-### JSON protocol (reference)
+Lint blocks common hallucinated imports and macro-only
+`IJ.run(...)`; it can't catch guessed method names (`setDirty`,
+`isDirty`) or fake modules (`org.setuptools`).
 
-All commands use JSON via TCP at `localhost:7746`. The `ij.py`
-helper wraps these. Response format: `{"ok": true, "result": ...}`.
-Common commands: `ping`, `execute_macro`, `get_state`,
-`get_image_info`, `get_results_table`, `capture_image`,
-`get_state_context`, `run_pipeline`, `explore_thresholds`,
-`batch`, `get_log`, `get_histogram`, `get_open_windows`,
-`get_metadata`, `get_dialogs`, `get_pixels`, `3d_viewer`,
-`close_dialogs`, `interact_dialog`, `probe_command`, `run_script`.
+- **UI steps** — delegate via `IJ.runMacro("<macro>")` instead of
+  hand-rolling `imp.show()` + `IJ.run(imp, ...)` + `imp.close()`.
+- **`Save changes to X?` on `imp.close()`** — set
+  `imp.changes = false` first (same syntax in Jython and Groovy).
+- **`AttributeError` / `NoSuchField` / `ImportError` /
+  `MissingMethod`** — don't rename-and-retry; rewrite the block
+  as `IJ.runMacro(...)` or pivot to `run_macro`.
 
-`execute_macro` runs ImageJ macro code — the primary tool.
-`run_script` runs Groovy / Jython / JavaScript inside Fiji's JVM
-(default Groovy) when macros can't reach Swing internals.
-`interact_dialog` matches labels by case-insensitive substring;
-`index` selects Nth component of that type. Always
-`list_components` first.
+## Python tools (numpy-side, no macro)
 
-### Plugin discovery
+Cheap reads that decode pixels Python-side via `get_pixels` —
+use them for measurement/verification without perturbing Fiji
+state.
 
-Run at the start of every session:
+- `region_stats(x, y, w, h)` — mean/stddev/min/max on a rectangle.
+- `line_profile(x1, y1, x2, y2)` — 1-D intensity along a line.
+- `histogram_summary` — mean, median, skew, percentiles, shape hint.
+- `quick_object_count(threshold)` — connected-component count.
+- `count_bright_regions` — auto-threshold + count.
+- `get_pixels_array(slice, region)` — up to 1,024 raw float32 values;
+  `slice` is 1-based Z (or `0` for the current Z) and `region` is
+  `[x, y, width, height]` (or `[]` for the whole image). Values are
+  returned under `pixels` beside their plane metadata.
 
-```bash
-python scan_plugins.py
-```
+Every pixel-analysis result identifies its source `channel`, Z
+`sliceStart`/`sliceAxis`, and `frame`, together with total
+`channels`, `slices`, and `frames`. Keep those coordinates with any
+reported measurement; if the tool rejects missing or inconsistent
+axis metadata, re-read image state instead of guessing the plane.
 
-Writes `.tmp/commands.md` (annotated, with lookup map at the
-top), `.tmp/commands.raw.txt` (raw `Name=class.path` dump),
-`.tmp/plugins_summary.txt`, and `.tmp/update_sites.json`.
+## Emitting labelled numbers from a macro
 
-```bash
-grep -i "keyword" .tmp/commands.md
-python ij.py macro 'run("StarDist 2D");'
-```
-
-### Agent-side Python tools
-
-All in this directory:
-
-- `session_log.py` — auto-log commands, export replayable `.ijm`.
-- `results_parser.py` — parse Results CSV, summary stats,
-  outliers.
-- `image_diff.py` — compare before/after PNGs.
-- `macro_lint.py` — validate macro code before sending.
-- `adviser.py` — research consultant
-  (`python adviser.py "colocalization"` / `--plugins` /
-  `--recipe` / `--macro` / `--compare`).
-- `recipe_search.py` — find analysis recipes
-  (`python recipe_search.py "count cells"` / `--list` / `--show`).
-- `auditor.py` — validate measurement sanity.
-- `practice.py` — autonomous self-improvement (15 tasks).
-- `autopsy.py` — failure logging, check known issues.
-
-### Lab training
-
-```bash
-python train_agent.py /path/to/lab/images              # train on a directory
-python train_agent.py /path/to/lab/images --domain neuro
-python train_agent.py --profile                         # show current lab profile
-```
-
-Writes `lab_profile.json` + `learnings.md`. Update `learnings.md`
-with macros that work well, error patterns and fixes, workflows
-discovered, tips about the user's specific data. Generalisable
-workflows go in `recipes/`.
+Use `setResult("Label", row, value)` + `updateResults()` so
+`get_results` returns a clean CSV. Never `print("Method: " + n)`
+and grep `get_log`.
 
 ---
 

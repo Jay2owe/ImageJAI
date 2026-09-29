@@ -13,7 +13,7 @@
 
     <groupId>imagejai</groupId>
     <artifactId>imagej-ai</artifactId>
-    <version>0.3.0</version>
+    <version>0.5.0</version>
     <packaging>jar</packaging>
 
     <name>ImageJ AI Assistant</name>
@@ -69,6 +69,9 @@
         <package-name>imagejai</package-name>
         <license.licenseName>bsd_3</license.licenseName>
         <license.copyrightOwners>Jamie Malcolm</license.copyrightOwners>
+        <!-- Canonical archive time for byte-for-byte reproducible release JARs.
+             Change this only when deliberately starting a new release line. -->
+        <project.build.outputTimestamp>2026-09-18T00:00:00Z</project.build.outputTimestamp>
         <!-- Java 11 target: required by pty4j / JediTerm (stage 05).
              Fiji ships a JRE 21+ so runtime is fine; build JDK stays at 25.
              NB: pom-scijava sets maven.compiler.release=8 in its BOM, and
@@ -199,12 +202,6 @@
             <artifactId>junit</artifactId>
             <scope>test</scope>
         </dependency>
-        <dependency>
-            <groupId>org.junit.jupiter</groupId>
-            <artifactId>junit-jupiter-api</artifactId>
-            <version>5.10.2</version>
-            <scope>test</scope>
-        </dependency>
     </dependencies>
 
     <build>
@@ -229,6 +226,92 @@
                     <include>ollama_model_sizes.json</include>
                 </includes>
             </resource>
+            <resource>
+                <directory>agent</directory>
+                <targetPath>imagejai</targetPath>
+                <includes>
+                    <include>command_manifest.json</include>
+                </includes>
+            </resource>
+            <!-- A JAR-only Fiji install still needs a real Python workspace for
+                 CLI agents and the bundled Ollama/Gemma loop. Keep this list
+                 deliberately narrow: runtime code/context only, never tests,
+                 caches, credentials, logs, or generated provider state. -->
+            <resource>
+                <directory>agent</directory>
+                <targetPath>agent-runtime</targetPath>
+                <filtering>false</filtering>
+                <includes>
+                    <include>.aider.conventions.md</include>
+                    <include>.clinerules</include>
+                    <include>.cursorrules</include>
+                    <include>AGENTS.md</include>
+                    <include>CLAUDE.md</include>
+                    <include>GEMINI.md</include>
+                    <!-- Not a duplicate of the imagejai/ copy above. ij.py and
+                         methods_table.py resolve the manifest as a sibling of
+                         their own __file__, and ij.py does it at module scope,
+                         so the classpath copy is unreachable to them: without
+                         this one, `import ij` raises in a JAR-only install.
+                         Remove it only if those readers stop doing that. -->
+                    <include>command_manifest.json</include>
+                    <include>__init__.py</include>
+                    <include>pyproject.toml</include>
+                    <include>adviser.py</include>
+                    <include>auditor.py</include>
+                    <include>autopsy.py</include>
+                    <include>ij.py</include>
+                    <include>image_diff.py</include>
+                    <include>imagej_helpers.py</include>
+                    <include>macro_lint.py</include>
+                    <include>methods_table.py</include>
+                    <include>pixels.py</include>
+                    <include>practice.py</include>
+                    <include>probe_plugin.py</include>
+                    <include>recipe_search.py</include>
+                    <include>results_parser.py</include>
+                    <include>run_recipe.py</include>
+                    <include>scan_plugins.py</include>
+                    <include>session_log.py</include>
+                    <include>sync_context.py</include>
+                    <include>train_agent.py</include>
+                    <include>imagej_use/**/*</include>
+                    <include>console/**/*</include>
+                    <include>contexts/**/*</include>
+                    <include>gemma4_31b/**/*</include>
+                    <include>ollama_agent/__init__.py</include>
+                    <include>ollama_agent/budget_ceiling.py</include>
+                    <include>providers/__init__.py</include>
+                    <include>providers/agent_cli.py</include>
+                    <include>providers/anthropic_native.py</include>
+                    <include>providers/base.py</include>
+                    <include>providers/gemini_native.py</include>
+                    <include>providers/litellm.config.yaml</include>
+                    <include>providers/litellm_proxy.py</include>
+                    <include>providers/models.yaml</include>
+                    <include>providers/ollama_model_sizes.json</include>
+                    <include>providers/proxy.py</include>
+                    <include>providers/requirements.txt</include>
+                    <include>providers/router.py</include>
+                    <include>macro_sets/**/*</include>
+                    <include>recipes/**/*</include>
+                    <include>references/**/*</include>
+                </includes>
+                <excludes>
+                    <exclude>**/__pycache__/**</exclude>
+                    <exclude>**/*.pyc</exclude>
+                    <exclude>**/tests/**</exclude>
+                    <exclude>**/.plugin_cache/**</exclude>
+                    <exclude>**/.pytest_cache/**</exclude>
+                    <exclude>**/*.egg-info/**</exclude>
+                    <exclude>contexts/_snapshots/**</exclude>
+                    <exclude>contexts/test_*.py</exclude>
+                    <exclude>providers/_spike/**</exclude>
+                    <exclude>providers/test_*.py</exclude>
+                    <exclude>providers/proxy.auth</exclude>
+                    <exclude>providers/proxy.runtime.json</exclude>
+                </excludes>
+            </resource>
         </resources>
         <plugins>
             <plugin>
@@ -239,6 +322,22 @@
                     <excludes>
                         <exclude>**/*IntegrationTest.java</exclude>
                     </excludes>
+                    <excludedGroups>imagejai.test.Benchmark</excludedGroups>
+                    <systemPropertyVariables>
+                        <!-- Keep the test run out of the developer's live
+                             ~/.imagej-ai. AiRootPanel honours
+                             settings.refreshOnStartup, so simply constructing
+                             the panel in a test used to fetch provider model
+                             lists over the network and write into the real
+                             model cache. Settings.getConfigDir() reads
+                             user.home on every call, so redirecting it here
+                             makes the suite hermetic. The directory lives in
+                             the system temp area, not under target/: this
+                             checkout sits in a synced Dropbox folder, and the
+                             sync client holds handles open long enough to break
+                             recursive test cleanup. -->
+                        <user.home>${java.io.tmpdir}/imagejai-test-home</user.home>
+                    </systemPropertyVariables>
                 </configuration>
             </plugin>
             <plugin>
@@ -257,12 +356,23 @@
             </plugin>
             <!-- Generate SciJava plugin annotation index -->
             <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-jar-plugin</artifactId>
+                <version>3.3.0</version>
                 <configuration>
+                    <outputTimestamp>${project.build.outputTimestamp}</outputTimestamp>
                     <archive>
                         <manifest>
+                            <!-- The release JAR shades these libraries; a Class-Path
+                                 list makes Fiji's updater demand duplicate JARs. -->
+                            <addClasspath>false</addClasspath>
                             <packageName>imagejai</packageName>
                         </manifest>
+                        <!-- pom-scijava otherwise inserts the wall-clock build
+                             time, which makes identical builds hash differently. -->
+                        <manifestEntries>
+                            <Implementation-Date>${project.build.outputTimestamp}</Implementation-Date>
+                        </manifestEntries>
                     </archive>
                 </configuration>
             </plugin>
@@ -286,6 +396,9 @@
                                         <exclude>META-INF/*.SF</exclude>
                                         <exclude>META-INF/*.DSA</exclude>
                                         <exclude>META-INF/*.RSA</exclude>
+                                        <!-- Dependency POMs are not runtime API
+                                             and violate the plugin artifact policy. -->
+                                        <exclude>META-INF/maven/**</exclude>
                                     </excludes>
                                 </filter>
                             </filters>
@@ -306,13 +419,39 @@
                 <plugins>
                     <plugin>
                         <groupId>org.apache.maven.plugins</groupId>
-                        <artifactId>maven-surefire-plugin</artifactId>
+                        <artifactId>maven-failsafe-plugin</artifactId>
                         <version>3.2.5</version>
+                        <executions>
+                            <execution>
+                                <goals>
+                                    <goal>integration-test</goal>
+                                    <goal>verify</goal>
+                                </goals>
+                            </execution>
+                        </executions>
                         <configuration>
                             <includes>
                                 <include>**/*IntegrationTest.java</include>
                             </includes>
-                            <excludes combine.self="override" />
+                        </configuration>
+                    </plugin>
+                </plugins>
+            </build>
+        </profile>
+        <profile>
+            <id>benchmark</id>
+            <build>
+                <plugins>
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-surefire-plugin</artifactId>
+                        <version>3.2.5</version>
+                        <configuration>
+                            <groups>imagejai.test.Benchmark</groups>
+                            <excludedGroups combine.self="override" />
+                            <excludes>
+                                <exclude>**/*IntegrationTest.java</exclude>
+                            </excludes>
                         </configuration>
                     </plugin>
                 </plugins>

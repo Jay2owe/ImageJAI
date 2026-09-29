@@ -4,13 +4,16 @@ import ij.IJ;
 import ij.ImagePlus;
 import ij.io.FileInfo;
 import ij.plugin.frame.RoiManager;
+import imagejai.engine.SafeFileIO;
 
+import java.nio.channels.FileChannel;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
+import java.nio.file.StandardOpenOption;
 
 /**
  * Stage 05 (docs/safe_mode_v2/05_destructive-scanner-expansion.md):
@@ -34,7 +37,7 @@ public final class RoiAutoBackup {
 
     /** Compact UTC timestamp suffix — {@code 20260504T103045Z}. */
     private static final DateTimeFormatter TS_FMT =
-            DateTimeFormatter.ofPattern("yyyyMMdd'T'HHmmss'Z'")
+            DateTimeFormatter.ofPattern("yyyyMMdd'T'HHmmss.SSS'Z'")
                     .withZone(ZoneOffset.UTC);
 
     /**
@@ -84,17 +87,26 @@ public final class RoiAutoBackup {
             return new Result(null, "AI_Exports mkdirs failed; reset proceeded without backup.");
         }
 
-        String ts = TS_FMT.format(Instant.now());
-        Path zip = dir.resolve(".safemode_roi_" + ts + ".zip");
+        Path zip = uniqueBackupPath(dir, Instant.now(), SafeFileIO.uniqueToken());
+        Path pending = dir.resolve(".safemode_roi_pending_"
+                + SafeFileIO.uniqueToken() + ".zip");
 
         try {
             // RoiManager.save() returns boolean only on a few IJ forks; the
             // canonical path is runCommand("save", absolutePath).
-            boolean ok = rm.runCommand("save", zip.toAbsolutePath().toString());
+            boolean ok = rm.runCommand("save", pending.toAbsolutePath().toString());
             if (!ok) {
                 return new Result(null, "RoiManager.runCommand(\"save\") returned false; reset proceeded without backup.");
             }
+            if (!Files.isRegularFile(pending)) {
+                return new Result(null, "RoiManager reported success but no backup file was created.");
+            }
+            try (FileChannel channel = FileChannel.open(pending, StandardOpenOption.WRITE)) {
+                channel.force(true);
+            }
+            SafeFileIO.moveNewAtomically(pending, zip);
         } catch (Throwable t) {
+            try { Files.deleteIfExists(pending); } catch (Throwable ignore) {}
             try { IJ.log("[ImageJAI-SafeMode] backup save failed: " + t.getMessage()); }
             catch (Throwable ignore) {}
             return new Result(null, "RoiManager.save threw " + t.getClass().getSimpleName()
@@ -129,5 +141,13 @@ public final class RoiAutoBackup {
      */
     static Path resolveBackupDirForTest(ImagePlus imp) {
         return resolveBackupDir(imp);
+    }
+
+    static Path uniqueBackupPath(Path dir, Instant instant, String token) {
+        if (dir == null || instant == null || token == null || token.isEmpty()) {
+            throw new IllegalArgumentException("directory, instant and token are required");
+        }
+        return dir.resolve(".safemode_roi_" + TS_FMT.format(instant)
+                + "_" + token + ".zip");
     }
 }

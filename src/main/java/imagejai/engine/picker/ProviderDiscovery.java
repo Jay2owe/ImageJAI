@@ -1,20 +1,30 @@
 package imagejai.engine.picker;
 
-import java.io.BufferedReader;
+import imagejai.engine.LaunchPolicy;
+
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
-import java.io.InputStreamReader;
 import java.net.HttpURLConnection;
+import java.net.URI;
+import java.net.URISyntaxException;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.Collections;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.Callable;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.ThreadFactory;
+import java.util.concurrent.TimeUnit;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -36,16 +46,38 @@ import java.util.regex.Pattern;
  */
 public final class ProviderDiscovery {
 
+    public static final int MAX_RESPONSE_BYTES = 1024 * 1024;
+    public static final int MAX_MODEL_IDS = 2000;
+    public static final int MAX_TIMEOUT_MS = 10000;
+    public static final int MAX_CONCURRENT_DISCOVERIES = 4;
+    public static final int MAX_DISCOVER_ALL_MS = 30000;
+
     /** Endpoint metadata for one provider. */
     public static final class Endpoint {
+        private static final Pattern CREDENTIAL_QUERY = Pattern.compile(
+                "(?i)(?:[?&])(?:key|api_?key|token|access_token|secret|password)=");
         private final String providerId;
         private final String url;
         private final Map<String, String> headers;
 
         public Endpoint(String providerId, String url, Map<String, String> headers) {
-            this.providerId = providerId;
-            this.url = url;
-            this.headers = Collections.unmodifiableMap(new LinkedHashMap<String, String>(headers));
+            this.providerId = LaunchPolicy.requireProviderId(providerId);
+            String candidateUrl = url == null ? "" : url.trim();
+            if (candidateUrl.isEmpty() || CREDENTIAL_QUERY.matcher(candidateUrl).find()) {
+                throw new IllegalArgumentException("Provider endpoint must not contain credentials.");
+            }
+            try {
+                URI uri = new URI(candidateUrl);
+                if (uri.getUserInfo() != null) {
+                    throw new IllegalArgumentException(
+                            "Provider endpoint must not contain credentials.");
+                }
+            } catch (URISyntaxException invalid) {
+                throw new IllegalArgumentException("Provider endpoint is invalid.");
+            }
+            this.url = candidateUrl;
+            this.headers = Collections.unmodifiableMap(new LinkedHashMap<String, String>(
+                    headers == null ? Collections.<String, String>emptyMap() : headers));
         }
 
         public String providerId() { return providerId; }
@@ -100,9 +132,8 @@ public final class ProviderDiscovery {
                 "https://api.anthropic.com/v1/models",
                 anthropicHeaders(credentials.get("anthropic"))));
         out.put("gemini", new Endpoint("gemini",
-                "https://generativelanguage.googleapis.com/v1beta/models?key="
-                        + nullToEmpty(credentials.get("gemini")),
-                Collections.<String, String>emptyMap()));
+                "https://generativelanguage.googleapis.com/v1beta/models",
+                googleHeaders(credentials.get("gemini"))));
         out.put("groq", new Endpoint("groq",
                 "https://api.groq.com/openai/v1/models",
                 authBearer(credentials.get("groq"))));
@@ -148,10 +179,6 @@ public final class ProviderDiscovery {
         return Collections.unmodifiableMap(out);
     }
 
-    private static String nullToEmpty(String s) {
-        return s == null ? "" : s;
-    }
-
     /**
      * Normalise a keyless local server's base URL to its host root so a
      * {@code /v1/models} path can be appended cleanly. Accepts a saved override
@@ -185,6 +212,15 @@ public final class ProviderDiscovery {
             h.put("x-api-key", key);
         }
         h.put("anthropic-version", "2023-06-01");
+        return h;
+    }
+
+    private static Map<String, String> googleHeaders(String key) {
+        if (key == null || key.isEmpty()) {
+            return Collections.emptyMap();
+        }
+        Map<String, String> h = new LinkedHashMap<String, String>();
+        h.put("x-goog-api-key", key);
         return h;
     }
 
@@ -232,9 +268,28 @@ public final class ProviderDiscovery {
             lastErrors.put(providerId, reason);
             return MergeFunction.LiveResult.failure(reason);
         }
-        HttpFetcher.HttpResult response = fetcher.fetch(endpoint, timeout);
+        HttpFetcher.HttpResult response;
+        try {
+            response = fetcher.fetch(endpoint,
+                    Duration.ofMillis(timeoutMillis(timeout)));
+        } catch (Throwable failure) {
+            String reason = "discovery failed (" + failure.getClass().getSimpleName() + ")";
+            lastErrors.put(providerId, reason);
+            return MergeFunction.LiveResult.failure(reason);
+        }
+        if (response == null) {
+            String reason = "discovery returned no response";
+            lastErrors.put(providerId, reason);
+            return MergeFunction.LiveResult.failure(reason);
+        }
         if (!response.ok()) {
-            String reason = describeFailure(response);
+            String reason = describeFailure(response, endpoint);
+            lastErrors.put(providerId, reason);
+            return MergeFunction.LiveResult.failure(reason);
+        }
+        if (response.body != null && (response.body.length() > MAX_RESPONSE_BYTES
+                || response.body.getBytes(StandardCharsets.UTF_8).length > MAX_RESPONSE_BYTES)) {
+            String reason = "provider response exceeded " + MAX_RESPONSE_BYTES + " byte limit";
             lastErrors.put(providerId, reason);
             return MergeFunction.LiveResult.failure(reason);
         }
@@ -243,15 +298,15 @@ public final class ProviderDiscovery {
         return MergeFunction.LiveResult.success(ids);
     }
 
-    private static String describeFailure(HttpFetcher.HttpResult response) {
+    private static String describeFailure(HttpFetcher.HttpResult response, Endpoint endpoint) {
         if (response.error != null) {
-            String message = response.error.getMessage();
+            String message = redactSecrets(response.error.getMessage(), endpoint);
             String name = response.error.getClass().getSimpleName();
             return message == null || message.isEmpty()
                     ? name
                     : name + ": " + message;
         }
-        String body = response.body == null ? "" : response.body.trim();
+        String body = redactSecrets(response.body, endpoint).trim();
         if (body.length() > 240) {
             body = body.substring(0, 240) + "…";
         }
@@ -261,6 +316,24 @@ public final class ProviderDiscovery {
         return "HTTP " + response.status + " — " + body;
     }
 
+    private static String redactSecrets(String text, Endpoint endpoint) {
+        String safe = text == null ? "" : text;
+        if (endpoint != null) {
+            for (String value : endpoint.headers().values()) {
+                if (value == null || value.trim().isEmpty()) {
+                    continue;
+                }
+                safe = safe.replace(value, "[REDACTED]");
+                if (value.startsWith("Bearer ") && value.length() > "Bearer ".length()) {
+                    safe = safe.replace(value.substring("Bearer ".length()), "[REDACTED]");
+                }
+            }
+        }
+        return safe.replaceAll(
+                "(?i)([?&](?:key|api_?key|token|access_token|secret|password)=)[^&\\s]+",
+                "$1[REDACTED]");
+    }
+
     /**
      * Discover every provider in {@link #endpoints()} sequentially with the
      * given per-provider timeout. Production code should fan out across a
@@ -268,9 +341,62 @@ public final class ProviderDiscovery {
      * wiring in {@link ProviderRegistry} parallelises explicitly.
      */
     public Map<String, MergeFunction.LiveResult> discoverAll(Duration timeout) {
-        Map<String, MergeFunction.LiveResult> out = new ConcurrentHashMap<String, MergeFunction.LiveResult>();
-        for (String providerId : endpoints.keySet()) {
-            out.put(providerId, discover(providerId, timeout));
+        final List<String> providerIds = new ArrayList<String>(endpoints.keySet());
+        Map<String, MergeFunction.LiveResult> out =
+                new LinkedHashMap<String, MergeFunction.LiveResult>();
+        if (providerIds.isEmpty()) return out;
+        int threads = Math.min(MAX_CONCURRENT_DISCOVERIES, providerIds.size());
+        ExecutorService executor = Executors.newFixedThreadPool(threads, new ThreadFactory() {
+            private int sequence;
+            @Override public synchronized Thread newThread(Runnable task) {
+                Thread thread = new Thread(task,
+                        "imagejai-provider-discovery-" + (++sequence));
+                thread.setDaemon(true);
+                return thread;
+            }
+        });
+        List<Callable<MergeFunction.LiveResult>> tasks =
+                new ArrayList<Callable<MergeFunction.LiveResult>>();
+        for (final String providerId : providerIds) {
+            tasks.add(new Callable<MergeFunction.LiveResult>() {
+                @Override public MergeFunction.LiveResult call() {
+                    return discover(providerId, timeout);
+                }
+            });
+        }
+        int perProviderMs = timeoutMillis(timeout);
+        long waves = (providerIds.size() + threads - 1L) / threads;
+        long totalMs = Math.min(MAX_DISCOVER_ALL_MS, perProviderMs * waves);
+        try {
+            List<Future<MergeFunction.LiveResult>> futures =
+                    executor.invokeAll(tasks, Math.max(1L, totalMs), TimeUnit.MILLISECONDS);
+            for (int i = 0; i < providerIds.size(); i++) {
+                String providerId = providerIds.get(i);
+                Future<MergeFunction.LiveResult> future = futures.get(i);
+                if (future.isCancelled()) {
+                    String reason = "discovery timed out";
+                    lastErrors.put(providerId, reason);
+                    out.put(providerId, MergeFunction.LiveResult.failure(reason));
+                } else {
+                    try {
+                        out.put(providerId, future.get());
+                    } catch (Exception failure) {
+                        String reason = "discovery failed ("
+                                + failure.getClass().getSimpleName() + ")";
+                        lastErrors.put(providerId, reason);
+                        out.put(providerId, MergeFunction.LiveResult.failure(reason));
+                    }
+                }
+            }
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+            for (String providerId : providerIds) {
+                String reason = "discovery cancelled";
+                lastErrors.put(providerId, reason);
+                out.put(providerId, MergeFunction.LiveResult.failure(reason));
+            }
+        } finally {
+            executor.shutdownNow();
         }
         return out;
     }
@@ -284,6 +410,7 @@ public final class ProviderDiscovery {
             // {"models": [{"name": "llama3.2:3b"}, ...]} — Ollama-specific shape.
             for (String name : extractKeyFromArray(body, "name")) {
                 out.add(name);
+                if (out.size() >= MAX_MODEL_IDS) break;
             }
             return out;
         }
@@ -294,6 +421,7 @@ public final class ProviderDiscovery {
             for (int i = 0; i < names.size(); i++) {
                 String publisher = i < publishers.size() ? publishers.get(i) : "";
                 out.add(publisher.isEmpty() ? names.get(i) : publisher + "/" + names.get(i));
+                if (out.size() >= MAX_MODEL_IDS) break;
             }
             return out;
         }
@@ -301,12 +429,14 @@ public final class ProviderDiscovery {
             for (String name : extractKeyFromArray(body, "name")) {
                 String stripped = name.startsWith("models/") ? name.substring("models/".length()) : name;
                 out.add(stripped);
+                if (out.size() >= MAX_MODEL_IDS) break;
             }
             return out;
         }
         // Default: OpenAI shape — {"data": [{"id": "..."}, ...]}.
         for (String id : extractKeyFromArray(body, "id")) {
             out.add(id);
+            if (out.size() >= MAX_MODEL_IDS) break;
         }
         return out;
     }
@@ -318,6 +448,7 @@ public final class ProviderDiscovery {
         List<String> out = new java.util.ArrayList<String>();
         while (m.find()) {
             out.add(m.group(1));
+            if (out.size() >= MAX_MODEL_IDS) break;
         }
         return out;
     }
@@ -330,7 +461,8 @@ public final class ProviderDiscovery {
                 try {
                     connection = (HttpURLConnection) new URL(endpoint.url()).openConnection();
                     int timeoutMs = timeoutMillis(timeout);
-                    connection.setInstanceFollowRedirects(true);
+                    // Never forward a credential header to a redirect target.
+                    connection.setInstanceFollowRedirects(false);
                     connection.setConnectTimeout(timeoutMs);
                     connection.setReadTimeout(timeoutMs);
                     connection.setRequestMethod("GET");
@@ -358,22 +490,25 @@ public final class ProviderDiscovery {
         if (millis <= 0L) {
             return 5000;
         }
-        return millis > Integer.MAX_VALUE ? Integer.MAX_VALUE : (int) millis;
+        return millis > MAX_TIMEOUT_MS ? MAX_TIMEOUT_MS : (int) millis;
     }
 
     private static String readAll(InputStream stream) throws IOException {
         if (stream == null) {
             return "";
         }
-        StringBuilder out = new StringBuilder();
-        try (BufferedReader reader = new BufferedReader(new InputStreamReader(
-                stream, StandardCharsets.UTF_8))) {
-            char[] buffer = new char[4096];
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        try (InputStream input = stream) {
+            byte[] buffer = new byte[4096];
             int n;
-            while ((n = reader.read(buffer)) >= 0) {
-                out.append(buffer, 0, n);
+            while ((n = input.read(buffer)) >= 0) {
+                if (out.size() + n > MAX_RESPONSE_BYTES) {
+                    throw new IOException("provider response exceeded "
+                            + MAX_RESPONSE_BYTES + " byte limit");
+                }
+                out.write(buffer, 0, n);
             }
         }
-        return out.toString();
+        return new String(out.toByteArray(), StandardCharsets.UTF_8);
     }
 }

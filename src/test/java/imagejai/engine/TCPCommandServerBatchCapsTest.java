@@ -12,6 +12,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotNull;
@@ -56,6 +57,7 @@ public class TCPCommandServerBatchCapsTest {
     @After
     public void tearDown() throws IOException {
         TCPCommandServer.executeMacroForTest = null;
+        if (server != null) server.stop();
         if (tempStore != null) {
             Files.deleteIfExists(tempStore);
             Path tmp = tempStore.resolveSibling(
@@ -263,11 +265,159 @@ public class TCPCommandServerBatchCapsTest {
         assertEquals(2, witness.size());
         assertSame(outer, witness.get(0));
         assertSame(outer, witness.get(1));
-        // handleBatch wraps the per-step results array directly in
-        // successResponse, so resp.result IS the JsonArray.
-        JsonArray results = resp.getAsJsonArray("result");
+        JsonObject batch = resp.getAsJsonObject("result");
+        JsonArray results = batch.getAsJsonArray("results");
         assertNotNull(results);
         assertEquals(2, results.size());
+        assertEquals(1, batch.get("firstFailureIndex").getAsInt());
+        assertEquals(0, results.get(0).getAsJsonObject().get("index").getAsInt());
+        assertTrue(results.get(0).getAsJsonObject().has("response"));
+    }
+
+    @Test
+    public void batchReportsFailureIndexAndRetainsPriorResults() {
+        TCPCommandServer.AgentCaps caps = new TCPCommandServer.AgentCaps();
+        caps.safeMode = true;
+        JsonObject req = parse(
+                "{\"command\":\"batch\",\"commands\":["
+              + "{\"command\":\"ping\"},"
+              + "{\"command\":\"not_a_real_command\"},"
+              + "{\"command\":\"ping\"}]}");
+
+        JsonObject response = server.dispatch(req, caps);
+        JsonObject batch = response.getAsJsonObject("result");
+        JsonArray results = batch.getAsJsonArray("results");
+
+        assertEquals(1, batch.get("firstFailureIndex").getAsInt());
+        assertEquals(3, batch.get("executed").getAsInt());
+        assertEquals(3, results.size());
+        assertTrue(results.get(0).getAsJsonObject()
+                .getAsJsonObject("response").get("ok").getAsBoolean());
+        assertEquals(2, results.get(2).getAsJsonObject().get("index").getAsInt());
+    }
+
+    @Test
+    public void batchCanHaltAfterIndexedFailureWithoutDiscardingSuccess() {
+        TCPCommandServer.AgentCaps caps = new TCPCommandServer.AgentCaps();
+        JsonObject req = parse(
+                "{\"command\":\"batch\",\"halt_on_error\":true,\"commands\":["
+              + "{\"command\":\"ping\"},"
+              + "{\"command\":\"not_a_real_command\"},"
+              + "{\"command\":\"ping\"}]}");
+
+        JsonObject batch = server.dispatch(req, caps).getAsJsonObject("result");
+        assertEquals(1, batch.get("firstFailureIndex").getAsInt());
+        assertEquals(2, batch.get("executed").getAsInt());
+        assertEquals(3, batch.get("total").getAsInt());
+        assertTrue(batch.get("halted").getAsBoolean());
+        assertEquals(2, batch.getAsJsonArray("results").size());
+    }
+
+    @Test
+    public void throwingSubCommandRetainsPriorIndexedResults() {
+        TCPCommandServer.executeMacroForTest = (request, caps) -> {
+            throw new IllegalStateException("synthetic batch failure");
+        };
+        JsonObject req = parse(
+                "{\"command\":\"batch\",\"halt_on_error\":true,\"commands\":["
+              + "{\"command\":\"ping\"},"
+              + "{\"command\":\"execute_macro\",\"code\":\"x\"},"
+              + "{\"command\":\"ping\"}]}");
+
+        JsonObject batch = server.dispatch(req, new TCPCommandServer.AgentCaps())
+                .getAsJsonObject("result");
+        JsonArray results = batch.getAsJsonArray("results");
+
+        assertEquals(1, batch.get("firstFailureIndex").getAsInt());
+        assertEquals(2, batch.get("executed").getAsInt());
+        assertTrue(results.get(0).getAsJsonObject()
+                .getAsJsonObject("response").get("ok").getAsBoolean());
+        JsonObject failure = results.get(1).getAsJsonObject();
+        assertEquals(1, failure.get("index").getAsInt());
+        assertTrue(failure.getAsJsonObject("response").toString()
+                .contains("synthetic batch failure"));
+    }
+
+    @Test
+    public void nestedSixtyFourBySixtyFourBatchDispatchesAtMostSixtyFourLeaves() {
+        CountingServer counting = new CountingServer();
+        try {
+            JsonObject outer = nestedBatchGrid("ping");
+
+            JsonObject result = counting.dispatch(
+                    outer, new TCPCommandServer.AgentCaps()).getAsJsonObject("result");
+
+            assertTrue(counting.leafDispatches.get()
+                    <= TCPCommandServer.MAX_COMPOUND_WORK);
+            assertEquals(TCPCommandServer.MAX_COMPOUND_WORK,
+                    result.get("work_executed").getAsInt());
+            assertTrue(result.get("work_budget_exhausted").getAsBoolean());
+            assertEquals(1, result.get("executed").getAsInt());
+            JsonObject indexed = result.getAsJsonArray("results")
+                    .get(0).getAsJsonObject();
+            assertEquals(0, indexed.get("index").getAsInt());
+            JsonObject nested = indexed.getAsJsonObject("response")
+                    .getAsJsonObject("result");
+            assertEquals(63, nested.get("executed").getAsInt());
+            assertEquals(63, nested.getAsJsonArray("results").size());
+            assertEquals(63, nested.get("budget_exhausted_at_index").getAsInt());
+        } finally {
+            counting.stop();
+        }
+    }
+
+    @Test
+    public void throwingNestedLeavesAreChargedBeforeDispatch() {
+        AtomicInteger attempts = new AtomicInteger();
+        TCPCommandServer.executeMacroForTest = (request, caps) -> {
+            attempts.incrementAndGet();
+            throw new IllegalStateException("synthetic leaf failure");
+        };
+
+        JsonObject result = server.dispatch(
+                nestedBatchGrid("execute_macro"),
+                new TCPCommandServer.AgentCaps()).getAsJsonObject("result");
+
+        assertTrue(attempts.get() <= TCPCommandServer.MAX_COMPOUND_WORK);
+        assertEquals(63, attempts.get());
+        assertEquals(TCPCommandServer.MAX_COMPOUND_WORK,
+                result.get("work_executed").getAsInt());
+        assertTrue(result.get("work_budget_exhausted").getAsBoolean());
+    }
+
+    private static JsonObject nestedBatchGrid(String leafCommand) {
+        JsonObject outer = new JsonObject();
+        outer.addProperty("command", "batch");
+        JsonArray outerCommands = new JsonArray();
+        for (int i = 0; i < TCPCommandServer.MAX_BATCH_COMMANDS; i++) {
+            JsonObject nested = new JsonObject();
+            nested.addProperty("command", "batch");
+            JsonArray leaves = new JsonArray();
+            for (int j = 0; j < TCPCommandServer.MAX_BATCH_COMMANDS; j++) {
+                JsonObject leaf = new JsonObject();
+                leaf.addProperty("command", leafCommand);
+                if ("execute_macro".equals(leafCommand)) leaf.addProperty("code", "x");
+                leaves.add(leaf);
+            }
+            nested.add("commands", leaves);
+            outerCommands.add(nested);
+        }
+        outer.add("commands", outerCommands);
+        return outer;
+    }
+
+    private static final class CountingServer extends TCPCommandServer {
+        final AtomicInteger leafDispatches = new AtomicInteger();
+
+        CountingServer() { super(0, null, null, null, null); }
+
+        @Override JsonObject dispatch(JsonObject request, AgentCaps caps) {
+            if (request != null && "ping".equals(
+                    request.has("command") ? request.get("command").getAsString() : "")) {
+                leafDispatches.incrementAndGet();
+            }
+            return super.dispatch(request, caps);
+        }
     }
 
     private static JsonObject parse(String s) {

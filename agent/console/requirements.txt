@@ -1,0 +1,10 @@
+# Isolated ImageJAI Console runtime. The Fiji bootstrapper installs this file
+# inside ~/.imagej-ai/console/<plugin-version>/venv.
+textual>=6.2,<7
+PyYAML>=6.0
+litellm[proxy]==1.83.14
+openai==2.24.0
+anthropic==0.97.0
+google-genai==1.71.0
+pillow>=10.0
+numpy>=1.26

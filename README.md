@@ -1,18 +1,23 @@
 # ImageJAI — AI Assistant for ImageJ/Fiji
 
-A single Fiji plugin that adds a conversational AI assistant to ImageJ. Install by dragging a JAR into `plugins/`. Free to use with Google Gemini or local with Ollama.
+ImageJAI is an ImageJ/Fiji plugin for describing image analysis in plain language. Use the assistant inside Fiji or its standalone console to inspect images, run analyses, interact with plugin dialogs and save reusable macros. Choose a cloud model, a supported agent subscription or a local model through Ollama.
+
+Version **0.5.0** is available from the [ImageJ-AI update site](https://sites.imagej.net/ImageJ-AI/). Console setup installs Python privately when needed.
 
 ## Data Governance
 
-ImageJAI includes a per-folder Privacy Posture for labs using external agent CLIs. New folders default to Pseudonymised; supervisors can set sensitive folders to On-premises, which filters the agent list to local binaries and refuses cloud-hosted Ollama tags.
+ImageJAI includes a per-folder Privacy Posture for labs using external agent CLIs. First use starts in Standard; supervisors can set sensitive folders to Pseudonymised or On-premises. Saved folder choices are retained. On-premises filters the agent list to local binaries and refuses cloud-hosted Ollama tags.
 
-> *"ImageJAI applies UK GDPR Art. 4(5) pseudonymisation to all outbound responses by default, differentiates microscopy pixels (downsampled, burn-in masked) from GUI screenshots (refused), refuses cloud-hosted model endpoints in On-premises posture, and emits an append-only audit trail per project."*
+Pseudonymised mode masks supported identifiers in outbound responses and restricts GUI screenshots. On-premises mode restricts supported launch routes to local models. These controls and their limits are described in the data-governance guide; choose a model provider appropriate for the data you are working with.
 
 The audit trail is written to `AI_Exports/imagejai_audit.csv`, and the launcher can generate a Data Handling Statement PDF for ethics or grant paperwork. See [`docs/data-governance/README.md`](docs/data-governance/README.md) for the biologist-facing workflow and limits.
 
 ## Features
 
 - **Natural language control** — "Open the blobs image", "Apply a Gaussian blur with sigma 2", "Count all cells"
+- **Standalone console** — Choose the model and reasoning effort with `/model`; work with streamed replies, readable tool summaries, expandable details and collapsible side panels
+- **Automatic Fiji connection** — Detect or select a Fiji installation, launch it when needed and start its TCP server from the console
+- **Reusable work** — Save session macros, resume conversations and inspect analysis history
 - **Vision reasoning** — AI can see your images and suggest appropriate analyses
 - **Multi-step pipelines** — "Analyze all neurons in this confocal stack" generates and executes a complete workflow
 - **6 specialist agents** — Segmentation, Measurement, Visualization, Statistics, Hypothesis-Driven Analysis, and General
@@ -31,21 +36,29 @@ The audit trail is written to `AI_Exports/imagejai_audit.csv`, and the launcher 
 
 ## Install
 
-1. Download `imagej-ai-0.2.0.jar`
-2. Copy to your `Fiji.app/plugins/` directory
-3. Restart Fiji
-4. Go to **Plugins > AI Assistant**
-5. On first run, choose your AI backend:
-   - **Google Gemini** (free) — get a key at [ai.google.dev](https://aistudio.google.com/apikey)
-   - **Ollama** (free, local, private) — install from [ollama.ai](https://ollama.ai)
-   - **OpenAI / Compatible** — any OpenAI-compatible endpoint
-6. Start chatting
+1. In Fiji, open **Help > Update > Manage update sites**.
+2. Click **Add update site**, name it **ImageJ-AI**, and enter
+   `https://sites.imagej.net/ImageJ-AI/` as its URL. Enable its checkbox.
+3. Close the sites window, click **Apply changes**, and restart Fiji.
+4. Open **Plugins > AI Assistant**.
+5. For the standalone console, open **Settings > Models & Agents**, find
+   **ImageJAI Console**, and click **Install**. Python and its packages are
+   installed privately when needed; you do not need to install Python yourself.
+6. Launch the console, choose a model, and sign in to its provider or connect
+   to a local model server.
+
+The [ImageJ-AI update site](https://sites.imagej.net/ImageJ-AI/) serves version
+0.5.0. The site can be added by URL before it appears in Fiji's default list.
+The Fiji panel also supports Gemini, Ollama, and OpenAI-compatible backends.
+For a direct install, copy `imagej-ai-0.5.0.jar` into `Fiji.app/plugins/` while Fiji
+is closed, restart it, and follow steps 4–6.
 
 ## Requirements
 
-- Fiji (ImageJ2) with Java 8+
-- An LLM backend (Gemini API key, Ollama, or OpenAI-compatible endpoint)
-- No other dependencies — everything else ships with Fiji
+- Fiji (ImageJ2) running Java 11 or newer
+- A model connection: a supported provider API key or agent subscription, or a local model server. Provider access and usage charges are separate from ImageJAI.
+- The Fiji panel runs from the plugin JAR. The optional standalone console
+  downloads Python and its packages into a private user folder if needed.
 
 ## Usage Examples
 
@@ -64,11 +77,51 @@ The audit trail is written to `AI_Exports/imagejai_audit.csv`, and the launcher 
 "Export the results as CSV"
 ```
 
+## ImageJAI Console — the standalone terminal
+
+Prefer a terminal to the Fiji panel? Run `imagejai` to open the standalone
+console. It connects to Fiji over TCP, shows streamed replies and tool activity,
+and saves conversations and session macros. The console detects Fiji, lets you
+choose another installation and starts Fiji and its server when needed.
+
+Install it from Fiji: open **AI Assistant > Settings > Models & Agents**, find
+**ImageJAI Console**, and click **Install**. The plugin creates a private,
+versioned Python environment, adds `imagejai` to the current user's PATH, and
+checks the command before making it active. Repair, update, launch, and
+uninstall are available from the same row. If Python 3.10–3.13 is already
+installed, the setup uses it; otherwise it downloads a private Python 3.12.
+First-time setup needs internet access but not administrator access. Choosing
+or signing in to an AI model is a separate step.
+
+```bash
+imagejai            # login on first run, then chat; drives Fiji over TCP
+imagejai login codex  # use a ChatGPT/Codex subscription
+imagejai login claude # use a Claude subscription
+imagejai status       # check installation and Fiji connectivity
+```
+
+Inside the console:
+
+| Command | Action |
+| --- | --- |
+| `/model` | Choose the model and its available reasoning effort levels |
+| `/fiji` | Detect or choose the Fiji installation |
+| `/settings` | Configure the agent, Fiji startup, privacy, display and budget |
+| **Session Macros** | Browse and reuse the current session's macros |
+| `/help` | Show the available commands and controls |
+
+Tool calls show short, readable summaries; open a summary to inspect the full
+result. Side panels can collapse to give the conversation more space. Standard
+privacy posture is the default; saved choices for individual folders are kept.
+See the [console guide](docs/console/README.md) for authentication, controls,
+sessions and automation. The physical plugin test harness is an optional
+developer tool and is installed separately.
+
 ## Build from Source
 
 ```bash
-# Requires Maven 3.6+ and JDK 8+
-mvn clean package -q
+# Requires Maven and JDK 25; the plugin targets Java 11 bytecode
+mvn clean package -Denforcer.skip=true
 
 # Build and deploy to local Fiji
 bash build.sh
@@ -76,7 +129,7 @@ bash build.sh
 
 ## Versioning
 
-MAJOR.MINOR.PATCH — first digit for new features, second for big refactors/improvements, third for bug fixes.
+Versions use MAJOR.MINOR.PATCH: breaking changes, compatible features, then fixes.
 
 ## Architecture
 
@@ -146,7 +199,9 @@ echo '{"command": "probe_command", "plugin": "Gaussian Blur..."}' | nc localhost
 echo '{"command": "get_progress"}' | nc localhost 7746
 ```
 
-Available commands: `ping`, `execute_macro`, `get_state`, `get_image_info`, `get_results_table`, `capture_image`, `run_pipeline`, `explore_thresholds`, `get_state_context`, `batch`, `get_log`, `get_histogram`, `get_open_windows`, `get_metadata`, `get_pixels`, `3d_viewer`, `get_dialogs`, `close_dialogs`, `probe_command`, `run_script`, `interact_dialog`, `get_progress`
+<!-- BEGIN GENERATED COMMAND SUMMARY -->
+ImageJAI 0.5.0 exposes **71 TCP commands** (70 request/response plus 1 live stream). `agent/ij.py` provides convenience helpers for 54; the other 17 are explicitly available through `imagej_command({...})`. See the generated [`docs/COMMAND_API.md`](docs/COMMAND_API.md) or the canonical [`agent/command_manifest.json`](agent/command_manifest.json).
+<!-- END GENERATED COMMAND SUMMARY -->
 
 The `run_script` command executes Groovy/Jython/JavaScript code directly inside Fiji's JVM — enabling access to any Java API, Swing component manipulation, and plugin internals that macros can't reach.
 
@@ -162,7 +217,7 @@ This is completely optional — the plugin works fully without it.
 
 The `agent/` directory contains a complete AI agent toolkit for controlling ImageJ via the TCP server:
 
-- **`ij.py`** — Python CLI helper for all TCP commands (macro, capture, state, script, probe, UI interaction, progress, etc.)
+- **`ij.py`** — Python CLI helper with convenience wrappers plus a documented raw-command escape hatch
 - **`pixels.py`** — Python-side pixel analysis (stats, cell detection, line profiles)
 - **`scan_plugins.py`** — Discover all installed Fiji commands and update sites
 - **`probe_plugin.py`** — Probe plugin dialogs for parameters, cache results, batch-probe
@@ -171,7 +226,7 @@ The `agent/` directory contains a complete AI agent toolkit for controlling Imag
 - **`practice.py`** — Autonomous self-improvement on sample images
 - **`train_agent.py`** — Train the agent on a lab's specific images
 - **`recipes/`** — YAML analysis recipes (colocalization, cell counting, CTCF, 3D rendering, etc.)
-- **`references/`** — 50+ expert reference documents covering microscopy, analysis methods, plugins, statistics, and neuroscience workflows
+- **`references/`** — 60 expert reference documents covering microscopy, analysis methods, plugins, statistics, and neuroscience workflows
 
 ## Context Hook (Claude Code Integration)
 
@@ -200,9 +255,9 @@ When you use ImageJAI to invoke specific tools, also cite the underlying methods
 
 ## License
 
-BSD 3-Clause License. See [`LICENSE`](LICENSE) for the full text.
-
-(Earlier ImageJAI versions shipped under BSD-2-Clause. Versions from the next tagged release onwards ship under BSD-3-Clause.)
+ImageJAI 0.5.0 is licensed under the **BSD 3-Clause License** (`BSD-3-Clause`).
+See [`LICENSE`](LICENSE) for the full terms. Third-party dependencies retain
+their own licences. Earlier versions retain the licence distributed with them.
 
 ## Acknowledgements
 

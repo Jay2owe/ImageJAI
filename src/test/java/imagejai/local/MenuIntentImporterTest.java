@@ -37,7 +37,7 @@ public class MenuIntentImporterTest {
         assertNotNull(library.byId("menu.fft"));
         assertNotNull(library.byId("menu.properties"));
         assertNotNull(library.byId("menu.bio.formats.importer"));
-        assertEquals(10, countMenuIntents(library));
+        assertEquals(countPhrasebookMenuIntents(library), countMenuIntents(library));
     }
 
     @Test
@@ -112,6 +112,16 @@ public class MenuIntentImporterTest {
         int count = 0;
         for (Intent intent : library.all()) {
             if (intent.id().startsWith("menu.")) {
+                count++;
+            }
+        }
+        return count;
+    }
+
+    private static int countPhrasebookMenuIntents(IntentLibrary library) {
+        int count = 0;
+        for (String id : library.phrasebookIntentIds()) {
+            if (id.startsWith("menu.")) {
                 count++;
             }
         }

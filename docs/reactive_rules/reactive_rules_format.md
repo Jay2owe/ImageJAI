@@ -72,6 +72,11 @@ rest of the rule set.
 | `capture`         | string (base name, optional)                  | Writes active image PNG to `~/.imagej-ai/captures/`. |
 | `wait`            | string (`"250ms"`, `"2s"`) or int (ms)        | Sleeps before the next action. |
 
+Durations are non-negative whole numbers. `wait_before` accepts only a JSON
+integer in milliseconds. A `wait` string must use exactly `<integer>ms` or
+`<integer>s`; fractions, non-finite values, booleans, nulls, overflow, and
+other units quarantine the malformed rule instead of running it immediately.
+
 ## Cycle safety
 
 Rate limiting prevents a rule from firing more often than its window allows.

@@ -34,6 +34,24 @@ public final class EmbeddedAgentSession implements AgentSession {
     private final File workingDir;
     private boolean scrollbackPersisted;
 
+    /** User-visible outcome of a single PTY write attempt. */
+    public static final class WriteResult {
+        private final boolean success;
+        private final String message;
+
+        private WriteResult(boolean success, String message) {
+            this.success = success;
+            this.message = message == null ? "" : message;
+        }
+
+        public static WriteResult success() { return new WriteResult(true, ""); }
+        public static WriteResult failure(String message) {
+            return new WriteResult(false, message);
+        }
+        public boolean isSuccess() { return success; }
+        public String message() { return message; }
+    }
+
     public EmbeddedAgentSession(AgentLauncher.AgentInfo info, AgentLaunchSpec spec) throws IOException {
         this.info = info;
         this.pty = new EmbeddedPty(spec);
@@ -55,18 +73,29 @@ public final class EmbeddedAgentSession implements AgentSession {
 
     @Override
     public void writeInput(String s) {
-        try {
-            pty.write((s == null ? "" : s) + "\r");
-        } catch (IOException e) {
-            IJ.log("[ImageJAI-Term] Failed to write input: " + e.getMessage());
-        }
+        writeInputResult(s);
     }
 
-    public void writeRaw(String s) {
+    public WriteResult writeInputResult(String s) {
+        return writeResult((s == null ? "" : s) + "\r", "input");
+    }
+
+    public WriteResult writeRaw(String s) {
+        return writeResult(s == null ? "" : s, "raw input");
+    }
+
+    private WriteResult writeResult(String text, String operation) {
         try {
-            pty.write(s == null ? "" : s);
+            if (!isAlive()) {
+                return WriteResult.failure("The terminal session is no longer running.");
+            }
+            pty.write(text);
+            return WriteResult.success();
         } catch (IOException e) {
-            IJ.log("[ImageJAI-Term] Failed to write raw input: " + e.getMessage());
+            String message = "PTY " + operation + " write failed ("
+                    + e.getClass().getSimpleName() + "). Retry without clearing the prompt.";
+            IJ.log("[ImageJAI-Term] " + message);
+            return WriteResult.failure(message);
         }
     }
 

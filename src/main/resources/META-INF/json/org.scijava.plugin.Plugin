@@ -1,1 +1,2 @@
 {"class":"imagejai.ImageJAIPlugin","values":{"type":"org.scijava.command.Command","menuPath":"Plugins>AI Assistant"}}
+{"class":"imagejai.engine.automation.AutomationBootstrapService","values":{"type":"org.scijava.service.Service"}}

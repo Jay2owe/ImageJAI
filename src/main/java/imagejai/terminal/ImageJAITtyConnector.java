@@ -38,13 +38,21 @@ public final class ImageJAITtyConnector implements TtyConnector {
     }
 
     @Override
-    public void write(byte[] bytes) throws IOException {
-        byte[] outgoing = scrubber == null ? bytes : scrubber.filter(bytes);
-        writer.write(outgoing);
-        writer.flush();
+    public synchronized void write(byte[] bytes) throws IOException {
+        OutboundPromptScrubber.PreparedWrite prepared = scrubber == null
+                ? null : scrubber.prepare(bytes);
+        byte[] outgoing = prepared == null ? bytes : prepared.bytes();
+        try {
+            writer.write(outgoing);
+            writer.flush();
+            if (prepared != null) prepared.commit();
+        } catch (IOException | RuntimeException failure) {
+            if (prepared != null) prepared.rollback();
+            throw failure;
+        }
     }
 
-    void writeRaw(byte[] bytes) throws IOException {
+    synchronized void writeRaw(byte[] bytes) throws IOException {
         writer.write(bytes);
         writer.flush();
     }

@@ -41,9 +41,22 @@ public interface ChatPanelController {
     void focusImage(String imageTitle);
 
     /**
-     * Append a confirmation prompt with a button per option. The supplied
-     * callback fires once with the chosen option label; subsequent clicks
-     * are ignored.
+     * Append an ID-keyed confirmation prompt with a button per option. The
+     * supplied callback fires once with the chosen option label; subsequent
+     * clicks and cancellation are ignored.
+     *
+     * @return {@code true} when the confirmation was admitted, or
+     *         {@code false} when bounded UI state could not accept it
      */
-    void confirm(String prompt, List<String> options, Consumer<String> onChoice);
+    boolean confirm(String confirmationId, String prompt, List<String> options,
+                    Consumer<String> onChoice);
+
+    /**
+     * Cancel exactly the pending confirmation with {@code confirmationId}.
+     * Implementations invalidate its callback before returning and complete
+     * any visible Swing cleanup on the event-dispatch thread.
+     *
+     * @return {@code true} only when this call won the pending confirmation
+     */
+    boolean cancelConfirmation(String confirmationId);
 }

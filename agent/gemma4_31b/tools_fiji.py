@@ -8,6 +8,7 @@ import base64
 import datetime
 import os
 import re
+from typing import Literal
 
 from . import events
 from . import lint
@@ -219,7 +220,7 @@ def run_macro(code: str) -> dict:
     """Run a short ImageJ macro and wait for the result.
 
     Args:
-        code: ImageJ macro source, e.g. 'run("Blobs (25K)"); run("Measure");'.
+        code: ImageJ macro source, e.g. 'run("Blobs"); run("Measure");'.
     """
     error = safety.check_macro(code)
     if error is not None:
@@ -340,6 +341,30 @@ def run_script(code: str, language: str) -> dict:
         safety.audit_log("script", code, success=True, metadata={"language": language})
         safety.note_execution(True)
     return resp
+
+
+@tool
+def open_image(path: str) -> dict:
+    """Open a local image or a console-provided file token in Fiji.
+
+    Args:
+        path: Image filename or file token. Use this instead of macro open().
+    """
+    return send("open_image", path=path)
+
+
+@tool
+def poll_operation(command: Literal["open_image", "interact_dialog", "close_dialogs"],
+                   operation_id: str) -> dict:
+    """Check a pending open or dialog operation without submitting it again.
+
+    Args:
+        command: Original command from the operation_in_progress response.
+        operation_id: Identifier returned with that response; keep it unchanged.
+    """
+    if command not in {"open_image", "interact_dialog", "close_dialogs"}:
+        return {"ok": False, "error": "Only pending image/dialog operations may be polled"}
+    return send(command, operation_id=operation_id)
 
 
 @tool

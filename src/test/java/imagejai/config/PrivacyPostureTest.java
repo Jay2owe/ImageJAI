@@ -3,9 +3,16 @@ package imagejai.config;
 import org.junit.Test;
 
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
 
 public class PrivacyPostureTest {
+
+    @Test
+    public void firstUseDefaultsToStandard() {
+        assertEquals(PrivacyPosture.STANDARD, PrivacyPosture.defaultPosture());
+        assertEquals(PrivacyPosture.STANDARD, new Settings().getPrivacyPosture());
+    }
 
     @Test
     public void stricterThanFollowsStandardPseudonymisedOnPremisesOrder() {

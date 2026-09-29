@@ -6,6 +6,8 @@ multi-provider plan.
 """
 from __future__ import annotations
 
+import base64
+import io
 import inspect
 import re
 import types
@@ -13,7 +15,72 @@ import typing
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Literal
+
+from PIL import Image
+
+
+HOST_CODE_CAPABILITY = "host_code"
+MAX_VISION_EDGE = 896
+MAX_VISION_BYTES = 500 * 1024
+
+# The runtime registry predates provider-native schemas.  These are contract
+# normalisations, not alternate tool implementations: the names remain the
+# exact decorated Python names and the loop supplies the same defaults when a
+# model omits an optional argument.
+TOOL_ARGUMENT_DEFAULTS: dict[str, dict[str, Any]] = {
+    "close_dialogs": {"pattern": ""},
+    "capture_image": {"max_size": 1024},
+}
+
+_BARE_LIST_ITEM_SCHEMAS: dict[tuple[str, str], dict[str, Any]] = {
+    ("get_pixels_array", "region"): {"type": "integer"},
+    ("open_lif_series", "indices"): {"type": "integer"},
+    ("save_recipe", "promote"): {"type": "string"},
+}
+
+
+@dataclass(frozen=True)
+class ProviderToolPolicy:
+    """Trusted provider classification and explicitly granted capabilities.
+
+    ``is_local`` is assigned by the provider router, never inferred from an
+    endpoint URL supplied by a caller.  An absent policy is deliberately the
+    least-privileged cloud policy.
+    """
+
+    provider: str = "unknown"
+    is_local: bool = False
+    capabilities: frozenset[str] = frozenset()
+
+    def has_capability(self, capability: str) -> bool:
+        return capability in self.capabilities
+
+
+@dataclass(frozen=True)
+class ImageAttachmentPolicy:
+    """Whether this client may attach captured pixels to an outbound message.
+
+    The default stays permissive so existing agents keep their vision
+    behaviour. Front-ends that know the user's privacy posture (the console)
+    set an explicit policy before every turn, because a capture can show a
+    sample or a burned-in name that no path token can hide.
+    """
+
+    allowed: bool = True
+    reason: str = ""
+
+
+@dataclass(frozen=True)
+class HostCodeApprovalRequest:
+    """Exact, single-call preview passed to a cloud approval callback."""
+
+    provider: str
+    model: str
+    tool: str
+    preview: str
+    working_directory: str
 
 
 @dataclass(frozen=True)
@@ -28,6 +95,37 @@ class ToolCall:
 
 class ProviderClient(ABC):
     """Five-method interface used by the ImageJAI tool loop."""
+
+    @property
+    def tool_policy(self) -> ProviderToolPolicy:
+        """Return the router-assigned policy, failing closed when absent."""
+
+        return getattr(self, "_imagejai_tool_policy", ProviderToolPolicy())
+
+    def configure_tool_policy(self, policy: ProviderToolPolicy) -> "ProviderClient":
+        """Attach the router's trusted policy and return this client."""
+
+        if not isinstance(policy, ProviderToolPolicy):
+            raise TypeError("policy must be a ProviderToolPolicy")
+        self._imagejai_tool_policy = policy
+        return self
+
+    @property
+    def image_policy(self) -> ImageAttachmentPolicy:
+        """Return the caller-assigned image policy, permissive when absent."""
+
+        return getattr(self, "_imagejai_image_policy", ImageAttachmentPolicy())
+
+    def configure_image_policy(self, policy: ImageAttachmentPolicy) -> "ProviderClient":
+        """Attach an image-attachment policy and return this client."""
+
+        if not isinstance(policy, ImageAttachmentPolicy):
+            raise TypeError("policy must be an ImageAttachmentPolicy")
+        self._imagejai_image_policy = policy
+        return self
+
+    def may_attach_image(self) -> bool:
+        return bool(self.image_policy.allowed)
 
     @abstractmethod
     def chat(
@@ -105,6 +203,9 @@ def _annotation_to_jsonschema(annotation: Any) -> dict[str, Any]:
             return _annotation_to_jsonschema(non_none[0])
         return {"anyOf": [_annotation_to_jsonschema(arg) for arg in non_none]}
 
+    if annotation is list:
+        return {"type": "array", "items": {}}
+
     if origin in (list, typing.List):
         item_type = args[0] if args else str
         return {"type": "array", "items": _annotation_to_jsonschema(item_type)}
@@ -181,10 +282,19 @@ def fn_to_json_schema(fn: Callable[..., Any]) -> dict[str, Any]:
             continue
         annotation = resolved_hints.get(name, parameter.annotation)
         prop = _annotation_to_jsonschema(annotation)
+        bare_items = _BARE_LIST_ITEM_SCHEMAS.get((fn.__name__, name))
+        if prop.get("type") == "array" and bare_items is not None:
+            prop["items"] = dict(bare_items)
         if name in arg_docs:
             prop["description"] = arg_docs[name]
+        contract_default = TOOL_ARGUMENT_DEFAULTS.get(fn.__name__, {}).get(name, inspect.Parameter.empty)
+        if contract_default is not inspect.Parameter.empty:
+            prop["default"] = contract_default
         properties[name] = prop
-        if parameter.default is inspect.Parameter.empty:
+        if (
+            parameter.default is inspect.Parameter.empty
+            and contract_default is inspect.Parameter.empty
+        ):
             required.append(name)
 
     return {
@@ -228,3 +338,111 @@ def to_gemini_tool(fn: Callable[..., Any]) -> dict[str, Any]:
     if spec["schema"]["properties"]:
         declaration["parameters"] = spec["schema"]
     return declaration
+
+
+def apply_tool_argument_defaults(name: str, args: dict[str, Any]) -> dict[str, Any]:
+    """Return model arguments completed with the public registry defaults."""
+
+    completed = dict(args)
+    for key, value in TOOL_ARGUMENT_DEFAULTS.get(str(name), {}).items():
+        completed.setdefault(key, value)
+    return completed
+
+
+def encode_capture_image(path_value: str) -> tuple[str, str] | None:
+    """Return a bounded ``(mime_type, base64)`` capture for provider vision.
+
+    Captures are always re-encoded as RGB JPEG and constrained by both pixel
+    edge and encoded byte count.  Invalid/non-file tool output is ignored.
+    """
+
+    path = Path(str(path_value or "").strip())
+    if not path.is_file():
+        return None
+    try:
+        with Image.open(path) as source:
+            image = source.convert("RGB")
+        if max(image.size) > MAX_VISION_EDGE:
+            scale = MAX_VISION_EDGE / float(max(image.size))
+            image = image.resize(
+                (
+                    max(1, round(image.width * scale)),
+                    max(1, round(image.height * scale)),
+                ),
+                Image.Resampling.LANCZOS,
+            )
+        quality = 85
+        while True:
+            buffer = io.BytesIO()
+            image.save(buffer, format="JPEG", quality=quality, optimize=True)
+            payload = buffer.getvalue()
+            if len(payload) <= MAX_VISION_BYTES:
+                return "image/jpeg", base64.b64encode(payload).decode("ascii")
+            if quality > 45:
+                quality -= 10
+                continue
+            if max(image.size) <= 256:
+                return None
+            image = image.resize(
+                (
+                    max(1, round(image.width * 0.75)),
+                    max(1, round(image.height * 0.75)),
+                ),
+                Image.Resampling.LANCZOS,
+            )
+    except (OSError, ValueError):
+        return None
+
+
+def message_image_bytes(message: dict[str, Any]) -> int:
+    """Base64 payload size of any image blocks in one provider message.
+
+    Recognises the three shapes this project produces: Anthropic
+    ``{"type": "image", "source": {"data": ...}}``, Gemini
+    ``{"inline_data": {"data": ...}}`` and OpenAI-style
+    ``{"type": "image_url", "image_url": {"url": "data:...;base64,..."}}``.
+    """
+    total = 0
+    content = message.get("content") if isinstance(message, dict) else None
+    if not isinstance(content, list):
+        return 0
+    for part in content:
+        if not isinstance(part, dict):
+            continue
+        source = part.get("source")
+        if isinstance(source, dict) and isinstance(source.get("data"), str):
+            total += len(source["data"])
+            continue
+        inline = part.get("inline_data")
+        if isinstance(inline, dict) and isinstance(inline.get("data"), str):
+            total += len(inline["data"])
+            continue
+        image_url = part.get("image_url")
+        if isinstance(image_url, dict) and isinstance(image_url.get("url"), str):
+            url = image_url["url"]
+            marker = ";base64,"
+            if marker in url:
+                total += len(url.split(marker, 1)[1])
+    return total
+
+
+def prune_capture_images(messages: list[dict[str, Any]]) -> None:
+    """Remove earlier provider image blocks so raw pixels cannot accumulate."""
+
+    for message in messages:
+        message.pop("capture_image", None)
+        message.pop("images", None)
+        content = message.get("content")
+        if not isinstance(content, list):
+            continue
+        retained: list[Any] = []
+        for part in content:
+            if not isinstance(part, dict):
+                retained.append(part)
+                continue
+            if part.get("type") in {"image", "image_url"}:
+                continue
+            if "inline_data" in part:
+                continue
+            retained.append(part)
+        message["content"] = retained

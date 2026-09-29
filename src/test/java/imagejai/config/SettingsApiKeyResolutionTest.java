@@ -32,8 +32,8 @@ public class SettingsApiKeyResolutionTest {
     public void resolveReturnsInMemoryKeyWhenPresent() throws Exception {
         Settings s = settingsWithTempSecrets();
         Settings.ModelConfig c = new Settings.ModelConfig("p", "gemini", "m");
-        c.apiKey = "in-mem-key";
-        assertEquals("in-mem-key", s.resolveApiKey(c));
+        c.apiKey = "dummy-a";
+        assertEquals("dummy-a", s.resolveApiKey(c));
     }
 
     @Test
@@ -69,16 +69,16 @@ public class SettingsApiKeyResolutionTest {
         Settings s = settingsWithTempSecrets();
         s.configs.clear();
         Settings.ModelConfig c = new Settings.ModelConfig("p", "gemini", "m");
-        c.apiKey = "legacy-gem";
+        c.apiKey = "dummy-b";
         s.configs.add(c);
 
         s.migrateLegacyApiKeysToSecrets();
 
         assertTrue(s.providerCredentials().hasCredentials("gemini"));
-        assertEquals("legacy-gem",
+        assertEquals("dummy-b",
                 s.providerCredentials().read("gemini").get("GEMINI_API_KEY"));
         // In-memory value is retained for the session (only config.json drops it).
-        assertEquals("legacy-gem", s.resolveApiKey(c));
+        assertEquals("dummy-b", s.resolveApiKey(c));
     }
 
     @Test
@@ -86,12 +86,12 @@ public class SettingsApiKeyResolutionTest {
         Settings s = settingsWithTempSecrets();
         s.configs.clear();
         Settings.ModelConfig c = new Settings.ModelConfig("p", "custom", "m");
-        c.apiKey = "legacy-custom";
+        c.apiKey = "dummy-c";
         s.configs.add(c);
 
         s.migrateLegacyApiKeysToSecrets();
 
-        assertEquals("legacy-custom",
+        assertEquals("dummy-c",
                 s.providerCredentials().read("custom").get(Settings.CUSTOM_API_KEY_ENV));
     }
 
@@ -101,7 +101,7 @@ public class SettingsApiKeyResolutionTest {
         s.providerCredentials().saveApiKey("gemini", "newer-key");
         s.configs.clear();
         Settings.ModelConfig c = new Settings.ModelConfig("p", "gemini", "m");
-        c.apiKey = "older-legacy-key";
+        c.apiKey = "dummy-d";
         s.configs.add(c);
 
         s.migrateLegacyApiKeysToSecrets();

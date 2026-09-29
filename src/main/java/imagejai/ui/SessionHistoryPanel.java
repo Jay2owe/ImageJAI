@@ -6,6 +6,7 @@ import imagejai.engine.SessionCodeJournal;
 import imagejai.engine.SessionCodeJournal.Entry;
 
 import javax.swing.BorderFactory;
+import javax.swing.AbstractAction;
 import javax.swing.Box;
 import javax.swing.BoxLayout;
 import javax.swing.DefaultListCellRenderer;
@@ -19,6 +20,8 @@ import javax.swing.JMenuItem;
 import javax.swing.JOptionPane;
 import javax.swing.JPanel;
 import javax.swing.JPopupMenu;
+import javax.swing.JComponent;
+import javax.swing.KeyStroke;
 import javax.swing.JScrollPane;
 import javax.swing.SwingUtilities;
 import javax.swing.SwingWorker;
@@ -33,6 +36,8 @@ import java.awt.Toolkit;
 import java.awt.datatransfer.StringSelection;
 import java.awt.event.ActionEvent;
 import java.awt.event.ActionListener;
+import java.awt.event.InputEvent;
+import java.awt.event.KeyEvent;
 import java.awt.event.MouseAdapter;
 import java.awt.event.MouseEvent;
 import java.io.File;
@@ -61,6 +66,14 @@ public final class SessionHistoryPanel extends JPanel implements SessionCodeJour
     private static final Color TEXT_MUTED = new Color(130, 130, 140);
     private static final Color ERROR_TEXT = new Color(255, 120, 120);
 
+    interface ClipboardSink {
+        void copy(String text);
+    }
+
+    interface EntryRunner {
+        void run(Entry entry) throws IOException;
+    }
+
     private final TcpHotline tcpHotline;
     private final Runnable focusReturn;
     private final SessionCodeJournal journal = SessionCodeJournal.INSTANCE;
@@ -73,6 +86,8 @@ public final class SessionHistoryPanel extends JPanel implements SessionCodeJour
     private final Timer refreshTimer;
     private final Timer toastTimer;
     private final Timer singleClickTimer;
+    private final ClipboardSink clipboardSink;
+    private final EntryRunner entryRunner;
 
     private Entry pendingSingleClick;
     private File workspace;
@@ -80,9 +95,27 @@ public final class SessionHistoryPanel extends JPanel implements SessionCodeJour
     private boolean excludePlumbing;
 
     public SessionHistoryPanel(TcpHotline tcpHotline, File workspace, Runnable focusReturn) {
+        this(tcpHotline, workspace, focusReturn, null, null);
+    }
+
+    SessionHistoryPanel(TcpHotline tcpHotline, File workspace, Runnable focusReturn,
+                        ClipboardSink clipboardSink, EntryRunner entryRunner) {
         this.tcpHotline = tcpHotline;
         this.workspace = workspace;
         this.focusReturn = focusReturn;
+        this.clipboardSink = clipboardSink == null
+                ? text -> Toolkit.getDefaultToolkit().getSystemClipboard()
+                        .setContents(new StringSelection(text), null)
+                : clipboardSink;
+        this.entryRunner = entryRunner == null
+                ? entry -> {
+                    if (MacroLibrary.isImageJMacro(entry.language)) {
+                        tcpHotline.executeMacro(entry.code, "rail:history");
+                    } else {
+                        tcpHotline.runScript(entry.language, entry.code, "rail:history");
+                    }
+                }
+                : entryRunner;
         this.collapsed = Prefs.get(PREF_COLLAPSED, false);
         this.excludePlumbing = Prefs.get(PREF_EXCLUDE_PLUMBING, false);
 
@@ -93,6 +126,9 @@ public final class SessionHistoryPanel extends JPanel implements SessionCodeJour
         setOpaque(false);
         setLayout(new BoxLayout(this, BoxLayout.Y_AXIS));
         setAlignmentX(Component.LEFT_ALIGNMENT);
+        getAccessibleContext().setAccessibleName("Session history");
+        getAccessibleContext().setAccessibleDescription(
+                "Review, copy, rerun, save, or remove code used in this session.");
 
         refreshTimer = new Timer(250, new ActionListener() {
             @Override
@@ -172,6 +208,9 @@ public final class SessionHistoryPanel extends JPanel implements SessionCodeJour
         });
         menuButton.setText("\u22EF");
         menuButton.setToolTipText("History options");
+        menuButton.getAccessibleContext().setAccessibleName("Session history options");
+        menuButton.getAccessibleContext().setAccessibleDescription(
+                "Open options for filtering, persistence, and clearing history.");
         menuButton.addActionListener(new ActionListener() {
             @Override
             public void actionPerformed(ActionEvent e) {
@@ -196,6 +235,10 @@ public final class SessionHistoryPanel extends JPanel implements SessionCodeJour
         list.setSelectionBackground(new Color(55, 65, 72));
         list.setSelectionForeground(TEXT);
         list.setBorder(BorderFactory.createEmptyBorder(2, 2, 2, 2));
+        list.getAccessibleContext().setAccessibleName("Session code history");
+        list.getAccessibleContext().setAccessibleDescription(
+                "Select an entry. Enter reruns it, Space or Control+C copies it, and Shift+F10 opens more actions.");
+        installListKeyboardActions();
         list.addMouseListener(new ClickDispatcher());
 
         JScrollPane scroll = new JScrollPane(list);
@@ -286,7 +329,12 @@ public final class SessionHistoryPanel extends JPanel implements SessionCodeJour
     }
 
     private void showRowMenu(final Entry entry, Component owner, int x, int y) {
+        buildRowMenu(entry).show(owner, x, y);
+    }
+
+    private JPopupMenu buildRowMenu(final Entry entry) {
         JPopupMenu popup = new JPopupMenu();
+        popup.getAccessibleContext().setAccessibleName("History entry actions");
 
         JMenuItem open = new JMenuItem("Open in editor");
         open.addActionListener(new ActionListener() {
@@ -326,12 +374,11 @@ public final class SessionHistoryPanel extends JPanel implements SessionCodeJour
         });
         popup.add(remove);
 
-        popup.show(owner, x, y);
+        return popup;
     }
 
     private void copyToClipboard(Entry entry) {
-        Toolkit.getDefaultToolkit().getSystemClipboard()
-                .setContents(new StringSelection(entry.code), null);
+        clipboardSink.copy(entry.code);
         toast("Copied " + entry.name);
     }
 
@@ -344,11 +391,7 @@ public final class SessionHistoryPanel extends JPanel implements SessionCodeJour
             @Override
             protected Void doInBackground() {
                 try {
-                    if (MacroLibrary.isImageJMacro(entry.language)) {
-                        tcpHotline.executeMacro(entry.code, "rail:history");
-                    } else {
-                        tcpHotline.runScript(entry.language, entry.code, "rail:history");
-                    }
+                    entryRunner.run(entry);
                     IJ.log("[ImageJAI-Term] Re-ran history entry: " + entry.name);
                 } catch (IOException e) {
                     error = readableMessage(e);
@@ -437,6 +480,10 @@ public final class SessionHistoryPanel extends JPanel implements SessionCodeJour
         content.setVisible(!collapsed);
         collapseButton.setText(collapsed ? "\u25B8" : "\u25BE");
         collapseButton.setToolTipText(collapsed ? "Expand history" : "Collapse history");
+        collapseButton.getAccessibleContext().setAccessibleName(
+                collapsed ? "Expand session history" : "Collapse session history");
+        collapseButton.getAccessibleContext().setAccessibleDescription(
+                collapsed ? "Show the session history list." : "Hide the session history list.");
         revalidate();
         repaint();
     }
@@ -454,8 +501,64 @@ public final class SessionHistoryPanel extends JPanel implements SessionCodeJour
         button.setBorderPainted(false);
         button.setContentAreaFilled(false);
         button.setFocusPainted(false);
+        button.setFocusable(true);
         button.setCursor(Cursor.getPredefinedCursor(Cursor.HAND_CURSOR));
         return button;
+    }
+
+    private void installListKeyboardActions() {
+        list.getInputMap(JComponent.WHEN_FOCUSED).put(
+                KeyStroke.getKeyStroke(KeyEvent.VK_ENTER, 0), "rerunSelectedHistory");
+        list.getActionMap().put("rerunSelectedHistory", new AbstractAction() {
+            @Override public void actionPerformed(ActionEvent e) {
+                Entry entry = list.getSelectedValue();
+                if (entry != null) rerun(entry);
+            }
+        });
+
+        list.getInputMap(JComponent.WHEN_FOCUSED).put(
+                KeyStroke.getKeyStroke(KeyEvent.VK_SPACE, 0), "copySelectedHistory");
+        list.getInputMap(JComponent.WHEN_FOCUSED).put(
+                KeyStroke.getKeyStroke(KeyEvent.VK_C, InputEvent.CTRL_DOWN_MASK),
+                "copySelectedHistory");
+        list.getActionMap().put("copySelectedHistory", new AbstractAction() {
+            @Override public void actionPerformed(ActionEvent e) {
+                Entry entry = list.getSelectedValue();
+                if (entry != null) copyToClipboard(entry);
+            }
+        });
+
+        list.getInputMap(JComponent.WHEN_FOCUSED).put(
+                KeyStroke.getKeyStroke(KeyEvent.VK_F10, InputEvent.SHIFT_DOWN_MASK),
+                "showSelectedHistoryMenu");
+        list.getInputMap(JComponent.WHEN_FOCUSED).put(
+                KeyStroke.getKeyStroke(KeyEvent.VK_CONTEXT_MENU, 0),
+                "showSelectedHistoryMenu");
+        list.getActionMap().put("showSelectedHistoryMenu", new AbstractAction() {
+            @Override public void actionPerformed(ActionEvent e) {
+                int index = list.getSelectedIndex();
+                if (index < 0) return;
+                java.awt.Rectangle cell = list.getCellBounds(index, index);
+                int y = cell == null ? 0 : cell.y + cell.height;
+                showRowMenu(model.getElementAt(index), list, 0, y);
+            }
+        });
+    }
+
+    JList<Entry> listForTest() {
+        return list;
+    }
+
+    JButton collapseButtonForTest() {
+        return collapseButton;
+    }
+
+    JButton menuButtonForTest() {
+        return menuButton;
+    }
+
+    JPopupMenu rowMenuForTest(int index) {
+        return buildRowMenu(model.getElementAt(index));
     }
 
     private static String rowText(Entry entry) {

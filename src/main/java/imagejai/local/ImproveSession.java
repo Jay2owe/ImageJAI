@@ -10,6 +10,8 @@ import java.util.Date;
 import java.util.List;
 import java.util.Locale;
 
+import javax.swing.SwingUtilities;
+
 /**
  * Multi-turn state machine for /improve.
  */
@@ -47,6 +49,10 @@ public final class ImproveSession {
     }
 
     public AssistantReply handle(String input) {
+        if (SwingUtilities.isEventDispatchThread()) {
+            return AssistantReply.text(
+                    "Improve session work must run on the background assistant worker.");
+        }
         String value = input == null ? "" : input.trim();
         switch (phase) {
             case BUCKET_DECISION:

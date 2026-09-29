@@ -5,6 +5,7 @@ import org.junit.Before;
 import org.junit.Test;
 
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
@@ -54,5 +55,14 @@ public class FolderPostureStoreTest {
         assertEquals(PrivacyPosture.ON_PREMISES, read.get().posture());
         assertEquals("test", read.get().setBy());
         assertEquals("manual test note", read.get().notes());
+    }
+
+    @Test
+    public void existingSidecarWithoutPostureKeepsProtectiveFallback() throws IOException {
+        Files.write(tmpDir.resolve(FolderPostureStore.FILE_NAME),
+                "{}".getBytes(StandardCharsets.UTF_8));
+
+        assertEquals(PrivacyPosture.PSEUDONYMISED,
+                new FolderPostureStore().read(tmpDir).get().posture());
     }
 }

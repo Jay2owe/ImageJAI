@@ -44,6 +44,11 @@ Merges the regenerated intent into the existing `src/main/resources/phrasebook.j
 preserving every other intent. Useful for fixing a single bad intent without
 re-billing the entire compile.
 
+Full generation also preserves existing IDs that are not present in
+`tools/intents.yaml`. Removing unlisted IDs is destructive and requires the
+explicit `--prune-unlisted` flag. `--keep` has the narrower meaning of reusing
+existing phrases for listed IDs instead of calling the provider for them.
+
 ## Schema check against the Java loader
 
 ```bash
@@ -64,11 +69,11 @@ print(Menus.getCommands().keySet().toArray().join("\n"))
 Then regenerate menu phrasings:
 
 ```bash
-python tools/phrasebook_build.py --provider gemini --menu-dump tools/menu-commands.txt --keep
+python tools/phrasebook_build.py --provider gemini --menu-dump tools/menu-commands.txt
 ```
 
-`--keep` preserves all hand-curated intents; only `menu.*` IDs that are not
-already in the phrasebook get LLM-distilled phrasings.
+Existing hand-curated IDs are preserved by default; only `menu.*` IDs that are
+not already in the phrasebook get LLM-distilled phrasings.
 
 `agent/scan_plugins.py` is a legacy agent-side scanner, not the Java Local
 Assistant source.

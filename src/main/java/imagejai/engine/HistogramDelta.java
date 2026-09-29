@@ -28,12 +28,13 @@ public final class HistogramDelta {
     /** Every reply ships this bin count regardless of bit depth. */
     public static final int BINS = 32;
 
-    /**
-     * Pixel threshold above which the snapshot is skipped. {@code
-     * ip.getHistogram()} is O(pixels); beyond this the double-snapshot cost
-     * becomes user-visible lag on every macro.
-     */
-    static final long MAX_PIXELS = 50_000_000L;
+    /** Maximum pixels for the exact {@link ImageProcessor#getHistogram()} path. */
+    static final long MAX_EXACT_PIXELS = 1_000_000L;
+
+    /** Maximum pixels read by the deterministic approximation path. */
+    static final long MAX_SAMPLED_PIXELS = 262_144L;
+
+    private static final int SAMPLE_SOURCE_BINS = 256;
 
     private HistogramDelta() { }
 
@@ -47,41 +48,115 @@ public final class HistogramDelta {
         final double mean;
         final double entropy;
         final String skipReason;
+        final boolean approximate;
+        final long totalPixels;
+        final long pixelsExamined;
+        final long sampleStride;
 
         Snapshot(int[] bins, double mean, double entropy, String skipReason) {
+            this(bins, mean, entropy, skipReason, false,
+                    histogramTotal(bins), histogramTotal(bins), 1L);
+        }
+
+        Snapshot(int[] bins, double mean, double entropy, String skipReason,
+                 boolean approximate, long totalPixels, long pixelsExamined,
+                 long sampleStride) {
             this.bins = bins;
             this.mean = mean;
             this.entropy = entropy;
             this.skipReason = skipReason;
+            this.approximate = approximate;
+            this.totalPixels = Math.max(0L, totalPixels);
+            this.pixelsExamined = Math.max(0L, pixelsExamined);
+            this.sampleStride = Math.max(1L, sampleStride);
         }
 
         static final Snapshot IMAGE_TOO_LARGE =
-                new Snapshot(null, 0.0, 0.0, "image_too_large");
+                new Snapshot(null, 0.0, 0.0, "image_too_large",
+                        false, 0L, 0L, 1L);
     }
 
     /**
      * Capture the active image's intensity distribution. Returns {@code null}
      * when {@code imp} is null (caller should omit the {@code histogramDelta}
-     * field entirely) or a sentinel with a {@code skipReason} when the image
-     * exceeds {@link #MAX_PIXELS}.
+     * field entirely). Images above the exact-work budget use deterministic
+     * stride sampling and carry approximation metadata in {@link #compute}.
      * <p>
      * Uses {@link ImageProcessor#getHistogram()} which returns 256 bins for
      * 8/16/32-bit images. We rebin to {@link #BINS} for the reply and compute
      * mean / entropy from the full 256-bin version for more precision.
      */
     public static Snapshot snapshot(ImagePlus imp) {
+        return snapshot(imp, MAX_EXACT_PIXELS, MAX_SAMPLED_PIXELS);
+    }
+
+    /** Budget-injectable entry point used by deterministic headless tests. */
+    static Snapshot snapshot(ImagePlus imp, long exactPixelBudget,
+                             long sampledPixelBudget) {
         if (imp == null) return null;
         long pixels = (long) imp.getWidth() * (long) imp.getHeight();
-        if (pixels > MAX_PIXELS) return Snapshot.IMAGE_TOO_LARGE;
         try {
             ImageProcessor ip = imp.getProcessor();
             if (ip == null) return null;
+            if (pixels > Math.max(0L, exactPixelBudget)) {
+                return sample(ip, pixels, sampledPixelBudget);
+            }
             int[] full = ip.getHistogram();
             if (full == null || full.length == 0) return null;
-            return new Snapshot(rebin(full, BINS), meanFromFull(full), entropy(full), null);
+            return new Snapshot(rebin(full, BINS), meanFromFull(full), entropy(full),
+                    null, false, pixels, pixels, 1L);
         } catch (Throwable t) {
             return null;
         }
+    }
+
+    private static Snapshot sample(ImageProcessor ip, long totalPixels,
+                                   long sampledPixelBudget) {
+        long budget = Math.max(0L, sampledPixelBudget);
+        if (ip == null || totalPixels <= 0L || budget == 0L) {
+            return new Snapshot(null, 0.0, 0.0, "sampling_budget_exhausted",
+                    false, totalPixels, 0L, 1L);
+        }
+        long stride = Math.max(1L, divideCeiling(totalPixels, budget));
+        long first = stride / 2L;
+        int width = ip.getWidth();
+        int height = ip.getHeight();
+        if (width <= 0 || height <= 0) return null;
+
+        double min = ip.getMin();
+        double max = ip.getMax();
+        if (!Double.isFinite(min) || !Double.isFinite(max) || max < min) {
+            min = 0.0;
+            max = 255.0;
+        }
+        int[] full = new int[SAMPLE_SOURCE_BINS];
+        long examined = 0L;
+        for (long index = first; index < totalPixels && examined < budget;
+             index += stride) {
+            int x = (int) (index % width);
+            int y = (int) (index / width);
+            if (y >= height) break;
+            double value = ip.getPixelValue(x, y);
+            examined++;
+            if (!Double.isFinite(value)) continue;
+            int bin;
+            if (max <= min) {
+                bin = 0;
+            } else {
+                double scaled = (value - min) * (SAMPLE_SOURCE_BINS - 1) / (max - min);
+                bin = (int) Math.floor(scaled);
+                if (bin < 0) bin = 0;
+                else if (bin >= SAMPLE_SOURCE_BINS) bin = SAMPLE_SOURCE_BINS - 1;
+            }
+            full[bin]++;
+        }
+        if (examined == 0L) return null;
+        return new Snapshot(rebin(full, BINS), meanFromFull(full), entropy(full),
+                null, true, totalPixels, examined, stride);
+    }
+
+    private static long divideCeiling(long numerator, long denominator) {
+        return 1L + ((numerator - 1L) / denominator);
     }
 
     /**
@@ -110,6 +185,22 @@ public final class HistogramDelta {
         out.addProperty("meanAfter", after.mean);
         out.addProperty("entropyBefore", before.entropy);
         out.addProperty("entropyAfter", after.entropy);
+        boolean approximate = before.approximate || after.approximate;
+        boolean truncated = before.pixelsExamined < before.totalPixels
+                || after.pixelsExamined < after.totalPixels;
+        out.addProperty("approximate", approximate);
+        out.addProperty("truncated", truncated);
+        if (approximate) {
+            JsonObject sampling = new JsonObject();
+            sampling.addProperty("method", "deterministic_stride");
+            sampling.addProperty("totalPixelsBefore", before.totalPixels);
+            sampling.addProperty("totalPixelsAfter", after.totalPixels);
+            sampling.addProperty("pixelsExaminedBefore", before.pixelsExamined);
+            sampling.addProperty("pixelsExaminedAfter", after.pixelsExamined);
+            sampling.addProperty("strideBefore", before.sampleStride);
+            sampling.addProperty("strideAfter", after.sampleStride);
+            out.add("sampling", sampling);
+        }
         boolean changed = !Arrays.equals(before.bins, after.bins)
                 || before.mean != after.mean
                 || before.entropy != after.entropy;
@@ -174,6 +265,15 @@ public final class HistogramDelta {
             H -= p * (Math.log(p) / log2);
         }
         return H;
+    }
+
+    private static long histogramTotal(int[] bins) {
+        if (bins == null) return 0L;
+        long total = 0L;
+        for (int count : bins) {
+            if (count > 0) total += count;
+        }
+        return total;
     }
 
     /**

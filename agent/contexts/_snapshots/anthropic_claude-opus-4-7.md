@@ -11,9 +11,17 @@ notes about your specific model family. Everything in this file is
 true for all agents.
 
 The Fiji TCP command server listens on `localhost:7746`. JSON in,
-JSON out. Around forty commands cover macro execution, state
-inspection, plugin probing, screenshot capture, results-table reads,
-dialog interaction, and a live event stream.
+<!-- BEGIN GENERATED COMMAND COUNT -->
+JSON out. The 71-command surface covers macro execution, state inspection, plugin probing, screenshot capture, results-table reads, dialog interaction, undo branches, and a live event stream. Python convenience helpers cover 54 commands; use `imagej_command({...})` for the 17 commands documented as raw-only.
+<!-- END GENERATED COMMAND COUNT -->
+
+Nine of those (`get_ui_tree`, `get_ui_component`, `perform_ui_action`,
+`wait_for_ui_state`, `wait_for_ui_idle`, `capture_ui`, `start_ui_trace`,
+`stop_ui_trace`, `get_ui_metrics`) belong to the test automation bridge. They
+exist only for the external plugin test harness, are inert unless Fiji was
+started in test mode, and will refuse your session with
+`test_automation_disabled`. Do not call them — use `get_dialogs` and
+`interact_dialog` for dialog work.
 
 ---
 
@@ -30,8 +38,11 @@ description.
 
 ## Workflow
 
-1. **Check state** — what images are open, what is selected, what
-   tables already exist. Never assume an image is open.
+1. **Check state once at the start of a task** — what images are open,
+   what is selected, what tables already exist. Reuse that result until
+   an action or event changes Fiji. Do not loop on `get_state` when
+   nothing has changed; if no image is open, ask the user or open the
+   image they named. Use `get_open_windows` for a targeted window check.
 2. **Check metadata** — is the image calibrated (μm vs px)? What
    are the channels, time points, z-slices? Bio-Formats metadata
    matters for measurement units.
@@ -128,6 +139,16 @@ For numbers, use the dedicated stats tools (histogram, region
 stats, line profile). The visual screenshot is lossy — never
 measure from it.
 
+RGB has two deliberate numeric representations. `get_pixels` returns
+packed `rgb24` as canonical unsigned `0x00RRGGBB` integers from 0 through
+16,777,215. `get_histogram` and its statistics return ImageJ's
+0–255 weighted RGB intensity instead; read `value_domain.scalarization`
+for the exact red, green, and blue weights and rounding rule. Never compare
+those scalar histogram values directly with packed RGB pixel integers.
+If `get_histogram` returns `unsupported_rgb_weights`, restore the first
+three ImageJ RGB weights to finite, non-negative values that sum to 1,
+then retry.
+
 ---
 
 ## Error handling
@@ -149,6 +170,16 @@ console buffer. If your script call returned a bare error and
 the Fiji log is empty, fetch the console buffer (the harness
 exposes this) before retrying — the stack trace there will tell
 you what actually failed.
+
+**Read the log's flags, not its text, to decide whether it is
+empty.** `get_log` wraps the log in a `[LOG: …]` envelope, and an
+envelope reading `<empty>` is not proof of anything: it is what a
+log containing that word produces too. The reply carries
+`log_present` (false until Fiji has created a Log window at all)
+and `log_empty` (true when there is nothing in it), and the source
+tag says the same thing — `LOG`, `LOG:empty` or `LOG:absent`.
+`get_console` does the same with `combinedEmpty`. A Fiji that has
+never logged is not a Fiji whose log says nothing went wrong.
 
 If a macro hung and the harness reports a timeout, do not
 blind-retry. Read the post-timeout state (what was open, what was
@@ -207,7 +238,8 @@ layer blocks the worst of them; you should avoid them up front:
 preconditions, parameters, decision points, validation, known
 issues. Always check it before building a workflow from scratch.
 When you solve a new generalisable workflow, write a recipe.
-Lab-specific notes go in `learnings.md`, not in a recipe.
+Notes that are specific to the user's own data go in
+`learnings.md`, not in a recipe.
 
 ---
 
@@ -268,14 +300,46 @@ OME-XML, batch-iterate-close patterns, see
 
 ---
 
-## Lab training
+## Reviewed knowledge (harness)
+
+Reviewed knowledge is shared by every ImageJAI agent through
+`agent/harness_access.py`. Use it instead of inventing your own
+memory file.
+
+```bash
+python agent/harness_access.py context --query "count nuclei" \
+    --state '{"format":"czi","channels":3}' --project <image-folder>
+python agent/harness_access.py skills --project <image-folder>
+python agent/harness_access.py skill --name safe-image-measurement \
+    --project <image-folder>
+python agent/harness_access.py propose --kind failure_fix --scope session \
+    --title "..." --content "..." --session-id <id>
+```
+
+Rules that do not change:
+
+- `context` returns only entries a human already approved.
+- `propose` always creates a candidate. There is no promote
+  command; a person approves knowledge in the console.
+- Never put a real path, sample name or patient identifier in a
+  proposal. Use the pseudonym token instead.
+- Skills are guidance only. A recipe named by a skill still has
+  to be run through the normal recipe path.
+
+---
+
+## Training on the user's own images
 
 When the user is new (no `lab_profile.json`), suggest running the
 trainer once on a representative image directory. It runs five
 phases (image characterization, threshold discovery, segmentation
 testing, parameter tuning, parameter sweep) and writes
-`lab_profile.json` + `learnings.md`. Subsequent agents inherit
-those defaults.
+`lab_profile.json` + `learnings.md`. Later sessions reuse those
+defaults.
+
+Both files describe one user's own data. They stay on that
+machine, are never shipped with the package, and must not be
+treated as general truth for anyone else.
 
 ---
 
@@ -291,12 +355,87 @@ explicitly promotes it.
 
 # Harness — CLI shell
 
-You operate Fiji by typing shell commands in a terminal. Use the
-`ij.py` helper for ALL ImageJ operations:
+You operate Fiji by typing shell commands in a terminal. For multi-step
+work, use `imagej-use-auto`: it reads one Python program from stdin and
+preloads semantic helpers bound to one authenticated ImageJ session.
+
+Sample command labels vary between Fiji versions (for example `Blobs` versus
+`Blobs (25K)`). Use the installed command list from `scan_plugins.py`; the
+examples below assume that list contains `Blobs`. Never invent a size suffix.
+
+PowerShell:
+
+```powershell
+@'
+print(get_state())
+print(run_macro('run("Blobs");'))
+print(screenshot_to_path('.tmp/after_blobs.png'))
+event = wait_for_event(
+    ['macro.completed'],
+    predicate={'event': 'macro.completed'},
+    timeout=30,
+)
+print(event)
+'@ | imagej-use-auto
+```
+
+Bash/zsh:
+
+```bash
+imagej-use-auto <<'PY'
+print(get_state())
+print(run_macro('run("Blobs");'))
+print(screenshot_to_path('.tmp/after_blobs.png'))
+PY
+```
+
+Run `imagej-use-auto --doctor` to distinguish Fiji reachability,
+authentication, protocol, workspace, and screenshot failures. The launcher
+sets the explicit workspace used for safe screenshot paths and optional
+`imagej_helpers.py`; workspace helpers cannot replace core session helpers.
+
+Dialog control is semantic only. Inspect with `get_dialogs()`, then use
+`interact_dialog('list_components', dialog='...')` before actions such as
+`interact_dialog('click_button', target='OK', dialog='...')`. Never use screen
+coordinates. The runner does not start, stop, or close Fiji.
+
+`open_image`, `interact_dialog`, and `close_dialogs` can outlive their first
+request deadline. A response with error code `operation_in_progress` is a
+handoff, not a failure. Extract `response['operation']['operation_id']` and
+call `wait_for_operation('<same command>', operation_id, timeout=120,
+poll_interval=0.1)` on the same session. Never submit the original mutation
+again: operation IDs are owner- and command-scoped, and the poll helper sends
+only the same command plus that ID.
+
+For one-shot shell operations, use `ij.py`:
+
+On Windows, send macro source through a pipe or a UTF-8 `.ijm` file.
+PowerShell can remove embedded double quotes from native command arguments,
+so `python ij.py macro 'run("Blobs");'` can arrive as `run(Blobs);` and be
+blocked as a dynamic command. Do not disable safe mode or request elevation
+for a quoting error. Preserve the original quoted source:
+
+```powershell
+@'
+run("Blobs");
+'@ | python ij.py macro --stdin
+python ij.py macro --file .tmp/analysis.ijm
+```
+
+In Bash, use a quoted heredoc when sending macro source through stdin:
+
+```bash
+python ij.py macro --stdin <<'IJM'
+run("Blobs");
+IJM
+```
+
+The same `--stdin` and `--file` options work with `async` and `run_patient`.
+`python ij.py macro --help` shows usage without running a macro.
 
 ```bash
 python ij.py ping                                    # test connection
-python ij.py macro 'run("Blobs (25K)");'             # run macro code
+python ij.py macro 'run("Blobs");'                    # use the installed label
 python ij.py state                                    # full ImageJ state
 python ij.py info                                     # active image details
 python ij.py results                                  # measurements as CSV
@@ -481,10 +620,10 @@ Claude:
 python ij.py capabilities
 ```
 
-Every new socket is independent today — `ij.py` opens one socket
-per command, so the hello response is informational. Future
-steps will key caps off the agent id and persist them across
-commands.
+The Java server still closes each command socket after one reply, but
+`ImageJSession` preserves the authenticated protocol session across those
+sockets. `imagej-use-auto` negotiates once and binds every preloaded helper,
+including governed event waits, to that same durable session.
 
 ## Style
 

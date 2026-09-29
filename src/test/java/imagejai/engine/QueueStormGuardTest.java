@@ -6,7 +6,11 @@ import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
 
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
@@ -336,6 +340,91 @@ public class QueueStormGuardTest {
                 msg.contains("#55"));
         assertTrue("error mentions dialog title: " + msg,
                 msg.contains("Convert Stack?"));
+    }
+
+    @Test
+    public void mutationAdmissionRejectsBeforeAQueueStormCreatesAnotherWorker()
+            throws Exception {
+        AtomicInteger workers = new AtomicInteger();
+        java.util.concurrent.ScheduledExecutorService scheduler =
+                java.util.concurrent.Executors.newSingleThreadScheduledExecutor();
+        java.util.concurrent.ExecutorService observers =
+                java.util.concurrent.Executors.newSingleThreadExecutor();
+        MutationCoordinator coordinator = new MutationCoordinator(
+                1,
+                runnable -> new Thread(runnable,
+                        "queue-storm-worker-" + workers.incrementAndGet()),
+                scheduler,
+                observers,
+                System::currentTimeMillis,
+                new java.security.SecureRandom(),
+                new Object());
+        CountDownLatch entered = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        try {
+            MutationCoordinator.Handle<String> active = coordinator.submit(
+                    MutationCoordinator.Request.<String>builder()
+                            .ownerSession("queue-owner")
+                            .operation(() -> {
+                                entered.countDown();
+                                while (true) {
+                                    try { release.await(); break; }
+                                    catch (InterruptedException ignored) {}
+                                }
+                                return "done";
+                            }).build());
+            assertTrue(entered.await(2, TimeUnit.SECONDS));
+            int before = workers.get();
+            try {
+                coordinator.submit(MutationCoordinator.Request.<String>builder()
+                        .ownerSession("queue-owner")
+                        .operation(() -> "must-not-start")
+                        .build());
+                org.junit.Assert.fail("queue storm should be rejected at admission");
+            } catch (RejectedExecutionException expected) {
+                assertTrue(expected.getMessage().contains("capacity"));
+            }
+            assertEquals(before, workers.get());
+            release.countDown();
+            active.awaitCompletion();
+        } finally {
+            release.countDown();
+            coordinator.shutdown();
+            scheduler.shutdownNow();
+            observers.shutdownNow();
+        }
+    }
+
+    @Test
+    public void stoppedMutationQueueRejectsWithoutCreatingAWorker() {
+        AtomicInteger workers = new AtomicInteger();
+        java.util.concurrent.ScheduledExecutorService scheduler =
+                java.util.concurrent.Executors.newSingleThreadScheduledExecutor();
+        java.util.concurrent.ExecutorService observers =
+                java.util.concurrent.Executors.newSingleThreadExecutor();
+        MutationCoordinator coordinator = new MutationCoordinator(
+                1,
+                runnable -> new Thread(runnable,
+                        "stopped-worker-" + workers.incrementAndGet()),
+                scheduler,
+                observers,
+                System::currentTimeMillis,
+                new java.security.SecureRandom(),
+                new Object());
+        coordinator.shutdown();
+        try {
+            coordinator.submit(MutationCoordinator.Request.<String>builder()
+                    .ownerSession("queue-owner")
+                    .operation(() -> "must-not-start")
+                    .build());
+            org.junit.Assert.fail("stopped coordinator should reject");
+        } catch (RejectedExecutionException expected) {
+            assertTrue(expected.getMessage().contains("stopped"));
+        } finally {
+            scheduler.shutdownNow();
+            observers.shutdownNow();
+        }
+        assertEquals(0, workers.get());
     }
 
     private static JsonObject parse(String s) {

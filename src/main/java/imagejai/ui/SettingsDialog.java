@@ -22,8 +22,11 @@ import java.util.List;
  */
 public class SettingsDialog extends JDialog {
 
+    private final Settings liveSettings;
     private final Settings settings;
+    private final String initialBackendFingerprint;
     private boolean confirmed = false;
+    private boolean backendSettingsChanged;
     private Settings.ModelConfig editingConfig;
 
     // Profile selector
@@ -69,17 +72,24 @@ public class SettingsDialog extends JDialog {
 
     public SettingsDialog(Frame parent, Settings settings) {
         super(parent, Constants.PLUGIN_NAME + " Settings", true);
-        this.settings = settings;
-        this.editingConfig = settings.getActiveConfig();
+        this.liveSettings = settings == null ? new Settings() : settings;
+        this.initialBackendFingerprint = this.liveSettings.backendFingerprint();
+        this.settings = this.liveSettings.detachedCopy();
+        this.editingConfig = this.settings.getActiveConfig();
         buildUI();
         loadFromSettings();
         pack();
+        UiScrollSupport.fitToScreen(this);
         setLocationRelativeTo(parent);
-        setResizable(false);
+        setResizable(true);
     }
 
     public boolean wasConfirmed() {
         return confirmed;
+    }
+
+    public boolean backendSettingsChanged() {
+        return confirmed && backendSettingsChanged;
     }
 
     private void buildUI() {
@@ -172,12 +182,15 @@ public class SettingsDialog extends JDialog {
         profilesTab.add(profileContent, BorderLayout.NORTH);
 
         tabs = new JTabbedPane();
-        tabs.addTab("Profiles", profilesTab);
+        tabs.addTab("Profiles", UiScrollSupport.wrap(
+                profilesTab, "Profile settings"));
         installerPanel = new InstallerPanel(settings);
-        tabs.addTab("Models & Agents", installerPanel);
+        tabs.addTab("Models & Agents", UiScrollSupport.wrap(
+                installerPanel, "Model and CLI agent settings"));
         multiProviderPanel = new MultiProviderPanel(
                 ProviderRegistry.loadBundled(), settings.providerCredentials(), settings);
-        tabs.addTab("Multi-Provider", multiProviderPanel);
+        tabs.addTab("Multi-Provider", UiScrollSupport.wrap(
+                multiProviderPanel, "Multi-provider settings"));
         content.add(tabs, BorderLayout.CENTER);
 
         // Buttons
@@ -580,6 +593,13 @@ public class SettingsDialog extends JDialog {
             settings.activeConfigId = editingConfig.id;
         }
 
+        // Privacy posture is session-owned and can change while this modal
+        // dialog is open; the settings UI does not edit it, so never roll it
+        // back to the opening snapshot.
+        settings.setPrivacyPosture(liveSettings.getPrivacyPosture());
+        liveSettings.applyFrom(settings);
+        backendSettingsChanged = !initialBackendFingerprint.equals(
+                liveSettings.backendFingerprint());
         confirmed = true;
         dispose();
     }

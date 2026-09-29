@@ -13,6 +13,7 @@ import imagejai.engine.EventBus;
 import imagejai.engine.ExplorationEngine;
 import imagejai.engine.ImageMonitor;
 import imagejai.engine.LiteLlmProxyService;
+import imagejai.engine.MutationCoordinator;
 import imagejai.engine.PipelineBuilder;
 import imagejai.engine.PostureController;
 import imagejai.engine.StateInspector;
@@ -35,6 +36,7 @@ import java.awt.event.WindowEvent;
 import java.io.IOException;
 import java.io.InputStream;
 import java.net.URI;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * Main entry point for the ImageJ AI Assistant plugin.
@@ -57,8 +59,16 @@ public class ImageJAIPlugin implements Command {
     private static volatile Settings budgetSettings;
     private static volatile boolean budgetDialogOpen;
     private static volatile boolean billingDialogOpen;
+    private static MutationCoordinator mutationCoordinator;
     private static boolean terminalFontsRegistered;
     private static boolean shutdownHookRegistered;
+    /**
+     * True when the TCP server and the automation bridge were started by the
+     * boot hook rather than by opening the panel. Their lifetime is then the
+     * JVM's, not the panel's, so closing the window must not stop them.
+     */
+    private static volatile boolean bridgeStartedAtBoot;
+    static volatile PluginSession activeSession;
 
     private static final BudgetCeilingTracker.BreachListener BUDGET_BREACH_LISTENER =
             new BudgetCeilingTracker.BreachListener() {
@@ -78,6 +88,10 @@ public class ImageJAIPlugin implements Command {
 
     @Override
     public void run() {
+        // Fiji's own UI may still be coming up — see awaitFijiUiThenRun.
+        if (deferUntilFijiUiIsUp()) {
+            return;
+        }
         // Ensure we're on the EDT
         if (!SwingUtilities.isEventDispatchThread()) {
             SwingUtilities.invokeLater(this::run);
@@ -91,6 +105,14 @@ public class ImageJAIPlugin implements Command {
             chatFrame.toFront();
             chatFrame.requestFocus();
             return;
+        }
+
+        // A disposed frame can be reopened before its queued windowClosed
+        // callback runs. Tear down that frame's owned resources synchronously
+        // so its delayed callback cannot stop the new frame's TCP server.
+        PluginSession previousSession = activeSession;
+        if (previousSession != null) {
+            previousSession.close();
         }
 
         // Load settings
@@ -118,14 +140,28 @@ public class ImageJAIPlugin implements Command {
             settings.save();
         }
 
+        // One mutation owner spans TCP, legacy chat, and Local Assistant. When
+        // the boot hook already started the server, it built the coordinator
+        // the server is using; a second one would split mutation ownership in
+        // half, which is exactly what this class exists to prevent.
+        boolean adoptBootBridge = bridgeStartedAtBoot
+                && tcpServer != null && tcpServer.isRunning();
+        if (!adoptBootBridge || mutationCoordinator == null) {
+            mutationCoordinator = new MutationCoordinator();
+        }
+
         // Create root panel and wire conversation loop
-        rootPanel = new AiRootPanel(settings);
+        rootPanel = new AiRootPanel(settings, mutationCoordinator);
         chatPanel = new ChatPanel(rootPanel.chatView());
         
-        if (settings.hasApiKey()) {
-            conversationLoop = new ConversationLoop(rootPanel, settings);
-            rootPanel.addChatListener(conversationLoop);
-        } else if (!localAssistantSelected) {
+        // Keep one live loop even when chat starts unconfigured: a later
+        // transactional Settings save can rebuild that same backend exactly
+        // once instead of requiring the plugin window to be reopened.
+        conversationLoop = new ConversationLoop(rootPanel, settings, mutationCoordinator);
+        rootPanel.addChatListener(conversationLoop);
+        rootPanel.addConversationClearListener(conversationLoop::clearHistory);
+        rootPanel.setBackendRefreshListener(conversationLoop::refreshBackend);
+        if (!settings.hasApiKey() && !localAssistantSelected) {
             rootPanel.appendMessage("assistant", "AI Assistant is running in TCP-only mode. " +
                     "To use chat features, please configure an API key in Settings.");
         }
@@ -142,19 +178,50 @@ public class ImageJAIPlugin implements Command {
             rootPanel.setAgentLauncher(new AgentLauncher(agentWorkspace, settings.tcpPort, settings));
         }
 
-        // Start TCP command server if enabled
-        if (settings.tcpServerEnabled) {
-            // Stage 03 (embedded-agent-widget): pick the first free port in the
-            // 7746..7750 window so two Fiji instances don't crash on a clash.
-            // The chosen port is written back to settings.tcpPort so rail-
-            // hotline buttons and any spawned agent env read the right value.
-            int chosen = findFreeTcpPort(settings.tcpPort);
-            if (chosen != settings.tcpPort) {
-                IJ.log("[ImageJAI-TCP] :" + settings.tcpPort
-                        + " busy; falling back to :" + chosen);
-                settings.tcpPort = chosen;
+        if (adoptBootBridge) {
+            // The boot hook already published readiness on this port. Give the
+            // running server the panel's controller so gui_action commands can
+            // drive it, and leave the socket exactly where it is: rebinding
+            // would invalidate the ready file a client is already using.
+            settings.tcpPort = tcpServer.getPort();
+            tcpServer.setChatPanelController(rootPanel.chatController());
+            IJ.log("[ImageJAI-TCP] adopted the boot-started server on :"
+                    + settings.tcpPort);
+        } else if (settings.tcpServerEnabled) {
+            if (imagejai.engine.automation.AutomationPolicy.current().isEnabled()) {
+                // Automation is armed, so a boot bridge should already exist.
+                // Starting a second server here would bind a second port and
+                // republish the ready file, pointing an already-connected
+                // client at a different instance. Say why it did not adopt.
+                IJ.log("[ImageJAI-TCP] no boot bridge to adopt (startedAtBoot="
+                        + bridgeStartedAtBoot + ", server="
+                        + (tcpServer != null && tcpServer.isRunning()) + ")");
             }
-            startTcpServer(settings, rootPanel, rootPanel.chatController());
+            // Start TCP command server if enabled.
+            // A harness-owned test instance must not land on the port a normal
+            // Fiji is using, so the startup automation policy may pin one — and
+            // 0 means "let the OS pick", with the real port published in the
+            // ready file once the socket is bound.
+            imagejai.engine.automation.AutomationPolicy automationPolicy =
+                    imagejai.engine.automation.AutomationPolicy.current();
+            if (automationPolicy.isEnabled() && automationPolicy.requestedPort() >= 0) {
+                settings.tcpPort = automationPolicy.requestedPort();
+                IJ.log("[ImageJAI-TCP] test automation pinned port :"
+                        + settings.tcpPort);
+            } else {
+                // Stage 03 (embedded-agent-widget): pick the first free port in the
+                // 7746..7750 window so two Fiji instances don't crash on a clash.
+                // The chosen port is written back to settings.tcpPort so rail-
+                // hotline buttons and any spawned agent env read the right value.
+                int chosen = findFreeTcpPort(settings.tcpPort);
+                if (chosen != settings.tcpPort) {
+                    IJ.log("[ImageJAI-TCP] :" + settings.tcpPort
+                            + " busy; falling back to :" + chosen);
+                    settings.tcpPort = chosen;
+                }
+            }
+            startTcpServer(settings, rootPanel, rootPanel.chatController(),
+                    mutationCoordinator);
         }
 
         // Phase 2: start the event-bus publishers so dialog / image / memory
@@ -185,35 +252,17 @@ public class ImageJAIPlugin implements Command {
         chatFrame.setSize(420, 600);
         chatFrame.setMinimumSize(new Dimension(350, 400));
         rootPanel.setFrame(chatFrame);
+        final PluginSession session = new PluginSession(chatFrame, rootPanel,
+                chatPanel, conversationLoop, tcpServer, mutationCoordinator,
+                imageMonitor, dialogWatcher, !adoptBootBridge);
+        activeSession = session;
         registerAgentShutdownHook();
 
         // Clean up resources on close
         chatFrame.addWindowListener(new WindowAdapter() {
             @Override
             public void windowClosed(WindowEvent e) {
-                // Stop TCP server if running
-                if (tcpServer != null) {
-                    tcpServer.stop();
-                    tcpServer = null;
-                }
-                // Stop event publishers
-                if (imageMonitor != null) {
-                    imageMonitor.stop();
-                    imageMonitor = null;
-                }
-                if (dialogWatcher != null) {
-                    dialogWatcher.stop();
-                    dialogWatcher = null;
-                }
-                if (rootPanel != null) {
-                    rootPanel.shutdownSessions();
-                }
-                // Null out static references so they can be GC'd
-                rootPanel = null;
-                chatPanel = null;
-                chatFrame = null;
-                conversationLoop = null;
-                System.out.println("[ImageJAI] Window closed, resources released.");
+                session.close();
             }
         });
 
@@ -253,6 +302,111 @@ public class ImageJAIPlugin implements Command {
         }
     }
 
+    /**
+     * Hold the panel back while Fiji is still building its own UI.
+     *
+     * <p>Fiji installs its look and feel from
+     * {@code SwingLookAndFeelService.initLookAndFeel}, which calls
+     * {@code SwingUtilities.updateComponentTreeUI} over every window <em>on the
+     * {@code main} thread</em>, not the event thread. Any panel that already
+     * exists is therefore having its component UIs uninstalled and reinstalled
+     * by one thread while the event thread lays the same components out. The
+     * result is a burst of uncaught {@code NullPointerException}s from inside
+     * Swing — {@code BasicScrollBarUI.layoutVScrollbar} with a null arrow
+     * button, {@code BasicComboBoxUI.getDisplaySize} with a null list — that no
+     * amount of care inside this plugin can prevent, because the fields being
+     * read are Swing's own and are legitimately null mid-reinstall.</p>
+     *
+     * <p>This only bites a command invoked <em>during</em> startup, e.g. by
+     * {@code -run "AI Assistant"} on the Fiji command line. Opening the panel
+     * from the menu on a running Fiji is unaffected and pays nothing here: the
+     * main window is already showing, so this returns immediately.</p>
+     *
+     * @return true when the caller should return and let the retry take over
+     */
+    private boolean deferUntilFijiUiIsUp() {
+        if (imageJMainWindowIsShowing()) {
+            return false;
+        }
+        IJ.log("[ImageJAI] Fiji is still starting; deferring the AI Assistant "
+                + "window until its UI has settled.");
+        Thread waiter = new Thread(new Runnable() {
+            @Override public void run() { awaitFijiUiThenRun(); }
+        }, "ImageJAI-startup-defer");
+        waiter.setDaemon(true);
+        waiter.start();
+        return true;
+    }
+
+    /** How long the boot path waits for the listen socket to bind. */
+    private static final long BOOT_BIND_WAIT_MS = 10_000L;
+
+    /** Poll until the server reports a bound socket, or the budget runs out. */
+    private static boolean awaitServerBound(long timeoutMs) {
+        long deadline = System.currentTimeMillis() + timeoutMs;
+        while (System.currentTimeMillis() < deadline) {
+            TCPCommandServer server = tcpServer;
+            if (server != null && server.isRunning()) return true;
+            try {
+                Thread.sleep(25L);
+            } catch (InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+                return false;
+            }
+        }
+        TCPCommandServer server = tcpServer;
+        return server != null && server.isRunning();
+    }
+
+    /** Bound on the deferral; after this the panel opens regardless. */
+    private static final long FIJI_UI_WAIT_MS = 60_000L;
+    /** How long the look and feel must hold still before the UI is "settled". */
+    private static final long LAF_SETTLE_MS = 750L;
+
+    private void awaitFijiUiThenRun() {
+        long deadline = System.currentTimeMillis() + FIJI_UI_WAIT_MS;
+        String lastLookAndFeel = null;
+        long stableSince = 0L;
+        while (System.currentTimeMillis() < deadline) {
+            if (imageJMainWindowIsShowing()) {
+                String current = String.valueOf(UIManager.getLookAndFeel());
+                long now = System.currentTimeMillis();
+                if (!current.equals(lastLookAndFeel)) {
+                    // Still being swapped; restart the settle window rather
+                    // than racing the thread doing the swapping.
+                    lastLookAndFeel = current;
+                    stableSince = now;
+                } else if (now - stableSince >= LAF_SETTLE_MS) {
+                    break;
+                }
+            }
+            try {
+                Thread.sleep(100L);
+            } catch (InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+                return;
+            }
+        }
+        SwingUtilities.invokeLater(this::run);
+    }
+
+    /**
+     * True when there is nothing left to wait for: ImageJ's main window is up,
+     * or there is no ImageJ 1.x UI in this JVM to wait for in the first place.
+     * The second case matters — otherwise a headless or embedded caller would
+     * sit out the whole deferral budget waiting for a window that never comes.
+     */
+    private static boolean imageJMainWindowIsShowing() {
+        try {
+            if (GraphicsEnvironment.isHeadless()) return true;
+            ij.ImageJ instance = IJ.getInstance();
+            if (instance == null) return true;
+            return instance.isShowing();
+        } catch (Throwable noImageJ) {
+            return true;
+        }
+    }
+
     private static synchronized void registerAgentShutdownHook() {
         if (shutdownHookRegistered) {
             return;
@@ -260,9 +414,27 @@ public class ImageJAIPlugin implements Command {
         Runtime.getRuntime().addShutdownHook(new Thread(new Runnable() {
             @Override
             public void run() {
-                AiRootPanel panel = rootPanel;
-                if (panel != null) {
-                    panel.shutdownSessions();
+                PluginSession session = activeSession;
+                if (session != null) {
+                    session.close();
+                }
+                // A boot-started server is not owned by any window, so nothing
+                // above stops it. The socket and the ready file must still go
+                // when the JVM does, or the next run authenticates a corpse.
+                if (bridgeStartedAtBoot) {
+                    TCPCommandServer server = tcpServer;
+                    if (server != null) {
+                        try {
+                            server.stop();
+                        } catch (Throwable ignored) {
+                        }
+                    }
+                    try {
+                        imagejai.engine.automation.AutomationBridge bridge =
+                                imagejai.engine.automation.AutomationBridge.shared();
+                        if (bridge.isEnabled()) bridge.close();
+                    } catch (Throwable ignored) {
+                    }
                 }
                 LiteLlmProxyService proxyService = liteLlmProxyService;
                 if (proxyService != null) {
@@ -271,6 +443,121 @@ public class ImageJAIPlugin implements Command {
             }
         }, "ImageJAI-agent-shutdown-hook"));
         shutdownHookRegistered = true;
+    }
+
+    /** Resources owned by one assistant window, closed exactly once. */
+    static final class PluginSession implements AutoCloseable {
+        private final JFrame frame;
+        private final AiRootPanel panel;
+        private final ChatPanel ownedChatPanel;
+        private final ConversationLoop ownedConversationLoop;
+        private final TCPCommandServer server;
+        private final MutationCoordinator coordinator;
+        private final ImageMonitor monitor;
+        private final DialogWatcher watcher;
+        private final AtomicBoolean closed = new AtomicBoolean(false);
+
+        /**
+         * False when the server, the mutation coordinator and the automation
+         * bridge were started by the boot hook. They then outlive this window,
+         * so closing it must leave the socket bound and the ready file in
+         * place — a harness holding that session did not ask for it to end.
+         */
+        private volatile boolean ownsServer;
+
+        PluginSession(JFrame frame, AiRootPanel panel, ChatPanel ownedChatPanel,
+                      ConversationLoop ownedConversationLoop,
+                      TCPCommandServer server, MutationCoordinator coordinator,
+                      ImageMonitor monitor, DialogWatcher watcher,
+                      boolean ownsServer) {
+            this.frame = frame;
+            this.panel = panel;
+            this.ownedChatPanel = ownedChatPanel;
+            this.ownedConversationLoop = ownedConversationLoop;
+            this.server = server;
+            this.coordinator = coordinator;
+            this.monitor = monitor;
+            this.watcher = watcher;
+            this.ownsServer = ownsServer;
+        }
+
+        /** A console request can adopt the coordinator after this panel opened. */
+        void releaseBridgeOwnership() {
+            ownsServer = false;
+        }
+
+        @Override
+        public void close() {
+            if (!closed.compareAndSet(false, true)) {
+                return;
+            }
+
+            closeResource("TCP server", new Runnable() {
+                @Override public void run() {
+                    if (ownsServer && server != null) server.stop();
+                }
+            });
+            closeResource("mutation coordinator", new Runnable() {
+                @Override public void run() {
+                    if (ownsServer && coordinator != null) coordinator.shutdown();
+                }
+            });
+            closeResource("image monitor", new Runnable() {
+                @Override public void run() {
+                    if (monitor != null) monitor.stop();
+                }
+            });
+            closeResource("dialog watcher", new Runnable() {
+                @Override public void run() {
+                    if (watcher != null) watcher.stop();
+                }
+            });
+            closeResource("agent sessions", new Runnable() {
+                @Override public void run() {
+                    if (panel != null) panel.shutdownSessions();
+                }
+            });
+            // Uninstall the test-mode event-queue instrumentation, stop the
+            // heartbeat thread, drop UI identities, and remove the ready file.
+            // A no-op on a normal Fiji, where nothing was ever installed.
+            closeResource("automation bridge", new Runnable() {
+                @Override public void run() {
+                    if (!ownsServer) return;
+                    imagejai.engine.automation.AutomationBridge bridge =
+                            imagejai.engine.automation.AutomationBridge.shared();
+                    if (bridge.isEnabled()) bridge.close();
+                }
+            });
+
+            synchronized (ImageJAIPlugin.class) {
+                // A delayed close event from an older frame owns only the
+                // objects captured above. It must never clear a newer session.
+                if (activeSession != this) {
+                    return;
+                }
+                activeSession = null;
+                if (ownsServer && tcpServer == server) tcpServer = null;
+                if (ownsServer && mutationCoordinator == coordinator) {
+                    mutationCoordinator = null;
+                }
+                if (imageMonitor == monitor) imageMonitor = null;
+                if (dialogWatcher == watcher) dialogWatcher = null;
+                if (rootPanel == panel) rootPanel = null;
+                if (chatPanel == ownedChatPanel) chatPanel = null;
+                if (conversationLoop == ownedConversationLoop) conversationLoop = null;
+                if (chatFrame == frame) chatFrame = null;
+            }
+            System.out.println("[ImageJAI] Window closed, resources released.");
+        }
+
+        private static void closeResource(String name, Runnable action) {
+            try {
+                action.run();
+            } catch (Throwable failure) {
+                IJ.log("[ImageJAI] Failed to close " + name + ": "
+                        + String.valueOf(failure.getMessage()));
+            }
+        }
     }
 
     private static synchronized void startLiteLlmProxy(String agentWorkspace, Settings settings) {
@@ -583,6 +870,15 @@ public class ImageJAIPlugin implements Command {
                 }
             }
 
+            // Lab ZIP installs create ~/ImageJAI/agent via setup-python.ps1,
+            // but a local/private JAR-only deployment used to leave every CLI
+            // and Ollama Cloud row visible with no launcher behind it. Extract
+            // the audited runtime bundled in the JAR as the final fallback.
+            String bundled = imagejai.install.BundledAgentWorkspace.ensureInstalled();
+            if (bundled != null) {
+                return bundled;
+            }
+
             IJ.log("[ImageJAI] Agent workspace not found. External CLI launchers "
                     + "are disabled until IMAGEJAI_AGENT_WORKSPACE points to an "
                     + "ImageJAI agent directory.");
@@ -653,17 +949,121 @@ public class ImageJAIPlugin implements Command {
     }
 
     /**
+     * Start the TCP command server during Fiji startup, before any UI exists,
+     * when the startup automation policy is armed.
+     *
+     * <p>Called by {@link imagejai.engine.automation.AutomationBootstrapService}.
+     * The panel is deliberately not constructed: an external harness needs a
+     * socket and a ready file, not a chat window, and making it open the panel
+     * to obtain one exposed it to every UI defect on the way. When the user
+     * later opens the panel, {@link #run()} adopts this server rather than
+     * starting a second one, and closing the panel leaves it running because
+     * the panel never owned it.</p>
+     *
+     * @return true when a server is listening as a result of this call
+     */
+    public static synchronized boolean startBridgeAtBoot() {
+        if (tcpServer != null && tcpServer.isRunning()) {
+            return true;
+        }
+        imagejai.engine.automation.AutomationPolicy policy =
+                imagejai.engine.automation.AutomationPolicy.current();
+        if (!policy.isEnabled()) {
+            return false;
+        }
+        Settings settings = Settings.load();
+        if (!settings.tcpServerEnabled) {
+            // Two keys, both the operator's: the JVM property arms automation,
+            // the plugin setting permits the server at all. Refusing loudly is
+            // better than quietly overriding a setting the user turned off.
+            IJ.log("[ImageJAI-Automation] test automation is armed but "
+                    + "tcpServerEnabled is false; the bridge will not start.");
+            return false;
+        }
+        // The privacy posture governs every reply the server writes, so it has
+        // to be read from the user's settings here as well as in run(). Leaving
+        // it unconfigured makes PostureController fall back to a default
+        // Settings object, which quietly overrides the configured posture for
+        // as long as the panel stays closed.
+        PostureController.getInstance().configure(settings);
+        if (policy.requestedPort() >= 0) {
+            settings.tcpPort = policy.requestedPort();
+        } else {
+            settings.tcpPort = findFreeTcpPort(settings.tcpPort);
+        }
+        if (mutationCoordinator == null) {
+            mutationCoordinator = new MutationCoordinator();
+        }
+        bridgeStartedAtBoot = true;
+        startTcpServer(settings, null, null, mutationCoordinator);
+        // start() hands the bind to the accept thread, so isRunning() is still
+        // false when it returns. Sampling it immediately reported failure for a
+        // server that was about to come up perfectly, cleared the "started at
+        // boot" flag, and let the panel start a second server on a second port
+        // — republishing the ready file underneath an already-connected client.
+        if (!awaitServerBound(BOOT_BIND_WAIT_MS)) {
+            bridgeStartedAtBoot = false;
+            IJ.log("[ImageJAI-TCP] the boot bridge did not bind within "
+                    + BOOT_BIND_WAIT_MS + " ms.");
+            return false;
+        }
+        // The panel may never be opened in an automated run, so the hook that
+        // releases the socket and the ready file has to be armed from here too.
+        registerAgentShutdownHook();
+        return true;
+    }
+
+    /**
+     * Open the ordinary authenticated TCP surface at the console user's
+     * request, including when the Fiji main window is already running.
+     * Test automation remains governed by its separate startup policy.
+     */
+    public static synchronized boolean startConsoleBridge(int requestedPort) {
+        if (requestedPort < 1 || requestedPort > 65535) return false;
+        if (tcpServer != null && tcpServer.isRunning()) {
+            return tcpServer.getPort() == requestedPort;
+        }
+        Settings settings = Settings.load();
+        settings.tcpPort = requestedPort;
+        PostureController.getInstance().configure(settings);
+        if (mutationCoordinator == null) {
+            mutationCoordinator = new MutationCoordinator();
+        }
+        startTcpServer(settings, rootPanel,
+                rootPanel == null ? null : rootPanel.chatController(),
+                mutationCoordinator);
+        if (!awaitServerBound(BOOT_BIND_WAIT_MS)) {
+            if (tcpServer != null) tcpServer.stop();
+            IJ.log("[ImageJAI-TCP] console request could not bind port :"
+                    + requestedPort);
+            return false;
+        }
+        bridgeStartedAtBoot = true;
+        PluginSession session = activeSession;
+        if (session != null) session.releaseBridgeOwnership();
+        startEventPublishers();
+        registerAgentShutdownHook();
+        IJ.log("[ImageJAI-TCP] console request opened port :" + requestedPort);
+        return true;
+    }
+
+    /**
      * Create and start the TCP command server with a listener that
      * reports status and activity to the chat panel.
+     *
+     * @param panel the chat surface to narrate to, or {@code null} when the
+     *              server is started at boot with no UI
      */
     private static void startTcpServer(Settings settings, final ChatSurface panel,
-                                       ChatPanelController controller) {
+                                       ChatPanelController controller,
+                                       MutationCoordinator coordinator) {
         CommandEngine engine = new CommandEngine();
         StateInspector inspector = new StateInspector();
         PipelineBuilder pipeline = new PipelineBuilder(engine);
         ExplorationEngine exploration = new ExplorationEngine(engine);
 
-        tcpServer = new TCPCommandServer(settings.tcpPort, engine, inspector, pipeline, exploration);
+        tcpServer = new TCPCommandServer(settings.tcpPort, engine, inspector,
+                pipeline, exploration, coordinator);
         // Phase 7: wire the chat panel as a ChatPanelController so external
         // gui_action commands can drive inline previews, toasts, ROI flashes,
         // markdown, and confirms. Safe even if the panel isn't visible â€” the
@@ -677,13 +1077,12 @@ public class ImageJAIPlugin implements Command {
         tcpServer.start(new TCPCommandServer.ServerListener() {
             @Override
             public void onServerStarted(int port) {
-                panel.appendMessage("assistant",
-                        "[TCP] Server listening on port " + port);
+                narrate(panel, "[TCP] Server listening on port " + port);
             }
 
             @Override
             public void onServerStopped() {
-                panel.appendMessage("assistant", "[TCP] Server stopped.");
+                narrate(panel, "[TCP] Server stopped.");
             }
 
             @Override
@@ -693,17 +1092,25 @@ public class ImageJAIPlugin implements Command {
 
             @Override
             public void onCommandReceived(String command) {
-                panel.appendMessage("assistant",
-                        "[External] " + command);
+                narrate(panel, "[External] " + command);
             }
 
             @Override
             public void onError(String error) {
-                panel.appendMessage("assistant",
-                        "[TCP] Error: " + error);
+                narrate(panel, "[TCP] Error: " + error);
             }
         });
     }
+
+    /**
+     * Report server activity to the chat panel, or to the console when the
+     * server is running headless because it was started at boot.
+     */
+    private static void narrate(ChatSurface panel, String message) {
+        if (panel != null) {
+            panel.appendMessage("assistant", message);
+        } else {
+            System.err.println("[ImageJAI-TCP] " + message);
+        }
+    }
 }
-
-

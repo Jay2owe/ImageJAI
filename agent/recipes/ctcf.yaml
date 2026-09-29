@@ -1,3 +1,4 @@
+schema_version: 1
 name: Corrected Total Cell Fluorescence (CTCF)
 id: ctcf
 description: >
@@ -112,7 +113,8 @@ steps:
 
   - id: 6
     description: "Calculate CTCF for each cell"
-    macro: |
+    type: manual
+    instructions: |
       // CTCF = IntDen - (Area * Background_Mean)
       // This is computed by the agent from the Results table values
       // bg_mean = average of background ROI Mean values from step 5

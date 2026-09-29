@@ -1,3 +1,4 @@
+schema_version: 1
 name: Sholl Analysis (Neurite Branching)
 id: sholl_analysis
 description: >

@@ -1,5 +1,6 @@
 package imagejai.ui.installer.wizard;
 
+import imagejai.ui.UiScrollSupport;
 import imagejai.ui.installer.ProviderCredentials;
 
 import javax.swing.BorderFactory;
@@ -26,7 +27,6 @@ import java.awt.Insets;
 import java.awt.Toolkit;
 import java.awt.datatransfer.DataFlavor;
 import java.awt.datatransfer.Transferable;
-import java.io.IOException;
 import java.net.URI;
 
 /**
@@ -35,8 +35,8 @@ import java.net.URI;
  * Mistral, Together, HuggingFace, DeepSeek, xAI, Perplexity, plus Gemini's
  * AI-Studio fallback).
  *
- * <p>Save flow per Phase E acceptance: persist the key, then synchronously
- * call the {@link CredentialVerifier} with a 4 s timeout. On success the
+ * <p>Save flow validates off the Swing event thread, then persists only an
+ * accepted key. On success the
  * dialog disposes; on failure the error message renders inline in red and
  * the dialog stays open for a retry.
  */
@@ -114,8 +114,8 @@ public class PureApiKeyWizard implements InstallerWizard {
         c.gridx = 0; c.gridy = 1; c.gridwidth = 3;
         JLabel envHint = new JLabel(
                 "<html><i>Saved as " + envVarName
-                + " in &lt;config&gt;/secrets/" + providerKey
-                + ".env. Loaded by the LiteLLM proxy at startup.</i></html>");
+                + " in the protected ImageJAI credential store. "
+                + "Loaded by the LiteLLM proxy at startup.</i></html>");
         envHint.setFont(envHint.getFont().deriveFont(11f));
         body.add(envHint, c);
 
@@ -124,7 +124,8 @@ public class PureApiKeyWizard implements InstallerWizard {
         statusLine.setFont(statusLine.getFont().deriveFont(11f));
         body.add(statusLine, c);
 
-        content.add(body, BorderLayout.CENTER);
+        content.add(UiScrollSupport.wrap(body, "API key setup"),
+                BorderLayout.CENTER);
 
         JPanel buttons = new JPanel(new FlowLayout(FlowLayout.RIGHT, 6, 4));
         JButton getKeyBtn = new JButton("Get key…");
@@ -132,37 +133,38 @@ public class PureApiKeyWizard implements InstallerWizard {
         getKeyBtn.addActionListener(e -> openUrl(signupUrl));
         JButton cancel = new JButton("Cancel");
         final boolean[] saved = new boolean[] { false };
-        cancel.addActionListener(e -> dialog.dispose());
+        final CredentialVerifier.ValidationWorker[] active =
+                new CredentialVerifier.ValidationWorker[1];
+        cancel.addActionListener(e -> {
+            if (active[0] != null) active[0].cancel(true);
+            dialog.dispose();
+        });
         JButton save = new JButton("Save & test");
         save.addActionListener(e -> {
-            String value = new String(keyField.getPassword()).trim();
+            final String value = new String(keyField.getPassword()).trim();
             if (value.isEmpty()) {
                 setError(statusLine, "Please paste your API key first.");
                 return;
             }
-            try {
-                credentials.saveApiKey(providerKey, value);
-            } catch (IOException ex) {
-                setError(statusLine, "Could not save key: " + ex.getMessage());
-                return;
-            }
             setBusy(statusLine, "Verifying…");
-            // Synchronous call honouring the 4 s budget — see VERIFY_TIMEOUT_MS.
-            CredentialVerifier.Result result;
-            try {
-                result = verifier.verify(providerKey, VERIFY_TIMEOUT_MS);
-            } catch (RuntimeException re) {
-                result = CredentialVerifier.Result.failure(
-                        "verifier threw " + re.getClass().getSimpleName()
-                                + (re.getMessage() == null ? "" : ": " + re.getMessage()));
-            }
-            if (result == null || !result.ok) {
-                String msg = result == null ? "verifier returned null" : result.message;
-                setError(statusLine, "Verification failed: " + msg);
-                return;
-            }
-            saved[0] = true;
-            dialog.dispose();
+            // Validation and disk I/O run off the Swing event thread.
+            save.setEnabled(false);
+            active[0] = new CredentialVerifier.ValidationWorker(
+                    providerKey, value, VERIFY_TIMEOUT_MS, verifier,
+                    (key, candidate) -> credentials.saveApiKey(key, candidate),
+                    result -> {
+                        active[0] = null;
+                        if (result != null && result.ok) {
+                            saved[0] = true;
+                            dialog.dispose();
+                        } else {
+                            save.setEnabled(true);
+                            setError(statusLine, "Verification failed: "
+                                    + (result == null ? "no result" : result.message));
+                            keyField.requestFocusInWindow();
+                        }
+                    });
+            active[0].execute();
         });
         buttons.add(getKeyBtn);
         buttons.add(Box.createHorizontalStrut(12));
@@ -175,6 +177,7 @@ public class PureApiKeyWizard implements InstallerWizard {
         dialog.pack();
         Dimension preferred = dialog.getPreferredSize();
         dialog.setSize(Math.max(preferred.width, 460), preferred.height);
+        UiScrollSupport.fitToScreen(dialog);
         dialog.setLocationRelativeTo(parent);
         dialog.setVisible(true);
         return saved[0];

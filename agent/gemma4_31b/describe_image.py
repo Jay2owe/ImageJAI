@@ -23,7 +23,7 @@ modules, so each is reimplemented here.
 from __future__ import annotations
 
 import base64
-import json
+import binascii
 import math
 import re
 import socket
@@ -51,6 +51,26 @@ def _safe_send(command: str, **payload) -> dict:
         return {"ok": False, "error": "Fiji TCP server unreachable: {}".format(exc)}
 
 
+def _response_error_text(response, fallback: str) -> str:
+    """Render legacy string and structured protocol errors without dict reprs."""
+    if not isinstance(response, dict):
+        return fallback
+    error = response.get("error")
+    if isinstance(error, dict):
+        code = error.get("code")
+        message = error.get("message")
+        if isinstance(message, str) and message.strip():
+            if isinstance(code, str) and code.strip():
+                return "{}: {}".format(code.strip(), message.strip())
+            return message.strip()
+        if isinstance(code, str) and code.strip():
+            return code.strip()
+        return fallback
+    if isinstance(error, str) and error.strip():
+        return error.strip()
+    return fallback
+
+
 def _bit_depth_from_type(type_str) -> int:
     """Parse an ImageJ type label like '8-bit' / '16-bit' / '32-bit'."""
     if not isinstance(type_str, str):
@@ -65,11 +85,170 @@ def _bit_depth_from_type(type_str) -> int:
     return 0
 
 
-def _ceiling_for_bit_depth(bit_depth: int):
-    """Max pixel value for an integer bit depth; None for float / RGB."""
-    if bit_depth in (8, 16):
-        return float((1 << bit_depth) - 1)
-    return None
+def _exact_int(value, name, minimum=None) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise TypeError("{} must be an exact integer".format(name))
+    if minimum is not None and value < minimum:
+        raise ValueError("{} must be at least {}".format(name, minimum))
+    return value
+
+
+def _optional_finite_number(value, name):
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise TypeError("{} must be numeric or null".format(name))
+    value = float(value)
+    if not math.isfinite(value):
+        raise ValueError("{} must be finite".format(name))
+    return value
+
+
+def _is_rgb_image_type(value) -> bool:
+    return isinstance(value, str) and value.strip().lower() in (
+        "rgb", "rgb color", "24-bit"
+    )
+
+
+def _is_exact_rgb24_source_domain(domain) -> bool:
+    """Recognize only the uncalibrated packed domain emitted by get_pixels."""
+    required = (
+        "representation", "pixel_type", "signed", "density_calibrated",
+        "acquisition_min_raw", "acquisition_max_raw",
+        "acquisition_min_calibrated", "acquisition_max_calibrated",
+    )
+    return (
+        isinstance(domain, dict)
+        and all(key in domain for key in required)
+        and domain.get("representation") == "raw"
+        and domain.get("pixel_type") == "rgb24"
+        and domain.get("signed") is None
+        and domain.get("density_calibrated") is False
+        and all(
+            domain.get(key) is None
+            for key in (
+                "acquisition_min_raw", "acquisition_max_raw",
+                "acquisition_min_calibrated", "acquisition_max_calibrated",
+            )
+        )
+        and domain.get("scalarization") is None
+    )
+
+
+def _is_exact_byte_scalar_domain(domain) -> bool:
+    """Recognize an exact uncalibrated ImageJ byte-intensity domain."""
+    required = (
+        "representation", "pixel_type", "signed", "density_calibrated",
+        "acquisition_min_raw", "acquisition_max_raw",
+        "acquisition_min_calibrated", "acquisition_max_calibrated",
+    )
+    return (
+        isinstance(domain, dict)
+        and all(key in domain for key in required)
+        and domain.get("representation") == "raw"
+        and domain.get("pixel_type") in ("uint8", "indexed8")
+        and domain.get("signed") is False
+        and domain.get("density_calibrated") is False
+        and isinstance(domain.get("acquisition_min_raw"), (int, float))
+        and not isinstance(domain.get("acquisition_min_raw"), bool)
+        and float(domain["acquisition_min_raw"]) == 0.0
+        and isinstance(domain.get("acquisition_max_raw"), (int, float))
+        and not isinstance(domain.get("acquisition_max_raw"), bool)
+        and float(domain["acquisition_max_raw"]) == 255.0
+        and domain.get("acquisition_min_calibrated") is None
+        and domain.get("acquisition_max_calibrated") is None
+    )
+
+
+def _is_exact_rgb_scalar_domain(domain) -> bool:
+    """Recognize the raw uint8 domain ImageJ publishes for weighted RGB intensity."""
+    required = (
+        "representation", "pixel_type", "signed", "density_calibrated",
+        "acquisition_min_raw", "acquisition_max_raw",
+        "acquisition_min_calibrated", "acquisition_max_calibrated",
+        "scalarization",
+    )
+    return (
+        isinstance(domain, dict)
+        and all(key in domain for key in required)
+        and domain.get("representation") == "raw"
+        and domain.get("pixel_type") == "uint8"
+        and domain.get("signed") is False
+        and domain.get("density_calibrated") is False
+        and isinstance(domain.get("acquisition_min_raw"), (int, float))
+        and not isinstance(domain.get("acquisition_min_raw"), bool)
+        and float(domain["acquisition_min_raw"]) == 0.0
+        and isinstance(domain.get("acquisition_max_raw"), (int, float))
+        and not isinstance(domain.get("acquisition_max_raw"), bool)
+        and float(domain["acquisition_max_raw"]) == 255.0
+        and domain.get("acquisition_min_calibrated") is None
+        and domain.get("acquisition_max_calibrated") is None
+        and isinstance(domain.get("scalarization"), dict)
+    )
+
+
+def _decode_value_domain(result: dict):
+    domain = result.get("value_domain")
+    if not isinstance(domain, dict) or domain.get("representation") != "raw":
+        raise ValueError("missing raw value-domain metadata")
+    if domain.get("pixel_type") not in (
+        "uint8", "uint16", "float32", "rgb24", "indexed8", "unknown"
+    ):
+        raise ValueError("invalid pixel type metadata")
+    if domain.get("signed") is not None and not isinstance(domain.get("signed"), bool):
+        raise ValueError("invalid signed metadata")
+    if not isinstance(domain.get("density_calibrated"), bool):
+        raise ValueError("invalid density-calibrated metadata")
+    normalized = dict(domain)
+    for key in (
+        "acquisition_min_raw", "acquisition_max_raw",
+        "acquisition_min_calibrated", "acquisition_max_calibrated",
+    ):
+        normalized[key] = _optional_finite_number(domain.get(key), key)
+    scalarization = domain.get("scalarization")
+    if (
+        scalarization is None
+        and (domain.get("pixel_type") == "rgb24" or _is_rgb_image_type(result.get("type")))
+        and not _is_exact_rgb24_source_domain(domain)
+    ):
+        raise ValueError("invalid packed RGB24 source value-domain metadata")
+    if scalarization is not None:
+        if (
+            not _is_exact_rgb_scalar_domain(domain)
+            or not isinstance(scalarization, dict)
+            or scalarization.get("method") != "imagej_weighted_rgb_intensity"
+            or scalarization.get("source_pixel_type") != "rgb24"
+            or scalarization.get("rounding") != "nearest_integer_half_up"
+            or not isinstance(scalarization.get("weights"), dict)
+        ):
+            raise ValueError("invalid RGB scalarization metadata")
+        weights = scalarization["weights"]
+        normalized_weights = {}
+        for component in ("red", "green", "blue"):
+            value = _optional_finite_number(weights.get(component), component + " weight")
+            if value is None or value < 0.0:
+                raise ValueError("invalid RGB scalarization weights")
+            normalized_weights[component] = value
+        if not math.isclose(
+            sum(normalized_weights.values()), 1.0, rel_tol=0.0, abs_tol=1e-9
+        ):
+            raise ValueError("invalid RGB scalarization weights")
+        normalized["scalarization"] = dict(scalarization)
+        normalized["scalarization"]["weights"] = normalized_weights
+    return normalized
+
+
+def _snapshot_payload(info: dict) -> dict:
+    """Bind one follow-up read to the exact image revision and active plane."""
+    return {
+        "image_id": info["image_id"],
+        "image_revision": int(info["image_revision"]),
+        "display_revision": int(info["display_revision"]),
+        "channel": int(info["channel"]),
+        "slice": int(info["sliceStart"]),
+        "frame": int(info["frame"]),
+        "force": True,
+    }
 
 
 def _fmt_int(value) -> str:
@@ -101,6 +280,23 @@ def _format_axes(info: dict) -> str:
         "single channel" if channels == 1 else "{} channels".format(channels),
         "single z" if slices == 1 else "{} z-slices".format(slices),
         "single frame" if frames == 1 else "{} frames".format(frames),
+    )
+
+
+def _fragment_plane_attribution(meta: dict) -> str:
+    """Identify the exact C/Z/T plane used for numeric pixel measurements."""
+    return (
+        "Pixel measurements are from channel {channel} of {channels}, "
+        "Z slice {slice} of {slices}, frame {frame} of {frames} "
+        "(slice axis {axis})."
+    ).format(
+        channel=meta["channel"],
+        channels=meta["channels"],
+        slice=meta["sliceStart"],
+        slices=meta["slices"],
+        frame=meta["frame"],
+        frames=meta["frames"],
+        axis=meta["sliceAxis"],
     )
 
 
@@ -156,18 +352,63 @@ def _fragment_calibration(info: dict) -> str:
 # Measurement 4-7: histogram-derived facts
 # --------------------------------------------------------------------------
 
-def _median_from_bins(bins: np.ndarray, n_pixels: int, lo: float, hi: float) -> float:
-    """Walk the cumulative bin count; return the intensity of the median bin."""
-    if n_pixels <= 0 or hi <= lo or bins.size == 0:
-        return lo
-    half = n_pixels / 2.0
-    cumulative = 0.0
-    n = int(bins.size)
-    for i in range(n):
-        cumulative += float(bins[i])
-        if cumulative >= half:
-            return lo + (hi - lo) * i / max(n - 1, 1)
-    return hi
+def _histogram_bin_values(bins: np.ndarray, value_domain: dict):
+    """Return exact values represented by histogram bins, or ``None``.
+
+    ImageJ's 256-bin byte histogram is absolute: bin ``i`` counts raw value
+    ``i``. This covers grayscale uint8, indexed8, and RGB histograms because the
+    server explicitly publishes RGB weighted scalarization as a uint8 0..255
+    value domain. Other ImageJ histograms can be display-range/adaptive bins.
+    The current TCP response does not publish their bin origin and width, so
+    observed min/max are not enough to reconstruct values without inventing
+    precision.
+    """
+    counts = np.asarray(bins, dtype=np.float64)
+    if counts.ndim != 1 or counts.size != 256 or not isinstance(value_domain, dict):
+        return None
+    if (
+        value_domain.get("pixel_type") in ("uint8", "indexed8")
+        and value_domain.get("signed") is False
+        and value_domain.get("acquisition_min_raw") == 0.0
+        and value_domain.get("acquisition_max_raw") == 255.0
+    ):
+        return np.arange(256, dtype=np.float64)
+    return None
+
+
+def _median_from_bins(bins: np.ndarray, n_pixels: int, bin_values) -> float | None:
+    """Return the exact median when the response defines every bin value."""
+    counts = np.asarray(bins, dtype=np.float64)
+    values = None if bin_values is None else np.asarray(bin_values, dtype=np.float64)
+    if (
+        n_pixels <= 0
+        or counts.ndim != 1
+        or counts.size == 0
+        or values is None
+        or values.ndim != 1
+        or values.size != counts.size
+        or not np.isfinite(counts).all()
+        or np.any(counts < 0)
+        or not np.equal(counts, np.floor(counts)).all()
+        or int(counts.sum()) != n_pixels
+    ):
+        return None
+
+    lower_rank = (n_pixels - 1) // 2
+    upper_rank = n_pixels // 2
+    cumulative = 0
+    lower = None
+    upper = None
+    for index, count in enumerate(counts):
+        cumulative += int(count)
+        if lower is None and cumulative > lower_rank:
+            lower = float(values[index])
+        if cumulative > upper_rank:
+            upper = float(values[index])
+            break
+    if lower is None or upper is None:
+        return None
+    return (lower + upper) / 2.0
 
 
 def _smooth_bins(bins: np.ndarray, window: int = 5) -> np.ndarray:
@@ -242,51 +483,120 @@ def _hist_stats(hist_result: dict):
         hi = float(hist_result.get("max"))
         mean = float(hist_result.get("mean"))
         std = float(hist_result.get("stdDev"))
-        n_pixels = int(hist_result.get("nPixels", 0))
+        n_pixels = _exact_int(hist_result["nPixels"], "nPixels", 1)
+        value_domain = _decode_value_domain(hist_result)
+        counts_exact = hist_result["acquisition_limit_counts_exact"]
+        if not isinstance(counts_exact, bool):
+            raise TypeError("acquisition_limit_counts_exact must be bool")
+        min_count_raw = hist_result["acquisition_min_count"]
+        max_count_raw = hist_result["acquisition_max_count"]
+        min_count = (
+            None if min_count_raw is None
+            else _exact_int(min_count_raw, "acquisition_min_count", 0)
+        )
+        max_count = (
+            None if max_count_raw is None
+            else _exact_int(max_count_raw, "acquisition_max_count", 0)
+        )
     except (TypeError, ValueError):
         return None
-    bins_raw = hist_result.get("bins") or []
-    bins = np.asarray(bins_raw, dtype=np.float64)
-    median = _median_from_bins(bins, n_pixels, lo, hi)
+    bins_raw = hist_result.get("bins")
+    try:
+        bins = np.asarray(bins_raw, dtype=np.float64)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    absolute_byte_domain = (
+        value_domain.get("pixel_type") in ("uint8", "indexed8")
+        and value_domain.get("signed") is False
+        and value_domain.get("acquisition_min_raw") == 0.0
+        and value_domain.get("acquisition_max_raw") == 255.0
+    )
+    bin_total = float(bins.sum())
+    if (
+        not all(math.isfinite(value) for value in (lo, hi, mean, std))
+        or bins.ndim != 1
+        or bins.size == 0
+        or (absolute_byte_domain and bins.size != 256)
+        or not np.isfinite(bins).all()
+        or np.any(bins < 0)
+        or not np.equal(bins, np.floor(bins)).all()
+        or not math.isfinite(bin_total)
+        or int(bin_total) != n_pixels
+        or (counts_exact and (min_count is None or max_count is None))
+        or (min_count is not None and min_count > n_pixels)
+        or (max_count is not None and max_count > n_pixels)
+        or (
+            min_count is not None
+            and max_count is not None
+            and min_count + max_count > n_pixels
+        )
+        or (
+            counts_exact
+            and absolute_byte_domain
+            and (
+                min_count != int(bins[0])
+                or max_count != int(bins[255])
+            )
+        )
+    ):
+        return None
+    bin_values = _histogram_bin_values(bins, value_domain)
+    median = _median_from_bins(bins, n_pixels, bin_values)
     return {
         "min": lo, "max": hi, "mean": mean, "std": std,
         "median": median, "n_pixels": n_pixels, "bins": bins,
+        "bin_values": bin_values,
+        "value_domain": value_domain,
+        "acquisition_min_count": min_count,
+        "acquisition_max_count": max_count,
+        "acquisition_limit_counts_exact": counts_exact,
+        "scope": hist_result.get("scope"),
     }
 
 
 def _fragment_intensity(stats: dict, bit_depth: int) -> str:
     """Sentence 3: intensity range + dynamic range used. Combined into
     one sentence (semicolon-joined) to match the Phase 4 examples."""
-    first = "Intensity ranges from {mn} to {mx} with mean {me}, median {md} and standard deviation {sd}".format(
-        mn=_fmt_int(stats["min"]), mx=_fmt_int(stats["max"]),
-        me=_fmt_int(stats["mean"]), md=_fmt_int(stats["median"]),
-        sd=_fmt_int(stats["std"]),
-    )
-    ceiling = _ceiling_for_bit_depth(bit_depth)
-    if ceiling is None or ceiling <= 0:
+    if stats.get("median") is None:
+        first = "Intensity ranges from {mn} to {mx} with mean {me} and standard deviation {sd}; the histogram contract does not define an exact median".format(
+            mn=_fmt_int(stats["min"]), mx=_fmt_int(stats["max"]),
+            me=_fmt_int(stats["mean"]), sd=_fmt_int(stats["std"]),
+        )
+    else:
+        first = "Intensity ranges from {mn} to {mx} with mean {me}, median {md} and standard deviation {sd}".format(
+            mn=_fmt_int(stats["min"]), mx=_fmt_int(stats["max"]),
+            me=_fmt_int(stats["mean"]), md=_fmt_int(stats["median"]),
+            sd=_fmt_int(stats["std"]),
+        )
+    domain = stats.get("value_domain") or {}
+    floor = domain.get("acquisition_min_raw")
+    ceiling = domain.get("acquisition_max_raw")
+    if floor is None or ceiling is None or ceiling <= floor:
         return first + "."
-    pct = float(stats["max"]) / ceiling * 100.0
-    return "{}; dynamic range used is {:.1f}% of the {}-bit maximum.".format(first, pct, bit_depth)
+    pct = (float(stats["max"]) - float(stats["min"])) / (ceiling - floor) * 100.0
+    return "{}; observed span uses {:.1f}% of the raw acquisition range {} to {}.".format(
+        first, pct, _fmt_int(floor), _fmt_int(ceiling)
+    )
 
 
 def _fragment_saturation(stats: dict, bit_depth: int) -> str:
-    """Sentence 4: saturated-pixel fraction at the top histogram bin."""
-    bins = stats["bins"]
+    """Sentence 4: exact acquisition-maximum fraction when supplied."""
     n_pixels = stats["n_pixels"]
-    if bins.size == 0 or n_pixels <= 0:
+    ceiling = (stats.get("value_domain") or {}).get("acquisition_max_raw")
+    sat_count = stats.get("acquisition_max_count")
+    if (
+        n_pixels <= 0
+        or ceiling is None
+        or not stats.get("acquisition_limit_counts_exact")
+        or sat_count is None
+    ):
         return "Saturated-pixel fraction is unavailable."
-    ceiling = _ceiling_for_bit_depth(bit_depth)
-    if ceiling is None:
-        sat_count = float(bins[-1])
-    elif float(stats["max"]) < ceiling:
-        sat_count = 0.0
-    else:
-        sat_count = float(bins[-1])
     frac = sat_count / float(n_pixels) * 100.0
-    if frac >= 5.0 and ceiling is not None:
+    if frac >= 5.0:
         return (
-            "Saturated-pixel fraction is {} \u2014 a large share of pixels are pinned at {}."
-        ).format(_fmt_pct(frac), int(ceiling))
+            "Saturated-pixel fraction is {} \u2014 a large share of pixels are pinned at "
+            "the raw acquisition maximum {}."
+        ).format(_fmt_pct(frac), _fmt_int(ceiling))
     return "Saturated-pixel fraction is {}.".format(_fmt_pct(frac))
 
 
@@ -296,15 +606,24 @@ def _fragment_histogram_shape(stats: dict) -> str:
     shape = classification["shape"]
     if shape == "bimodal":
         valley_bin = classification["valley_bin"]
-        n_bins = int(stats["bins"].size)
-        intensity = stats["min"] + (stats["max"] - stats["min"]) * valley_bin / max(n_bins - 1, 1)
+        bin_values = stats.get("bin_values")
+        if bin_values is None or valley_bin >= len(bin_values):
+            return (
+                "The histogram is bimodal with a valley at bin {}, but the response does not "
+                "define that bin's exact intensity."
+            ).format(valley_bin)
+        intensity = float(bin_values[valley_bin])
         return (
             "The histogram is bimodal with a valley at intensity {}, consistent with a clear "
             "separation between dim background and bright foreground."
         ).format(_fmt_int(intensity))
     mean = stats["mean"]
-    median = stats["median"]
+    median = stats.get("median")
     std = stats["std"]
+    if median is None:
+        if shape == "flat":
+            return "The histogram has no peak reaching 5% of pixels."
+        return "The histogram is unimodal; exact median-based skew is unavailable."
     diff = mean - median
     if std > 0 and abs(diff) > _SKEW_STD_RATIO * std:
         direction = "right-skewed" if diff > 0 else "left-skewed"
@@ -317,40 +636,46 @@ def _fragment_histogram_shape(stats: dict) -> str:
 
 
 def _hist_bin_centers(stats: dict) -> np.ndarray:
-    """Map histogram bins onto intensity centers across the reported min/max span."""
+    """Return exact bin values; never infer them from observed extrema."""
     bins = np.asarray(stats["bins"], dtype=np.float64)
-    if bins.size == 0:
-        return bins
-    lo = float(stats["min"])
-    hi = float(stats["max"])
-    if bins.size == 1 or hi <= lo:
-        return np.full(bins.shape, lo, dtype=np.float64)
-    return np.linspace(lo, hi, int(bins.size), dtype=np.float64)
+    values = stats.get("bin_values")
+    if values is None:
+        values = _histogram_bin_values(bins, stats.get("value_domain") or {})
+    if values is None:
+        return np.asarray([], dtype=np.float64)
+    values = np.asarray(values, dtype=np.float64)
+    if values.ndim != 1 or values.size != bins.size:
+        return np.asarray([], dtype=np.float64)
+    return values
 
 
-def _otsu_threshold_from_hist(stats: dict) -> float:
+def _otsu_threshold_from_hist(stats: dict) -> float | None:
     """Otsu threshold derived from the Fiji histogram bins."""
     counts = np.asarray(stats["bins"], dtype=np.float64)
     centers = _hist_bin_centers(stats)
     total = counts.sum()
-    if counts.size == 0 or total <= 0:
-        return float(stats["min"])
+    if counts.size == 0 or centers.size != counts.size or total <= 0:
+        return None
     omega = np.cumsum(counts)
     mu = np.cumsum(counts * centers)
     mu_t = mu[-1]
-    denom = omega * (total - omega)
-    denom = np.where(denom <= 0, 1e-12, denom)
-    sigma_b_sq = (mu_t * omega - mu) ** 2 / denom
+    valid = (omega > 0) & (omega < total)
+    if not np.any(valid):
+        return float(centers[int(np.argmax(counts))])
+    sigma_b_sq = np.full(counts.shape, -np.inf, dtype=np.float64)
+    denom = omega[valid] * (total - omega[valid])
+    numerator = mu_t * omega[valid] - mu[valid] * total
+    sigma_b_sq[valid] = numerator ** 2 / denom
     return float(centers[int(np.argmax(sigma_b_sq))])
 
 
-def _li_threshold_from_hist(stats: dict) -> float:
+def _li_threshold_from_hist(stats: dict) -> float | None:
     """Li's iterative minimum cross-entropy threshold on histogram bins."""
     counts = np.asarray(stats["bins"], dtype=np.float64)
     values = _hist_bin_centers(stats)
     total = counts.sum()
-    if counts.size == 0 or total <= 0:
-        return float(stats["min"])
+    if counts.size == 0 or values.size != counts.size or total <= 0:
+        return None
     shift = 0.0
     if float(values.min()) <= 0:
         shift = -float(values.min()) + 1.0
@@ -378,37 +703,53 @@ def _li_threshold_from_hist(stats: dict) -> float:
     return float(t - shift)
 
 
-def _triangle_threshold_from_hist(stats: dict) -> float:
-    """Zack's triangle method using the Fiji histogram bins."""
+def _triangle_threshold_from_hist(stats: dict) -> float | None:
+    """ImageJ 1.54c's public Triangle method using Fiji histogram bins."""
     hist = np.asarray(stats["bins"], dtype=np.float64)
     values = _hist_bin_centers(stats)
-    if hist.size == 0:
-        return float(stats["min"])
+    if (
+        hist.ndim != 1
+        or hist.size != 256
+        or values.size != hist.size
+        or not np.isfinite(hist).all()
+        or np.any(hist < 0)
+    ):
+        return None
+    occupied = np.flatnonzero(hist)
+    if occupied.size == 2:
+        return float(values[int(occupied[1]) - 1])
     peak = int(np.argmax(hist))
-    if peak < hist.size / 2:
-        end = hist.size - 1
-        while end > peak and hist[end] == 0:
-            end -= 1
+    first = int(occupied[0]) if occupied.size else 0
+    last = int(occupied[-1]) if occupied.size else 0
+    line_end = first - 1 if first > 0 else first
+    far_end = last + 1 if last < hist.size - 1 else last
+    inverted = peak - line_end < far_end - peak
+    working = hist[::-1].copy() if inverted else hist
+    if inverted:
+        line_end = hist.size - 1 - far_end
+        peak = hist.size - 1 - peak
+    if line_end == peak:
+        split = line_end
     else:
-        end = 0
-        while end < peak and hist[end] == 0:
-            end += 1
-    x0, y0 = float(peak), float(hist[peak])
-    x1, y1 = float(end), float(hist[end])
-    dx = x1 - x0
-    dy = y1 - y0
-    denom = math.sqrt(dx * dx + dy * dy)
-    if denom == 0:
-        return float(values[peak])
-    lo_i, hi_i = min(peak, end), max(peak, end)
-    best = peak
-    max_d = -1.0
-    for i in range(lo_i, hi_i + 1):
-        d = abs(dy * float(i) - dx * float(hist[i]) + x1 * y0 - y1 * x0) / denom
-        if d > max_d:
-            max_d = d
-            best = i
-    return float(values[best])
+        nx = float(working[peak])
+        ny = float(line_end - peak)
+        denom = math.sqrt(nx * nx + ny * ny)
+        nx /= denom
+        ny /= denom
+        line_d = nx * line_end + ny * float(working[line_end])
+        split = line_end
+        split_distance = 0.0
+        for index in range(line_end + 1, peak + 1):
+            distance = nx * index + ny * float(working[index]) - line_d
+            if distance > split_distance:
+                split = index
+                split_distance = distance
+        split -= 1
+    if inverted:
+        split = hist.size - 1 - split
+    if split == -1:
+        split = 0
+    return float(values[split])
 
 
 # --------------------------------------------------------------------------
@@ -425,20 +766,153 @@ def _decode_pixels(resp):
     if not isinstance(b64, str) or not b64:
         return None, {"error": "get_pixels reply missing data field"}
     try:
-        raw = base64.b64decode(b64)
-    except (ValueError, TypeError) as exc:
+        raw = base64.b64decode(b64, validate=True)
+    except (binascii.Error, ValueError, TypeError) as exc:
         return None, {"error": "base64 decode failed: {}".format(exc)}
-    w = int(result.get("width", 0))
-    h = int(result.get("height", 0))
+    try:
+        w = _exact_int(result["width"], "width", 1)
+        h = _exact_int(result["height"], "height", 1)
+        meta = {
+            "image_id": result["image_id"],
+            "image_revision": _exact_int(result["image_revision"], "image_revision", 1),
+            "display_revision": _exact_int(result["display_revision"], "display_revision", 1),
+            "x": _exact_int(result["x"], "x", 0),
+            "y": _exact_int(result["y"], "y", 0),
+            "width": w,
+            "height": h,
+            "sliceStart": _exact_int(result["sliceStart"], "sliceStart", 1),
+            "sliceEnd": _exact_int(result["sliceEnd"], "sliceEnd", 1),
+            "sliceCount": _exact_int(result["sliceCount"], "sliceCount", 1),
+            "sliceAxis": result["sliceAxis"],
+            "channel": _exact_int(result["channel"], "channel", 1),
+            "frame": _exact_int(result["frame"], "frame", 1),
+            "channels": _exact_int(result["channels"], "channels", 1),
+            "slices": _exact_int(result["slices"], "slices", 1),
+            "frames": _exact_int(result["frames"], "frames", 1),
+            "nPixels": _exact_int(result["nPixels"], "nPixels", 1),
+            "type": result["type"],
+            "encoding": result["encoding"],
+            "value_domain": _decode_value_domain(result),
+        }
+        if (
+            not isinstance(meta["image_id"], str)
+            or not isinstance(meta["sliceAxis"], str)
+            or not isinstance(meta["type"], str)
+            or not isinstance(meta["encoding"], str)
+        ):
+            raise TypeError("image_id, sliceAxis, type and encoding must be strings")
+        counts_exact = result["acquisition_limit_counts_exact"]
+        if not isinstance(counts_exact, bool):
+            raise TypeError("acquisition_limit_counts_exact must be bool")
+        min_count_raw = result["acquisition_min_count"]
+        max_count_raw = result["acquisition_max_count"]
+        meta["acquisition_min_count"] = (
+            None if min_count_raw is None
+            else _exact_int(min_count_raw, "acquisition_min_count", 0)
+        )
+        meta["acquisition_max_count"] = (
+            None if max_count_raw is None
+            else _exact_int(max_count_raw, "acquisition_max_count", 0)
+        )
+        meta["acquisition_limit_counts_exact"] = counts_exact
+    except (KeyError, TypeError, ValueError) as exc:
+        return None, {
+            "error": "get_pixels reply missing or malformed C/Z/T metadata: {}".format(exc)
+        }
     if w <= 0 or h <= 0:
         return None, {"error": "get_pixels returned zero-size region"}
-    plane = np.frombuffer(raw, dtype="<f4", count=w * h).reshape((h, w))
-    return plane, {
-        "x": int(result.get("x", 0)),
-        "y": int(result.get("y", 0)),
-        "width": w,
-        "height": h,
-    }
+    if (
+        not meta["image_id"].strip()
+        or meta["image_revision"] <= 0
+        or meta["x"] < 0
+        or meta["y"] < 0
+        or meta["sliceAxis"] != "Z"
+        or meta["encoding"] != "base64_float32_le"
+        or meta["channels"] <= 0
+        or meta["slices"] <= 0
+        or meta["frames"] <= 0
+        or not 1 <= meta["channel"] <= meta["channels"]
+        or not 1 <= meta["frame"] <= meta["frames"]
+        or not 1 <= meta["sliceStart"] <= meta["sliceEnd"] <= meta["slices"]
+        or meta["sliceCount"] != 1
+        or meta["sliceEnd"] != meta["sliceStart"]
+        or meta["nPixels"] != w * h
+        or len(raw) != meta["nPixels"] * 4
+        or (
+            meta["acquisition_limit_counts_exact"]
+            and (
+                meta["acquisition_min_count"] is None
+                or meta["acquisition_max_count"] is None
+            )
+        )
+        or (
+            meta["acquisition_min_count"] is not None
+            and meta["acquisition_min_count"] > meta["nPixels"]
+        )
+        or (
+            meta["acquisition_max_count"] is not None
+            and meta["acquisition_max_count"] > meta["nPixels"]
+        )
+    ):
+        return None, {"error": "get_pixels returned inconsistent C/Z/T metadata"}
+    plane = np.frombuffer(raw, dtype="<f4").reshape((h, w))
+    if not np.isfinite(plane).all():
+        return None, {"error": "get_pixels returned non-finite pixel values"}
+    return plane, meta
+
+
+def _metadata_matches_info(meta: dict, info: dict) -> bool:
+    """Return whether a reply belongs to the exact info snapshot and plane."""
+    try:
+        expected_slice = _exact_int(info["sliceStart"], "info sliceStart", 1)
+        meta_image_id = meta["image_id"]
+        info_image_id = info["image_id"]
+        if (
+            not isinstance(meta_image_id, str)
+            or not meta_image_id.strip()
+            or not isinstance(info_image_id, str)
+            or not info_image_id.strip()
+            or not isinstance(meta["sliceAxis"], str)
+            or not isinstance(info["sliceAxis"], str)
+        ):
+            return False
+        return (
+            meta_image_id == info_image_id
+            and _exact_int(meta["image_revision"], "image_revision", 1)
+            == _exact_int(info["image_revision"], "info image_revision", 1)
+            and _exact_int(meta["display_revision"], "display_revision", 1)
+            == _exact_int(info["display_revision"], "info display_revision", 1)
+            and meta["sliceAxis"] == info["sliceAxis"] == "Z"
+            and _exact_int(meta["sliceStart"], "sliceStart", 1) == expected_slice
+            and _exact_int(meta["sliceEnd"], "sliceEnd", 1) == expected_slice
+            and _exact_int(meta["channel"], "channel", 1)
+            == _exact_int(info["channel"], "info channel", 1)
+            and _exact_int(meta["frame"], "frame", 1)
+            == _exact_int(info["frame"], "info frame", 1)
+            and all(
+                _exact_int(meta[key], key, 1)
+                == _exact_int(info[key], "info " + key, 1)
+                for key in ("channels", "slices", "frames")
+            )
+        )
+    except (KeyError, TypeError, ValueError):
+        return False
+
+
+def _geometry_matches(meta: dict, x: int, y: int, width: int, height: int) -> bool:
+    """Return whether Fiji supplied the exact requested image rectangle."""
+    try:
+        return all(
+            int(meta[key]) == expected
+            for key, expected in (
+                ("x", x),
+                ("y", y),
+                ("width", width),
+                ("height", height),
+            )
+        )
+    except (KeyError, TypeError, ValueError):
+        return False
 
 
 def _fetch_thumbnail(info: dict):
@@ -446,7 +920,8 @@ def _fetch_thumbnail(info: dict):
 
     Downsamples in numpy when the whole image is under the server's
     4M-pixel cap, otherwise falls back to a centred crop sized to
-    respect both the 512 px target and the cap. Returns (None, err).
+    respect both the 512 px target and the cap. Crop pixels are fetched
+    directly, so their downsample factor is one. Returns (None, err).
     """
     try:
         w = int(info.get("width", 0))
@@ -460,9 +935,15 @@ def _fetch_thumbnail(info: dict):
     factor = 1 if long_edge <= _THUMB_MAX_SIDE else (long_edge + _THUMB_MAX_SIDE - 1) // _THUMB_MAX_SIDE
 
     if w * h <= _SERVER_PIXEL_CAP:
-        arr, meta = _decode_pixels(_safe_send("get_pixels"))
+        arr, meta = _decode_pixels(
+            _safe_send("get_pixels", **_snapshot_payload(info))
+        )
         if arr is None:
             return None, meta
+        if not _geometry_matches(meta, 0, 0, w, h):
+            return None, {"error": "active image geometry changed during pixel fetch"}
+        if not _metadata_matches_info(meta, info):
+            return None, {"error": "active image axis sizes changed during pixel fetch"}
         if factor > 1:
             arr = arr[::factor, ::factor]
         meta["downsample_factor"] = int(factor)
@@ -474,10 +955,16 @@ def _fetch_thumbnail(info: dict):
     cy = max(0, (h - crop) // 2)
     cw = min(crop, w - cx)
     ch = min(crop, h - cy)
-    arr, meta = _decode_pixels(_safe_send("get_pixels", x=cx, y=cy, width=cw, height=ch))
+    payload = _snapshot_payload(info)
+    payload.update({"x": cx, "y": cy, "width": cw, "height": ch})
+    arr, meta = _decode_pixels(_safe_send("get_pixels", **payload))
     if arr is None:
         return None, meta
-    meta["downsample_factor"] = int(factor)
+    if not _geometry_matches(meta, cx, cy, cw, ch):
+        return None, {"error": "active image geometry changed during pixel fetch"}
+    if not _metadata_matches_info(meta, info):
+        return None, {"error": "active image axis sizes changed during pixel fetch"}
+    meta["downsample_factor"] = 1
     meta["source"] = "center_crop"
     return arr, meta
 
@@ -533,39 +1020,19 @@ def _li_threshold(arr: np.ndarray) -> float:
     return float(t - shift)
 
 
-def _triangle_threshold(arr: np.ndarray) -> float:
-    """Zack's triangle method on a 256-bin histogram of arr."""
+def _triangle_threshold(arr: np.ndarray, *, value_domain=None) -> float:
+    """Approximate Triangle on samples, exact for a published byte domain."""
     flat = arr.ravel()
     lo = float(flat.min())
     hi = float(flat.max())
-    if hi <= lo:
-        return lo
-    hist, edges = np.histogram(flat, bins=256, range=(lo, hi))
-    peak = int(np.argmax(hist))
-    if peak < 128:
-        end = len(hist) - 1
-        while end > peak and hist[end] == 0:
-            end -= 1
-    else:
-        end = 0
-        while end < peak and hist[end] == 0:
-            end += 1
-    x0, y0 = float(peak), float(hist[peak])
-    x1, y1 = float(end), float(hist[end])
-    dx = x1 - x0
-    dy = y1 - y0
-    denom = math.sqrt(dx * dx + dy * dy)
-    if denom == 0:
-        return float(edges[peak])
-    lo_i, hi_i = min(peak, end), max(peak, end)
-    best = peak
-    max_d = -1.0
-    for i in range(lo_i, hi_i + 1):
-        d = abs(dy * float(i) - dx * float(hist[i]) + x1 * y0 - y1 * x0) / denom
-        if d > max_d:
-            max_d = d
-            best = i
-    return float(edges[best])
+    histogram_range = (
+        (0.0, 256.0) if _is_exact_byte_scalar_domain(value_domain) else (lo, hi)
+    )
+    hist, edges = np.histogram(flat, bins=256, range=histogram_range)
+    threshold = _triangle_threshold_from_hist(
+        {"bins": hist, "bin_values": edges[:-1]}
+    )
+    return lo if threshold is None else threshold
 
 
 def _count_4_connected(mask: np.ndarray) -> int:
@@ -596,23 +1063,136 @@ def _count_4_connected(mask: np.ndarray) -> int:
     return count
 
 
-def _fragment_thresholds(thumb: np.ndarray, stats: dict | None) -> str:
+def _decode_rgb24_samples(samples: np.ndarray):
+    """Return strict lower-24-bit RGB integers, including legacy signed 0xff forms."""
+    values = np.asarray(samples, dtype=np.float64)
+    if not np.isfinite(values).all() or not np.equal(values, np.floor(values)).all():
+        return None
+
+    # Current get_pixels replies publish ColorProcessor pixels as canonical
+    # 0x00RRGGBB values. Older replies exposed Java's signed 0xffRRGGBB int;
+    # accept exactly that sign-extension range, but no other high-byte values.
+    canonical_lower24 = (values >= 0) & (values <= 0x00ffffff)
+    legacy_signed_ff = (values >= -0x01000000) & (values <= -1)
+    if not np.all(canonical_lower24 | legacy_signed_ff):
+        return None
+    return np.bitwise_and(values.astype(np.int64), 0x00ffffff)
+
+
+def _threshold_thumbnail(thumb: np.ndarray, stats: dict, thumb_meta: dict | None):
+    """Align thumbnail samples to the histogram's raw numeric domain."""
+    samples = np.asarray(thumb, dtype=np.float64)
+    if samples.ndim != 2 or not np.isfinite(samples).all():
+        return None
+    histogram_domain = stats.get("value_domain")
+    thumbnail_domain = (
+        thumb_meta.get("value_domain") if isinstance(thumb_meta, dict) else None
+    )
+    if not isinstance(histogram_domain, dict) or not isinstance(thumbnail_domain, dict):
+        return None
+
+    scalarization = histogram_domain.get("scalarization")
+    if scalarization is not None:
+        if (
+            not _is_exact_rgb_scalar_domain(histogram_domain)
+            or not _is_exact_rgb24_source_domain(thumbnail_domain)
+            or scalarization.get("method") != "imagej_weighted_rgb_intensity"
+            or scalarization.get("source_pixel_type") != "rgb24"
+            or scalarization.get("rounding") != "nearest_integer_half_up"
+        ):
+            return None
+        weights = scalarization.get("weights")
+        if not isinstance(weights, dict):
+            return None
+        try:
+            red_weight = float(weights["red"])
+            green_weight = float(weights["green"])
+            blue_weight = float(weights["blue"])
+        except (KeyError, TypeError, ValueError, OverflowError):
+            return None
+        rgb_weights = np.asarray(
+            [red_weight, green_weight, blue_weight], dtype=np.float64
+        )
+        if (
+            not np.isfinite(rgb_weights).all()
+            or np.any(rgb_weights < 0)
+            or not math.isclose(
+                float(rgb_weights.sum()), 1.0, rel_tol=0.0, abs_tol=1e-9
+            )
+        ):
+            return None
+        packed = _decode_rgb24_samples(samples)
+        if packed is None:
+            return None
+        red = ((packed >> 16) & 0xff).astype(np.float64)
+        green = ((packed >> 8) & 0xff).astype(np.float64)
+        blue = (packed & 0xff).astype(np.float64)
+        # ImageJ ColorProcessor uses (int)(weighted + 0.5). The server admits
+        # only non-negative normalized weights, so floor exactly matches that
+        # Java cast and its published nearest-half-up contract.
+        scalar = np.floor(
+            red * red_weight + green * green_weight + blue * blue_weight + 0.5
+        )
+        if np.any(scalar < 0) or np.any(scalar > 255):
+            return None
+        return scalar
+
+    for key in (
+        "representation",
+        "pixel_type",
+        "signed",
+        "density_calibrated",
+        "acquisition_min_raw",
+        "acquisition_max_raw",
+        "acquisition_min_calibrated",
+        "acquisition_max_calibrated",
+    ):
+        if histogram_domain.get(key) != thumbnail_domain.get(key):
+            return None
+    return samples
+
+
+def _fragment_thresholds(
+    thumb: np.ndarray, stats: dict | None, thumb_meta: dict | None = None
+) -> str:
     """Sentence 6: Otsu / Li / Triangle object counts on the thumbnail."""
     if stats is None:
-        return "Auto-threshold counts are unavailable because Fiji did not return histogram data."
+        return "Auto-threshold counts are unavailable because no valid Fiji histogram is available."
+    threshold_thumb = _threshold_thumbnail(thumb, stats, thumb_meta)
+    if threshold_thumb is None:
+        return (
+            "Auto-threshold counts are unavailable because the histogram and thumbnail "
+            "value domains cannot be aligned."
+        )
     otsu_t = _otsu_threshold_from_hist(stats)
     li_t = _li_threshold_from_hist(stats)
     tri_t = _triangle_threshold_from_hist(stats)
-    n_otsu = _count_4_connected(thumb > otsu_t)
-    n_li = _count_4_connected(thumb > li_t)
-    n_tri = _count_4_connected(thumb > tri_t)
+    # Non-uint8 histogram responses currently omit bin origin/width. In that
+    # case derive thresholds from the actual thumbnail samples instead of
+    # pretending observed min/max define the histogram bins.
+    if otsu_t is None:
+        otsu_t = _otsu_threshold(threshold_thumb)
+    if li_t is None:
+        li_t = _li_threshold(threshold_thumb)
+    if tri_t is None:
+        tri_t = _triangle_threshold(
+            threshold_thumb, value_domain=stats.get("value_domain")
+        )
+    n_otsu = _count_4_connected(threshold_thumb > otsu_t)
+    n_li = _count_4_connected(threshold_thumb > li_t)
+    n_tri = _count_4_connected(threshold_thumb > tri_t)
     return (
         "Auto-thresholds produce {} connected components with Otsu, {} with Li and {} "
         "with Triangle on a 512-pixel thumbnail."
     ).format(n_otsu, n_li, n_tri)
 
 
-def _fragment_artifacts(thumb: np.ndarray, bit_depth: int) -> str:
+def _fragment_artifacts(
+    thumb: np.ndarray,
+    bit_depth: int,
+    meta: dict | None = None,
+    analysis_thumb: np.ndarray | None = None,
+) -> str:
     """Sentence 7: clipped blacks + quadrant saturation + stripe detection.
 
     All three sub-checks always contribute a phrase — either an issue
@@ -624,46 +1204,87 @@ def _fragment_artifacts(thumb: np.ndarray, bit_depth: int) -> str:
     issues = []
     clean = []
 
-    mn = float(thumb.min())
-    clipped_frac = float((thumb <= mn).mean()) * 100.0
-    if clipped_frac > 1.0:
-        issues.append("clipped blacks at {}".format(_fmt_pct(clipped_frac)))
+    meta = meta or {}
+    domain = meta.get("value_domain") or {}
+    floor = domain.get("acquisition_min_raw")
+    ceiling = domain.get("acquisition_max_raw")
+    counts_exact = bool(meta.get("acquisition_limit_counts_exact"))
+    n_pixels = meta.get("nPixels")
+    min_count = meta.get("acquisition_min_count")
+    if (
+        floor is None
+        or not counts_exact
+        or not isinstance(n_pixels, int)
+        or n_pixels <= 0
+        or not isinstance(min_count, int)
+    ):
+        clean.append("acquisition-minimum clipping check unavailable")
     else:
-        clean.append("no clipped blacks")
-
-    ceiling = _ceiling_for_bit_depth(bit_depth)
-    if ceiling is None:
-        ceiling = float(thumb.max())
-    mid_y = h // 2
-    mid_x = w // 2
-    quadrants = [
-        ("top-left", thumb[:mid_y, :mid_x]),
-        ("top-right", thumb[:mid_y, mid_x:]),
-        ("bottom-left", thumb[mid_y:, :mid_x]),
-        ("bottom-right", thumb[mid_y:, mid_x:]),
-    ]
-    q_counts = [float((q >= ceiling).sum()) for _, q in quadrants]
-    total_sat = sum(q_counts)
-    if total_sat > 0:
-        max_idx = int(np.argmax(q_counts))
-        others = [c for i, c in enumerate(q_counts) if i != max_idx]
-        mean_others = float(sum(others)) / max(len(others), 1)
-        dominant = q_counts[max_idx] > 5.0 * mean_others if mean_others > 0 else True
-        if dominant:
-            share = q_counts[max_idx] / total_sat * 100.0
-            corner = quadrants[max_idx][0]
+        clipped_frac = float(min_count) / float(n_pixels) * 100.0
+        if clipped_frac > 1.0:
             issues.append(
-                "the {} quadrant carries {:.0f}% of the saturated pixels, suggesting a "
-                "saturated patch in that corner".format(corner, share)
+                "pixels at the raw acquisition minimum {} account for {}".format(
+                    _fmt_int(floor), _fmt_pct(clipped_frac)
+                )
             )
         else:
-            clean.append("no quadrant saturation")
-    else:
-        clean.append("no quadrant saturation")
+            clean.append("no substantial acquisition-minimum clipping")
 
-    if h >= 2 and w >= 2:
-        row_means = thumb.mean(axis=1)
-        col_means = thumb.mean(axis=0)
+    if ceiling is None:
+        clean.append("saturation-location check unavailable without a raw acquisition maximum")
+    else:
+        mid_y = h // 2
+        mid_x = w // 2
+        quadrants = [
+            ("top-left", thumb[:mid_y, :mid_x]),
+            ("top-right", thumb[:mid_y, mid_x:]),
+            ("bottom-left", thumb[mid_y:, :mid_x]),
+            ("bottom-right", thumb[mid_y:, mid_x:]),
+        ]
+        if any(
+            q.size < 16 or q.shape[0] < 2 or q.shape[1] < 2
+            for _, q in quadrants
+        ):
+            clean.append("quadrant saturation localization unavailable at this sampling")
+        else:
+            q_rates = [float((q >= ceiling).mean()) for _, q in quadrants]
+            max_idx = int(np.argmax(q_rates))
+            others = [rate for i, rate in enumerate(q_rates) if i != max_idx]
+            mean_others = float(sum(others)) / len(others)
+            dominant = (
+                q_rates[max_idx] > 0
+                and (
+                    q_rates[max_idx] > 5.0 * mean_others
+                    if mean_others > 0
+                    else True
+                )
+            )
+            if dominant:
+                corner = quadrants[max_idx][0]
+                issues.append(
+                    "the {} quadrant has {:.1f}% of pixels at the raw acquisition maximum "
+                    "versus {:.1f}% across other quadrants, suggesting a saturated patch"
+                    .format(corner, q_rates[max_idx] * 100.0, mean_others * 100.0)
+                )
+            else:
+                clean.append("no quadrant saturation")
+
+    stripe_thumb = None
+    if analysis_thumb is not None:
+        candidate = np.asarray(analysis_thumb, dtype=np.float64)
+        if candidate.shape == thumb.shape and np.isfinite(candidate).all():
+            stripe_thumb = candidate
+    elif domain.get("pixel_type") != "rgb24":
+        stripe_thumb = thumb
+
+    if stripe_thumb is None:
+        clean.append("stripe-pattern check unavailable for packed RGB values")
+    elif h >= 2 and w >= 2:
+        # Packed RGB integers have no meaningful scalar ordering. For RGB,
+        # callers pass the same weighted scalar thumbnail used by histogram
+        # thresholding; other image types continue to use their raw samples.
+        row_means = stripe_thumb.mean(axis=1)
+        col_means = stripe_thumb.mean(axis=0)
         row_var = float(row_means.var())
         col_var = float(col_means.var())
         if row_var > 4.0 * col_var and col_var > 0:
@@ -692,45 +1313,15 @@ def _fragment_artifacts(thumb: np.ndarray, bit_depth: int) -> str:
 # Measurement 10: ROI / overlay
 # --------------------------------------------------------------------------
 
-_ROI_SCRIPT = """
-import groovy.json.JsonOutput
-def imp = ij.WindowManager.getCurrentImage()
-def out = [:]
-if (imp == null) {
-    out.error = "no_image"
-} else {
-    def roi = imp.getRoi()
-    out.hasRoi = (roi != null)
-    if (roi != null) {
-        def b = roi.getBounds()
-        out.roiType = roi.getTypeAsString()
-        out.roiWidth = b.width
-        out.roiHeight = b.height
-    }
-    def overlay = imp.getOverlay()
-    out.hasOverlay = (overlay != null)
-    if (overlay != null) out.overlaySize = overlay.size()
-}
-JsonOutput.toJson(out)
-""".strip()
-
-
-def _fetch_roi_overlay():
-    """One-round Groovy call: reports active ROI shape/size and overlay presence."""
-    resp = _safe_send("run_script", code=_ROI_SCRIPT, language="groovy")
+def _fetch_roi_overlay(info: dict):
+    """Read ROI/overlay facts bound to the same immutable image snapshot."""
+    resp = _safe_send("get_display_state", **_snapshot_payload(info))
     if not isinstance(resp, dict) or not resp.get("ok"):
         return None
-    result = resp.get("result") or {}
-    if not result.get("success"):
+    data = resp.get("result") or {}
+    if not isinstance(data, dict) or not _metadata_matches_info(data, info):
         return None
-    output = result.get("output")
-    if not isinstance(output, str) or not output.strip():
-        return None
-    try:
-        data = json.loads(output)
-    except (ValueError, TypeError):
-        return None
-    return data if isinstance(data, dict) else None
+    return data
 
 
 def _fragment_roi_overlay(data) -> str:
@@ -771,28 +1362,80 @@ def describe_image() -> str:
     Args:
         None.
     """
-    info_resp = _safe_send("get_image_info")
+    info_resp = _safe_send("get_image_info", force=True)
     if not isinstance(info_resp, dict) or not info_resp.get("ok"):
-        err = info_resp.get("error") if isinstance(info_resp, dict) else "no reply from Fiji"
+        err = _response_error_text(info_resp, "no reply from Fiji")
         return "describe_image: cannot read active image info ({}).".format(err or "unknown error")
     info = info_resp.get("result") or {}
     if not isinstance(info, dict) or not info:
         return "describe_image: no active image."
+    try:
+        image_id = info["image_id"]
+        width = _exact_int(info["width"], "width", 1)
+        height = _exact_int(info["height"], "height", 1)
+        image_revision = _exact_int(info["image_revision"], "image_revision", 1)
+        display_revision = _exact_int(info["display_revision"], "display_revision", 1)
+        channel = _exact_int(info["channel"], "channel", 1)
+        slice_start = _exact_int(info["sliceStart"], "sliceStart", 1)
+        slice_end = _exact_int(info["sliceEnd"], "sliceEnd", 1)
+        slice_axis = info["sliceAxis"]
+        frame = _exact_int(info["frame"], "frame", 1)
+        channels = _exact_int(info["channels"], "channels", 1)
+        slices = _exact_int(info["slices"], "slices", 1)
+        frames = _exact_int(info["frames"], "frames", 1)
+        value_domain = _decode_value_domain(info)
+        if not isinstance(image_id, str) or not isinstance(slice_axis, str):
+            raise TypeError("image_id and sliceAxis must be strings")
+    except (KeyError, TypeError, ValueError) as exc:
+        return "describe_image: cannot attribute image axes ({}).".format(exc)
+    if (
+        min(width, height, channels, slices, frames) <= 0
+        or not image_id.strip()
+        or image_revision <= 0
+        or slice_axis != "Z"
+        or slice_start != slice_end
+        or not 1 <= channel <= channels
+        or not 1 <= slice_start <= slices
+        or not 1 <= frame <= frames
+    ):
+        return "describe_image: cannot attribute image axes (invalid axis sizes)."
 
     bit_depth = _bit_depth_from_type(info.get("type", ""))
 
+    thumb_arr, thumb_meta = _fetch_thumbnail(info)
+    plane_meta = info
+
     hist_stats = None
     hist_error = None
-    hist_resp = _safe_send("get_histogram")
-    if isinstance(hist_resp, dict) and hist_resp.get("ok"):
-        hist_stats = _hist_stats(hist_resp.get("result") or {})
+    histogram_payload = _snapshot_payload(info)
+    histogram_payload["scope"] = "full_plane"
+    hist_resp = _safe_send("get_histogram", **histogram_payload)
+    hist_result = hist_resp.get("result") if isinstance(hist_resp, dict) else None
+    if (
+        isinstance(hist_resp, dict)
+        and hist_resp.get("ok")
+        and isinstance(hist_result, dict)
+        and hist_result.get("scope") == "full_plane"
+        and _metadata_matches_info(hist_result, info)
+    ):
+        candidate_stats = _hist_stats(hist_result)
+        if (
+            candidate_stats is None
+            or candidate_stats["n_pixels"] != width * height
+        ):
+            hist_error = "Fiji returned an invalid histogram payload"
+        else:
+            hist_stats = candidate_stats
+    elif isinstance(hist_resp, dict) and hist_resp.get("ok"):
+        hist_error = "histogram snapshot/plane did not match image info"
     elif isinstance(hist_resp, dict):
-        hist_error = hist_resp.get("error") or "unknown histogram error"
-
-    thumb_arr, _thumb_meta = _fetch_thumbnail(info)
-    roi_data = _fetch_roi_overlay()
+        hist_error = _response_error_text(hist_resp, "unknown histogram error")
+    else:
+        hist_error = "no reply from Fiji"
+    roi_data = _fetch_roi_overlay(info)
 
     fragments = [_fragment_header(info), _fragment_calibration(info)]
+    fragments.append(_fragment_plane_attribution(plane_meta))
     if hist_stats is not None:
         fragments.append(_fragment_intensity(hist_stats, bit_depth))
         fragments.append(_fragment_saturation(hist_stats, bit_depth))
@@ -802,8 +1445,20 @@ def describe_image() -> str:
             "Histogram-derived intensity statistics are unavailable ({}).".format(hist_error)
         )
     if thumb_arr is not None:
-        fragments.append(_fragment_thresholds(thumb_arr, hist_stats))
-        fragments.append(_fragment_artifacts(thumb_arr, bit_depth))
+        aligned_thumb = (
+            _threshold_thumbnail(thumb_arr, hist_stats, thumb_meta)
+            if hist_stats is not None
+            else None
+        )
+        fragments.append(_fragment_thresholds(thumb_arr, hist_stats, thumb_meta))
+        fragments.append(
+            _fragment_artifacts(
+                thumb_arr,
+                bit_depth,
+                thumb_meta,
+                analysis_thumb=aligned_thumb,
+            )
+        )
     else:
         fragments.append("Thumbnail-based threshold and artifact checks are unavailable.")
     fragments.append(_fragment_roi_overlay(roi_data))

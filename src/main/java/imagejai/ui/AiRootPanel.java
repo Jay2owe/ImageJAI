@@ -14,6 +14,7 @@ import imagejai.engine.EmbeddedAgentSession;
 import imagejai.engine.ExternalAgentSession;
 import imagejai.engine.PostureController;
 import imagejai.engine.PostureViolation;
+import imagejai.engine.MutationCoordinator;
 import imagejai.engine.picker.AgentLaunchOrchestrator;
 import imagejai.engine.picker.MergeFunction;
 import imagejai.engine.picker.ModelEntry;
@@ -45,6 +46,7 @@ import javax.swing.JRadioButtonMenuItem;
 import javax.swing.JFileChooser;
 import javax.swing.JOptionPane;
 import javax.swing.JPanel;
+import javax.swing.JScrollPane;
 import javax.swing.SwingUtilities;
 import javax.swing.SwingWorker;
 import javax.swing.Timer;
@@ -125,14 +127,21 @@ public class AiRootPanel extends JPanel implements ChatSurface {
     private String currentCard = CARD_CHAT;
     private boolean applyingFrameSize;
     private List<AgentLauncher.AgentInfo> detectedAgents = new ArrayList<AgentLauncher.AgentInfo>();
+    private PostureController.Listener postureRefreshListener;
+    private Runnable backendRefreshListener;
+    private PostureBadge postureBadge;
 
     public AiRootPanel(Settings settings) {
+        this(settings, new MutationCoordinator());
+    }
+
+    public AiRootPanel(Settings settings, MutationCoordinator mutationCoordinator) {
         super(new BorderLayout(0, 6));
         this.settings = settings;
         setBorder(new EmptyBorder(8, 8, 8, 8));
         setBackground(BG_MAIN);
 
-        chatView = new ChatView(settings);
+        chatView = new ChatView(settings, mutationCoordinator);
         terminalView = new TerminalView(settings, new File(System.getProperty("user.dir", ".")),
                 new LeftRail.SessionRelauncher() {
                     @Override
@@ -157,7 +166,8 @@ public class AiRootPanel extends JPanel implements ChatSurface {
                 openAgentPicker();
             }
         });
-        cards.add(welcomePanel, CARD_WELCOME);
+        cards.add(UiScrollSupport.wrap(welcomePanel, "ImageJAI welcome"),
+                CARD_WELCOME);
         pseudonymisationToast = new PseudonymisationToast();
         promptToastSubscription = OutboundPromptScrubber.getInstance()
                 .addNotifier(pseudonymisationToast);
@@ -175,7 +185,11 @@ public class AiRootPanel extends JPanel implements ChatSurface {
         // play button when many notifications stack.
         JPanel top = new JPanel(new BorderLayout(0, 4));
         top.setOpaque(false);
-        top.add(createHeader(), BorderLayout.NORTH);
+        top.add(UiScrollSupport.wrap(
+                createHeader(),
+                "ImageJAI controls",
+                JScrollPane.VERTICAL_SCROLLBAR_NEVER,
+                JScrollPane.HORIZONTAL_SCROLLBAR_AS_NEEDED), BorderLayout.NORTH);
         tierChangeBanner = new TierChangeBanner();
         tierChangeBanner.setDismissListener(n -> {
             if (settings.dismissedTierChangeBanners == null) {
@@ -197,7 +211,9 @@ public class AiRootPanel extends JPanel implements ChatSurface {
         notices.add(visualOverrideNotice);
         notices.add(configurationPane);
         notices.add(receiptsPane);
-        top.add(notices, BorderLayout.CENTER);
+        top.add(UiScrollSupport.cappedSection(
+                notices, "Notifications and data governance", 180),
+                BorderLayout.CENTER);
 
         add(top, BorderLayout.NORTH);
         add(body, BorderLayout.CENTER);
@@ -230,6 +246,14 @@ public class AiRootPanel extends JPanel implements ChatSurface {
 
     public void addChatListener(ChatPanel.ChatListener listener) {
         chatView.addChatListener(listener);
+    }
+
+    public void addConversationClearListener(Runnable listener) {
+        chatView.addConversationClearListener(listener);
+    }
+
+    public void setBackendRefreshListener(Runnable listener) {
+        backendRefreshListener = listener;
     }
 
     public void setAgentLauncher(AgentLauncher launcher) {
@@ -321,17 +345,20 @@ public class AiRootPanel extends JPanel implements ChatSurface {
     }
 
     private void installPostureRefreshListener() {
-        PostureController.getInstance().addListener(new PostureController.Listener() {
-            @Override
-            public void postureChanged(PrivacyPosture from, PrivacyPosture to, Path folder) {
-                SwingUtilities.invokeLater(new Runnable() {
-                    @Override
-                    public void run() {
-                        refreshAgentSelectorAsync();
-                    }
-                });
-            }
-        });
+        if (postureRefreshListener == null) {
+            postureRefreshListener = new PostureController.Listener() {
+                @Override
+                public void postureChanged(PrivacyPosture from, PrivacyPosture to, Path folder) {
+                    SwingUtilities.invokeLater(new Runnable() {
+                        @Override
+                        public void run() {
+                            refreshAgentSelectorAsync();
+                        }
+                    });
+                }
+            };
+        }
+        PostureController.getInstance().addListener(postureRefreshListener);
     }
 
     /**
@@ -378,12 +405,25 @@ public class AiRootPanel extends JPanel implements ChatSurface {
     }
 
     @Override
+    public void addNotify() {
+        super.addNotify();
+        installPostureRefreshListener();
+        if (postureBadge != null) postureBadge.attach();
+    }
+
+    @Override
     public void removeNotify() {
         disposeGovernanceUi();
         super.removeNotify();
     }
 
     private void disposeGovernanceUi() {
+        if (postureRefreshListener != null) {
+            PostureController.getInstance().removeListener(postureRefreshListener);
+        }
+        if (postureBadge != null) {
+            postureBadge.dispose();
+        }
         if (configurationPane != null) {
             configurationPane.dispose();
         }
@@ -534,7 +574,8 @@ public class AiRootPanel extends JPanel implements ChatSurface {
 
         JPanel workRight = new JPanel(new FlowLayout(FlowLayout.RIGHT, 2, 0));
         workRight.setOpaque(false);
-        workRight.add(new PostureBadge(PostureController.getInstance()));
+        postureBadge = new PostureBadge(PostureController.getInstance());
+        workRight.add(postureBadge);
         egressIndicator = new EgressIndicator();
         workRight.add(egressIndicator);
         JButton overflowBtn = createHeaderButton("\u22EF",
@@ -650,6 +691,7 @@ public class AiRootPanel extends JPanel implements ChatSurface {
                     public void actionPerformed(ActionEvent e) {
                         settings.activeConfigId = config.id;
                         settings.save();
+                        notifyBackendRefresh();
                         chatView.refreshInputState();
                         chatView.appendMessage("assistant",
                                 "Switched to profile: " + config.name);
@@ -1404,8 +1446,7 @@ public class AiRootPanel extends JPanel implements ChatSurface {
         SettingsDialog dialog = new SettingsDialog(parent, settings);
         dialog.setVisible(true);
         if (dialog.wasConfirmed()) {
-            settings.save();
-            refreshProfileSwitcher();
+            applyConfirmedSettings(dialog.backendSettingsChanged());
         }
     }
 
@@ -1415,9 +1456,19 @@ public class AiRootPanel extends JPanel implements ChatSurface {
         SettingsDialog dialog = new SettingsDialog(parent, settings);
         dialog.openWithProvider(providerId);
         if (dialog.wasConfirmed()) {
-            settings.save();
-            refreshProfileSwitcher();
+            applyConfirmedSettings(dialog.backendSettingsChanged());
         }
+    }
+
+    void applyConfirmedSettings(boolean backendChanged) {
+        settings.save();
+        if (backendChanged) notifyBackendRefresh();
+        refreshProfileSwitcher();
+    }
+
+    private void notifyBackendRefresh() {
+        Runnable listener = backendRefreshListener;
+        if (listener != null) listener.run();
     }
 
     private void runFirstRunFlipNoticeIfNeeded() {
@@ -1472,17 +1523,22 @@ public class AiRootPanel extends JPanel implements ChatSurface {
         Map<String, MergeFunction.LiveResult> live =
                 new LinkedHashMap<String, MergeFunction.LiveResult>();
         List<String> failed = new ArrayList<String>();
+        Map<String, MergeFunction.LiveResult> discovered = discovery.discoverAll(timeout);
 
         for (String providerId : endpoints.keySet()) {
-            if (ProviderDiscovery.CURATED_ONLY.contains(providerId)) {
-                live.put(providerId, MergeFunction.LiveResult.failure());
-                continue;
+            MergeFunction.LiveResult result = discovered.get(providerId);
+            if (result == null) {
+                result = MergeFunction.LiveResult.failure("discovery returned no result");
             }
-            MergeFunction.LiveResult result = discovery.discover(providerId, timeout);
             if (result.successful()) {
                 try {
                     cache.write(providerId, fetchedAt,
                             endpoints.get(providerId).url(), result.modelIds());
+                    int skipped = cache.lastRejectedModelCount();
+                    if (skipped > 0) {
+                        IJ.log("[ImageJAI] " + providerId + ": skipped " + skipped
+                                + " model id(s) the launch policy cannot use.");
+                    }
                 } catch (Exception ex) {
                     IJ.log("[ImageJAI] Failed to write cache for "
                             + providerId + ": " + ex.getMessage());
@@ -1625,10 +1681,13 @@ public class AiRootPanel extends JPanel implements ChatSurface {
         try (InputStream in = ProviderRegistry.class
                 .getResourceAsStream(ProviderRegistry.BUNDLED_RESOURCE)) {
             if (in == null) {
+                IJ.log("[ImageJAI] Bundled model registry is missing; model list is incomplete");
                 return java.util.Collections.emptyList();
             }
             return ModelsYamlLoader.loadFromStream(in);
         } catch (Exception ex) {
+            IJ.log("[ImageJAI] Bundled model registry failed to load ("
+                    + ex.getClass().getSimpleName() + ")");
             return java.util.Collections.emptyList();
         }
     }
@@ -1637,8 +1696,14 @@ public class AiRootPanel extends JPanel implements ChatSurface {
         try {
             ModelsLocalLoader loader = new ModelsLocalLoader(
                     ModelsLocalLoader.resolveDefaultPath());
-            return loader.loadAsMap();
+            Map<String, ModelsLocalLoader.Override> loaded = loader.loadAsMap();
+            if (!loader.lastError().isEmpty()) {
+                IJ.log("[ImageJAI] " + loader.lastError());
+            }
+            return loaded;
         } catch (Exception ex) {
+            IJ.log("[ImageJAI] Model overrides failed to load ("
+                    + ex.getClass().getSimpleName() + ")");
             return java.util.Collections.emptyMap();
         }
     }
@@ -1716,28 +1781,7 @@ public class AiRootPanel extends JPanel implements ChatSurface {
      * the picker on the EDT. Bundled models stay visible until it completes.
      */
     private void triggerStartupRefresh() {
-        javax.swing.SwingWorker<ModelPickerButton.RefreshOutcome, Void> worker =
-                new javax.swing.SwingWorker<ModelPickerButton.RefreshOutcome, Void>() {
-                    @Override
-                    protected ModelPickerButton.RefreshOutcome doInBackground() {
-                        return runRefreshOffEdt();
-                    }
-
-                    @Override
-                    protected void done() {
-                        try {
-                            ModelPickerButton.RefreshOutcome outcome = get();
-                            if (outcome != null && outcome.newRegistry != null
-                                    && modelPicker != null) {
-                                modelPicker.setRegistry(outcome.newRegistry);
-                            }
-                        } catch (Exception ex) {
-                            IJ.log("[ImageJAI] Startup model refresh failed: "
-                                    + ex.getMessage());
-                        }
-                    }
-                };
-        worker.execute();
+        if (modelPicker != null) modelPicker.refreshAsync();
     }
 
     private static Set<String> collectModelKeys(ProviderRegistry registry) {

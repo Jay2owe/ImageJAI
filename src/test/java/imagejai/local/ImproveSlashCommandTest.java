@@ -10,6 +10,9 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicReference;
+
+import javax.swing.SwingUtilities;
 
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
@@ -108,6 +111,50 @@ public class ImproveSlashCommandTest {
         assertFalse(assistant.improveSessionForTest().isPresent());
     }
 
+    @Test
+    public void improveNeverScansJournalOrMatchesOnSwingEventThread() throws Exception {
+        Path root = Files.createTempDirectory("imagejai-friction-edt");
+        write(root.resolve(FrictionLogJournal.FILE_NAME), jsonLine(1, "how many frames"));
+        FrictionLogJournal journal = new FrictionLogJournal(root);
+        FrictionLog log = new FrictionLog();
+        log.setJournal(journal);
+        IntentLibrary library = IntentLibrary.load();
+        Path yaml = Files.createTempFile("imagejai-intents", ".yaml");
+        write(yaml, "- id: image.stack_counts\n  seeds: [\"x\"]\n");
+        SlashCommandRegistry registry = new SlashCommandRegistry();
+        registry.register(new ImproveSlashCommand(yaml));
+        final LocalAssistant assistant = new LocalAssistant(
+                library, new IntentMatcher(library), null, log,
+                new IntentRouter(), null, registry);
+        final AtomicReference<AssistantReply> reply = new AtomicReference<AssistantReply>();
+
+        SwingUtilities.invokeAndWait(new Runnable() {
+            public void run() {
+                reply.set(assistant.handle("/improve"));
+            }
+        });
+
+        assertTrue(reply.get().text().contains("Cannot run /improve on the Swing event thread"));
+        assertFalse(assistant.improveSessionForTest().isPresent());
+    }
+
+    @Test
+    public void improveRanksOnlyTheRequestedNumberOfTopBuckets() throws Exception {
+        Path root = Files.createTempDirectory("imagejai-friction-bounded");
+        StringBuilder rows = new StringBuilder();
+        for (int i = 0; i < 12; i++) {
+            rows.append(jsonLine(i + 1, "unmatched phrase " + i));
+        }
+        write(root.resolve(FrictionLogJournal.FILE_NAME), rows.toString());
+        CountingMatcher matcher = new CountingMatcher();
+
+        List<ImproveAnalysis.MissBucket> buckets = ImproveAnalysis.fromJournal(
+                new FrictionLogJournal(root), matcher, 3);
+
+        assertTrue(buckets.size() == 3);
+        assertTrue(matcher.calls == 3);
+    }
+
     private static void writeMisses(Path root) throws Exception {
         StringBuilder sb = new StringBuilder();
         for (int i = 0; i < 5; i++) {
@@ -132,5 +179,15 @@ public class ImproveSlashCommandTest {
 
     private static String read(Path path) throws Exception {
         return new String(Files.readAllBytes(path), StandardCharsets.UTF_8);
+    }
+
+    private static final class CountingMatcher extends IntentMatcher {
+        int calls;
+
+        @Override
+        public List<RankedPhrase> topK(String input, int k) {
+            calls++;
+            return java.util.Collections.emptyList();
+        }
     }
 }

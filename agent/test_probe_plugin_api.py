@@ -16,7 +16,7 @@ SPEC.loader.exec_module(probe_plugin)
 
 def write_cached_probe(cache_dir: Path, plugin_name: str, payload: dict) -> Path:
     path = cache_dir / probe_plugin.cache_key(plugin_name)
-    path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    probe_plugin._write_cache_record(str(path), plugin_name, payload)
     return path
 
 
@@ -48,10 +48,11 @@ def test_public_api_exports_new_helpers_and_compatibility_names():
     assert probe_plugin.format_result is probe_plugin.format_probe_result
 
 
-def test_cache_key_keeps_existing_safe_filename_shape():
-    assert probe_plugin.cache_key("Gaussian Blur...") == "Gaussian_Blur.json"
-    assert probe_plugin.cache_key("Analyze Particles...") == "Analyze_Particles.json"
-    assert probe_plugin.cache_key("CLIJ2-GPU Filter") == "CLIJ2-GPU_Filter.json"
+def test_cache_key_is_safe_stable_and_collision_resistant():
+    gaussian = probe_plugin.cache_key("Gaussian Blur...")
+    assert gaussian.startswith("Gaussian_Blur-") and gaussian.endswith(".json")
+    assert gaussian == probe_plugin.cache_key("Gaussian Blur...")
+    assert probe_plugin.cache_key("Same Name...") != probe_plugin.cache_key("Same Name!!!")
 
 
 def test_probe_plugin_reads_cache_without_contacting_fiji(tmp_path, monkeypatch):
@@ -93,7 +94,10 @@ def test_probe_plugin_fallback_sends_expected_payload_and_caches(tmp_path, monke
     assert probe_plugin.probe_plugin("Median...") == result
     assert calls == [{"command": "probe_command", "plugin": "Median..."}]
     cache_path = tmp_path / probe_plugin.cache_key("Median...")
-    assert json.loads(cache_path.read_text(encoding="utf-8")) == result
+    record = json.loads(cache_path.read_text(encoding="utf-8"))
+    assert record["schema_version"] == probe_plugin.CACHE_SCHEMA_VERSION
+    assert record["plugin"] == "Median..."
+    assert record["result"] == result
 
     calls.clear()
     assert probe_plugin.probe_plugin("Median...") == result
@@ -154,6 +158,43 @@ def test_search_and_list_cached_probes_use_temp_cache(tmp_path, monkeypatch):
     assert probe_plugin.search_cached_probes("threshold") == [alpha]
     assert probe_plugin.search_cached_probes("SIGMA") == [beta]
     assert probe_plugin.list_cached_probes() == ["Alpha Threshold", "Beta Blur"]
+
+
+def test_plugin_fingerprint_change_invalidates_cache(tmp_path, monkeypatch):
+    monkeypatch.setattr(probe_plugin, "CACHE_DIR", str(tmp_path))
+    fingerprint = {"value": "fiji-a"}
+    monkeypatch.setattr(probe_plugin, "plugin_fingerprint", lambda: fingerprint["value"])
+    payload = {"plugin": "Variant...", "fields": []}
+    write_cached_probe(tmp_path, "Variant...", payload)
+    assert probe_plugin.lookup_cached_probe("Variant...") == payload
+
+    fingerprint["value"] = "fiji-b"
+    assert probe_plugin.lookup_cached_probe("Variant...") is None
+    assert probe_plugin.list_cached_probes() == []
+
+
+def test_corrupt_and_failed_cache_writes_do_not_replace_good_record(tmp_path, monkeypatch):
+    monkeypatch.setattr(probe_plugin, "CACHE_DIR", str(tmp_path))
+    path = write_cached_probe(tmp_path, "Atomic...", {"plugin": "Atomic...", "value": 1})
+    original = path.read_bytes()
+
+    def fail_dump(*_args, **_kwargs):
+        raise TypeError("not serializable")
+
+    monkeypatch.setattr(probe_plugin.json, "dump", fail_dump)
+    try:
+        probe_plugin._write_cache_record(
+            str(path), "Atomic...", {"plugin": "Atomic...", "bad": object()}
+        )
+    except TypeError:
+        pass
+    else:
+        raise AssertionError("failed serialization should surface")
+    assert path.read_bytes() == original
+
+    corrupt = tmp_path / "corrupt.json"
+    corrupt.write_text("{", encoding="utf-8")
+    assert probe_plugin.search_cached_probes("anything") == []
 
 
 def test_probe_plugins_preserves_order_and_force(monkeypatch):

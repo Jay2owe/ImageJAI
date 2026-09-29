@@ -61,6 +61,7 @@ public final class ModelsLocalLoader {
     public static final String FILENAME = "models_local.yaml";
 
     private final Path filePath;
+    private volatile String lastError = "";
 
     public ModelsLocalLoader(Path filePath) {
         this.filePath = Objects.requireNonNull(filePath, "filePath");
@@ -69,6 +70,8 @@ public final class ModelsLocalLoader {
     public Path filePath() {
         return filePath;
     }
+
+    public String lastError() { return lastError; }
 
     /**
      * Resolve the platform-appropriate config root. Used by the production
@@ -98,6 +101,7 @@ public final class ModelsLocalLoader {
     @SuppressWarnings("unchecked")
     public List<Override> load() {
         if (!Files.exists(filePath)) {
+            lastError = "";
             return Collections.emptyList();
         }
         try (InputStream in = Files.newInputStream(filePath)) {
@@ -106,10 +110,12 @@ public final class ModelsLocalLoader {
             Yaml yaml = new Yaml(new SafeConstructor(options));
             Object root = yaml.load(in);
             if (!(root instanceof Map)) {
+                reportCorruption("top-level YAML is not an object");
                 return Collections.emptyList();
             }
             Object overridesObj = ((Map<String, Object>) root).get("overrides");
             if (!(overridesObj instanceof List)) {
+                reportCorruption("missing overrides list");
                 return Collections.emptyList();
             }
             List<Override> out = new ArrayList<Override>();
@@ -127,8 +133,12 @@ public final class ModelsLocalLoader {
                 Boolean hidden = optBool(row.get("hidden"));
                 out.add(new Override(provider.toLowerCase(), modelId, pinned, hidden));
             }
+            lastError = "";
             return out;
-        } catch (IOException ex) {
+        } catch (IOException | RuntimeException ex) {
+            lastError = "Model overrides failed to load ("
+                    + ex.getClass().getSimpleName() + ").";
+            System.err.println("[ImageJAI] " + lastError);
             return Collections.emptyList();
         }
     }
@@ -147,6 +157,18 @@ public final class ModelsLocalLoader {
      * file then rename — protects against torn writes from concurrent agents).
      */
     public void save(List<Override> overrides) throws IOException {
+        try {
+            saveInternal(overrides);
+            lastError = "";
+        } catch (IOException | RuntimeException failure) {
+            lastError = "Model overrides failed to save ("
+                    + failure.getClass().getSimpleName() + ").";
+            System.err.println("[ImageJAI] " + lastError);
+            throw failure;
+        }
+    }
+
+    private void saveInternal(List<Override> overrides) throws IOException {
         Path parent = filePath.getParent();
         if (parent != null && !Files.exists(parent)) {
             Files.createDirectories(parent);
@@ -197,5 +219,10 @@ public final class ModelsLocalLoader {
         if (s.equals("true") || s.equals("yes")) return Boolean.TRUE;
         if (s.equals("false") || s.equals("no")) return Boolean.FALSE;
         return null;
+    }
+
+    private void reportCorruption(String reason) {
+        lastError = "Model overrides are corrupt: " + reason + ".";
+        System.err.println("[ImageJAI] " + lastError);
     }
 }

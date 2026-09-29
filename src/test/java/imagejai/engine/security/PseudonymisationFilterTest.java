@@ -4,6 +4,8 @@ import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 import imagejai.config.PrivacyPosture;
 import org.junit.Test;
+import org.junit.experimental.categories.Category;
+import imagejai.test.Benchmark;
 
 import java.nio.file.Paths;
 
@@ -164,6 +166,57 @@ public class PseudonymisationFilterTest {
     }
 
     @Test
+    public void freeTextMatcherIsCachedUntilTokenMapVersionChanges() {
+        PathTokenMap map = new PathTokenMap(bytes(31));
+        String firstToken = map.tokenForSensitiveText("subject-017", "label");
+        PseudonymisationFilter filter = filter(map);
+
+        assertEquals(firstToken, filter.freeTextScrubString("subject-017"));
+        assertEquals(firstToken, filter.freeTextScrubString("subject-017"));
+        assertEquals(1L, filter.matcherBuildCountForTest());
+
+        String secondToken = map.tokenForSensitiveText("visit-3", "label");
+        assertEquals(secondToken, filter.freeTextScrubString("visit-3"));
+        assertEquals(2L, filter.matcherBuildCountForTest());
+    }
+
+    @Test
+    public void oversizedFreeTextFailsClosedInsteadOfReturningEmptySuccess() {
+        PathTokenMap map = new PathTokenMap(bytes(32));
+        map.tokenForSensitiveText("subject-017", "label");
+        PseudonymisationFilter filter = filter(map);
+        JsonObject response = okObject();
+        StringBuilder oversized = new StringBuilder(
+                PseudonymisationFilter.MAX_FREE_TEXT_CHARS + 1);
+        while (oversized.length() <= PseudonymisationFilter.MAX_FREE_TEXT_CHARS) {
+            oversized.append('x');
+        }
+        response.getAsJsonObject("result").addProperty("log", oversized.toString());
+
+        RedactionReport report = filter.apply(response, "get_state",
+                PrivacyPosture.PSEUDONYMISED, "s");
+
+        assertTrue(report.failed());
+        assertFalse(response.get("ok").getAsBoolean());
+        assertEquals("redaction_failed", response.get("error").getAsString());
+        assertFalse(response.has("result"));
+    }
+
+    @Test
+    public void cachedMatcherPreservesDeterministicLongestMatchWithManyTokens() {
+        PathTokenMap map = new PathTokenMap(bytes(33));
+        for (int i = 0; i < 500; i++) {
+            map.tokenForSensitiveText("prefix-" + i, "label");
+        }
+        String longest = map.tokenForSensitiveText("prefix-499-extra", "label");
+        PseudonymisationFilter filter = filter(map);
+
+        assertEquals(longest + " done",
+                filter.freeTextScrubString("prefix-499-extra done"));
+        assertEquals(1L, filter.matcherBuildCountForTest());
+    }
+
+    @Test
     public void governanceBlockIsPresentEvenWhenNothingChanged() {
         PseudonymisationFilter filter = filter(new PathTokenMap(bytes(7)));
         JsonObject response = okObject();
@@ -174,6 +227,58 @@ public class PseudonymisationFilterTest {
         assertTrue(response.has("_governance"));
         assertEquals(0, response.getAsJsonObject("_governance")
                 .getAsJsonArray("fields_pseudonymised").size());
+    }
+
+    /**
+     * A realistic {@code get_ui_tree} used to destroy itself.
+     *
+     * <p>Every node carries an {@code index_path} such as {@code menu_bar/3/10/1}.
+     * That key matched the {@code *_path} rule and the value looks path-like
+     * because of the slashes, so each node minted its own path token. ImageJ's
+     * main window publishes a couple of thousand nodes — more than
+     * {@link PathTokenMap#MAX_PATH_TOKENS} — so the map threw, the filter failed
+     * closed, and the caller got {@code redaction_failed} instead of a tree.
+     */
+    @Test
+    public void uiTreeIndexPathsAreNotTreatedAsFilesystemPaths() {
+        PathTokenMap map = new PathTokenMap(bytes(41));
+        PseudonymisationFilter filter = filter(map);
+        JsonObject response = okObject();
+        JsonArray nodes = new JsonArray();
+        for (int i = 0; i < PathTokenMap.MAX_PATH_TOKENS + 64; i++) {
+            JsonObject node = new JsonObject();
+            node.addProperty("index_path", "menu_bar/3/" + i + "/1");
+            node.addProperty("role", "menu_item");
+            nodes.add(node);
+        }
+        response.getAsJsonObject("result").add("nodes", nodes);
+
+        filter.apply(response, "get_ui_tree", PrivacyPosture.PSEUDONYMISED, "s");
+
+        assertTrue("a UI tree must survive redaction",
+                response.get("ok").getAsBoolean());
+        assertEquals(PathTokenMap.MAX_PATH_TOKENS + 64,
+                response.getAsJsonObject("result").getAsJsonArray("nodes").size());
+        assertEquals("menu_bar/3/7/1",
+                response.getAsJsonObject("result").getAsJsonArray("nodes")
+                        .get(7).getAsJsonObject().get("index_path").getAsString());
+    }
+
+    /** A real path under a path-typed key is still tokenised, unchanged. */
+    @Test
+    public void realPathsRemainTokenisedAlongsideIndexPaths() {
+        PathTokenMap map = new PathTokenMap(bytes(42));
+        PseudonymisationFilter filter = filter(map);
+        JsonObject response = okObject();
+        JsonObject result = response.getAsJsonObject("result");
+        result.addProperty("index_path", "menu_bar/1/2");
+        result.addProperty("file_path", "C:\\study\\MOAB2_subject_017.lif");
+
+        filter.apply(response, "get_ui_tree", PrivacyPosture.PSEUDONYMISED, "s");
+
+        assertEquals("menu_bar/1/2", result.get("index_path").getAsString());
+        assertFalse(result.get("file_path").getAsString().contains("subject_017"));
+        assertTrue(result.get("file_path").getAsString().startsWith("image-"));
     }
 
     @Test
@@ -417,6 +522,7 @@ public class PseudonymisationFilterTest {
     }
 
     @Test
+    @Category(Benchmark.class)
     public void fiftyKilobytePayloadFiltersUnderTenMillisecondsOnAverage() {
         PathTokenMap map = new PathTokenMap(bytes(18));
         PseudonymisationFilter filter = filter(map);
@@ -441,6 +547,7 @@ public class PseudonymisationFilterTest {
 
         assertTrue("average filter time was " + averageMs + " ms", averageMs < 10.0);
     }
+
 
     private static PseudonymisationFilter filter(PathTokenMap map) {
         return new PseudonymisationFilter(map, new OmeXmlScrubber(),

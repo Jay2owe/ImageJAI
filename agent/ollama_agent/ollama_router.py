@@ -26,6 +26,15 @@ import time
 from pathlib import Path
 
 try:
+    from .tcp_frames import recv_bounded
+    from .agentconsole_tcp import send_agentconsole
+    from .legacy_tool_policy import allowed_tools_for_model, dispatch_tool_for_model
+except ImportError:
+    from tcp_frames import recv_bounded
+    from agentconsole_tcp import send_agentconsole
+    from legacy_tool_policy import allowed_tools_for_model, dispatch_tool_for_model  # type: ignore
+
+try:
     import ollama
 except ImportError:
     ollama = None
@@ -81,16 +90,13 @@ def _tcp(port: int, cmd: str, timeout: float = 5) -> str:
     try:
         with socket.create_connection(("127.0.0.1", port), timeout=timeout) as s:
             s.sendall(f"{cmd}\n".encode())
-            chunks = []
-            while True:
-                try:
-                    data = s.recv(8192)
-                    if not data:
-                        break
-                    chunks.append(data.decode(errors="replace"))
-                except socket.timeout:
-                    break
-            return "".join(chunks).strip() or "OK"
+            try:
+                reply = recv_bounded(s)
+            except socket.timeout:
+                reply = b""
+            return reply.decode(errors="replace").strip() or "OK"
+    except ValueError as e:
+        return f"ERROR: service on port {port} returned an invalid reply ({e})"
     except (ConnectionRefusedError, OSError) as e:
         return f"ERROR: service on port {port} not reachable ({e})"
 
@@ -142,7 +148,7 @@ def agent_command(command: str) -> str:
         command: e.g. list, status, cost, spawn 1 claude, kill agent-1,
                  send 'hello' to agent-1
     """
-    return _tcp(7745, command)
+    return send_agentconsole(command)
 
 
 def tv_control(command: str) -> str:
@@ -297,12 +303,13 @@ def _run_tool_loop(model: str, text: str) -> tuple[bool, str, Exception | None]:
     the loop aborted before producing a meaningful answer.
     """
     messages = [{"role": "user", "content": text}]
+    schema_tools = allowed_tools_for_model(model, ALL_TOOLS)
     try:
         for _ in range(MAX_ROUNDS):
             resp = ollama.chat(
                 model=model,
                 messages=messages,
-                tools=ALL_TOOLS,
+                tools=schema_tools,
                 stream=False,
                 keep_alive="5m",
                 options={"temperature": 0.2, "num_predict": 256},
@@ -319,13 +326,8 @@ def _run_tool_loop(model: str, text: str) -> tuple[bool, str, Exception | None]:
             for tc in msg.tool_calls:
                 name = tc.function.name
                 args = tc.function.arguments
-                if name not in TOOL_MAP:
-                    log.warning("Gemma called unknown tool: %s", name)
-                    messages.append({"role": "tool", "content": f"ERROR: unknown tool '{name}'"})
-                    continue
-
                 log.info("Tool call: %s(%s)", name, json.dumps(args))
-                result = TOOL_MAP[name](**args)
+                result = dispatch_tool_for_model(model, name, args, TOOL_MAP)
                 log.info("Tool result: %s", result[:200])
                 messages.append({"role": "tool", "content": str(result)})
 
@@ -391,8 +393,7 @@ def create_model():
                       system=_SYSTEM_PROMPT, parameters=_MODEL_PARAMS)
         print(f"Model '{MODEL_NAME}' created successfully.")
         # Invalidate cache
-        global _available_cache
-        _available_cache = None
+        _available_cache.clear()
         return True
     except Exception as e:
         print(f"ERROR creating model: {e}")

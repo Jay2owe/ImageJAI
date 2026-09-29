@@ -1,3 +1,4 @@
+schema_version: 1
 name: Gaussian Blur Denoising
 id: denoise_gaussian
 description: >

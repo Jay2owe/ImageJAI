@@ -1,3 +1,4 @@
+schema_version: 1
 name: 3D Object Counting
 id: 3d_object_counting
 description: >
@@ -64,11 +65,11 @@ steps:
 
   - id: 2
     description: "Determine threshold from histogram"
-    macro: |
-      // Agent should run: python ij.py histogram
-      // Find the valley between background and foreground peaks
-      // Or use: python ij.py explore Otsu Triangle Li
-      // to find the best auto-threshold value
+    type: manual
+    instructions: >
+      Inspect the histogram and find the valley between the background and
+      foreground peaks. Compare Otsu, Triangle, and Li if the choice is unclear,
+      then confirm the threshold parameter before continuing.
     decision_point: true
     decision_logic: >
       Check the histogram for a clear separation between background and signal.
@@ -93,10 +94,10 @@ steps:
 
   - id: 4
     description: "Review 3D object statistics"
-    macro: |
-      // Results are in the Statistics table
-      // Agent should check: python ij.py results
-      // Columns: Volume, Surface, IntDen, Mean, Centroid X/Y/Z
+    type: manual
+    instructions: >
+      Review the Statistics table. Confirm that Volume, Surface, IntDen, Mean,
+      and Centroid X/Y/Z are present and plausible for the dataset.
     decision_point: false
     decision_logic: ""
     capture_after: false

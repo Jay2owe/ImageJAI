@@ -24,11 +24,19 @@ from collections.abc import Callable
 from typing import Any
 
 from anthropic import Anthropic, APIConnectionError, APIStatusError, APITimeoutError
+from agent.ollama_agent.budget_ceiling import estimate_runtime_cost_usd
 
-from .base import ProviderClient, ToolCall, to_anthropic_tool
+from .base import (
+    ProviderClient,
+    ToolCall,
+    encode_capture_image,
+    prune_capture_images,
+    to_anthropic_tool,
+)
 
 
 DEFAULT_MAX_TOKENS = 4096
+MAX_OUTPUT_TOKENS = 32768
 DEFAULT_TIMEOUT_SECONDS = 120.0
 DEFAULT_MAX_RETRIES = 2
 
@@ -69,9 +77,6 @@ def _emit_cost(value: float) -> None:
 
 
 def _estimate_cost_usd(model: str, response: Any) -> float:
-    pricing = ANTHROPIC_PRICING_USD_PER_MTOK.get(model)
-    if not pricing:
-        return 0.0
     usage = getattr(response, "usage", None)
     if usage is None:
         return 0.0
@@ -79,6 +84,9 @@ def _estimate_cost_usd(model: str, response: Any) -> float:
     out_tok = int(getattr(usage, "output_tokens", 0) or 0)
     cache_read = int(getattr(usage, "cache_read_input_tokens", 0) or 0)
     cache_write = int(getattr(usage, "cache_creation_input_tokens", 0) or 0)
+    pricing = ANTHROPIC_PRICING_USD_PER_MTOK.get(model)
+    if not pricing:
+        return estimate_runtime_cost_usd("anthropic", model, in_tok, out_tok)
     # Treat cache reads at 10% of input rate (Anthropic ephemeral caching);
     # cache writes at the standard input rate per Anthropic's billing docs.
     billable_in = in_tok + cache_write + (cache_read * 0.1)
@@ -110,15 +118,16 @@ class AnthropicNativeClient(ProviderClient):
             kwargs["api_key"] = api_key
         self._client = Anthropic(**kwargs)
 
-    def chat(
+    def _chat_kwargs(
         self,
         messages: list[dict[str, Any]],
         tools: list[Callable[..., Any]],
         model: str,
-        **opts: Any,
-    ) -> Any:
+        opts: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Build the messages.create kwargs shared by chat() and chat_stream()."""
         enable_prompt_caching = bool(opts.pop("enable_prompt_caching", True))
-        thinking_budget = int(opts.pop("thinking_budget", 0) or 0)
+        thinking_budget = min(MAX_OUTPUT_TOKENS, max(0, int(opts.pop("thinking_budget", 0) or 0)))
         enable_server_tools = opts.pop("enable_server_tools", None) or []
         if isinstance(enable_server_tools, str):
             enable_server_tools = [enable_server_tools]
@@ -128,7 +137,10 @@ class AnthropicNativeClient(ProviderClient):
         kwargs: dict[str, Any] = {
             "model": model,
             "messages": non_system_messages,
-            "max_tokens": opts.pop("max_tokens", DEFAULT_MAX_TOKENS),
+            "max_tokens": min(
+                MAX_OUTPUT_TOKENS,
+                max(1, int(opts.pop("max_tokens", DEFAULT_MAX_TOKENS))),
+            ),
         }
 
         tool_specs: list[dict[str, Any]] = (
@@ -165,6 +177,17 @@ class AnthropicNativeClient(ProviderClient):
             kwargs["extra_headers"] = extra_headers
 
         kwargs.update(opts)
+        return kwargs
+
+    def chat(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[Callable[..., Any]],
+        model: str,
+        **opts: Any,
+    ) -> Any:
+        """Issue one non-streaming chat completion."""
+        kwargs = self._chat_kwargs(messages, tools, model, opts)
         try:
             response = self._client.messages.create(**kwargs)
         except (APIConnectionError, APIStatusError, APITimeoutError) as exc:
@@ -174,6 +197,55 @@ class AnthropicNativeClient(ProviderClient):
         except Exception:
             pass  # cost listeners must never block a successful call.
         return response
+
+    def chat_stream(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[Callable[..., Any]],
+        model: str,
+        on_delta: Callable[[str], None] | None = None,
+        abort: Any | None = None,
+        on_thinking: Callable[[str], None] | None = None,
+        on_tool_preparing: Callable[[str], None] | None = None,
+        **opts: Any,
+    ) -> Any:
+        """Streaming chat: emits text deltas via ``on_delta`` and returns the
+        same normalised ``Message`` object ``chat()`` would return, so the
+        existing ``extract_*`` / ``append_*`` helpers work unchanged."""
+        kwargs = self._chat_kwargs(messages, tools, model, opts)
+        try:
+            with self._client.messages.stream(**kwargs) as stream:
+                closer = getattr(stream, "close", None)
+                if abort is not None and callable(closer):
+                    abort.register(closer)
+                try:
+                    for event in stream:
+                        if abort is not None and abort.set_flag:
+                            raise InterruptedError("interrupted by user")
+                        if (event.type == "content_block_start"
+                                and event.content_block.type == "tool_use"
+                                and on_tool_preparing is not None):
+                            on_tool_preparing(event.content_block.name)
+                        if event.type == "content_block_delta":
+                            delta = event.delta
+                            if delta.type == "text_delta" and on_delta is not None:
+                                on_delta(delta.text)
+                            elif delta.type == "thinking_delta" and on_thinking is not None:
+                                on_thinking(delta.thinking)
+                    if abort is not None and abort.set_flag:
+                        raise InterruptedError("interrupted by user")
+                    response = stream.get_final_message()
+                finally:
+                    if abort is not None and callable(closer):
+                        abort.unregister(closer)
+        except (APIConnectionError, APIStatusError, APITimeoutError) as exc:
+            raise RuntimeError(f"Anthropic stream failed for model {model!r}: {exc}") from exc
+        try:
+            _emit_cost(_estimate_cost_usd(model, response))
+        except Exception:
+            pass
+        return response
+
 
     @staticmethod
     def _split_system(messages: list[dict[str, Any]]) -> tuple[str, list[dict[str, Any]]]:
@@ -273,18 +345,29 @@ class AnthropicNativeClient(ProviderClient):
         call: ToolCall,
         result: str,
     ) -> None:
-        messages.append(
+        content: list[dict[str, Any]] = [
             {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "tool_result",
-                        "tool_use_id": call.id,
-                        "content": str(result),
-                    }
-                ],
+                "type": "tool_result",
+                "tool_use_id": call.id,
+                "content": str(result),
             }
-        )
+        ]
+        if call.name == "capture_image" and self.may_attach_image():
+            encoded = encode_capture_image(result)
+            if encoded is not None:
+                prune_capture_images(messages)
+                mime_type, data = encoded
+                content.append(
+                    {
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": mime_type,
+                            "data": data,
+                        },
+                    }
+                )
+        messages.append({"role": "user", "content": content})
 
 
 def _block_get(block: Any, key: str) -> Any:

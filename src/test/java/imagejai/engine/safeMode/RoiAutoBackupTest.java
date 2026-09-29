@@ -8,11 +8,13 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.time.Instant;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
+import static org.junit.Assert.assertNotEquals;
 
 /**
  * Stage 05 of {@code docs/safe_mode_v2/} — verify {@link RoiAutoBackup}'s
@@ -101,6 +103,19 @@ public class RoiAutoBackupTest {
         Path sample = dir.resolve(".safemode_roi_20260504T103045Z.zip");
         assertTrue("hidden prefix", sample.getFileName().toString().startsWith(".safemode_roi_"));
         assertTrue("zip extension", sample.getFileName().toString().endsWith(".zip"));
+    }
+
+    @Test
+    public void backupsAtTheSameInstantStillHaveCollisionResistantNames() {
+        Path dir = RoiAutoBackup.resolveBackupDirForTest(null);
+        Instant instant = Instant.parse("2026-05-04T10:30:45.123Z");
+        Path first = RoiAutoBackup.uniqueBackupPath(dir, instant, "token-a");
+        Path second = RoiAutoBackup.uniqueBackupPath(dir, instant, "token-b");
+
+        assertNotEquals(first, second);
+        assertTrue(first.getFileName().toString().contains(".123Z_token-a"));
+        assertTrue(first.getFileName().toString().startsWith(".safemode_roi_"));
+        assertTrue(first.getFileName().toString().endsWith(".zip"));
     }
 
     private static void walkDeleteQuietly(Path root) {
