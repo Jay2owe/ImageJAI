@@ -38,8 +38,11 @@ description.
 
 ## Workflow
 
-1. **Check state** — what images are open, what is selected, what
-   tables already exist. Never assume an image is open.
+1. **Check state once at the start of a task** — what images are open,
+   what is selected, what tables already exist. Reuse that result until
+   an action or event changes Fiji. Do not loop on `get_state` when
+   nothing has changed; if no image is open, ask the user or open the
+   image they named. Use `get_open_windows` for a targeted window check.
 2. **Check metadata** — is the image calibrated (μm vs px)? What
    are the channels, time points, z-slices? Bio-Formats metadata
    matters for measurement units.

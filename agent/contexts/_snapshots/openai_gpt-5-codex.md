@@ -38,8 +38,11 @@ description.
 
 ## Workflow
 
-1. **Check state** — what images are open, what is selected, what
-   tables already exist. Never assume an image is open.
+1. **Check state once at the start of a task** — what images are open,
+   what is selected, what tables already exist. Reuse that result until
+   an action or event changes Fiji. Do not loop on `get_state` when
+   nothing has changed; if no image is open, ask the user or open the
+   image they named. Use `get_open_windows` for a targeted window check.
 2. **Check metadata** — is the image calibrated (μm vs px)? What
    are the channels, time points, z-slices? Bio-Formats metadata
    matters for measurement units.
@@ -356,12 +359,16 @@ You operate Fiji by typing shell commands in a terminal. For multi-step
 work, use `imagej-use-auto`: it reads one Python program from stdin and
 preloads semantic helpers bound to one authenticated ImageJ session.
 
+Sample command labels vary between Fiji versions (for example `Blobs` versus
+`Blobs (25K)`). Use the installed command list from `scan_plugins.py`; the
+examples below assume that list contains `Blobs`. Never invent a size suffix.
+
 PowerShell:
 
 ```powershell
 @'
 print(get_state())
-print(run_macro('run("Blobs (25K)");'))
+print(run_macro('run("Blobs");'))
 print(screenshot_to_path('.tmp/after_blobs.png'))
 event = wait_for_event(
     ['macro.completed'],
@@ -377,7 +384,7 @@ Bash/zsh:
 ```bash
 imagej-use-auto <<'PY'
 print(get_state())
-print(run_macro('run("Blobs (25K)");'))
+print(run_macro('run("Blobs");'))
 print(screenshot_to_path('.tmp/after_blobs.png'))
 PY
 ```
@@ -402,9 +409,33 @@ only the same command plus that ID.
 
 For one-shot shell operations, use `ij.py`:
 
+On Windows, send macro source through a pipe or a UTF-8 `.ijm` file.
+PowerShell can remove embedded double quotes from native command arguments,
+so `python ij.py macro 'run("Blobs");'` can arrive as `run(Blobs);` and be
+blocked as a dynamic command. Do not disable safe mode or request elevation
+for a quoting error. Preserve the original quoted source:
+
+```powershell
+@'
+run("Blobs");
+'@ | python ij.py macro --stdin
+python ij.py macro --file .tmp/analysis.ijm
+```
+
+In Bash, use a quoted heredoc when sending macro source through stdin:
+
+```bash
+python ij.py macro --stdin <<'IJM'
+run("Blobs");
+IJM
+```
+
+The same `--stdin` and `--file` options work with `async` and `run_patient`.
+`python ij.py macro --help` shows usage without running a macro.
+
 ```bash
 python ij.py ping                                    # test connection
-python ij.py macro 'run("Blobs (25K)");'             # run macro code
+python ij.py macro 'run("Blobs");'                    # use the installed label
 python ij.py state                                    # full ImageJ state
 python ij.py info                                     # active image details
 python ij.py results                                  # measurements as CSV
