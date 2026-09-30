@@ -734,6 +734,7 @@ def test_settings_cancel_validate_and_save(isolated_home, fake_fiji, monkeypatch
     async def _inner():
         app = tui_mod.ConsoleApp(ConsoleConfig.load())
         app.fiji = fake_fiji(app.config.host, app.config.port)
+        app._start_fiji_worker = lambda: None  # enabling auto-start must not launch Fiji
         async with app.run_test(size=(120, 40)) as pilot:
             await pilot.pause(0.2)
             app._slash("/settings")
