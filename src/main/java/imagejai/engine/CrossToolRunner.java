@@ -21,7 +21,7 @@ import java.util.concurrent.TimeUnit;
  * Uses {@link ProcessBuilder} to launch processes, writes script content
  * to temp files, captures stdout/stderr, and enforces timeouts.
  * <p>
- * Compiled for Java 11: process-tree control uses {@link ProcessHandle}.
+ * Process-tree control goes through {@link ProcessTrees} so it also runs on Java 8.
  */
 public class CrossToolRunner {
 
@@ -337,26 +337,16 @@ public class CrossToolRunner {
     /** Terminate descendants before their parent so they cannot be orphaned. */
     static void terminateProcessTree(Process process) {
         if (process == null) return;
-        List<ProcessHandle> descendants = new ArrayList<ProcessHandle>();
-        try {
-            process.toHandle().descendants().forEach(descendants::add);
-            // PIDs are allocation identifiers, not a process-tree ordering.  Killing a
-            // parent before its child can orphan the child and make later discovery
-            // unreliable, so take the ancestry depth while the tree is still intact.
-            descendants.sort(Comparator
-                    .comparingInt(CrossToolRunner::processAncestryDepth)
-                    .reversed());
-            for (ProcessHandle child : descendants) {
-                try { child.destroy(); } catch (Throwable ignore) {}
-            }
-            for (ProcessHandle child : descendants) {
-                try {
-                    if (child.isAlive()) child.destroyForcibly();
-                } catch (Throwable ignore) {}
-            }
-        } catch (Throwable ignore) {
-            // ProcessHandle discovery is best-effort on unusual JVMs.
+        List<Object> descendants = ProcessTrees.descendants(process);
+        // PIDs are allocation identifiers, not a process-tree ordering.  Killing a
+        // parent before its child can orphan the child and make later discovery
+        // unreliable, so take the ancestry depth while the tree is still intact.
+        ProcessTrees.sortDeepestFirst(descendants);
+        for (Object child : descendants) ProcessTrees.destroy(child);
+        for (Object child : descendants) {
+            if (ProcessTrees.isAlive(child)) ProcessTrees.destroyForcibly(child);
         }
+        ProcessTrees.killDescendantsWithoutHandles(process);
         try { process.destroy(); } catch (Throwable ignore) {}
         try {
             if (!process.waitFor(TERMINATION_GRACE_MS, TimeUnit.MILLISECONDS)) {
@@ -367,26 +357,9 @@ public class CrossToolRunner {
             try { process.destroyForcibly(); } catch (Throwable ignore) {}
             Thread.currentThread().interrupt();
         } catch (Throwable ignore) {}
-        for (ProcessHandle child : descendants) {
-            try { if (child.isAlive()) child.destroyForcibly(); } catch (Throwable ignore) {}
+        for (Object child : descendants) {
+            if (ProcessTrees.isAlive(child)) ProcessTrees.destroyForcibly(child);
         }
-    }
-
-    private static int processAncestryDepth(ProcessHandle process) {
-        int depth = 0;
-        ProcessHandle current = process;
-        // A defensive cap protects against a pathological platform implementation.
-        while (depth < 1024) {
-            try {
-                java.util.Optional<ProcessHandle> parent = current.parent();
-                if (!parent.isPresent()) break;
-                current = parent.get();
-                depth++;
-            } catch (Throwable ignored) {
-                break;
-            }
-        }
-        return depth;
     }
 
     /**

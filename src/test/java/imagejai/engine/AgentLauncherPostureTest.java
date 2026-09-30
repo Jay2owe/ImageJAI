@@ -87,7 +87,7 @@ public class AgentLauncherPostureTest {
                 "gemma4:31b-cloud");
 
         try {
-            launcher.buildEmbeddedLaunchSpec(gemma);
+            launcher.buildExternalLaunchSpec(gemma);
             fail("Expected PostureViolation");
         } catch (PostureViolation violation) {
             assertEquals(AgentLauncher.CLOUD_OLLAMA_REFUSAL, violation.getMessage());
@@ -108,7 +108,7 @@ public class AgentLauncherPostureTest {
                 true,
                 "gemma4:31b-cloud");
 
-        AgentLaunchSpec spec = launcher.buildEmbeddedLaunchSpec(gemma);
+        AgentLaunchSpec spec = launcher.buildExternalLaunchSpec(gemma);
 
         assertTrue(spec.isLocal());
         assertTrue(spec.agentCommand.toString().contains("gemma4_31b_agent"));
@@ -163,7 +163,7 @@ public class AgentLauncherPostureTest {
                 true,
                 "gemma4:31b-cloud");
 
-        AgentLaunchSpec spec = launcher.buildEmbeddedLaunchSpec(gemma);
+        AgentLaunchSpec spec = launcher.buildExternalLaunchSpec(gemma);
         String pythonPath = spec.env.get("PYTHONPATH");
 
         assertTrue("Bundled Gemma must receive PYTHONPATH", pythonPath != null);
@@ -255,7 +255,7 @@ public class AgentLauncherPostureTest {
                 "deepseek-v3.2:cloud");
 
         try {
-            launcher.buildEmbeddedLaunchSpec(deepseek);
+            launcher.buildExternalLaunchSpec(deepseek);
             fail("Expected PostureViolation");
         } catch (PostureViolation violation) {
             assertEquals(AgentLauncher.CLOUD_OLLAMA_REFUSAL, violation.getMessage());

@@ -5,24 +5,16 @@ contains the following third-party software and font resources. Versions below
 are the versions embedded by `pom.xml`; source and license texts are available
 from the linked upstream projects.
 
-## Embedded terminal and native-process support
+## Native-process support
 
-- **JediTerm core and UI 3.66** — LGPL-3.0.
-  Source: https://github.com/JetBrains/jediterm
-- **pty4j 0.13.12** — EPL-1.0.
-  Source: https://github.com/JetBrains/pty4j
 - **Java Native Access (JNA and JNA Platform) 5.13.0** — available under
   LGPL-2.1-or-later or Apache-2.0.
   Source: https://github.com/java-native-access/jna
-- **Kotlin standard library 2.1.21** — Apache-2.0.
-  Source: https://github.com/JetBrains/kotlin
-- **JetBrains Java annotations 24.0.1** — Apache-2.0.
-  Source: https://github.com/JetBrains/java-annotations
-- **SLF4J API 1.7.36** — MIT.
-  Source: https://github.com/qos-ch/slf4j
 
 ## Configuration and document support
 
+- **Gson 2.10.1** — Apache-2.0. Relocated to `imagejai.shaded.gson`.
+  Source: https://github.com/google/gson
 - **SnakeYAML 2.2** — Apache-2.0.
   Source: https://bitbucket.org/snakeyaml/snakeyaml
 - **Apache PDFBox, PDFBox IO, and FontBox 3.0.2** — Apache-2.0.

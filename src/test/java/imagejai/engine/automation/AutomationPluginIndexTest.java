@@ -1,11 +1,10 @@
 package imagejai.engine.automation;
 
 import com.google.gson.JsonObject;
-import com.google.gson.JsonParser;
+import com.google.gson.JsonStreamParser;
 import org.junit.Test;
 import org.scijava.service.Service;
 
-import java.io.BufferedReader;
 import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.nio.charset.StandardCharsets;
@@ -21,12 +20,11 @@ public class AutomationPluginIndexTest {
         InputStream stream = getClass().getClassLoader().getResourceAsStream(resource);
         assertNotNull("Missing SciJava plugin index", stream);
         boolean registered = false;
-        try (BufferedReader reader = new BufferedReader(
-                new InputStreamReader(stream, StandardCharsets.UTF_8))) {
-            String line;
-            while ((line = reader.readLine()) != null) {
-                if (line.trim().isEmpty()) continue;
-                JsonObject entry = JsonParser.parseString(line).getAsJsonObject();
+        // The annotation processor writes entries back to back, not one per line.
+        try (InputStreamReader reader = new InputStreamReader(stream, StandardCharsets.UTF_8)) {
+            JsonStreamParser entries = new JsonStreamParser(reader);
+            while (entries.hasNext()) {
+                JsonObject entry = entries.next().getAsJsonObject();
                 if (AutomationBootstrapService.class.getName().equals(
                         entry.get("class").getAsString())) {
                     assertEquals(Service.class.getName(), entry.getAsJsonObject("values")

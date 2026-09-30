@@ -1,11 +1,7 @@
 package imagejai.engine.security;
 
-import imagejai.engine.AgentLauncher;
-import imagejai.engine.AgentSession;
 import org.junit.Test;
 
-import java.io.ByteArrayInputStream;
-import java.io.InputStream;
 import java.util.Arrays;
 import java.util.LinkedHashMap;
 import java.util.Map;
@@ -51,68 +47,11 @@ public class BriefNudgerTest {
         assertEquals("", toast.toString());
     }
 
-    @Test
-    public void embeddedPtyDeliveryUsesPtySendText() {
-        BriefNudger nudger = new BriefNudger();
-        FakeEmbeddedSession session = new FakeEmbeddedSession();
-
-        nudger.deliver(brief(), BriefNudger.NudgeMechanism.EMBEDDED_PTY, session);
-
-        assertTrue(session.pty.sent.toString().contains("image-7a3f.lif:1"));
-        assertTrue(session.pty.sent.toString().contains("get_pending_brief"));
-        assertTrue(session.pty.sent.toString().endsWith("\n"));
-        assertEquals("", session.input.toString());
-    }
-
-    @Test
-    public void embeddedFallbackWritesToAgentInput() {
-        BriefNudger nudger = new BriefNudger();
-        FakeSession session = new FakeSession();
-
-        nudger.deliver(brief(), BriefNudger.NudgeMechanism.EMBEDDED_PTY, session);
-
-        assertTrue(session.input.toString().contains("image-7a3f.lif:1"));
-        assertTrue(session.input.toString().contains("get_pending_brief"));
-    }
-
     private static Brief brief() {
         Map<String, Object> metadata = new LinkedHashMap<String, Object>();
         metadata.put("channels", 4);
         metadata.put("dimensions", "64x64x5");
         return new Brief("s1", Arrays.asList("image-7a3f.lif:1"),
                 "8 weeks, wild-type", metadata);
-    }
-
-    private static final class FakeSession implements AgentSession {
-        final StringBuilder input = new StringBuilder();
-
-        @Override public AgentLauncher.AgentInfo info() { return null; }
-        @Override public void writeInput(String s) { input.append(s); }
-        @Override public InputStream output() { return new ByteArrayInputStream(new byte[0]); }
-        @Override public boolean isAlive() { return true; }
-        @Override public int exitValue() { return -1; }
-        @Override public void interrupt() { }
-        @Override public void destroy() { }
-    }
-
-    private static final class FakeEmbeddedSession implements AgentSession {
-        private final FakePty pty = new FakePty();
-        final StringBuilder input = new StringBuilder();
-
-        @Override public AgentLauncher.AgentInfo info() { return null; }
-        @Override public void writeInput(String s) { input.append(s); }
-        @Override public InputStream output() { return new ByteArrayInputStream(new byte[0]); }
-        @Override public boolean isAlive() { return true; }
-        @Override public int exitValue() { return -1; }
-        @Override public void interrupt() { }
-        @Override public void destroy() { }
-    }
-
-    public static final class FakePty {
-        final StringBuilder sent = new StringBuilder();
-
-        public void sendText(String text) {
-            sent.append(text);
-        }
     }
 }

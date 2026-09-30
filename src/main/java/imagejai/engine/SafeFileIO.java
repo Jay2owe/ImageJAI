@@ -36,7 +36,17 @@ public final class SafeFileIO {
         if (size > maxBytes) {
             throw new IOException("file exceeds " + maxBytes + " bytes: " + size);
         }
-        return Files.readString(path, StandardCharsets.UTF_8);
+        return readUtf8(path);
+    }
+
+    /**
+     * Read a whole file as UTF-8, failing on malformed bytes like Java 11's
+     * {@code Files.readString}. Kept here because the plugin targets Java 8.
+     */
+    public static String readUtf8(Path path) throws IOException {
+        byte[] bytes = Files.readAllBytes(path);
+        return StandardCharsets.UTF_8.newDecoder()
+                .decode(ByteBuffer.wrap(bytes)).toString();
     }
 
     public static void writeUtf8Atomically(Path target, String content) throws IOException {

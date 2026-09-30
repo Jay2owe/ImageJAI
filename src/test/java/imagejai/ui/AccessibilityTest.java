@@ -2,7 +2,6 @@ package imagejai.ui;
 
 import imagejai.config.PrivacyPosture;
 import imagejai.config.Settings;
-import imagejai.engine.EmbeddedAgentSession;
 import imagejai.engine.SessionCodeJournal;
 import imagejai.engine.picker.ModelEntry;
 import imagejai.engine.picker.ProviderEntry;
@@ -202,104 +201,6 @@ public class AccessibilityTest {
         log.shutdownAndAwait(100);
     }
 
-    @Test
-    public void historyRowsCopyRerunAndExposeMoreActionsFromKeyboard() throws Exception {
-        SessionCodeJournal journal = SessionCodeJournal.INSTANCE;
-        journal.clearRing();
-        journal.record("ijm", "run(\"Blobs (25K)\"); print(\"accessible history\");",
-                "test", 7L, System.currentTimeMillis(), 2L, true, "");
-        AtomicReference<String> copied = new AtomicReference<String>();
-        CountDownLatch reran = new CountDownLatch(1);
-        AtomicReference<SessionHistoryPanel> ref = new AtomicReference<SessionHistoryPanel>();
-        SwingUtilities.invokeAndWait(() -> ref.set(new SessionHistoryPanel(
-                new TcpHotline(new Settings()), tmp.getRoot(), null,
-                copied::set, entry -> reran.countDown())));
-        SessionHistoryPanel panel = ref.get();
-        JList<SessionCodeJournal.Entry> list = panel.listForTest();
-        assertTrue(list.getModel().getSize() > 0);
-        String collapseNameBefore = panel.collapseButtonForTest()
-                .getAccessibleContext().getAccessibleName();
-
-        SwingUtilities.invokeAndWait(() -> {
-            list.setSelectedIndex(0);
-            invoke(list.getActionMap().get("copySelectedHistory"), list);
-            invoke(list.getActionMap().get("rerunSelectedHistory"), list);
-            panel.collapseButtonForTest().doClick();
-        });
-        assertTrue(copied.get().contains("accessible history"));
-        assertTrue(reran.await(2, TimeUnit.SECONDS));
-        assertNamedRole(list, "Session code history", AccessibleRole.LIST);
-        assertEquals(AccessibleRole.PUSH_BUTTON, panel.collapseButtonForTest()
-                .getAccessibleContext().getAccessibleRole());
-        assertFalse(collapseNameBefore.equals(panel.collapseButtonForTest()
-                .getAccessibleContext().getAccessibleName()));
-        assertNamedRole(panel.menuButtonForTest(), "Session history options",
-                AccessibleRole.PUSH_BUTTON);
-        assertNotNull(list.getActionMap().get("showSelectedHistoryMenu"));
-        assertEquals("showSelectedHistoryMenu", list.getInputMap(JComponent.WHEN_FOCUSED)
-                .get(KeyStroke.getKeyStroke(KeyEvent.VK_F10, InputEvent.SHIFT_DOWN_MASK)));
-        JPopupMenu rowMenu = panel.rowMenuForTest(0);
-        assertEquals(4, rowMenu.getComponentCount());
-        for (Component component : rowMenu.getComponents()) {
-            assertTrue(component instanceof JMenuItem);
-            assertFalse(((JMenuItem) component).getText().trim().isEmpty());
-        }
-
-        panel.removeNotify();
-        journal.clearRing();
-    }
-
-    @Test
-    public void terminalControlsAreDisabledUntilALiveKeyboardSessionIsAttached()
-            throws Exception {
-        AtomicReference<TerminalToolbar> ref = new AtomicReference<TerminalToolbar>();
-        SwingUtilities.invokeAndWait(() -> ref.set(new TerminalToolbar(null)));
-        TerminalToolbar toolbar = ref.get();
-        SwingUtilities.invokeAndWait(() -> {
-            toolbar.showPendingPrompt("Continue?");
-            toolbar.showCopyUrl("https://example.invalid/auth");
-        });
-        assertTerminalEnabled(toolbar, false);
-
-        AtomicReference<String> lastWrite = new AtomicReference<String>();
-        AtomicInteger interrupts = new AtomicInteger();
-        TerminalToolbar.SessionControl live = new TerminalToolbar.SessionControl() {
-            @Override public boolean isAlive() { return true; }
-            @Override public EmbeddedAgentSession.WriteResult writeRaw(String text) {
-                lastWrite.set(text);
-                return EmbeddedAgentSession.WriteResult.success();
-            }
-            @Override public void interrupt() { interrupts.incrementAndGet(); }
-            @Override public void destroy() { }
-            @Override public String displayName() { return "test agent"; }
-        };
-        SwingUtilities.invokeAndWait(() -> {
-            toolbar.attachSessionForTest(live);
-            toolbar.showPendingPrompt("Continue?");
-            toolbar.showCopyUrl("https://example.invalid/auth");
-        });
-        assertTerminalEnabled(toolbar, true);
-        for (JButton button : terminalButtons(toolbar)) {
-            assertTrue(button.isFocusable());
-            assertTrue(button.getMnemonic() != 0);
-            assertEquals(AccessibleRole.PUSH_BUTTON,
-                    button.getAccessibleContext().getAccessibleRole());
-            assertFalse(button.getAccessibleContext().getAccessibleName().trim().isEmpty());
-        }
-
-        SwingUtilities.invokeAndWait(() -> toolbar.confirmButtonForTest().doClick());
-        assertEquals("\r", lastWrite.get());
-        SwingUtilities.invokeAndWait(() -> {
-            toolbar.showPendingPrompt("Cancel?");
-            toolbar.cancelButtonForTest().doClick();
-            toolbar.interruptButtonForTest().doClick();
-        });
-        assertEquals("\u001b", lastWrite.get());
-        assertEquals(1, interrupts.get());
-        SwingUtilities.invokeAndWait(() -> toolbar.clearSession(null));
-        assertTerminalEnabled(toolbar, false);
-    }
-
     private static ModelEntry model(String provider, String modelId) {
         return new ModelEntry(provider, modelId, modelId, "",
                 ModelEntry.Tier.FREE, 8192, false, ModelEntry.Reliability.HIGH,
@@ -311,23 +212,6 @@ public class AccessibilityTest {
                 "get_state", PrivacyPosture.PSEUDONYMISED, "demo", "", 20, 10,
                 "sha256:test", true, Collections.singletonList("path"), "",
                 "{\"success\":true}");
-    }
-
-    private static void assertTerminalEnabled(TerminalToolbar toolbar, boolean enabled) {
-        for (JButton button : terminalButtons(toolbar)) {
-            assertEquals(button.getAccessibleContext().getAccessibleName(),
-                    enabled, button.isEnabled());
-        }
-    }
-
-    private static List<JButton> terminalButtons(TerminalToolbar toolbar) {
-        List<JButton> out = new ArrayList<JButton>();
-        out.add(toolbar.confirmButtonForTest());
-        out.add(toolbar.cancelButtonForTest());
-        out.add(toolbar.interruptButtonForTest());
-        out.add(toolbar.killButtonForTest());
-        out.add(toolbar.copyUrlButtonForTest());
-        return out;
     }
 
     private static void assertNamedRole(Component component, String nameFragment,

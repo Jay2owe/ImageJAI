@@ -42,10 +42,8 @@ public class AgentLauncher {
 
     /** How an agent should be launched. */
     public enum Mode {
-        /** Detached external terminal — today's default. */
-        EXTERNAL,
-        /** Embedded PTY inside the plugin frame — landed in stage 05. */
-        EMBEDDED
+        /** Detached external terminal window. */
+        EXTERNAL
     }
 
     /** Which CLI conversation lifecycle action to request. */
@@ -195,9 +193,6 @@ public class AgentLauncher {
     /**
      * Launch an agent in the requested mode. Returns a live session handle,
      * or {@code null} if the spawn failed.
-     *
-     * <p>{@link Mode#EMBEDDED} will start working once the terminal primitive
-     * lands (stage 05); until then it throws {@link UnsupportedOperationException}.
      */
     public AgentSession launch(AgentInfo agent, Mode mode) {
         return launch(agent, mode, SessionAction.NEW_SESSION);
@@ -256,36 +251,9 @@ public class AgentLauncher {
                     agent, extraEnv, requestedDangerousPermissions).enforce();
             Map<String, String> permittedEnv = decision.permittedEnvironment();
             syncContextFiles();
-            // Build exactly once. Command construction consumes any one-launch
-            // permission-bypass consent, so an embedded-terminal failure must
-            // reuse this approved command instead of trying to consume consent
-            // again while constructing the external fallback.
+            // Build exactly once: command construction consumes any one-launch
+            // permission-bypass consent.
             String approvedCommand = buildAgentCommandString(agent, action);
-
-            if (mode == Mode.EMBEDDED) {
-                AgentLaunchSpec spec = buildEmbeddedLaunchSpec(agent, approvedCommand);
-                if (!permittedEnv.isEmpty()) {
-                    spec.env.putAll(permittedEnv);
-                }
-                try {
-                    return createEmbeddedSession(agent, spec);
-                } catch (IOException e) {
-                    return fallbackToExternalAfterEmbeddedFailure(
-                            agent, permittedEnv, action, requestedDangerousPermissions,
-                            approvedCommand, e);
-                } catch (RuntimeException e) {
-                    if (e instanceof PostureViolation) {
-                        throw e;
-                    }
-                    return fallbackToExternalAfterEmbeddedFailure(
-                            agent, permittedEnv, action, requestedDangerousPermissions,
-                            approvedCommand, e);
-                } catch (LinkageError e) {
-                    return fallbackToExternalAfterEmbeddedFailure(
-                            agent, permittedEnv, action, requestedDangerousPermissions,
-                            approvedCommand, e);
-                }
-            }
 
             return launchExternalSessionPrepared(agent, permittedEnv, "", action,
                     requestedDangerousPermissions, approvedCommand);
@@ -297,10 +265,6 @@ public class AgentLauncher {
             IJ.log("[AgentLauncher] The requested launch mode is unavailable.");
             return null;
         }
-    }
-
-    AgentSession createEmbeddedSession(AgentInfo agent, AgentLaunchSpec spec) throws IOException {
-        return new EmbeddedAgentSession(agent, spec);
     }
 
     AgentSession launchExternalSession(AgentInfo agent,
@@ -351,25 +315,9 @@ public class AgentLauncher {
         return new ExternalAgentSession(agent, true, notice);
     }
 
-    private AgentSession fallbackToExternalAfterEmbeddedFailure(AgentInfo agent,
-                                                               Map<String, String> extraEnv,
-                                                               SessionAction sessionAction,
-                                                               boolean dangerousPermissions,
-                                                               String approvedCommand,
-                                                               Throwable failure)
-            throws IOException {
-        String reason = "Embedded terminal failed (" + safeFailureCategory(failure) + ")";
-        IJ.log("[AgentLauncher] " + reason + ". Falling back to external terminal.");
-        String notice = reason + ". Launching the approved agent in an external window.";
-        return launchExternalSessionPrepared(agent, extraEnv, notice, sessionAction,
-                dangerousPermissions, approvedCommand);
-    }
-
     /**
      * Build the OS-specific command list that opens a new detached terminal
-     * and runs the agent inside it. Kept distinct from embedded-launch spec
-     * construction so the two paths share the same {@link AgentLaunchSpec}
-     * shape without cross-contaminating shell quoting.
+     * and runs the agent inside it.
      */
     AgentLaunchSpec buildExternalLaunchSpec(AgentInfo agent) {
         return buildExternalLaunchSpec(agent, SessionAction.NEW_SESSION);
@@ -419,53 +367,6 @@ public class AgentLauncher {
         Map<String, String> env = new LinkedHashMap<>();
         env.put("IMAGEJAI_TCP_PORT", String.valueOf(tcpPort));
         env.put("IMAGEJAI_SAFE_MODE", settings.safeModeEnabled ? "1" : "0");
-        addRunnerEnvironment(env);
-        addBundledGemmaPythonPath(env, agent);
-        addRecipeEnvironment(env);
-        addAuditEnvironment(env, agent);
-
-        return new AgentLaunchSpec(agent, cmd, new File(agentWorkspace), env);
-    }
-
-    /**
-     * Build the command for an embedded PTY. It intentionally goes through the
-     * platform shell so compound commands and context flags behave like the
-     * existing external-terminal path.
-     */
-    AgentLaunchSpec buildEmbeddedLaunchSpec(AgentInfo agent) {
-        return buildEmbeddedLaunchSpec(agent, SessionAction.NEW_SESSION);
-    }
-
-    AgentLaunchSpec buildEmbeddedLaunchSpec(AgentInfo agent, SessionAction sessionAction) {
-        evaluateLaunch(agent, null, requestsDangerousPermissionBypass(agent)).enforce();
-        String fullCommand = buildAgentCommandString(agent, sessionAction);
-        return buildEmbeddedLaunchSpec(agent, fullCommand);
-    }
-
-    private AgentLaunchSpec buildEmbeddedLaunchSpec(AgentInfo agent, String fullCommand) {
-        LaunchPolicy.requireSafeCommandText(fullCommand, "agent command");
-
-        String os = System.getProperty("os.name", "").toLowerCase();
-        List<String> cmd = new ArrayList<String>();
-        if (os.contains("win")) {
-            cmd.add("cmd.exe");
-            cmd.add("/c");
-            cmd.add(fullCommand);
-        } else {
-            cmd.add("bash");
-            cmd.add("-lc");
-            cmd.add("exec " + fullCommand);
-        }
-
-        // Process creation inherits the host environment itself. Keep only
-        // ImageJAI-approved additions in the inspectable launch spec so keys
-        // can never leak through tests, logs, caches, or diagnostics.
-        Map<String, String> env = new LinkedHashMap<>();
-        env.put("IMAGEJAI_TCP_PORT", String.valueOf(tcpPort));
-        env.put("IMAGEJAI_SAFE_MODE", settings.safeModeEnabled ? "1" : "0");
-        env.put("TERM", "xterm-256color");
-        env.put("COLORTERM", "truecolor");
-        env.put("TERMINAL_EMULATOR", "JetBrains-JediTerm");
         addRunnerEnvironment(env);
         addBundledGemmaPythonPath(env, agent);
         addRecipeEnvironment(env);
@@ -1095,20 +996,6 @@ public class AgentLauncher {
         return cleaned;
     }
 
-    private static String safeFailureCategory(Throwable failure) {
-        Throwable current = failure;
-        for (int depth = 0; current != null && depth < 6; depth++) {
-            String className = current.getClass().getName();
-            String message = current.getMessage();
-            if ((className != null && className.toLowerCase(Locale.ROOT).contains("winpty"))
-                    || (message != null && message.toLowerCase(Locale.ROOT).contains("winpty"))) {
-                return "WinPty unavailable";
-            }
-            current = current.getCause();
-        }
-        return failure == null ? "unknown error" : failure.getClass().getSimpleName();
-    }
-
     private static boolean isBlank(String value) {
         return value == null || value.trim().isEmpty();
     }
@@ -1226,15 +1113,15 @@ public class AgentLauncher {
     private static void terminateOwnedProcessTree(Process process) {
         if (process == null) return;
         try {
-            List<ProcessHandle> descendants = new ArrayList<ProcessHandle>();
-            process.toHandle().descendants().forEach(descendants::add);
+            List<Object> descendants = ProcessTrees.descendants(process);
+            ProcessTrees.killDescendantsWithoutHandles(process);
             Collections.reverse(descendants);
-            for (ProcessHandle child : descendants) child.destroy();
+            for (Object child : descendants) ProcessTrees.destroy(child);
             process.destroy();
             try { process.waitFor(250L, TimeUnit.MILLISECONDS); }
             catch (InterruptedException interrupted) { Thread.currentThread().interrupt(); }
-            for (ProcessHandle child : descendants) {
-                if (child.isAlive()) child.destroyForcibly();
+            for (Object child : descendants) {
+                if (ProcessTrees.isAlive(child)) ProcessTrees.destroyForcibly(child);
             }
             if (process.isAlive()) process.destroyForcibly();
         } catch (Throwable unavailable) {

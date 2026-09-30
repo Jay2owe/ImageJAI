@@ -66,7 +66,7 @@ def test_methods_fields_use_real_state_keys_and_provenance(monkeypatch):
     fields = dict(methods_table.extract_fields({}, {}, {}, info))
     assert fields["Image dimensions (X x Y x Z x C x T)"] == "100x200x3x2x4"
     assert fields["Bit depth"] == "16-bit"
-    assert fields["ImageJAI version"] == "0.5.0"
+    assert fields["ImageJAI version"] == "0.6.0"
     assert fields["Fiji / ImageJ version"] == "2.16.0/1.54p"
     assert fields["TCP session ID"] == "tcp-session"
     assert fields["Agent launch session ID"] == "launch-session"

@@ -17,7 +17,7 @@ import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 
 public class ReleaseMetadataTest {
-    private static final String RELEASE_VERSION = "0.5.0";
+    private static final String RELEASE_VERSION = "0.6.0";
 
     @Test
     public void canonicalVersionMatchesPomCitationAndDocumentation() throws Exception {
@@ -76,9 +76,7 @@ public class ReleaseMetadataTest {
     @Test
     public void noticeNamesEveryEmbeddedRuntimeDependencyFamily() throws Exception {
         String notice = read("src/main/resources/META-INF/NOTICE.md");
-        String[] required = {"JediTerm", "pty4j", "Java Native Access",
-                "Kotlin standard library", "JetBrains Java annotations",
-                "SLF4J API", "SnakeYAML", "Apache PDFBox",
+        String[] required = {"Java Native Access", "Gson", "SnakeYAML", "Apache PDFBox",
                 "PDFBox IO", "FontBox", "Apache Commons Logging",
                 "JetBrains Mono", "Noto Emoji"};
         for (String name : required) {

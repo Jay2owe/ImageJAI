@@ -23,7 +23,7 @@ public class AgentLauncherRecipeEnvTest {
         AgentLauncher.AgentInfo info = new AgentLauncher.AgentInfo(
                 "Dummy", "dummy", "test", null, "");
 
-        AgentLaunchSpec spec = launcher.buildEmbeddedLaunchSpec(info);
+        AgentLaunchSpec spec = launcher.buildExternalLaunchSpec(info);
 
         String userRecipes = RecipePaths.userRecipesDir()
                 .toAbsolutePath().normalize().toString();

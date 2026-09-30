@@ -20,8 +20,8 @@ authors:
 repository-code: "https://github.com/Jay2owe/ImageJAI"
 url: "https://github.com/Jay2owe/ImageJAI"
 license: BSD-3-Clause
-version: "0.5.0"
-date-released: 2026-09-29
+version: "0.6.0"
+date-released: 2026-09-30
 keywords:
   - fiji
   - imagej

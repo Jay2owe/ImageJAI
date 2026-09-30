@@ -604,7 +604,7 @@ public final class SessionCodeJournal {
                 if (dir == null) return;
                 Files.createDirectories(dir);
                 if (e != null) {
-                    Files.writeString(dir.resolve(e.fileName), e.code, StandardCharsets.UTF_8,
+                    Files.write(dir.resolve(e.fileName), e.code.getBytes(StandardCharsets.UTF_8),
                             StandardOpenOption.CREATE_NEW);
                 }
                 writeIndexAtomically(dir.resolve("INDEX.json"), indexSnapshot);

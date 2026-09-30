@@ -54,7 +54,7 @@ def test_user_release_documents_agree_on_artifact_version_and_runtime():
              ROOT / "docs" / "DEVELOPER.md"]
     for path in paths:
         text = path.read_text(encoding="utf-8")
-        assert "imagej-ai-0.5.0.jar" in text
+        assert "imagej-ai-0.6.0.jar" in text
         assert "Java 11" in text
         assert "imagej-ai-0.2.0.jar" not in text
         assert "Java 8+" not in text

@@ -77,7 +77,6 @@ public final class BrowseFilesDialog extends JDialog {
     private final JTextField tag;
     private final JTextArea preview;
     private final JLabel status;
-    private final JRadioButton embedded;
     private final JRadioButton clipboard;
     private final JRadioButton polling;
 
@@ -146,30 +145,22 @@ public final class BrowseFilesDialog extends JDialog {
         preview.setForeground(TEXT);
         status = label("Scanning...", false);
 
-        embedded = new JRadioButton("Embedded terminal");
         clipboard = new JRadioButton("Clipboard");
         polling = new JRadioButton("TCP polling");
-        for (JRadioButton radio : new JRadioButton[] {embedded, clipboard, polling}) {
+        for (JRadioButton radio : new JRadioButton[] {clipboard, polling}) {
             radio.setOpaque(false);
             radio.setForeground(TEXT);
             radio.setFont(new Font(Font.SANS_SERIF, Font.PLAIN, 11));
         }
         ButtonGroup group = new ButtonGroup();
-        group.add(embedded);
         group.add(clipboard);
         group.add(polling);
-        if (activeSession != null
-                && activeSession.getClass().getName().endsWith("EmbeddedAgentSession")) {
-            embedded.setSelected(true);
-        } else {
-            clipboard.setSelected(true);
-        }
+        clipboard.setSelected(true);
 
         addRow(bottom, 0, label("Suggested tag:", false), tag);
         addRow(bottom, 1, label("The agent will see:", false), new JScrollPane(preview));
         JPanel delivery = new JPanel(new FlowLayout(FlowLayout.LEFT, 8, 0));
         delivery.setOpaque(false);
-        delivery.add(embedded);
         delivery.add(clipboard);
         delivery.add(polling);
         addRow(bottom, 2, label("Delivery:", false), delivery);
@@ -338,9 +329,6 @@ public final class BrowseFilesDialog extends JDialog {
     }
 
     private BriefNudger.NudgeMechanism selectedMechanism() {
-        if (embedded.isSelected()) {
-            return BriefNudger.NudgeMechanism.EMBEDDED_PTY;
-        }
         if (polling.isSelected()) {
             return BriefNudger.NudgeMechanism.TCP_POLLING;
         }

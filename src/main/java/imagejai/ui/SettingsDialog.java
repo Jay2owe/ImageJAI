@@ -59,8 +59,6 @@ public class SettingsDialog extends JDialog {
     private JTextField tcpPortField;
     private JLabel tcpPortLabel;
     private JLabel tcpHelpLabel;
-    private JCheckBox embeddedTerminalCheckbox;
-    private JCheckBox persistScrollbackCheckbox;
     private InstallerPanel installerPanel;
 
     private JPanel cardsPanel;
@@ -374,20 +372,6 @@ public class SettingsDialog extends JDialog {
         tcpHelpLabel.setFont(tcpHelpLabel.getFont().deriveFont(Font.ITALIC, 11f));
         p.add(tcpHelpLabel, c);
 
-        c.gridx = 0; c.gridy = 3; c.gridwidth = 2;
-        embeddedTerminalCheckbox = new JCheckBox(
-                "Launch agents inside the ImageJAI window");
-        embeddedTerminalCheckbox.setToolTipText(
-                "Uses the embedded terminal with ImageJAI's controls and buttons.");
-        p.add(embeddedTerminalCheckbox, c);
-
-        c.gridx = 0; c.gridy = 4; c.gridwidth = 2;
-        persistScrollbackCheckbox = new JCheckBox(
-                "Persist embedded terminal scrollback on exit");
-        persistScrollbackCheckbox.setToolTipText(
-                "Off by default because terminal output may contain pasted credentials.");
-        p.add(persistScrollbackCheckbox, c);
-
         wrapper.add(p, BorderLayout.WEST);
         return wrapper;
     }
@@ -543,8 +527,6 @@ public class SettingsDialog extends JDialog {
         tcpPortField.setEnabled(tcpOn);
         tcpPortLabel.setEnabled(tcpOn);
         tcpHelpLabel.setEnabled(tcpOn);
-        embeddedTerminalCheckbox.setSelected(settings.agentEmbeddedTerminal);
-        persistScrollbackCheckbox.setSelected(settings.persistScrollback);
         loadFromActiveConfig();
     }
 
@@ -585,8 +567,6 @@ public class SettingsDialog extends JDialog {
         } catch (Exception e) {
             settings.tcpPort = Constants.DEFAULT_TCP_PORT;
         }
-        settings.agentEmbeddedTerminal = embeddedTerminalCheckbox.isSelected();
-        settings.persistScrollback = persistScrollbackCheckbox.isSelected();
         installerPanel.saveToSettings();
 
         if (editingConfig != null) {

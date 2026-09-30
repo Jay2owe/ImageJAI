@@ -131,24 +131,6 @@ public class Settings {
     public Map<String, String> cliAgentArguments = defaultCliAgentArguments();
 
     /**
-     * Stage 03 (embedded-agent-widget): when true, AgentLauncher launches the
-     * agent's terminal UI inside the plugin frame (requires stage 05+). When
-     * false, today's detached cmd.exe /c start behaviour is preserved.
-     *
-     * <p>Default is true so agent launches use the controllable in-window
-     * terminal. The Settings dialog exposes this so users can still opt back
-     * into a detached terminal.
-     */
-    public boolean agentEmbeddedTerminal = true;
-
-    /**
-     * Optional terminal-output audit log. Default stays false because terminal
-     * scrollback may include pasted API keys, tokens, or paths the user did not
-     * intend to persist.
-     */
-    public boolean persistScrollback = false;
-
-    /**
      * Safe-mode v2 stage 02 master switch. When true, agent wrappers
      * negotiate {@code safe_mode=true} in the {@code hello} handshake;
      * when false, wrappers pass {@code safe_mode=false} so the user
@@ -191,11 +173,6 @@ public class Settings {
     public java.util.Set<String> dismissedTierChangeBanners = new java.util.LinkedHashSet<>();
     /** Set after the first run where useMultiProviderPicker default flipped to true. */
     public boolean multiProviderFlipNoticeShown = false;
-    /**
-     * One-time migration for the hidden embedded-terminal flag. Before this
-     * setting had UI, saved configs usually carried the old default false.
-     */
-    public boolean embeddedTerminalDefaultFlipApplied = false;
 
     /**
      * Per-provider cached error from the most recent {@code /models} probe â€”
@@ -437,10 +414,6 @@ public class Settings {
         // before the new picker shipped don't lose their pick on first launch.
         if (privacyPosture == null) {
             privacyPosture = PrivacyPosture.defaultPosture();
-        }
-        if (!embeddedTerminalDefaultFlipApplied) {
-            agentEmbeddedTerminal = true;
-            embeddedTerminalDefaultFlipApplied = true;
         }
         seedMultiProviderFromLegacyAgentName();
         migrateLegacyApiKeysToSecrets();

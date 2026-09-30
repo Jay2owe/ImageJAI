@@ -5,9 +5,10 @@
 Requirements:
 
 - Maven 3.6 or newer.
-- JDK 11 or newer; local release builds use JDK 25. The whole plugin is
-  compiled as Java 11 bytecode (see `pom.xml`) and therefore requires a
-  Fiji/ImageJ runtime on Java 11 or newer.
+- JDK 11 or newer; local release builds use JDK 25. The plugin is compiled
+  as Java 8 bytecode (see `pom.xml`), so it runs on Fiji/ImageJ with Java 8
+  or newer. Main code must not call Java 9+ APIs directly; tests compile
+  for Java 11.
 
 Commands:
 
@@ -16,13 +17,13 @@ mvn clean test -Denforcer.skip=true
 mvn clean package -DskipTests -Denforcer.skip=true
 ```
 
-The uploadable plugin jar is `target/imagej-ai-0.5.0.jar`. Do not upload
+The uploadable plugin jar is `target/imagej-ai-0.6.0.jar`. Do not upload
 `*-sources.jar`, `*-tests.jar`, or `original-*.jar`.
 
 ## Runtime Dependencies
 
 Fiji provides ImageJ and SciJava dependencies at runtime. The plugin jar shades
-the embedded terminal and provider-side Java dependencies it needs. The jar
+the provider-side Java dependencies it needs. The jar
 build excludes Maven metadata from `META-INF/maven/**` so the Fiji updater does
 not infer development-time Maven dependencies from the packaged jar.
 
@@ -53,7 +54,7 @@ keep these out of public commits:
 1. Confirm `pom.xml`, `README.md`, and `Constants.VERSION` agree.
 2. Run `mvn clean test -Denforcer.skip=true`.
 3. Run `mvn clean package -DskipTests -Denforcer.skip=true`.
-4. Inspect `target/imagej-ai-0.5.0.jar` for `plugins.config` and plugin classes.
+4. Inspect `target/imagej-ai-0.6.0.jar` for `plugins.config` and plugin classes.
 5. Confirm the jar does not contain `META-INF/maven/**`.
 6. Run `mvn dependency:tree -Dscope=runtime -Denforcer.skip=true` and confirm
    no private project dependency is listed.

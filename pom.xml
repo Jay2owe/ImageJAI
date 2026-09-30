@@ -13,7 +13,7 @@
 
     <groupId>imagejai</groupId>
     <artifactId>imagej-ai</artifactId>
-    <version>0.5.0</version>
+    <version>0.6.0</version>
     <packaging>jar</packaging>
 
     <name>ImageJ AI Assistant</name>
@@ -72,32 +72,21 @@
         <!-- Canonical archive time for byte-for-byte reproducible release JARs.
              Change this only when deliberately starting a new release line. -->
         <project.build.outputTimestamp>2026-09-18T00:00:00Z</project.build.outputTimestamp>
-        <!-- Java 11 target: required by pty4j / JediTerm (stage 05).
-             Fiji ships a JRE 21+ so runtime is fine; build JDK stays at 25.
-             NB: pom-scijava sets maven.compiler.release=8 in its BOM, and
-             `release` trumps `source`/`target` — override it here explicitly. -->
-        <maven.compiler.source>11</maven.compiler.source>
-        <maven.compiler.target>11</maven.compiler.target>
-        <maven.compiler.release>11</maven.compiler.release>
+        <!-- Java 8 target so the plugin also runs on older Fiji installs.
+             Build JDK stays at 25. Tests are compiled for Java 11 because they
+             only ever run on the build JDK. -->
+        <maven.compiler.source>8</maven.compiler.source>
+        <maven.compiler.target>8</maven.compiler.target>
+        <maven.compiler.release>8</maven.compiler.release>
+        <maven.compiler.testRelease>11</maven.compiler.testRelease>
         <scijava.jvm.build.version>[11,)</scijava.jvm.build.version>
         <!-- Override scijava's enforcer to allow building with newer JDKs -->
         <enforcer.skip>true</enforcer.skip>
         <!-- pom-scijava 37 pins JaCoCo 0.8.10, which cannot instrument JDK 23 classes. -->
         <jacoco-maven-plugin.version>0.8.13</jacoco-maven-plugin.version>
-        <!-- pty4j / JediTerm resolve Kotlin 2.x transitive artifacts. Keep this
-             explicit so SciJava's older BOM does not pull a mismatched stdlib. -->
-        <kotlin.version>2.1.21</kotlin.version>
-        <!-- SciJava still manages kotlin-stdlib-common, which Kotlin 2.x no
-             longer publishes as a jar. Keep that retired compatibility artifact
-             on SciJava's original line while the terminal deps use Kotlin 2.x. -->
-        <kotlin-stdlib-common.version>1.9.22</kotlin-stdlib-common.version>
     </properties>
 
     <repositories>
-        <repository>
-            <id>jetbrains-intellij-dependencies</id>
-            <url>https://packages.jetbrains.team/maven/p/ij/intellij-dependencies</url>
-        </repository>
         <repository>
             <id>scijava.public</id>
             <url>https://maven.scijava.org/content/groups/public</url>
@@ -140,20 +129,15 @@
             <scope>provided</scope>
         </dependency>
 
-        <!-- Gson (provided by Fiji at runtime — ships as jars/gson-2.10.1.jar) -->
+        <!-- Gson, bundled and relocated (see the shade plugin): older Fijis ship
+             Gson releases without JsonParser.parseString, which this code uses. -->
         <dependency>
             <groupId>com.google.code.gson</groupId>
             <artifactId>gson</artifactId>
-            <scope>provided</scope>
-        </dependency>
-
-        <!-- Embedded terminal backend (stage 05) -->
-        <dependency>
-            <groupId>org.jetbrains.pty4j</groupId>
-            <artifactId>pty4j</artifactId>
-            <version>0.13.12</version>
             <scope>compile</scope>
         </dependency>
+
+        <!-- Native Windows calls (credential store, PATH broadcast, child PIDs) -->
         <dependency>
             <groupId>net.java.dev.jna</groupId>
             <artifactId>jna</artifactId>
@@ -164,18 +148,6 @@
             <groupId>net.java.dev.jna</groupId>
             <artifactId>jna-platform</artifactId>
             <version>5.13.0</version>
-            <scope>compile</scope>
-        </dependency>
-        <dependency>
-            <groupId>org.jetbrains.jediterm</groupId>
-            <artifactId>jediterm-core</artifactId>
-            <version>3.66</version>
-            <scope>compile</scope>
-        </dependency>
-        <dependency>
-            <groupId>org.jetbrains.jediterm</groupId>
-            <artifactId>jediterm-ui</artifactId>
-            <version>3.66</version>
             <scope>compile</scope>
         </dependency>
 
@@ -344,8 +316,8 @@
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-compiler-plugin</artifactId>
                 <configuration>
-                    <source>11</source>
-                    <target>11</target>
+                    <source>8</source>
+                    <target>8</target>
                     <excludes>
                         <exclude>**/*conflicted copy*.java</exclude>
                     </excludes>
@@ -399,9 +371,18 @@
                                         <!-- Dependency POMs are not runtime API
                                              and violate the plugin artifact policy. -->
                                         <exclude>META-INF/maven/**</exclude>
+                                        <!-- Java 9 module descriptors cannot load on Java 8. -->
+                                        <exclude>module-info.class</exclude>
+                                        <exclude>META-INF/versions/*/module-info.class</exclude>
                                     </excludes>
                                 </filter>
                             </filters>
+                            <relocations>
+                                <relocation>
+                                    <pattern>com.google.gson</pattern>
+                                    <shadedPattern>imagejai.shaded.gson</shadedPattern>
+                                </relocation>
+                            </relocations>
                             <transformers>
                                 <transformer implementation="org.apache.maven.plugins.shade.resource.ServicesResourceTransformer" />
                                 <transformer implementation="org.apache.maven.plugins.shade.resource.ManifestResourceTransformer" />

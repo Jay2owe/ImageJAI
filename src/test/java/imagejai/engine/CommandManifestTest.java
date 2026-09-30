@@ -23,7 +23,7 @@ public class CommandManifestTest {
         assertEquals(71, names.size());
         assertEquals(70, CommandManifest.requestResponseNames().size());
         assertEquals(Collections.singletonList("subscribe"), CommandManifest.streamNames());
-        assertEquals("0.5.0", CommandManifest.productVersion());
+        assertEquals("0.6.0", CommandManifest.productVersion());
     }
 
     @Test

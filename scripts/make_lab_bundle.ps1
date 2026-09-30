@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [string]$Version = "0.5.0",
+    [string]$Version = "0.6.0",
     # No site-specific defaults: this script ships publicly. Point the two
     # destinations at your own machine with -SharedRoot / -LocalFijiPlugins,
     # or set IMAGEJAI_SHARED_ROOT / IMAGEJAI_FIJI_PLUGINS once per user.
@@ -851,7 +851,7 @@ ImageJAI lab install
 Optional: run .\setup-python.ps1 from this folder to install the legacy Gemma
 and imagej-use helper environment used by the Fiji agent launchers.
 
-Requirements: Fiji on Java 11 or newer and Python 3.10-3.13. The setup script
+Requirements: Fiji on Java 8 or newer and Python 3.10-3.13. The setup script
 creates %USERPROFILE%\ImageJAI\.venv and never installs into global Python.
 Provider credentials remain on the user's machine and are not bundled.
 "@
@@ -872,7 +872,7 @@ virtual environment at %USERPROFILE%\ImageJAI\.venv, installs imagej-use-auto
 and the bundled Gemma agent there, and sets IMAGEJAI_PYTHON to that interpreter.
 It does not install packages into global Python.
 
-Fiji must use Java 11 or newer. Analysis outputs belong in AI_Exports beside
+Fiji must use Java 8 or newer. Analysis outputs belong in AI_Exports beside
 the opened image. API keys and provider credentials are never included.
 "@
 

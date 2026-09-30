@@ -52,6 +52,26 @@ def test_plugin_failure_falls_back_to_local_token(tmp_path: Path):
     assert tokens.resolve(token).path == image.resolve()
 
 
+def test_standard_posture_echo_is_not_adopted_as_a_token(tmp_path: Path):
+    # Fiji under Standard posture echoes the real path; the console may be
+    # stricter, so it must mint locally instead of "tokenising" to the path.
+    image = tmp_path / "patient-secret.tif"
+    image.write_bytes(b"pixels")
+
+    class StandardFiji:
+        def pseudonymise_paths(self, paths):
+            return {"ok": True, "result": {"pseudonymised": False, "mappings": [
+                {"index": 0, "path": str(p), "token": str(p)} for p in paths
+            ]}}
+
+    tokens = PluginTokenMap(StandardFiji(), salt=b"s" * 32)
+    token = tokens.token_for_path(image)
+
+    assert token.startswith("image-") and token != str(image.resolve())
+    assert tokens.remote_mints == 0 and tokens.local_mints == 1
+    assert str(image.resolve()) not in tokens.redact(f"Never alter {image.resolve()}")
+
+
 def test_mentions_use_plugin_tokens_and_never_show_real_path(tmp_path: Path):
     image = tmp_path / "patient-name.tif"
     image.write_bytes(b"pixels")

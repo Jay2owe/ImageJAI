@@ -153,7 +153,11 @@ final class ManagedPythonRuntime {
                 .redirectErrorStream(true).start();
         String listing;
         try (InputStream input = listed.getInputStream()) {
-            listing = new String(input.readAllBytes(), java.nio.charset.StandardCharsets.UTF_8);
+            java.io.ByteArrayOutputStream bytes = new java.io.ByteArrayOutputStream();
+            byte[] buffer = new byte[8192];
+            int read;
+            while ((read = input.read(buffer)) != -1) bytes.write(buffer, 0, read);
+            listing = new String(bytes.toByteArray(), java.nio.charset.StandardCharsets.UTF_8);
         }
         if (!listed.waitFor(60, TimeUnit.SECONDS) || listed.exitValue() != 0) {
             throw new IOException("Could not read the private Python setup archive.");

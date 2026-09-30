@@ -4,8 +4,6 @@ import imagejai.engine.AgentSession;
 
 import java.awt.Toolkit;
 import java.awt.datatransfer.StringSelection;
-import java.lang.reflect.Field;
-import java.lang.reflect.Method;
 import java.util.List;
 import java.util.Map;
 
@@ -14,7 +12,6 @@ import java.util.Map;
  */
 public final class BriefNudger {
     public enum NudgeMechanism {
-        EMBEDDED_PTY,
         CLIPBOARD,
         TCP_POLLING
     }
@@ -67,14 +64,6 @@ public final class BriefNudger {
         if (mechanism == NudgeMechanism.TCP_POLLING) {
             return;
         }
-        if (mechanism == NudgeMechanism.EMBEDDED_PTY) {
-            if (!sendToEmbeddedPty(session, text + "\n")) {
-                if (session != null) {
-                    session.writeInput(text);
-                }
-            }
-            return;
-        }
         try {
             clipboardWriter.write(text);
             toast.show("Selection ready - Ctrl+V into your agent terminal.");
@@ -124,24 +113,5 @@ public final class BriefNudger {
             out.append(dimensions.toString().trim());
         }
         return out.toString();
-    }
-
-    private static boolean sendToEmbeddedPty(AgentSession session, String text) {
-        if (session == null) {
-            return false;
-        }
-        try {
-            Field field = session.getClass().getDeclaredField("pty");
-            field.setAccessible(true);
-            Object pty = field.get(session);
-            if (pty == null) {
-                return false;
-            }
-            Method sendText = pty.getClass().getMethod("sendText", String.class);
-            sendText.invoke(pty, text);
-            return true;
-        } catch (Exception ignored) {
-            return false;
-        }
     }
 }

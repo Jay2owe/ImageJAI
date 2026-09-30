@@ -56,8 +56,13 @@ class PluginTokenMap(PathTokenMap):
             self.last_error = str(exc)
             return None
         result = response.get("result", response) if isinstance(response, dict) else {}
-        for mapping in (result or {}).get("mappings") or []:
+        # Under Fiji's Standard posture the plugin echoes the real path as the
+        # "token". Adopting that would make redact() swap the path for itself,
+        # so only a reply that says it pseudonymised is trusted.
+        if not isinstance(result, dict) or result.get("pseudonymised") is not True:
+            return None
+        for mapping in result.get("mappings") or []:
             token = mapping.get("token")
-            if token:
+            if token and str(token) != str(path):
                 return str(token)
         return None

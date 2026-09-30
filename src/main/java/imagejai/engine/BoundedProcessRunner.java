@@ -72,7 +72,7 @@ final class BoundedProcessRunner {
         int exitCode = process.isAlive() ? -1 : process.exitValue();
         return new Result(exitCode, timedOut, terminated && !process.isAlive(),
                 output.complete, output.text, output.totalBytes,
-                output.totalBytes > maxOutputBytes, process.pid());
+                output.totalBytes > maxOutputBytes, ProcessTrees.pid(process));
     }
 
     private static void awaitCollector(Thread drainer, InputStream processOutput)
@@ -85,42 +85,34 @@ final class BoundedProcessRunner {
     }
 
     private static boolean terminateTree(Process process) throws InterruptedException {
-        List<ProcessHandle> descendants = descendants(process);
-        for (ProcessHandle child : descendants) child.destroy();
+        List<Object> descendants = ProcessTrees.descendants(process);
+        ProcessTrees.killDescendantsWithoutHandles(process);
+        for (Object child : descendants) ProcessTrees.destroy(child);
         process.destroy();
         if (!process.waitFor(GRACEFUL_STOP_MS, TimeUnit.MILLISECONDS)) {
-            for (ProcessHandle child : descendants) {
-                if (child.isAlive()) child.destroyForcibly();
+            for (Object child : descendants) {
+                if (ProcessTrees.isAlive(child)) ProcessTrees.destroyForcibly(child);
             }
             process.destroyForcibly();
             process.waitFor(FORCED_STOP_MS, TimeUnit.MILLISECONDS);
         }
-        for (ProcessHandle child : descendants) {
-            if (child.isAlive()) child.destroyForcibly();
+        for (Object child : descendants) {
+            if (ProcessTrees.isAlive(child)) ProcessTrees.destroyForcibly(child);
         }
         return !process.isAlive() && noneAlive(descendants);
     }
 
     private static void forceTerminateTree(Process process) {
-        for (ProcessHandle child : descendants(process)) {
-            try { child.destroyForcibly(); } catch (RuntimeException ignored) {}
+        for (Object child : ProcessTrees.descendants(process)) {
+            ProcessTrees.destroyForcibly(child);
         }
+        ProcessTrees.killDescendantsWithoutHandles(process);
         try { process.destroyForcibly(); } catch (RuntimeException ignored) {}
     }
 
-    private static List<ProcessHandle> descendants(Process process) {
-        List<ProcessHandle> handles = new ArrayList<ProcessHandle>();
-        try {
-            process.toHandle().descendants().forEach(handles::add);
-        } catch (RuntimeException ignored) {
-            // The direct owned process is still terminated below.
-        }
-        return handles;
-    }
-
-    private static boolean noneAlive(List<ProcessHandle> handles) {
-        for (ProcessHandle handle : handles) {
-            if (handle.isAlive()) return false;
+    private static boolean noneAlive(List<Object> handles) {
+        for (Object handle : handles) {
+            if (ProcessTrees.isAlive(handle)) return false;
         }
         return true;
     }

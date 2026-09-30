@@ -111,15 +111,22 @@ public final class AutomationReadyFile {
 
     static long currentPid() {
         try {
-            // Java 9+ exposes the PID directly; the reflective call keeps the
-            // Java 11 bytecode target free of a hard ProcessHandle reference in
-            // case a future build lowers it again.
+            // Java 9+ exposes the PID directly; reached by reflection because
+            // the plugin is compiled for Java 8.
             Class<?> handle = Class.forName("java.lang.ProcessHandle");
             Object current = handle.getMethod("current").invoke(null);
             Object pid = handle.getMethod("pid").invoke(current);
             return pid instanceof Long ? ((Long) pid).longValue() : -1L;
-        } catch (Throwable unavailable) {
-            return -1L;
+        } catch (Throwable java8) {
+            // Java 8: the runtime bean name is "<pid>@<host>".
+            try {
+                String name = java.lang.management.ManagementFactory
+                        .getRuntimeMXBean().getName();
+                int at = name == null ? -1 : name.indexOf('@');
+                return at > 0 ? Long.parseLong(name.substring(0, at)) : -1L;
+            } catch (Throwable unavailable) {
+                return -1L;
+            }
         }
     }
 }

@@ -52,24 +52,6 @@ public class UiScrollSupportTest {
     }
 
     @Test
-    public void terminalActionRailScrollsAndStillPropagatesFontChanges()
-            throws Exception {
-        LeftRail rail = new LeftRail(new Settings(), new File("."), null, null);
-        Field scrollField = LeftRail.class.getDeclaredField("bodyScroll");
-        scrollField.setAccessible(true);
-        JScrollPane scroll = (JScrollPane) scrollField.get(rail);
-        Field buttonField = LeftRail.class.getDeclaredField("newWipButton");
-        buttonField.setAccessible(true);
-        JButton button = (JButton) buttonField.get(rail);
-
-        rail.setRailFontSize(17);
-
-        assertEquals("Terminal action rail",
-                scroll.getAccessibleContext().getAccessibleName());
-        assertEquals(17f, button.getFont().getSize2D(), 0.01f);
-    }
-
-    @Test
     public void everySettingsTabUsesAScrollViewportAndDialogRemainsResizable()
             throws Exception {
         assumeFalse("headless build", GraphicsEnvironment.isHeadless());

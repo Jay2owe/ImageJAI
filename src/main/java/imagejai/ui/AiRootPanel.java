@@ -10,8 +10,6 @@ import imagejai.config.Settings;
 import imagejai.engine.AgentLauncher;
 import imagejai.engine.AgentRecommender;
 import imagejai.engine.AgentSession;
-import imagejai.engine.EmbeddedAgentSession;
-import imagejai.engine.ExternalAgentSession;
 import imagejai.engine.PostureController;
 import imagejai.engine.PostureViolation;
 import imagejai.engine.MutationCoordinator;
@@ -80,25 +78,22 @@ import java.util.Set;
 
 /**
  * Plugin root panel: header controls plus a CardLayout body that swaps
- * between chat and embedded terminal.
+ * between the welcome card and chat. CLI agents open in their own terminal
+ * window.
  */
 public class AiRootPanel extends JPanel implements ChatSurface {
     private static final String CARD_CHAT = "chat";
-    private static final String CARD_TERMINAL = "terminal";
     private static final String CARD_WELCOME = "welcome";
 
     private static final String PREF_WINDOW_SIZE_PREFIX = "ai.assistant.window.size.";
     private static final Dimension CHAT_SIZE = new Dimension(420, 600);
-    private static final Dimension TERMINAL_SIZE = new Dimension(900, 700);
 
     private static final Color BG_MAIN = new Color(30, 30, 35);
     private static final Color ACCENT = new Color(0, 200, 255);
     private static final Color TEXT_MUTED = new Color(120, 120, 130);
-    private static boolean terminalFallbackNoticeShown;
 
     private final Settings settings;
     private final ChatView chatView;
-    private final TerminalView terminalView;
     private final CardLayout cardLayout;
     private final JPanel cards;
     private final List<AgentSession> liveSessions = new ArrayList<AgentSession>();
@@ -112,7 +107,6 @@ public class AiRootPanel extends JPanel implements ChatSurface {
     private ProviderTierGate tierGate;
     private UsageTracker usageTracker;
     private TierChangeBanner tierChangeBanner;
-    private JPanel terminalFallbackNotice;
     private ConfigurationPane configurationPane;
     private ReceiptsPane receiptsPane;
     private PseudonymisationToast pseudonymisationToast;
@@ -142,19 +136,11 @@ public class AiRootPanel extends JPanel implements ChatSurface {
         setBackground(BG_MAIN);
 
         chatView = new ChatView(settings, mutationCoordinator);
-        terminalView = new TerminalView(settings, new File(System.getProperty("user.dir", ".")),
-                new LeftRail.SessionRelauncher() {
-                    @Override
-                    public void relaunchEmbeddedSession(EmbeddedAgentSession oldSession) {
-                        AiRootPanel.this.relaunchEmbeddedSession(oldSession);
-                    }
-                });
 
         cardLayout = new CardLayout();
         cards = new JPanel(cardLayout);
         cards.setOpaque(false);
         cards.add(chatView, CARD_CHAT);
-        cards.add(terminalView, CARD_TERMINAL);
         welcomePanel = new WelcomePanel(new Runnable() {
             @Override
             public void run() {
@@ -181,7 +167,7 @@ public class AiRootPanel extends JPanel implements ChatSurface {
         body.add(toastRow, BorderLayout.SOUTH);
 
         // Top stack: header + tier-change banner (06 Â§7.4). Banner sits below
-        // the header so it pushes the chat/terminal down without blocking the
+        // the header so it pushes the chat down without blocking the
         // play button when many notifications stack.
         JPanel top = new JPanel(new BorderLayout(0, 4));
         top.setOpaque(false);
@@ -198,12 +184,10 @@ public class AiRootPanel extends JPanel implements ChatSurface {
             settings.dismissedTierChangeBanners.add(n.key);
             settings.save();
         });
-        terminalFallbackNotice = createTerminalFallbackNotice();
         JPanel notices = new JPanel();
         notices.setOpaque(false);
         notices.setLayout(new BoxLayout(notices, BoxLayout.Y_AXIS));
         notices.add(tierChangeBanner);
-        notices.add(terminalFallbackNotice);
         configurationPane = new ConfigurationPane(PostureController.getInstance(),
                 AuditLog.getInstance());
         receiptsPane = new ReceiptsPane(AuditLog.getInstance());
@@ -258,9 +242,6 @@ public class AiRootPanel extends JPanel implements ChatSurface {
 
     public void setAgentLauncher(AgentLauncher launcher) {
         agentLauncher = launcher;
-        if (launcher != null) {
-            terminalView.setWorkspace(new File(launcher.getAgentWorkspace()));
-        }
         // Pass null launchers so the orchestrator wires them with the CLI
         // launcher, giving the proxy/native paths the terminal machinery they
         // need to spawn the Python provider agent loop.
@@ -560,7 +541,7 @@ public class AiRootPanel extends JPanel implements ChatSurface {
         minRight.add(minSettings);
         minHeader.add(minRight, BorderLayout.EAST);
 
-        // --- Working header (chat / embedded terminal): the switch picker on
+        // --- Working header (chat): the switch picker on
         // the left; read-only status plus an overflow menu on the right. Each
         // side holds only a couple of items, so the row can never overlap (the
         // original first-open bug packed ~988px of controls into a ~404px
@@ -590,7 +571,7 @@ public class AiRootPanel extends JPanel implements ChatSurface {
         workHeader.add(workRight, BorderLayout.EAST);
 
         // Swap minimal/working via a CardLayout so the persistent NORTH header
-        // morphs with the body card (Welcome -> minimal, chat/terminal -> work).
+        // morphs with the body card (Welcome -> minimal, chat -> work).
         headerCardLayout = new CardLayout();
         headerCards = new JPanel(headerCardLayout);
         headerCards.setOpaque(false);
@@ -828,29 +809,6 @@ public class AiRootPanel extends JPanel implements ChatSurface {
         return id == null || id.trim().isEmpty() ? "default" : id.trim();
     }
 
-    private JPanel createTerminalFallbackNotice() {
-        JPanel panel = new JPanel(new FlowLayout(FlowLayout.LEFT, 6, 2));
-        panel.setBackground(new Color(42, 37, 28));
-        panel.setBorder(new EmptyBorder(3, 6, 3, 6));
-        javax.swing.JLabel label = new javax.swing.JLabel(
-                "Embedded terminal needs Java 11+ - launching agent in an external window.");
-        label.setForeground(new Color(230, 210, 160));
-        label.setFont(new Font(Font.SANS_SERIF, Font.PLAIN, 11));
-        JButton why = new JButton("Why?");
-        why.setFont(new Font(Font.SANS_SERIF, Font.PLAIN, 11));
-        why.setMargin(new Insets(1, 6, 1, 6));
-        why.addActionListener(new ActionListener() {
-            @Override
-            public void actionPerformed(ActionEvent e) {
-                showJavaCompatibilityDialog();
-            }
-        });
-        panel.add(label);
-        panel.add(why);
-        panel.setVisible(false);
-        return panel;
-    }
-
     private void refreshAgentSelectorAsync() {
         if (agentSelector == null) {
             return;
@@ -987,9 +945,7 @@ public class AiRootPanel extends JPanel implements ChatSurface {
                 IJ.log("[ImageJAI] Could not persist usage_tracking.json: " + ex.getMessage());
             }
         }
-        final AgentLauncher.Mode mode = settings.agentEmbeddedTerminal
-                ? AgentLauncher.Mode.EMBEDDED
-                : AgentLauncher.Mode.EXTERNAL;
+        final AgentLauncher.Mode mode = AgentLauncher.Mode.EXTERNAL;
         chatView.appendMessage("assistant", "Launching " + entry.displayName() + "...");
         new SwingWorker<AgentSession, Void>() {
             @Override
@@ -1033,9 +989,7 @@ public class AiRootPanel extends JPanel implements ChatSurface {
                     "Resume is not available for " + agent.name + ".");
             return;
         }
-        final AgentLauncher.Mode mode = settings.agentEmbeddedTerminal
-                ? AgentLauncher.Mode.EMBEDDED
-                : AgentLauncher.Mode.EXTERNAL;
+        final AgentLauncher.Mode mode = AgentLauncher.Mode.EXTERNAL;
 
         rememberCliAgentSelection(agent);
         final boolean resume = action == AgentLauncher.SessionAction.RESUME_LATEST;
@@ -1109,129 +1063,9 @@ public class AiRootPanel extends JPanel implements ChatSurface {
             liveSessions.add(session);
         }
 
-        if (mode == AgentLauncher.Mode.EMBEDDED && session instanceof EmbeddedAgentSession) {
-            EmbeddedAgentSession embedded = (EmbeddedAgentSession) session;
-            terminalView.attachSession(embedded);
-            showTerminalCard();
-            watchSessionExit(embedded);
-            chatView.appendMessage("assistant", pastTense + " " + agent.name
-                    + " inside the plugin window.");
-        } else {
-            if (mode == AgentLauncher.Mode.EMBEDDED && session instanceof ExternalAgentSession) {
-                ExternalAgentSession external = (ExternalAgentSession) session;
-                if (external.isFallbackLaunch()) {
-                    showTerminalFallbackNotice(external.notice());
-                }
-            }
-            chatView.appendMessage("assistant", pastTense + " " + agent.name
-                    + " in: " + agentLauncher.getAgentWorkspace());
-            showChatCard();
-        }
-    }
-
-    private void showTerminalFallbackNotice(String reason) {
-        if (terminalFallbackNoticeShown || terminalFallbackNotice == null) {
-            return;
-        }
-        terminalFallbackNoticeShown = true;
-        terminalFallbackNotice.setToolTipText(reason == null || reason.isEmpty()
-                ? null
-                : reason);
-        terminalFallbackNotice.setVisible(true);
-        terminalFallbackNotice.revalidate();
-        terminalFallbackNotice.repaint();
-    }
-
-    private void showJavaCompatibilityDialog() {
-        JOptionPane.showMessageDialog(
-                this,
-                "This Fiji is running Java "
-                        + System.getProperty("java.specification.version", "unknown")
-                        + ".\n\n"
-                        + "ImageJAI targets Java 11. The embedded terminal backend "
-                        + "(pty4j / JediTerm) is loaded only on Java 11 or newer.\n\n"
-                        + "On older runtimes the selected agent still launches in a "
-                        + "normal terminal window. Upgrade Fiji's Java runtime to "
-                        + "Java 11+ to use the embedded terminal.",
-                "ImageJAI Java compatibility",
-                JOptionPane.INFORMATION_MESSAGE);
-    }
-
-    private void watchSessionExit(final EmbeddedAgentSession session) {
-        final Timer timer = new Timer(750, null);
-        timer.addActionListener(new ActionListener() {
-            @Override
-            public void actionPerformed(ActionEvent e) {
-                if (session.isAlive()) {
-                    return;
-                }
-                timer.stop();
-                session.persistScrollbackIfEnabled();
-                synchronized (liveSessions) {
-                    liveSessions.remove(session);
-                }
-                if (!terminalView.isSession(session)) {
-                    IJ.log("[ImageJAI-Term] Replaced embedded agent exited with code "
-                            + session.exitValue() + ": " + session.info().name);
-                    return;
-                }
-                terminalView.clearSession(session);
-                IJ.log("[ImageJAI-Term] Embedded agent exited with code "
-                        + session.exitValue() + ": " + session.info().name);
-                showWelcomeCard();
-            }
-        });
-        timer.start();
-    }
-
-    private void relaunchEmbeddedSession(final EmbeddedAgentSession oldSession) {
-        if (oldSession == null || agentLauncher == null) {
-            return;
-        }
-        final AgentLauncher.AgentInfo info = oldSession.info();
-        terminalView.clearSession(oldSession);
-        synchronized (liveSessions) {
-            liveSessions.remove(oldSession);
-        }
-
-        new SwingWorker<AgentSession, Void>() {
-            @Override
-            protected AgentSession doInBackground() {
-                try {
-                    oldSession.destroy();
-                    IJ.log("[ImageJAI-Term] Destroyed uncleared PTY before relaunch: "
-                            + info.name);
-                } catch (Exception ex) {
-                    IJ.log("[ImageJAI-Term] Failed to destroy uncleared PTY: "
-                            + ex.getMessage());
-                }
-                return agentLauncher.launch(info, AgentLauncher.Mode.EMBEDDED);
-            }
-
-            @Override
-            protected void done() {
-                try {
-                    AgentSession fresh = get();
-                    handleLaunchedSession(info, AgentLauncher.Mode.EMBEDDED, fresh);
-                } catch (Exception ex) {
-                    chatView.appendMessage("assistant",
-                            "Failed to relaunch " + info.name + ": " + ex.getMessage());
-                }
-            }
-        }.execute();
-    }
-
-    private void showTerminalCard() {
-        currentCard = CARD_TERMINAL;
-        setHeaderState(false);
-        cardLayout.show(cards, CARD_TERMINAL);
-        applyFrameSize();
-        SwingUtilities.invokeLater(new Runnable() {
-            @Override
-            public void run() {
-                terminalView.requestTerminalFocus();
-            }
-        });
+        chatView.appendMessage("assistant", pastTense + " " + agent.name
+                + " in: " + agentLauncher.getAgentWorkspace());
+        showChatCard();
     }
 
     private void showChatCard() {
@@ -1262,7 +1096,7 @@ public class AiRootPanel extends JPanel implements ChatSurface {
     /**
      * Launch the recommended agent from the Welcome CTA. The built-in Local
      * Assistant has no process, so it just reveals the chat surface; a detected
-     * CLI agent goes through the normal embedded/external launch path.
+     * CLI agent opens in its own terminal window.
      */
     private void launchRecommended() {
         AgentRecommender.Recommendation rec = recommendation;
@@ -1409,12 +1243,12 @@ public class AiRootPanel extends JPanel implements ChatSurface {
         if (size == null || size.width <= 0 || size.height <= 0) {
             return;
         }
-        // Stored as "WxH" strings so ij.Prefs keeps chat and terminal sizes portable.
+        // Stored as "WxH" strings so ij.Prefs keeps window sizes portable.
         Prefs.set(PREF_WINDOW_SIZE_PREFIX + currentCard, size.width + "x" + size.height);
     }
 
     private Dimension savedSizeFor(String card) {
-        Dimension fallback = CARD_TERMINAL.equals(card) ? TERMINAL_SIZE : CHAT_SIZE;
+        Dimension fallback = CHAT_SIZE;
         String value = Prefs.get(PREF_WINDOW_SIZE_PREFIX + card,
                 fallback.width + "x" + fallback.height);
         return parseSize(value, fallback);
