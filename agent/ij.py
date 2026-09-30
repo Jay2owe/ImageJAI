@@ -117,7 +117,7 @@ def _load_command_manifest():
     commands = manifest.get("commands") if isinstance(manifest, dict) else None
     if (not isinstance(commands, list)
             or manifest.get("schema_version") != 1
-            or manifest.get("product_version") != "0.6.0"
+            or manifest.get("product_version") != "0.6.1"
             or manifest.get("protocol") != "ImageJAI TCP JSONL"):
         raise RuntimeError("invalid ImageJAI command manifest: %s" % path)
     names = [entry.get("name") for entry in commands

@@ -17,7 +17,7 @@ import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 
 public class ReleaseMetadataTest {
-    private static final String RELEASE_VERSION = "0.6.0";
+    private static final String RELEASE_VERSION = "0.6.1";
 
     @Test
     public void canonicalVersionMatchesPomCitationAndDocumentation() throws Exception {

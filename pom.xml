@@ -13,7 +13,7 @@
 
     <groupId>imagejai</groupId>
     <artifactId>imagej-ai</artifactId>
-    <version>0.6.0</version>
+    <version>0.6.1</version>
     <packaging>jar</packaging>
 
     <name>ImageJ AI Assistant</name>
@@ -130,7 +130,8 @@
         </dependency>
 
         <!-- Gson, bundled and relocated (see the shade plugin): older Fijis ship
-             Gson releases without JsonParser.parseString, which this code uses. -->
+             Gson releases without JsonParser.parseString, which this code uses.
+             Fiji's jars/ folder always wins over classes bundled in a plugin. -->
         <dependency>
             <groupId>com.google.code.gson</groupId>
             <artifactId>gson</artifactId>
@@ -144,11 +145,22 @@
             <version>5.13.0</version>
             <scope>compile</scope>
         </dependency>
+        <!-- jna-platform stays at 4.5.2: an older Fiji ships only JNA core 4.x
+             in jars/, which wins over the copy bundled here, and platform 5.x
+             calls core methods 4.x lacks. Newer Fijis ship their own platform
+             jar, which then takes precedence. JNA cannot be relocated: its
+             native library binds to the com.sun.jna class names. -->
         <dependency>
             <groupId>net.java.dev.jna</groupId>
             <artifactId>jna-platform</artifactId>
-            <version>5.13.0</version>
+            <version>4.5.2</version>
             <scope>compile</scope>
+            <exclusions>
+                <exclusion>
+                    <groupId>net.java.dev.jna</groupId>
+                    <artifactId>jna</artifactId>
+                </exclusion>
+            </exclusions>
         </dependency>
 
         <!-- SnakeYAML for ProviderRegistry (Phase D). SafeConstructor only;
@@ -374,6 +386,9 @@
                                         <!-- Java 9 module descriptors cannot load on Java 8. -->
                                         <exclude>module-info.class</exclude>
                                         <exclude>META-INF/versions/*/module-info.class</exclude>
+                                        <!-- Not a multi-release jar, and the shade plugin
+                                             leaves these copies unrelocated. -->
+                                        <exclude>META-INF/versions/**</exclude>
                                     </excludes>
                                 </filter>
                             </filters>
@@ -381,6 +396,12 @@
                                 <relocation>
                                     <pattern>com.google.gson</pattern>
                                     <shadedPattern>imagejai.shaded.gson</shadedPattern>
+                                </relocation>
+                                <!-- Fiji's own SnakeYAML (1.x in older installs) would
+                                     otherwise shadow this 2.x copy. -->
+                                <relocation>
+                                    <pattern>org.yaml.snakeyaml</pattern>
+                                    <shadedPattern>imagejai.shaded.snakeyaml</shadedPattern>
                                 </relocation>
                             </relocations>
                             <transformers>

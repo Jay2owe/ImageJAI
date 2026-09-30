@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [string]$Version = "0.6.0",
+    [string]$Version = "0.6.1",
     # No site-specific defaults: this script ships publicly. Point the two
     # destinations at your own machine with -SharedRoot / -LocalFijiPlugins,
     # or set IMAGEJAI_SHARED_ROOT / IMAGEJAI_FIJI_PLUGINS once per user.

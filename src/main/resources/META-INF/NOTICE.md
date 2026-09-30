@@ -7,15 +7,15 @@ from the linked upstream projects.
 
 ## Native-process support
 
-- **Java Native Access (JNA and JNA Platform) 5.13.0** — available under
-  LGPL-2.1-or-later or Apache-2.0.
+- **Java Native Access (JNA) 5.13.0 and JNA Platform 4.5.2** — available
+  under LGPL-2.1-or-later or Apache-2.0.
   Source: https://github.com/java-native-access/jna
 
 ## Configuration and document support
 
 - **Gson 2.10.1** — Apache-2.0. Relocated to `imagejai.shaded.gson`.
   Source: https://github.com/google/gson
-- **SnakeYAML 2.2** — Apache-2.0.
+- **SnakeYAML 2.2** — Apache-2.0. Relocated to `imagejai.shaded.snakeyaml`.
   Source: https://bitbucket.org/snakeyaml/snakeyaml
 - **Apache PDFBox, PDFBox IO, and FontBox 3.0.2** — Apache-2.0.
   Source: https://github.com/apache/pdfbox

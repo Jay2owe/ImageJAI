@@ -279,7 +279,9 @@ def ensure_fiji(
         raise TimeoutError(
             "Fiji did not open the ImageJAI server. Check that this installation "
             "contains the current ImageJAI plugin and has no blocking startup "
-            "dialog, then use /fiji start to retry.")
+            "dialog, then use /fiji start to retry. A Fiji running on Java 8 "
+            "may not start the plugin until it is used: open Plugins > AI "
+            "Assistant once, then use /fiji start.")
     finally:
         # Only remove our own request. A newer console may have replaced it.
         try:

@@ -5,7 +5,7 @@ Plugins > AI Assistant.
 
 ## Install
 
-1. Download `imagej-ai-0.6.0.jar` from the GitHub Actions artifact or a
+1. Download `imagej-ai-0.6.1.jar` from the GitHub Actions artifact or a
    GitHub release.
 2. Copy the jar into `Fiji.app/plugins/`.
 3. Restart Fiji.

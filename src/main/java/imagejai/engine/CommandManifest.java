@@ -91,8 +91,8 @@ final class CommandManifest {
                 throw invalid("schema_version must be 1");
             }
             String productVersion = string(root, "product_version");
-            if (!"0.6.0".equals(productVersion)) {
-                throw invalid("product_version must be 0.6.0");
+            if (!"0.6.1".equals(productVersion)) {
+                throw invalid("product_version must be 0.6.1");
             }
             if (!"ImageJAI TCP JSONL".equals(string(root, "protocol"))) {
                 throw invalid("protocol must be ImageJAI TCP JSONL");
