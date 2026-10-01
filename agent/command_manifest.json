@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "product_version": "0.6.1",
+  "product_version": "0.6.2",
   "protocol": "ImageJAI TCP JSONL",
   "commands": [
     {"name":"3d_viewer","transport":"request_response","classification":"mutation","request":{"required":[],"optional":["action","image","type","threshold","resampling","width","height"]},"reply":{"type":"object"},"capabilities":[],"authentication":"session_optional","python":{"coverage":"convenience","helpers":["viewer3d"]},"summary":"Inspect or control the Fiji 3D Viewer."},

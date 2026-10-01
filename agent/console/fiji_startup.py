@@ -20,6 +20,8 @@ from .workspace import find_workspace
 
 REQUEST_NAME = "tcp-start-request.properties"
 REQUEST_MAX_AGE_S = 120
+# Single quotes only: the macro must survive Windows argument quoting intact.
+JAVA8_WATCHER_MACRO = "call('imagejai.engine.automation.ConsoleBootstrapService.startWatcher');"
 _ROOT_NAMES = ("Fiji.app", "Fiji")
 _EXECUTABLES = (
     "ImageJ-win64.exe", "fiji-windows-x64.exe", "fiji-win64.exe",
@@ -195,6 +197,12 @@ def launch_fiji(root: Path) -> subprocess.Popen:
             java_home = _bundled_java_home(root)
             if java_home is not None:
                 command += ["--java-home", str(java_home), "--default-gc"]
+            else:
+                # Java 8 Fiji: ImageJ 2.16 there does not start plugin services
+                # at boot, so start the plugin's request watcher from IJ1.
+                # -port0 keeps ImageJ from handing the macro to another
+                # running Fiji instead of starting this one.
+                command += ["--", "-port0", "-eval", JAVA8_WATCHER_MACRO]
     flags = 0
     if os.name == "nt":
         flags = (subprocess.CREATE_NEW_PROCESS_GROUP

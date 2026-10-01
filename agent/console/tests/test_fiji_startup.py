@@ -60,6 +60,20 @@ def test_packaged_launcher_uses_bundled_supported_java(fiji, monkeypatch):
                      "--default-gc"]]
 
 
+def test_java8_only_fiji_is_told_to_start_the_request_watcher(fiji, monkeypatch):
+    if os.name != "nt":
+        pytest.skip("Windows Fiji launcher only")
+    (fiji / "java" / "win64" / "jdk1.8.0_172" / "bin").mkdir(parents=True)
+    (fiji / "java" / "win64" / "jdk1.8.0_172" / "bin" / "java.exe").write_bytes(b"test")
+    seen = []
+    monkeypatch.setattr(startup.subprocess, "Popen",
+                        lambda command, **kwargs: seen.append(command))
+    startup.launch_fiji(fiji)
+    assert seen == [[str(fiji / "ImageJ-win64.exe"), "--", "-port0", "-eval",
+                     startup.JAVA8_WATCHER_MACRO]]
+    assert '"' not in startup.JAVA8_WATCHER_MACRO
+
+
 def test_starts_selected_fiji_then_connects(fiji, monkeypatch):
     monkeypatch.setattr(startup, "_matching_process_running", lambda root: False)
     launches = []

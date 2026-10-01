@@ -2,7 +2,7 @@
 
 ImageJAI is an ImageJ/Fiji plugin for describing image analysis in plain language. Use the assistant inside Fiji or its standalone console to inspect images, run analyses, interact with plugin dialogs and save reusable macros. Choose a cloud model, a supported agent subscription or a local model through Ollama.
 
-Version **0.6.1** is available from the [ImageJ-AI update site](https://sites.imagej.net/ImageJ-AI/). Console setup installs Python privately when needed.
+Version **0.6.2** is available from the [ImageJ-AI update site](https://sites.imagej.net/ImageJ-AI/). Console setup installs Python privately when needed.
 
 ## Data Governance
 
@@ -39,7 +39,10 @@ The audit trail is written to `AI_Exports/imagejai_audit.csv`, and the launcher 
 1. In Fiji, open **Help > Update > Manage update sites**.
 2. Click **Add update site**, name it **ImageJ-AI**, and enter
    `https://sites.imagej.net/ImageJ-AI/` as its URL. Enable its checkbox.
-3. Close the sites window, click **Apply changes**, and restart Fiji.
+3. Close the sites window, click **Apply changes**, and restart Fiji. Leave
+   Fiji's own updates selected: the plugin declares ImageJ core libraries as
+   dependencies, and installing it alone on an older Fiji upgrades part of
+   the core and can stop Fiji starting.
 4. Open **Plugins > AI Assistant**.
 5. For the standalone console, open **Settings > Models & Agents**, find
    **ImageJAI Console**, and click **Install**. Python and its packages are
@@ -48,9 +51,9 @@ The audit trail is written to `AI_Exports/imagejai_audit.csv`, and the launcher 
    to a local model server.
 
 The [ImageJ-AI update site](https://sites.imagej.net/ImageJ-AI/) serves version
-0.6.1. The site can be added by URL before it appears in Fiji's default list.
+0.6.2. The site can be added by URL before it appears in Fiji's default list.
 The Fiji panel also supports Gemini, Ollama, and OpenAI-compatible backends.
-For a direct install, copy `imagej-ai-0.6.1.jar` into `Fiji.app/plugins/` while Fiji
+For a direct install, copy `imagej-ai-0.6.2.jar` into `Fiji.app/plugins/` while Fiji
 is closed, restart it, and follow steps 4–6.
 
 ## Requirements
@@ -200,7 +203,7 @@ echo '{"command": "get_progress"}' | nc localhost 7746
 ```
 
 <!-- BEGIN GENERATED COMMAND SUMMARY -->
-ImageJAI 0.6.1 exposes **71 TCP commands** (70 request/response plus 1 live stream). `agent/ij.py` provides convenience helpers for 54; the other 17 are explicitly available through `imagej_command({...})`. See the generated [`docs/COMMAND_API.md`](docs/COMMAND_API.md) or the canonical [`agent/command_manifest.json`](agent/command_manifest.json).
+ImageJAI 0.6.2 exposes **71 TCP commands** (70 request/response plus 1 live stream). `agent/ij.py` provides convenience helpers for 54; the other 17 are explicitly available through `imagej_command({...})`. See the generated [`docs/COMMAND_API.md`](docs/COMMAND_API.md) or the canonical [`agent/command_manifest.json`](agent/command_manifest.json).
 <!-- END GENERATED COMMAND SUMMARY -->
 
 The `run_script` command executes Groovy/Jython/JavaScript code directly inside Fiji's JVM — enabling access to any Java API, Swing component manipulation, and plugin internals that macros can't reach.
@@ -236,7 +239,7 @@ When you use ImageJAI to invoke specific tools, also cite the underlying methods
 
 ## License
 
-ImageJAI 0.6.1 is licensed under the **BSD 3-Clause License** (`BSD-3-Clause`).
+ImageJAI 0.6.2 is licensed under the **BSD 3-Clause License** (`BSD-3-Clause`).
 See [`LICENSE`](LICENSE) for the full terms. Third-party dependencies retain
 their own licences. Earlier versions retain the licence distributed with them.
 

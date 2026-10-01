@@ -20,15 +20,38 @@ import java.util.Properties;
 public class ConsoleBootstrapService extends AbstractService implements ImageJService {
     private static final long MAX_REQUEST_AGE_MS = 120_000L;
     private static final long POLL_MS = 750L;
+    /**
+     * Set once a watcher runs. A system property, not a static field: the
+     * service and an IJ1 macro call can load this class through different
+     * class loaders, and each copy would have its own statics.
+     */
+    static final String WATCHER_PROPERTY = "imagejai.consoleBridgeWatcher";
 
     @Override
     public void initialize() {
-        if (AutomationPolicy.current().isEnabled()) return;
+        startWatcher();
+    }
+
+    /**
+     * Start the request watcher unless one is already running.
+     *
+     * <p>Also an IJ1 macro entry point: ImageJ 2.16 on Java 8 does not create
+     * SciJava services at boot, so the console launches such a Fiji with
+     * {@code -eval "call('imagejai.engine.automation.ConsoleBootstrapService.startWatcher');"}.</p>
+     *
+     * @return what happened, for the macro caller
+     */
+    public static String startWatcher() {
+        if (AutomationPolicy.current().isEnabled()) return "automation bridge in charge";
+        if (System.getProperties().putIfAbsent(WATCHER_PROPERTY, "running") != null) {
+            return "already watching";
+        }
         Thread watcher = new Thread(new Runnable() {
             @Override public void run() { watchRequests(); }
         }, "ImageJAI-console-bridge-request");
         watcher.setDaemon(true);
         watcher.start();
+        return "watching";
     }
 
     private static void watchRequests() {

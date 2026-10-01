@@ -5,13 +5,16 @@ Plugins > AI Assistant.
 
 ## Install
 
-1. Download `imagej-ai-0.6.1.jar` from the GitHub Actions artifact or a
+1. Download `imagej-ai-0.6.2.jar` from the GitHub Actions artifact or a
    GitHub release.
 2. Copy the jar into `Fiji.app/plugins/`.
 3. Restart Fiji.
 4. Open Plugins > AI Assistant.
 
-ImageJAI requires Fiji/ImageJ running Java 8 or newer.
+ImageJAI requires Fiji/ImageJ running Java 8 or newer. On a Java 8 Fiji the
+standalone console can connect by itself only when it starts Fiji; if that
+Fiji is already open, open Plugins > AI Assistant once so the console can
+connect.
 
 ## First Run
 
