@@ -17,6 +17,22 @@ def test_upgrade_changes_signature_and_requires_review(tmp_path):
     status = profile.inspect(changed)
     assert not status["reviewed"] and "plugins" in status["changed"]
 
+def test_stable_jars_are_hashed_once(tmp_path, monkeypatch):
+    import os
+    from agent.console import instrument
+    root = tmp_path / "Fiji.app"
+    (root / "plugins").mkdir(parents=True)
+    jar = root / "plugins" / "old.jar"
+    jar.write_bytes(b"settled")
+    os.utime(jar, (1_000_000_000, 1_000_000_000))
+    hashed = []
+    real_hash = instrument.file_hash
+    monkeypatch.setattr(instrument, "file_hash", lambda path: hashed.append(path) or real_hash(path))
+    detector = InstrumentDetector()
+    detector.facts(root, {})
+    detector.facts(root, {})
+    assert hashed == [jar]
+
 def test_instrument_memory_withheld_until_profile_and_entry_revalidated(tmp_path):
     store = HarnessStore(tmp_path / "state.json", tmp_path / "events.jsonl")
     entry = store.propose(kind="fact",scope="instrument",title="Pixel size",content="Use instrument calibration")

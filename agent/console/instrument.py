@@ -8,6 +8,8 @@ import shutil
 import threading
 from .validation import file_hash
 
+_RACY_WINDOW_NS = 2_000_000_000
+
 def fingerprint(facts):
     return hashlib.sha256(json.dumps(facts, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()).hexdigest()
 
@@ -61,8 +63,14 @@ class InstrumentDetector:
             stat = path.stat()
             signature = (stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
             previous = self._plugins.get(str(path))
-            digest = previous[1] if previous and previous[0] == signature else file_hash(path)
-            self._plugins[str(path)] = (signature, digest)
+            # A same-size rewrite inside one timestamp tick keeps the signature,
+            # so only trust a digest taken after the file had been still.
+            if previous and previous[0] == signature and previous[2]:
+                digest = previous[1]
+            else:
+                digest = file_hash(path)
+            stable = time.time_ns() - stat.st_mtime_ns > _RACY_WINDOW_NS
+            self._plugins[str(path)] = (signature, digest, stable)
             plugins[str(path.relative_to(root)).replace("\\", "/")] = digest
         self._plugins = {name:value for name,value in self._plugins.items() if Path(name) in candidates}
         active = state.get("active") or {}
