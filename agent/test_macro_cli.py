@@ -100,19 +100,18 @@ def test_quote_loss_hint_preserves_refusal_and_never_rewrites_source(nested, mon
     assert ij._macro_cli_reply(damaged, {"ok": True}) == {"ok": True}
 
 
-def test_windows_guidance_reaches_both_vendor_clients(monkeypatch, tmp_path):
+def test_vendor_clients_send_macros_as_json_actions_not_shell(monkeypatch, tmp_path):
+    # Wrapped subscription agents never run ij.py through a shell, so Windows
+    # argument quoting cannot strip macro quotes; the macro travels as JSON.
     monkeypatch.setattr(subscriptions, "_executable", lambda provider: provider)
     monkeypatch.setattr(subscriptions, "subscription_status", lambda _: (True, "ready"))
     monkeypatch.setattr(subscriptions, "ensure_importable", lambda: tmp_path)
-    make_prompt = subscriptions._fiji_prompt
-    monkeypatch.setattr(subscriptions, "_fiji_prompt", lambda text: make_prompt(text, "win32"))
-    assert make_prompt("open blobs", "linux") == "open blobs"
     for provider in ("codex-subscription", "claude-subscription"):
         agent = subscriptions.SubscriptionAgent(provider, external_session_id="existing-session")
         prompts = []
 
         def run(command, workspace, stdin=None, **kw):
-            prompts.append(stdin if provider == "codex-subscription" else command[-1])
+            prompts.append(stdin)  # both clients receive the prompt on stdin
             return 0, '{"result":"done"}', ""
 
         monkeypatch.setattr(agent, "_run", run)
@@ -121,8 +120,11 @@ def test_windows_guidance_reaches_both_vendor_clients(monkeypatch, tmp_path):
         else:
             agent._claude_turn("open blobs")
         assert len(prompts) == 1
-        assert "macro --stdin" in prompts[0] and "macro --file" in prompts[0]
-        assert prompts[0].endswith("User request:\nopen blobs")
+        assert "Do not call ij.py, run Fiji commands through a shell" in prompts[0]
+        assert '"code": "run(\\"Blobs\\");"' in prompts[0]
+        # No contradictory shell advice alongside the action-only rule.
+        assert "macro --stdin" not in prompts[0]
+        assert prompts[0].endswith("Conversation input:\nopen blobs")
         assert agent.messages == []
 
 

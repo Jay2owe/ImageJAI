@@ -8,7 +8,6 @@ import queue
 import signal
 import shutil
 import subprocess
-import sys
 import tempfile
 import threading
 import uuid
@@ -50,23 +49,6 @@ _COMMANDS = {
     "codex-subscription": ("codex", "codex.cmd"),
     "claude-subscription": ("claude", "claude.exe"),
 }
-
-
-def _fiji_prompt(prompt: str, platform: str | None = None) -> str:
-    """Remind resumed Windows agents how to preserve ImageJ macro quotes."""
-    if (platform or sys.platform) != "win32":
-        return prompt
-    return (
-        "ImageJAI console instruction: Windows shells can remove quotes inside "
-        "native command arguments, turning run(\"Blobs\"); into run(Blobs);. "
-        "Send ImageJ macro source through stdin or a UTF-8 .ijm file, using "
-        "`python ij.py macro --stdin` or `python ij.py macro --file <path>`, "
-        "or the imagej-use-auto stdin runner. In PowerShell use a single-quoted "
-        "here-string piped to the helper; in Bash use a quoted heredoc. "
-        "Use the installed Fiji command label. A safe-mode refusal caused by "
-        "missing command quotes needs corrected source, not elevated permissions.\n\n"
-        "User request:\n" + prompt
-    )
 
 
 def _executable(provider: str) -> str | None:
