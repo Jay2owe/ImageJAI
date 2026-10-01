@@ -17,12 +17,14 @@ import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 
 public class ReleaseMetadataTest {
-    private static final String RELEASE_VERSION = "0.6.1";
-
     @Test
     public void canonicalVersionMatchesPomCitationAndDocumentation() throws Exception {
+        // pom.xml is the single source; scripts/bump_version.py rewrites the rest.
+        final String RELEASE_VERSION = projectVersion(root().resolve("pom.xml"));
+        assertTrue(RELEASE_VERSION.matches("\\d+\\.\\d+\\.\\d+"));
         assertEquals(RELEASE_VERSION, Constants.VERSION);
-        assertEquals(RELEASE_VERSION, projectVersion(root().resolve("pom.xml")));
+        assertTrue(read("agent/command_manifest.json")
+                .contains("\"product_version\": \"" + RELEASE_VERSION + "\""));
 
         String citation = read("CITATION.cff");
         Matcher cffVersion = Pattern.compile("(?m)^version:\\s*[\"']?([^\"'\\s]+)")
@@ -76,11 +78,14 @@ public class ReleaseMetadataTest {
     @Test
     public void noticeNamesEveryEmbeddedRuntimeDependencyFamily() throws Exception {
         String notice = read("src/main/resources/META-INF/NOTICE.md");
-        String[] required = {"Java Native Access", "Gson", "SnakeYAML", "Apache PDFBox",
-                "PDFBox IO", "FontBox", "Apache Commons Logging",
-                "JetBrains Mono", "Noto Emoji"};
+        String[] required = {"Java Native Access", "Gson", "SnakeYAML"};
         for (String name : required) {
             assertTrue("NOTICE missing " + name, notice.contains(name));
+        }
+        // No longer embedded: the statement is HTML and the terminal is gone.
+        String[] removed = {"PDFBox", "FontBox", "Commons Logging", "JetBrains Mono", "Noto Emoji"};
+        for (String name : removed) {
+            assertFalse("NOTICE still names " + name, notice.contains(name));
         }
     }
 

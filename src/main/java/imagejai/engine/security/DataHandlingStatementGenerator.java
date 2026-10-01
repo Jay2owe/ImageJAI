@@ -1,42 +1,33 @@
 package imagejai.engine.security;
 
+import imagejai.config.Constants;
 import imagejai.config.PrivacyPosture;
-import org.apache.pdfbox.pdmodel.PDDocument;
-import org.apache.pdfbox.pdmodel.PDPage;
-import org.apache.pdfbox.pdmodel.PDPageContentStream;
-import org.apache.pdfbox.pdmodel.common.PDRectangle;
-import org.apache.pdfbox.pdmodel.font.PDFont;
-import org.apache.pdfbox.pdmodel.font.PDType0Font;
-import org.apache.pdfbox.pdmodel.font.PDType1Font;
-import org.apache.pdfbox.pdmodel.font.Standard14Fonts;
 
-import java.awt.Color;
-import java.io.File;
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Clock;
 import java.time.Instant;
 import java.time.LocalDate;
 import java.time.format.DateTimeFormatter;
-import java.util.ArrayList;
-import java.util.List;
 
 /**
- * Generates the printable Data Governance statement under AI_Exports.
+ * Generates the printable Data Governance statement under AI_Exports as a
+ * self-contained HTML page; a browser's Print command turns it into a PDF.
  */
 public final class DataHandlingStatementGenerator {
-    private static final float LEFT = 44f;
-    private static final float RIGHT = 44f;
-    private static final float TOP = 46f;
-    private static final float BOTTOM = 24f;
-    private static final float BODY_SIZE = 9.0f;
-    private static final float BODY_LEADING = 10.7f;
-    private static final float HEADING_SIZE = 10.5f;
-    private static final float HEADING_LEADING = 13.0f;
-    private static final float TITLE_SIZE = 15.0f;
-    private static final float TITLE_LEADING = 18.0f;
     private static final String REPO_URL = "github.com/Jay2owe/ImageJAI";
+    private static final String STYLE =
+            "@page{size:A4;margin:16mm}"
+            + "body{font:10pt/1.45 Arial,'Segoe UI',sans-serif;color:#000;"
+            + "max-width:180mm;margin:24px auto;padding:0 16px}"
+            + "h1{font-size:15pt;margin:0 0 6px}"
+            + "h2{font-size:10.5pt;margin:14px 0 4px;break-after:avoid}"
+            + "p{margin:2px 0}ul{margin:2px 0;padding-left:18px}"
+            + "hr{border:0;border-top:1px solid #bebec3;margin:8px 0}"
+            + ".indent{margin-left:14px}.vendor{font-weight:bold;margin-top:6px}"
+            + "footer{margin-top:16px;font-size:9pt;color:#444}";
 
     private final Path projectFolder;
     private final PrivacyPosture posture;
@@ -44,7 +35,7 @@ public final class DataHandlingStatementGenerator {
     private final String version;
 
     public DataHandlingStatementGenerator(Path projectFolder, PrivacyPosture posture) {
-        this(projectFolder, posture, Clock.systemDefaultZone(), defaultVersion());
+        this(projectFolder, posture, Clock.systemDefaultZone(), Constants.VERSION);
     }
 
     DataHandlingStatementGenerator(Path projectFolder, PrivacyPosture posture,
@@ -56,7 +47,7 @@ public final class DataHandlingStatementGenerator {
         this.posture = posture == null ? PrivacyPosture.defaultPosture() : posture;
         this.clock = clock == null ? Clock.systemDefaultZone() : clock;
         this.version = version == null || version.trim().isEmpty()
-                ? defaultVersion()
+                ? Constants.VERSION
                 : version.trim();
     }
 
@@ -66,144 +57,130 @@ public final class DataHandlingStatementGenerator {
         Files.createDirectories(outDir);
         Path out = outDir.resolve("DataHandlingStatement_" + projectName()
                 + "_" + DateTimeFormatter.BASIC_ISO_DATE.format(generatedDate)
-                + ".pdf");
+                + ".html");
 
-        AuditSummary summary = AuditLog.summaryFor(projectFolder);
-        try (PDDocument doc = new PDDocument()) {
-            FontSet fonts = FontSet.load(doc);
-            PdfWriter writer = new PdfWriter(doc, fonts);
-            writer.startPage();
-            writeHeader(writer, generatedDate);
-            writeSection1Purpose(writer);
-            writeSection2DataFlow(writer);
-            writeSection3Pseudonymisation(writer);
-            writeSection4VendorTerms(writer);
-            writeSection5AuditSummary(writer, summary);
-            writeSection6OptOut(writer);
-            writeSection7Limitations(writer);
-            writeFooter(writer);
-            writer.close();
-            doc.save(out.toFile());
-        }
+        Html html = new Html();
+        html.raw("<!DOCTYPE html>\n<html lang=\"en\"><head><meta charset=\"utf-8\">"
+                + "<title>Data Handling Statement — " + escape(projectName())
+                + "</title><style>" + STYLE + "</style></head><body>\n");
+        writeHeader(html, generatedDate);
+        writeSection1Purpose(html);
+        writeSection2DataFlow(html);
+        writeSection3Pseudonymisation(html);
+        writeSection4VendorTerms(html);
+        writeSection5AuditSummary(html, AuditLog.summaryFor(projectFolder));
+        writeSection6OptOut(html);
+        writeSection7Limitations(html);
+        html.raw("<footer>Generated by ImageJAI v" + escape(version) + " — "
+                + escape(REPO_URL) + "</footer>\n</body></html>\n");
+        Files.write(out, html.toString().getBytes(StandardCharsets.UTF_8));
         return out;
     }
 
-    private void writeHeader(PdfWriter writer, LocalDate generatedDate) throws IOException {
-        writer.writeTitle("ImageJAI — Data Handling Statement");
-        writer.writeBody("Project: " + projectName());
-        writer.writeBody("Generated: " + generatedDate
-                + "    Posture in force: " + posture.label());
-        writer.writeBody("ImageJAI version: " + version);
-        writer.rule();
-        writer.blank(4f);
+    private void writeHeader(Html html, LocalDate generatedDate) {
+        html.raw("<h1>ImageJAI — Data Handling Statement</h1>\n");
+        html.p("Project: " + projectName());
+        html.p("Generated: " + generatedDate + "    Posture in force: " + posture.label());
+        html.p("ImageJAI version: " + version);
+        html.raw("<hr>\n");
     }
 
-    private void writeSection1Purpose(PdfWriter writer) throws IOException {
-        writer.section("1. Purpose");
-        writer.writeBody("This statement summarises the data-handling posture of the "
+    private void writeSection1Purpose(Html html) {
+        html.section("1. Purpose");
+        html.p("This statement summarises the data-handling posture of the "
                 + "ImageJAI plugin for the named project. Suitable for Research Ethics "
                 + "Committee amendments and Data Management Plans.");
-        writer.blank();
     }
 
-    private void writeSection2DataFlow(PdfWriter writer) throws IOException {
-        writer.section("2. Data flow");
-        writer.bullet("Images are read from " + projectFolder + " on the local machine.", 0);
-        writer.bullet("The user selects files (and series-within-files) via the "
-                + "Browse Files dialog or Fiji's File menu. Identifiable filenames "
-                + "remain on the local machine.", 0);
-        writer.bullet("The ImageJAI TCP server (localhost:7746) exposes commands "
-                + "to the selected agent CLI.", 0);
-        writer.bullet("Outbound responses pass through the PseudonymisationFilter "
-                + "before reaching the agent process.", 0);
-        writer.bullet("The agent CLI communicates with the configured model "
-                + "endpoint (see §4).", 0);
-        writer.blank();
+    private void writeSection2DataFlow(Html html) {
+        html.section("2. Data flow");
+        html.list(
+                "Images are read from " + projectFolder + " on the local machine.",
+                "The user selects files (and series-within-files) via the "
+                        + "Browse Files dialog or Fiji's File menu. Identifiable filenames "
+                        + "remain on the local machine.",
+                "The ImageJAI TCP server (localhost:7746) exposes commands "
+                        + "to the selected agent CLI.",
+                "Outbound responses pass through the PseudonymisationFilter "
+                        + "before reaching the agent process.",
+                "The agent CLI communicates with the configured model "
+                        + "endpoint (see §4).");
     }
 
-    private void writeSection3Pseudonymisation(PdfWriter writer) throws IOException {
-        writer.section("3. Pseudonymisation scheme (UK GDPR Art. 4(5))");
-        writer.writeBody("The following are tokenised before leaving the JVM in "
+    private void writeSection3Pseudonymisation(Html html) {
+        html.section("3. Pseudonymisation scheme (UK GDPR Art. 4(5))");
+        html.p("The following are tokenised before leaving the JVM in "
                 + "Pseudonymised and On-premises postures:");
-        writer.bullet("File and folder paths (whole-file and series-within-file)", 1);
-        writer.bullet("OME-XML elements: Experimenter, Description, StageLabel, "
-                + "AcquisitionDate, InstrumentRef, InstrumentSerialNumber, Annotation", 1);
-        writer.bullet("Results-table columns: Label, Slice (when non-numeric)", 1);
-        writer.bullet("Dialog and window titles", 1);
-        writer.bullet("Error and log messages", 1);
-        writer.blank(3f);
-        writer.writeBody("Image-pixel handling is differentiated by source:");
-        writer.bullet("Microscopy image content: downsampled to ≤512×512 and "
-                + "text burn-ins (Incucyte timestamps, scanner labels) masked "
-                + "before transmission.", 1);
-        writer.bullet("GUI / dialog / window screenshots: refused and replaced "
-                + "with a hash placeholder.", 1);
-        writer.bullet("On-demand visual override: the agent may request "
-                + "full-resolution pixel access for one call; the user must "
-                + "explicitly grant; burn-in mask still applied; the grant and "
-                + "consumption are logged in the audit trail.", 1);
-        writer.blank(3f);
-        writer.writeBody("The token map is held in JVM memory only and destroyed "
-                + "at session end.");
-        writer.blank();
+        html.list(
+                "File and folder paths (whole-file and series-within-file)",
+                "OME-XML elements: Experimenter, Description, StageLabel, "
+                        + "AcquisitionDate, InstrumentRef, InstrumentSerialNumber, Annotation",
+                "Results-table columns: Label, Slice (when non-numeric)",
+                "Dialog and window titles",
+                "Error and log messages");
+        html.p("Image-pixel handling is differentiated by source:");
+        html.list(
+                "Microscopy image content: downsampled to ≤512×512 and "
+                        + "text burn-ins (Incucyte timestamps, scanner labels) masked "
+                        + "before transmission.",
+                "GUI / dialog / window screenshots: refused and replaced "
+                        + "with a hash placeholder.",
+                "On-demand visual override: the agent may request "
+                        + "full-resolution pixel access for one call; the user must "
+                        + "explicitly grant; burn-in mask still applied; the grant and "
+                        + "consumption are logged in the audit trail.");
+        html.p("The token map is held in JVM memory only and destroyed at session end.");
     }
 
-    private void writeSection4VendorTerms(PdfWriter writer) throws IOException {
-        writer.section("4. Vendor contractual posture");
+    private void writeSection4VendorTerms(Html html) {
+        html.section("4. Vendor contractual posture");
         for (VendorTermsRegistry.VendorTerm term : VendorTermsRegistry.ALL) {
-            writer.writeBodyBold(term.vendor() + ":");
-            writer.writeBody(vendorStatement(term), 12f);
+            html.raw("<p class=\"vendor\">" + escape(term.vendor() + ":") + "</p>\n");
+            html.raw("<p class=\"indent\">" + escape(vendorStatement(term)) + "</p>\n");
         }
-        writer.blank();
     }
 
-    private void writeSection5AuditSummary(PdfWriter writer, AuditSummary summary)
-            throws IOException {
+    private void writeSection5AuditSummary(Html html, AuditSummary summary) {
         AuditSummary s = summary == null
                 ? new AuditSummary(null, 0, null, null, 0L, 0L, 0, 0, 0, 0,
                         null, null, null)
                 : summary;
-        writer.section("5. Audit trail");
-        writer.writeBody("Location: AI_Exports/imagejai_audit.csv");
-        writer.writeBody("Rows in this project to date: " + s.rowCount());
-        writer.writeBody("Date range: " + dateRange(s.first(), s.last()));
-        writer.writeBody("Of which:");
-        writer.writeBody("Pseudonymised calls: " + s.pseudonymised(), 12f);
-        writer.writeBody("Visual override grants: " + s.visualOverrideGrants(), 12f);
-        writer.writeBody("Posture downshifts: " + s.downshifts(), 12f);
-        writer.blank();
+        html.section("5. Audit trail");
+        html.p("Location: AI_Exports/imagejai_audit.csv");
+        html.p("Rows in this project to date: " + s.rowCount());
+        html.p("Date range: " + dateRange(s.first(), s.last()));
+        html.p("Of which:");
+        html.raw("<p class=\"indent\">" + escape("Pseudonymised calls: " + s.pseudonymised())
+                + "</p>\n<p class=\"indent\">"
+                + escape("Visual override grants: " + s.visualOverrideGrants())
+                + "</p>\n<p class=\"indent\">"
+                + escape("Posture downshifts: " + s.downshifts()) + "</p>\n");
     }
 
-    private void writeSection6OptOut(PdfWriter writer) throws IOException {
-        writer.section("6. Opt-out and escalation");
-        writer.writeBody("Set the Privacy Posture to On-premises via the folder "
+    private void writeSection6OptOut(Html html) {
+        html.section("6. Opt-out and escalation");
+        html.p("Set the Privacy Posture to On-premises via the folder "
                 + "banner or the launcher Configuration Pane. In this mode the "
                 + "agent dropdown is filtered to local-binary agents only, "
                 + "*-cloud Ollama tags are refused, and the visual override is "
                 + "unavailable.");
-        writer.blank();
     }
 
-    private void writeSection7Limitations(PdfWriter writer) throws IOException {
-        writer.section("7. Limitations");
-        writer.bullet("Pseudonymisation remains reversible inside the live JVM "
-                + "session so ImageJAI can resolve tokens back to local files.", 0);
-        writer.bullet("The pseudonymisation filter governs TCP responses. For "
-                + "external CLIs (Claude Code in a separate terminal), filenames "
-                + "typed directly into the agent chat are NOT intercepted. The "
-                + "Browse Files dialog and the embedded terminal's outbound "
-                + "prompt scrubber mitigate this.", 0);
-        writer.bullet("Burn-in text detection uses a fast heuristic catching "
-                + "~90% of cases; configurable per-format masks cover known "
-                + "microscope vendors (Incucyte, Aperio).", 0);
-        writer.bullet("This statement is generated automatically from posture "
-                + "and audit metadata at the moment of generation.", 0);
-        writer.blank();
-    }
-
-    private void writeFooter(PdfWriter writer) throws IOException {
-        writer.blank(4f);
-        writer.writeBody("Generated by ImageJAI v" + version + " — " + REPO_URL);
+    private void writeSection7Limitations(Html html) {
+        html.section("7. Limitations");
+        html.list(
+                "Pseudonymisation remains reversible inside the live JVM "
+                        + "session so ImageJAI can resolve tokens back to local files.",
+                "The pseudonymisation filter governs TCP responses. For "
+                        + "external CLIs (Claude Code in a separate terminal), filenames "
+                        + "typed directly into the agent chat are NOT intercepted. The "
+                        + "Browse Files dialog and the ImageJAI console's redaction of "
+                        + "typed paths mitigate this.",
+                "Burn-in text detection uses a fast heuristic catching "
+                        + "~90% of cases; configurable per-format masks cover known "
+                        + "microscope vendors (Incucyte, Aperio).",
+                "This statement is generated automatically from posture "
+                        + "and audit metadata at the moment of generation.");
     }
 
     private String vendorStatement(VendorTermsRegistry.VendorTerm term) {
@@ -233,290 +210,40 @@ public final class DataHandlingStatementGenerator {
         return first + " — " + last;
     }
 
-    private static String defaultVersion() {
-        Package pkg = DataHandlingStatementGenerator.class.getPackage();
-        String implementation = pkg == null ? null : pkg.getImplementationVersion();
-        return implementation == null || implementation.trim().isEmpty()
-                ? "0.2.0"
-                : implementation.trim();
+    static String escape(String text) {
+        String value = text == null ? "" : text;
+        StringBuilder out = new StringBuilder(value.length() + 16);
+        for (int i = 0; i < value.length(); i++) {
+            char c = value.charAt(i);
+            switch (c) {
+                case '&': out.append("&amp;"); break;
+                case '<': out.append("&lt;"); break;
+                case '>': out.append("&gt;"); break;
+                case '"': out.append("&quot;"); break;
+                case '\'': out.append("&#39;"); break;
+                default: out.append(c);
+            }
+        }
+        return out.toString();
     }
 
-    static List<String> wrapText(String text, PDFont font, float fontSize,
-                                 float maxWidth) throws IOException {
-        List<String> lines = new ArrayList<String>();
-        String value = text == null ? "" : text.trim();
-        if (value.isEmpty()) {
-            lines.add("");
-            return lines;
-        }
-        if (maxWidth <= 0f) {
-            lines.add(value);
-            return lines;
-        }
+    private static final class Html {
+        private final StringBuilder out = new StringBuilder(8192);
 
-        String[] words = value.split("\\s+");
-        StringBuilder line = new StringBuilder();
-        for (String word : words) {
-            String candidate = line.length() == 0 ? word : line + " " + word;
-            if (textWidth(font, fontSize, candidate) <= maxWidth) {
-                line.setLength(0);
-                line.append(candidate);
-                continue;
+        void raw(String markup) { out.append(markup); }
+
+        void section(String title) { out.append("<h2>").append(escape(title)).append("</h2>\n"); }
+
+        void p(String text) { out.append("<p>").append(escape(text)).append("</p>\n"); }
+
+        void list(String... items) {
+            out.append("<ul>\n");
+            for (String item : items) {
+                out.append("<li>").append(escape(item)).append("</li>\n");
             }
-            if (line.length() > 0) {
-                lines.add(line.toString());
-                line.setLength(0);
-            }
-            if (textWidth(font, fontSize, word) <= maxWidth) {
-                line.append(word);
-            } else {
-                List<String> pieces = breakLongWord(word, font, fontSize, maxWidth);
-                for (int i = 0; i < pieces.size() - 1; i++) {
-                    lines.add(pieces.get(i));
-                }
-                if (!pieces.isEmpty()) {
-                    line.append(pieces.get(pieces.size() - 1));
-                }
-            }
-        }
-        if (line.length() > 0) {
-            lines.add(line.toString());
-        }
-        return lines;
-    }
-
-    private static List<String> breakLongWord(String word, PDFont font,
-                                              float fontSize, float maxWidth)
-            throws IOException {
-        List<String> pieces = new ArrayList<String>();
-        StringBuilder piece = new StringBuilder();
-        for (int i = 0; i < word.length();) {
-            int cp = word.codePointAt(i);
-            String next = piece.toString() + new String(Character.toChars(cp));
-            if (piece.length() > 0 && textWidth(font, fontSize, next) > maxWidth) {
-                pieces.add(piece.toString());
-                piece.setLength(0);
-            }
-            piece.appendCodePoint(cp);
-            i += Character.charCount(cp);
-        }
-        if (piece.length() > 0) {
-            pieces.add(piece.toString());
-        }
-        return pieces;
-    }
-
-    private static float textWidth(PDFont font, float fontSize, String text)
-            throws IOException {
-        return font.getStringWidth(text == null ? "" : text) / 1000f * fontSize;
-    }
-
-    private static final class PdfWriter {
-        private final PDDocument doc;
-        private final FontSet fonts;
-        private PDPage page;
-        private PDPageContentStream stream;
-        private float y;
-
-        PdfWriter(PDDocument doc, FontSet fonts) {
-            this.doc = doc;
-            this.fonts = fonts;
+            out.append("</ul>\n");
         }
 
-        void startPage() throws IOException {
-            if (stream != null) {
-                stream.close();
-            }
-            page = new PDPage(PDRectangle.A4);
-            doc.addPage(page);
-            stream = new PDPageContentStream(doc, page);
-            stream.setStrokingColor(new Color(190, 190, 195));
-            stream.setLineWidth(0.5f);
-            PDRectangle box = page.getMediaBox();
-            stream.addRect(24f, 24f, box.getWidth() - 48f, box.getHeight() - 48f);
-            stream.stroke();
-            y = box.getHeight() - TOP;
-        }
-
-        void close() throws IOException {
-            if (stream != null) {
-                stream.close();
-                stream = null;
-            }
-        }
-
-        void writeTitle(String text) throws IOException {
-            writeLine(text, 0f, fonts.bold, TITLE_SIZE, TITLE_LEADING);
-        }
-
-        void section(String text) throws IOException {
-            ensureSpace(HEADING_LEADING + BODY_LEADING);
-            writeLine(text, 0f, fonts.bold, HEADING_SIZE, HEADING_LEADING);
-        }
-
-        void writeBody(String text) throws IOException {
-            writeBody(text, 0f);
-        }
-
-        void writeBody(String text, float indent) throws IOException {
-            writeWrapped(text, indent, fonts.regular, BODY_SIZE, BODY_LEADING);
-        }
-
-        void writeBodyBold(String text) throws IOException {
-            writeWrapped(text, 0f, fonts.bold, BODY_SIZE, BODY_LEADING);
-        }
-
-        void bullet(String text, int level) throws IOException {
-            float indent = level <= 0 ? 10f : 22f;
-            float bulletWidth = textWidth(fonts.regular, BODY_SIZE, fonts.prepare("• "));
-            List<String> lines = wrapText(fonts.prepare(text), fonts.regular, BODY_SIZE,
-                    availableWidth() - indent - bulletWidth);
-            for (int i = 0; i < lines.size(); i++) {
-                if (i == 0) {
-                    writeLine("• " + lines.get(i), indent, fonts.regular,
-                            BODY_SIZE, BODY_LEADING);
-                } else {
-                    writeLine(lines.get(i), indent + bulletWidth, fonts.regular,
-                            BODY_SIZE, BODY_LEADING);
-                }
-            }
-        }
-
-        void rule() throws IOException {
-            ensureSpace(8f);
-            stream.setStrokingColor(new Color(190, 190, 195));
-            stream.setLineWidth(0.5f);
-            stream.moveTo(LEFT, y);
-            stream.lineTo(page.getMediaBox().getWidth() - RIGHT, y);
-            stream.stroke();
-            y -= 8f;
-        }
-
-        void blank() throws IOException {
-            blank(5f);
-        }
-
-        void blank(float points) throws IOException {
-            ensureSpace(points);
-            y -= points;
-        }
-
-        private void writeWrapped(String text, float indent, PDFont font,
-                                  float size, float leading) throws IOException {
-            List<String> lines = wrapText(fonts.prepare(text), font, size,
-                    availableWidth() - indent);
-            for (String line : lines) {
-                writeLine(line, indent, font, size, leading);
-            }
-        }
-
-        private void writeLine(String text, float indent, PDFont font, float size,
-                               float leading) throws IOException {
-            ensureSpace(leading);
-            stream.beginText();
-            stream.setNonStrokingColor(Color.BLACK);
-            stream.setFont(font, size);
-            stream.newLineAtOffset(LEFT + indent, y);
-            stream.showText(fonts.prepare(text));
-            stream.endText();
-            y -= leading;
-        }
-
-        private void ensureSpace(float needed) throws IOException {
-            if (stream == null) {
-                startPage();
-                return;
-            }
-            if (y - needed < BOTTOM) {
-                startPage();
-            }
-        }
-
-        private float availableWidth() {
-            return page.getMediaBox().getWidth() - LEFT - RIGHT;
-        }
-    }
-
-    private static final class FontSet {
-        final PDFont regular;
-        final PDFont bold;
-        final boolean unicode;
-
-        private FontSet(PDFont regular, PDFont bold, boolean unicode) {
-            this.regular = regular;
-            this.bold = bold;
-            this.unicode = unicode;
-        }
-
-        static FontSet load(PDDocument doc) {
-            PDFont regular = loadFirstExisting(doc, false);
-            PDFont bold = loadFirstExisting(doc, true);
-            if (regular != null) {
-                return new FontSet(regular, bold == null ? regular : bold, true);
-            }
-            return new FontSet(
-                    new PDType1Font(Standard14Fonts.FontName.HELVETICA),
-                    new PDType1Font(Standard14Fonts.FontName.HELVETICA_BOLD),
-                    false);
-        }
-
-        String prepare(String text) {
-            String out = text == null ? "" : text;
-            if (unicode) {
-                return out;
-            }
-            return out.replace("—", "-")
-                    .replace("–", "-")
-                    .replace("≤", "<=")
-                    .replace("×", "x")
-                    .replace("§", "section ")
-                    .replace("•", "-");
-        }
-
-        private static PDFont loadFirstExisting(PDDocument doc, boolean bold) {
-            String explicit = System.getProperty(bold
-                    ? "imagejai.pdf.font.bold"
-                    : "imagejai.pdf.font.regular");
-            List<String> candidates = new ArrayList<String>();
-            if (explicit != null && !explicit.trim().isEmpty()) {
-                candidates.add(explicit.trim());
-            }
-            if (bold) {
-                candidates.add("C:/Windows/Fonts/arialbd.ttf");
-                candidates.add("C:/Windows/Fonts/segoeuib.ttf");
-                candidates.add("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf");
-                candidates.add("/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf");
-                candidates.add("/System/Library/Fonts/Supplemental/Arial Bold.ttf");
-                candidates.add("/Library/Fonts/Arial Bold.ttf");
-            } else {
-                candidates.add("C:/Windows/Fonts/arial.ttf");
-                candidates.add("C:/Windows/Fonts/segoeui.ttf");
-                candidates.add("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf");
-                candidates.add("/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf");
-                candidates.add("/System/Library/Fonts/Supplemental/Arial.ttf");
-                candidates.add("/Library/Fonts/Arial.ttf");
-            }
-            for (String candidate : candidates) {
-                try {
-                    File file = new File(candidate);
-                    if (file.isFile()) {
-                        return PDType0Font.load(doc, file);
-                    }
-                } catch (Throwable ignore) {
-                }
-            }
-            String javaHome = System.getProperty("java.home", "");
-            String lucida = javaHome + File.separator + "lib" + File.separator
-                    + "fonts" + File.separator
-                    + (bold ? "LucidaSansDemiBold.ttf" : "LucidaSansRegular.ttf");
-            try {
-                File file = new File(lucida);
-                if (file.isFile()) {
-                    return PDType0Font.load(doc, file);
-                }
-            } catch (Throwable ignore) {
-            }
-            return null;
-        }
+        @Override public String toString() { return out.toString(); }
     }
 }

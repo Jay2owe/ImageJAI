@@ -1,6 +1,7 @@
 [CmdletBinding()]
 param(
-    [string]$Version = "0.6.1",
+    # Defaults to the version in pom.xml.
+    [string]$Version = "",
     # No site-specific defaults: this script ships publicly. Point the two
     # destinations at your own machine with -SharedRoot / -LocalFijiPlugins,
     # or set IMAGEJAI_SHARED_ROOT / IMAGEJAI_FIJI_PLUGINS once per user.
@@ -513,16 +514,23 @@ function Remove-OwnedStagingTree {
     Remove-Item -LiteralPath $full -Recurse -Force
 }
 
-if ($Version -notmatch '^[0-9]+\.[0-9]+\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?$') {
-    throw "Version must be a simple semantic version, not a path or wildcard: $Version"
-}
-
 if ([string]::IsNullOrWhiteSpace($ProjectRoot)) {
     $ProjectRoot = Split-Path -Parent $PSScriptRoot
 }
 $ProjectRoot = Get-FullPath $ProjectRoot
 if (-not (Test-Path -LiteralPath $ProjectRoot -PathType Container)) {
     throw "Project root not found: $ProjectRoot"
+}
+
+if ([string]::IsNullOrWhiteSpace($Version)) {
+    $pomPath = Join-Path $ProjectRoot "pom.xml"
+    if (-not (Test-Path -LiteralPath $pomPath -PathType Leaf)) {
+        throw "No -Version given and no pom.xml at $pomPath"
+    }
+    $Version = ([xml](Get-Content -LiteralPath $pomPath -Raw)).project.version
+}
+if ($Version -notmatch '^[0-9]+\.[0-9]+\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?$') {
+    throw "Version must be a simple semantic version, not a path or wildcard: $Version"
 }
 
 $agentRoot = Join-Path $ProjectRoot "agent"

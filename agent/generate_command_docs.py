@@ -46,8 +46,8 @@ def load_manifest(path: Path = MANIFEST_PATH) -> dict:
     data = json.loads(_read_bounded(path))
     if not isinstance(data, dict) or data.get("schema_version") != 1:
         raise ValueError("command manifest schema_version must be 1")
-    if data.get("product_version") != "0.6.1":
-        raise ValueError("command manifest product_version must be 0.6.1")
+    if not re.fullmatch(r"\d+\.\d+\.\d+", str(data.get("product_version", ""))):
+        raise ValueError("command manifest product_version must look like 1.2.3")
     if data.get("protocol") != "ImageJAI TCP JSONL":
         raise ValueError("command manifest protocol must be ImageJAI TCP JSONL")
     commands = data.get("commands")

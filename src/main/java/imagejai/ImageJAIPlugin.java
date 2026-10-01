@@ -34,7 +34,6 @@ import java.awt.*;
 import java.awt.event.WindowAdapter;
 import java.awt.event.WindowEvent;
 import java.io.IOException;
-import java.io.InputStream;
 import java.net.URI;
 import java.util.concurrent.atomic.AtomicBoolean;
 
@@ -60,7 +59,6 @@ public class ImageJAIPlugin implements Command {
     private static volatile boolean budgetDialogOpen;
     private static volatile boolean billingDialogOpen;
     private static MutationCoordinator mutationCoordinator;
-    private static boolean terminalFontsRegistered;
     private static boolean shutdownHookRegistered;
     /**
      * True when the TCP server and the automation bridge were started by the
@@ -97,8 +95,6 @@ public class ImageJAIPlugin implements Command {
             SwingUtilities.invokeLater(this::run);
             return;
         }
-
-        registerBundledTerminalFonts();
 
         // If already open, bring to front
         if (chatFrame != null && chatFrame.isDisplayable()) {
@@ -274,32 +270,6 @@ public class ImageJAIPlugin implements Command {
         }
 
         chatFrame.setVisible(true);
-    }
-
-    static synchronized void registerBundledTerminalFonts() {
-        if (terminalFontsRegistered) {
-            return;
-        }
-
-        try {
-            registerFontResource("/fonts/JetBrainsMono-Regular.ttf");
-            registerFontResource("/fonts/NotoEmoji-Regular.ttf");
-            terminalFontsRegistered = true;
-            IJ.log("[ImageJAI-Term] Registered bundled terminal fonts");
-        } catch (Exception e) {
-            IJ.log("[ImageJAI-Term] Failed to register bundled terminal fonts: " + e.getMessage());
-        }
-    }
-
-    private static void registerFontResource(String resourcePath)
-            throws FontFormatException, IOException {
-        try (InputStream in = ImageJAIPlugin.class.getResourceAsStream(resourcePath)) {
-            if (in == null) {
-                throw new IOException("missing resource " + resourcePath);
-            }
-            Font font = Font.createFont(Font.TRUETYPE_FONT, in);
-            GraphicsEnvironment.getLocalGraphicsEnvironment().registerFont(font);
-        }
     }
 
     /**

@@ -8,7 +8,8 @@ public final class Constants {
     private Constants() {}
 
     public static final String PLUGIN_NAME = "AI Assistant";
-    public static final String VERSION = "0.6.1";
+    /** The pom.xml version, written into version.properties by the build. */
+    public static final String VERSION = readVersion();
 
     // Config directory: ~/.imagej-ai/
     public static final String CONFIG_DIR_NAME = ".imagej-ai";
@@ -40,4 +41,21 @@ public final class Constants {
     // TCP command server
     public static final int DEFAULT_TCP_PORT = 7746;
     public static final int TCP_MAX_MESSAGE_SIZE = 1024 * 1024; // 1MB
+
+    private static String readVersion() {
+        try (java.io.InputStream in =
+                     Constants.class.getResourceAsStream("/imagejai/version.properties")) {
+            if (in != null) {
+                java.util.Properties properties = new java.util.Properties();
+                properties.load(in);
+                String version = properties.getProperty("version", "").trim();
+                if (!version.isEmpty() && !version.startsWith("${")) {
+                    return version;
+                }
+            }
+        } catch (java.io.IOException ignored) {
+            // Fall through to an explicit unknown rather than a stale literal.
+        }
+        return "unknown";
+    }
 }

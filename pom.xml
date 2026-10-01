@@ -172,14 +172,6 @@
             <scope>compile</scope>
         </dependency>
 
-        <!-- Data Governance statement PDF generation (stage 06). -->
-        <dependency>
-            <groupId>org.apache.pdfbox</groupId>
-            <artifactId>pdfbox</artifactId>
-            <version>3.0.2</version>
-            <scope>compile</scope>
-        </dependency>
-
         <!-- Test -->
         <dependency>
             <groupId>junit</groupId>
@@ -198,6 +190,12 @@
                     <exclude>**/*.bak</exclude>
                     <exclude>**/*.tmp</exclude>
                 </excludes>
+            </resource>
+            <!-- Only these files get ${project.version}-style filtering, so the
+                 version lives in this pom alone. -->
+            <resource>
+                <directory>src/main/resources-filtered</directory>
+                <filtering>true</filtering>
             </resource>
             <resource>
                 <directory>agent/providers</directory>

@@ -77,6 +77,8 @@ def _meaningful_lines(text: str) -> list[str]:
 
 def _load_context_hook_module():
     path = PROJECT_ROOT / "context_hook.py"
+    if not path.is_file():
+        pytest.skip("context_hook.py is a local Claude Code hook, not part of the release")
     spec = importlib.util.spec_from_file_location("imagejai_context_hook_test", path)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)

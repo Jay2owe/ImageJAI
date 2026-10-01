@@ -117,7 +117,7 @@ def _load_command_manifest():
     commands = manifest.get("commands") if isinstance(manifest, dict) else None
     if (not isinstance(commands, list)
             or manifest.get("schema_version") != 1
-            or manifest.get("product_version") != "0.6.1"
+            or not re.fullmatch(r"\d+\.\d+\.\d+", str(manifest.get("product_version", "")))
             or manifest.get("protocol") != "ImageJAI TCP JSONL"):
         raise RuntimeError("invalid ImageJAI command manifest: %s" % path)
     names = [entry.get("name") for entry in commands
@@ -2292,7 +2292,9 @@ def _macro_cli_code(args):
     if args[0] == "--stdin":
         if len(args) != 1:
             raise ValueError("--stdin cannot be combined with macro arguments")
-        code = sys.stdin.read()
+        # PowerShell can prefix piped text with a byte-order mark; --file
+        # already drops it by reading utf-8-sig.
+        code = sys.stdin.read().lstrip("﻿")
     elif args[0] == "--file":
         if len(args) != 2:
             raise ValueError("--file requires exactly one macro file path")

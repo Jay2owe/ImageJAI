@@ -50,11 +50,14 @@ def test_context_registry_has_a_deterministic_model_bound():
 
 
 def test_user_release_documents_agree_on_artifact_version_and_runtime():
+    import json
+    version = json.loads((ROOT / "agent" / "command_manifest.json")
+                         .read_text(encoding="utf-8"))["product_version"]
     paths = [ROOT / "README.md", ROOT / "docs" / "USER_GUIDE.md",
              ROOT / "docs" / "DEVELOPER.md"]
     for path in paths:
         text = path.read_text(encoding="utf-8")
-        assert "imagej-ai-0.6.1.jar" in text
+        assert f"imagej-ai-{version}.jar" in text
         assert "Java 8" in text
         assert "imagej-ai-0.2.0.jar" not in text
         assert "Java 8+" not in text

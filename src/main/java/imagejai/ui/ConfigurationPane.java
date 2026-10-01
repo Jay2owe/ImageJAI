@@ -267,7 +267,8 @@ public final class ConfigurationPane extends JPanel
                 }
                 JOptionPane.showMessageDialog(
                         ConfigurationPane.this,
-                        "Generated Data Handling Statement:\n" + generated,
+                        "Generated Data Handling Statement:\n" + generated
+                                + "\n\nOpen it in a web browser; use Print to save a PDF.",
                         "Generate Data Handling Statement",
                         JOptionPane.INFORMATION_MESSAGE);
             }

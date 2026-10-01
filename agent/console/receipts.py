@@ -8,7 +8,7 @@ read/record side of that contract:
   (``imagejai/ui/ReceiptsPane.java``),
 * a reader for the plugin's append-only ``AI_Exports/imagejai_audit.csv``
   (``imagejai/engine/security/AuditLog.java`` + ``AuditRow.java``),
-* the Data Handling Statement, as Markdown rather than PDF
+* the Data Handling Statement, as Markdown (the plugin writes HTML)
   (``imagejai/engine/security/DataHandlingStatementGenerator.java``),
 * a reader for ``~/.imagej-ai/friction.jsonl``
   (``imagejai/engine/FrictionLogJournal.java`` + ``FrictionLog.java``).
@@ -614,8 +614,19 @@ VENDOR_TERMS: tuple[VendorTerm, ...] = (
                "https://ollama.com/privacy"),
 )
 
-REPO_URL = "github.com/Jay2owe/ImageJAI"  # DataHandlingStatementGenerator.java:39
-DEFAULT_VERSION = "0.5.0"  # Constants.java:11
+REPO_URL = "github.com/Jay2owe/ImageJAI"  # as in DataHandlingStatementGenerator.java
+
+
+def _manifest_version() -> str:
+    """The product version from command_manifest.json, which ships beside console/."""
+    try:
+        path = Path(__file__).resolve().parents[1] / "command_manifest.json"
+        return str(json.loads(path.read_text(encoding="utf-8"))["product_version"])
+    except (OSError, ValueError, KeyError):
+        return "unknown"
+
+
+DEFAULT_VERSION = _manifest_version()
 
 
 def _project_name(folder: Path) -> str:
@@ -627,8 +638,7 @@ def statement_path(project_folder: "str | os.PathLike[str]",
                    today: "datetime | None" = None) -> Path:
     """AI_Exports/DataHandlingStatement_<project>_<YYYYMMDD>.md.
 
-    Markdown, not PDF: the console has no PDF toolkit and inventing one would
-    add a heavy dependency for a document the user can print from Markdown.
+    Markdown: plain text the user can read, diff and print without extra tools.
     """
     folder = Path(os.path.abspath(os.path.normpath(str(project_folder))))
     when = today or datetime.now(timezone.utc)
@@ -644,10 +654,10 @@ def generate_data_handling_statement(
         receipts: "ReceiptsSummary | None" = None,
         version: str = DEFAULT_VERSION,
         today: "datetime | None" = None) -> str:
-    """Build the statement text; same seven sections as the plugin PDF.
+    """Build the statement text; same seven sections as the plugin's HTML page.
 
     Section numbering is deliberately identical to
-    DataHandlingStatementGenerator.java:63 so a reviewer can compare a console
+    DataHandlingStatementGenerator.generate() so a reviewer can compare a console
     statement with a plugin statement paragraph by paragraph. The posture
     history is appended inside section 5, where the audit evidence lives.
     """
